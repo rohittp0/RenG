@@ -204,10 +204,12 @@ Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL`
 A dedicated step fails fast if any is missing. Do not run AWS, upload, push, dispatch, or otherwise infer
 that these outward gates passed without explicit approval and an observed workflow result. The first
 public release is pending. After the exact merged CI jobs and first public completion record succeed, an
-authorized documentation-only follow-up must remove or revise pending claims in `README.md`,
+authorized documentation-only follow-up must remove or revise pending claims in `CLAUDE.md`, `README.md`,
 `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the `docs/versions.js` `pending` fallback if
-applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. Keep public version display
-metadata-driven and do not check a RenG semantic version literal into README or served docs.
+applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. ADR 0013 and the Cycle A design spec and
+implementation plan remain historical decision records unless the release exposes a contract error. Keep
+public version display metadata-driven and do not check a RenG semantic version literal into README or
+served docs.
 
 Two rentile gates were **not** ported because RenG has no analogue: the credential-free coverage
 manifest check (`tools/check_coverage_manifest.py` over `compatibility/`) and the rolling

@@ -106,10 +106,12 @@ Release versions are not hardcoded in HTML. Every displayed RenG release uses
 pending, failed or unavailable metadata leaves the readable `pending` fallback.
 
 After both CI jobs pass the exact merged commit and the first public completion record verifies
-anonymously, an authorized documentation-only follow-up must remove or revise pending claims in this
-README, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the `docs/versions.js` fallback if
-applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. Version display remains metadata-driven,
-so that follow-up must not hardcode a RenG release version in README or served docs.
+anonymously, an authorized documentation-only follow-up must remove or revise pending claims in
+`CLAUDE.md`, this README, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
+`docs/versions.js` fallback if applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. ADR 0013
+and the Cycle A design spec and implementation plan remain historical decision records unless the release
+exposes a contract error. Version display remains metadata-driven, so that follow-up must not hardcode a
+RenG release version in README or served docs.
 
 Architecture decisions and the evolving publication contract are in [`docs/`](docs/). Public documentation
 is prepared for [https://rohittp.com/reng/](https://rohittp.com/reng/).

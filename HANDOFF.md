@@ -115,11 +115,13 @@ outcome until both CI jobs pass the exact merged commit and that commit's public
 verifies its exact completion record.
 
 After that observed outcome, request approval for a separate documentation-only follow-up. Remove or revise
-pending claims in `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
-`docs/versions.js` `pending` fallback if applicable; and record the exact merged CI/public outcome here and
-in `docs/decomposition.md`. Keep the public version display metadata-driven and do not check a RenG semantic
-version literal into README or served docs. Do not pre-apply that follow-up or infer success from artifacts,
-POM, metadata, local publication, or a branch CI run.
+pending claims in `CLAUDE.md`, `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust
+the `docs/versions.js` `pending` fallback if applicable; and record the exact merged CI/public outcome here
+and in `docs/decomposition.md`. ADR 0013 and the Cycle A design spec and implementation plan remain
+historical decision records unless the release exposes a contract error. Keep the public version display
+metadata-driven and do not check a RenG semantic version literal into README or served docs. Do not
+pre-apply that follow-up or infer success from artifacts, POM, metadata, local publication, or a branch CI
+run.
 
 The release resolver does not search for alternatives. If checked-in `VERSION_NAME` is newer than every
 public stable version, that explicit declaration is the candidate and is allowed to recover from a partial

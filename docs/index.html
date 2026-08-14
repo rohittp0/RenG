@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RenG — Kotlin Multiplatform 3D rendering contract</title>
-  <meta name="description" content="RenG is a pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract." />
+  <meta name="description" content="RenG is a pre-runtime Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract." />
   <meta name="theme-color" content="#0b3026" />
   <link rel="canonical"
     href="https://rohittp.com/reng/" />
@@ -13,7 +13,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="RenG" />
   <meta property="og:title" content="RenG — A rendering contract, before a renderer" />
-  <meta property="og:description" content="A pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract." />
+  <meta property="og:description" content="A pre-runtime Kotlin Multiplatform skeleton for a caller-owned 3D rendering contract." />
   <meta property="og:url" content="https://rohittp.com/reng/" />
 
   <script type="application/ld+json">
@@ -21,7 +21,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",
     "name": "RenG",
-    "description": "A pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract.",
+    "description": "A pre-runtime Kotlin Multiplatform skeleton for a caller-owned 3D rendering contract.",
     "codeRepository": "https://github.com/rohittp0/RenG",
     "url": "https://rohittp.com/reng/",
     "programmingLanguage": "Kotlin",
@@ -54,9 +54,9 @@
         <p class="eyebrow">Kotlin Multiplatform · Cycle A</p>
         <h1 id="hero-title">A rendering contract,<br /><em>before a renderer.</em></h1>
         <p class="hero-lead">
-          RenG is a Kotlin Multiplatform publication for a caller-owned 3D rendering contract.
-          Cycle A establishes its coordinate, target surface, and release discipline. It exposes no
-          runtime API and renders nothing.
+          RenG is a Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract.
+          Cycle A establishes its coordinate, target surface, and release discipline. The first public
+          release is pending, and RenG exposes no runtime API or rendering behavior.
         </p>
         <div class="hero-actions">
           <a class="button primary" href="kmp.html">Read the KMP setup</a>
@@ -71,7 +71,7 @@
           <p class="frame-state">Cycle A</p>
           <dl class="frame-facts">
             <div><dt>Coordinate</dt><dd><code>com.rohittp.reng:kmp</code></dd></div>
-            <div><dt>Release</dt><dd>v<span data-maven-version="kmp">latest</span></dd></div>
+            <div><dt>Release</dt><dd><span data-maven-version="kmp">pending</span></dd></div>
             <div><dt>Runtime</dt><dd>Not exposed</dd></div>
             <div><dt>Rendering</dt><dd>Not present</dd></div>
           </dl>
@@ -79,7 +79,7 @@
       </aside>
     </section>
 
-    <section class="platform-band" aria-label="Published Kotlin Multiplatform targets">
+    <section class="platform-band" aria-label="Configured Kotlin Multiplatform targets">
       <div class="shell target-list">
         <span>android</span>
         <span>iosArm64</span>
@@ -93,23 +93,23 @@
     <section class="section shell" id="status">
       <div class="section-heading">
         <p class="eyebrow">Current scope</p>
-        <h2>The published surface is intentionally narrow.</h2>
+        <h2>The configured surface is intentionally narrow.</h2>
         <p>
-          RenG currently gives consumers one anonymous Maven coordinate and six permanently supported
-          targets. It does not yet define callable runtime behavior, create a window, own a render loop,
-          or draw a frame.
+          RenG is configured for one anonymous Maven coordinate and six targets. Installation becomes
+          available only after the first release passes anonymous verification. No callable runtime
+          behavior, window, render loop, or frame drawing exists yet.
         </p>
       </div>
       <div class="scope-grid">
         <article class="scope-card">
-          <p class="card-label">It is available as</p>
+          <p class="card-label">It will be available as</p>
           <h3>A common KMP coordinate</h3>
-          <p>Resolve <code>com.rohittp.reng:kmp</code> from the public repository without credentials.</p>
+          <p>After verification, resolve <code>com.rohittp.reng:kmp</code> without credentials.</p>
         </article>
         <article class="scope-card">
-          <p class="card-label">It publishes for</p>
+          <p class="card-label">It is configured for</p>
           <h3>Six selected targets</h3>
-          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux all resolve from one coordinate.</p>
+          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux become available together.</p>
         </article>
         <article class="scope-card">
           <p class="card-label">It does not provide</p>
@@ -121,11 +121,12 @@
 
     <section class="section shell setup-section" id="coordinate">
       <div class="section-heading compact">
-        <p class="eyebrow">Public Maven repository</p>
-        <h2>One coordinate. No consumer credentials.</h2>
+        <p class="eyebrow">Pending public Maven repository</p>
+        <h2>One coordinate after verification.</h2>
         <p>
-          Add the public repository through <code>dependencyResolutionManagement</code>, then declare
-          the common coordinate with your version property. The KMP guide includes the complete setup.
+          After the first release passes anonymous verification, add the public repository through
+          <code>dependencyResolutionManagement</code> and declare the common coordinate with your version
+          property. The KMP guide includes the complete setup.
         </p>
       </div>
       <div class="code-card">
@@ -140,7 +141,7 @@ kotlin {
     }
 }</code></pre>
       </div>
-      <p class="version-note">Published release: v<span data-maven-version="kmp">latest</span>. The displayed value comes from Maven metadata and remains <code>latest</code> when metadata is unavailable.</p>
+      <p class="version-note">Release status: <span data-maven-version="kmp">pending</span>. The browser replaces this fallback only when public Maven metadata reports a release.</p>
     </section>
 
     <section class="section shell" id="release-model">
@@ -180,7 +181,7 @@ kotlin {
         <p class="eyebrow">Source and decisions</p>
         <h2>Read the contract in the repository.</h2>
         <p>
-          The source tree records the vocabulary and architectural decisions behind the published surface.
+          The source tree records the vocabulary and architectural decisions behind the configured surface.
         </p>
       </div>
       <div class="resource-links">
@@ -201,7 +202,7 @@ kotlin {
     <div class="shell footer-inner">
       <div>
         <a class="brand" href="index.html">RenG</a>
-        <p>com.rohittp.reng:kmp · v<span data-maven-version="kmp">latest</span></p>
+        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">pending</span></p>
       </div>
       <div class="footer-links">
         <a href="kmp.html">KMP setup</a>

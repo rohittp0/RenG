@@ -26,6 +26,6 @@
       });
     })
     .catch((error) => {
-      console.error("Unable to load the published RenG version.", error);
+      console.error("Unable to load RenG release metadata.", error);
     });
 })();

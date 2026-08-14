@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KMP setup — RenG</title>
-  <meta name="description" content="Add the pre-runtime RenG coordinate to a Kotlin Multiplatform project and review its exact publication targets." />
+  <meta name="description" content="Review the pending RenG KMP installation and its configured publication targets." />
   <meta name="theme-color" content="#0b3026" />
   <link rel="canonical"
     href="https://rohittp.com/reng/kmp.html" />
@@ -13,7 +13,7 @@
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="RenG" />
   <meta property="og:title" content="KMP setup — RenG" />
-  <meta property="og:description" content="Add the pre-runtime RenG coordinate to a Kotlin Multiplatform project." />
+  <meta property="og:description" content="Review the RenG KMP setup that becomes available after first-release verification." />
   <meta property="og:url" content="https://rohittp.com/reng/kmp.html" />
   <script src="versions.js" defer></script>
 </head>
@@ -44,18 +44,19 @@
         <p class="eyebrow">com.rohittp.reng:kmp</p>
         <h1>KMP setup</h1>
         <p class="docs-lead">
-          RenG has one public KMP coordinate. Configure its repositories once, keep the release value
-          in a Gradle property, and let Gradle select the matching target artifact.
+          RenG is configured for one public KMP coordinate. Installation becomes available only after
+          the first release passes anonymous verification. The setup below is ready for that release.
         </p>
         <div class="tag-row">
           <span class="tag">Kotlin Multiplatform</span>
-          <span class="tag">Six targets</span>
+          <span class="tag">Six configured targets</span>
           <span class="tag">Apache-2.0</span>
-          <span class="tag">v<span data-maven-version="kmp">latest</span></span>
+          <span class="tag">Release <span data-maven-version="kmp">pending</span></span>
         </div>
         <div class="status-callout">
-          <strong>Cycle A exposes no runtime API and renders nothing.</strong>
-          This page documents publication setup only; it does not promise a callable rendering interface.
+          <strong>The first public release is pending.</strong>
+          Cycle A exposes no runtime API and renders nothing. This page describes the setup that becomes
+          usable after anonymous first-release verification.
         </div>
       </header>
 
@@ -63,8 +64,8 @@
         <p class="doc-label">Step 1</p>
         <h2>Add the repositories.</h2>
         <p>
-          RenG resolves from the public Maven repository with no consumer credentials. Keep it before
-          the standard repositories. RenG's Rentile dependency also resolves Skiko platform artifacts
+          After anonymous first-release verification, RenG will resolve from the public Maven repository
+          without consumer credentials. RenG's Rentile dependency also resolves Skiko platform artifacts
           from JetBrains' public Compose repository; limit that repository to its owner group.
         </p>
         <div class="code-card doc-code">
@@ -106,17 +107,18 @@ kotlin {
 }</code></pre>
         </div>
         <div class="callout">
-          Published release: v<span data-maven-version="kmp">latest</span>. This page reads Maven metadata
-          after loading; if metadata is unavailable, the readable fallback remains <code>latest</code>.
+          Release status: <span data-maven-version="kmp">pending</span>. This page reads Maven metadata
+          after loading. Until metadata reports a release, the fallback remains <code>pending</code>.
         </div>
       </section>
 
       <section class="doc-section" id="targets">
         <p class="doc-label">Publication surface</p>
-        <h2>Exactly six targets.</h2>
+        <h2>Six configured targets.</h2>
         <p>
-          These targets are the complete published surface. Apple support is Apple Silicon only;
-          RenG deliberately does not publish <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
+          These targets become the complete publication surface after the first release passes anonymous
+          verification. Apple support is Apple Silicon only; RenG deliberately does not publish
+          <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
         </p>
         <div class="table-wrap">
           <table>
@@ -124,12 +126,12 @@ kotlin {
               <tr><th>Platform</th><th>KMP target</th><th>Publication</th></tr>
             </thead>
             <tbody>
-              <tr><td>Android</td><td><code>android</code></td><td>Published</td></tr>
-              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Published</td></tr>
-              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Published</td></tr>
-              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Published</td></tr>
-              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Published</td></tr>
-              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Published</td></tr>
+              <tr><td>Android</td><td><code>android</code></td><td>Pending first release</td></tr>
+              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Pending first release</td></tr>
+              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Pending first release</td></tr>
+              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Pending first release</td></tr>
+              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Pending first release</td></tr>
+              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Pending first release</td></tr>
             </tbody>
           </table>
         </div>
@@ -145,7 +147,7 @@ kotlin {
     <div class="shell footer-inner">
       <div>
         <a class="brand" href="index.html">RenG</a>
-        <p>com.rohittp.reng:kmp · v<span data-maven-version="kmp">latest</span></p>
+        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">pending</span></p>
       </div>
       <div class="footer-links">
         <a href="index.html">Overview</a>

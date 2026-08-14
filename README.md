@@ -4,19 +4,22 @@
 
 ## Current status
 
-RenG is a pre-runtime Kotlin Multiplatform publication. Cycle A establishes its published coordinate,
-target surface, and release gates. It exposes no runtime API and renders nothing.
+RenG is a pre-runtime Kotlin Multiplatform publication skeleton. Cycle A establishes its coordinate,
+target surface, and release gates, but its first public release is still pending anonymous verification.
+It exposes no runtime API and renders nothing.
 
 ## Coordinate and repository
 
-RenG publishes one common-code coordinate:
+RenG is configured to publish one common-code coordinate:
 
 ```text
 com.rohittp.reng:kmp
 ```
 
-It resolves anonymously from `https://maven.rohittp.com`; consumer credentials are not required.
-Add that repository through `dependencyResolutionManagement` before the standard repositories:
+After the first release passes anonymous verification, the coordinate will resolve without consumer
+credentials from `https://maven.rohittp.com`. Configure that repository and JetBrains Compose, filtered
+exclusively to `org.jetbrains.skiko` for Rentile's transitive platform artifacts, before the standard
+repositories:
 
 ```kotlin
 dependencyResolutionManagement {
@@ -24,13 +27,17 @@ dependencyResolutionManagement {
         maven("https://maven.rohittp.com")
         mavenCentral()
         google()
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev") {
+            content { includeGroup("org.jetbrains.skiko") }
+        }
     }
 }
 ```
 
 ## Targets
 
-RenG publishes exactly these six Kotlin Multiplatform targets:
+RenG is configured to publish exactly these six Kotlin Multiplatform targets after the first release gate
+succeeds:
 
 - `android`
 - `iosArm64`
@@ -64,7 +71,7 @@ kotlin {
 
 ## Build and verify
 
-Once the KMP module is present, the local gates are:
+The local gates are:
 
 ```text
 ./gradlew :kmp:checkKotlinAbi
@@ -82,7 +89,9 @@ Once the KMP module is present, the local gates are:
 Every non-documentation push to `main` releases only after its gates pass. Releases are immutable and
 fail closed: an occupied coordinate, incomplete remote response, or validation failure stops publication
 rather than overwriting or skipping a version. `VERSION_NAME` in the root `gradle.properties` is the sole
-checked-in version input.
+checked-in version input. Routine next-patch advancement requires the newest metadata-listed aggregate
+POM as a completion witness. That aggregate publishes only after all six target publications complete.
+An explicit upward `VERSION_NAME` is the recovery path for a partial release.
 
 ## Static documentation version convention
 
@@ -90,7 +99,8 @@ Release versions are not hardcoded in HTML. Every displayed RenG release uses
 `data-maven-version="kmp"`, and every applicable page loads `docs/versions.js`. The browser reads
 `<versioning><release>` from
 `https://maven.rohittp.com/com/rohittp/reng/kmp/maven-metadata.xml`; if it cannot load the metadata,
-the readable `latest` fallback remains. Publishing a release requires no documentation version update.
+the readable `pending` fallback remains until release metadata is available. Publishing a release requires
+no documentation version update.
 
 Architecture decisions and the evolving publication contract are in [`docs/`](docs/). Public documentation
 is prepared for [https://rohittp.com/reng/](https://rohittp.com/reng/).

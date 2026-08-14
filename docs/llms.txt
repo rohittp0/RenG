@@ -6,9 +6,10 @@ Source: https://github.com/rohittp0/RenG
 Architecture decisions: https://github.com/rohittp0/RenG/tree/main/docs/adr
 
 Maven coordinate: com.rohittp.reng:kmp
-Public Maven repository: https://maven.rohittp.com
+Public Maven repository after first-release verification: https://maven.rohittp.com
+Public release status: pending
 
-Published Kotlin Multiplatform targets:
+Configured Kotlin Multiplatform targets, available together after first-release verification:
 - android
 - iosArm64
 - iosSimulatorArm64

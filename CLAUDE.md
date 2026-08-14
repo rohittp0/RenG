@@ -156,21 +156,23 @@ publishes all seven publications to `build/local-maven`, then compiles the stand
 targets with a fresh Gradle home and `--refresh-dependencies`.
 
 `publish.yml` runs for every non-documentation push to `main` and for an explicit dispatch from `main`.
-It implements a **one-candidate rule**: `tools/resolve_release_version.py` accepts the checked-in stable
-`VERSION_NAME` only when it is newer than every public stable version; otherwise it selects exactly the
-next patch after the newest public version. It probes only that candidate's aggregate POM and never skips
-an occupied candidate. Missing metadata means no release exists; malformed/empty metadata, redirects,
-transport errors, unexpected HTTP statuses, snapshots, and an occupied candidate all stop resolution.
-After a partial upload, recovery is an explicit upward `VERSION_NAME` change, never overwrite, delete,
-or an automatic skip.
+It implements a fail-closed completion-witness rule. If checked-in stable `VERSION_NAME` is newer than
+every public stable version, that explicit declaration is the candidate and may recover from a partial
+release. Otherwise, automatic next-patch advancement requires HTTP 200 from the newest metadata-listed
+aggregate POM. That POM is a completion witness because the aggregate KotlinMultiplatform R2 task depends
+on all six target R2 publication tasks, so targets publish before aggregate artifacts and metadata. Missing
+witnesses, malformed or empty metadata, redirects, transport errors, unexpected statuses, snapshots, and
+occupied candidates stop resolution. The selected candidate still receives exactly one aggregate-POM
+availability probe, and the resolver never skips it. Partial-release recovery is always an explicit upward
+`VERSION_NAME` change, never overwrite, delete, reuse, or automatic skip.
 
 The release gate chain is: Python tests and repository policy → Ubuntu ABI/Android/Linux gates → signed
 local publication of `kmp` plus its six target artifacts → all seven POM checks → manifest-derived signed
 POM and artifact validation → fresh-home six-target local smoke → authoritative exact-key R2 collision
-checks → upload → anonymous HTTP verification of every manifest entry and aggregate metadata → a copied
-standalone smoke project resolving all six targets from the public repository with no credentials, a fresh
-Gradle home, and `--refresh-dependencies`. `publish-main` concurrency is serialized with
-`cancel-in-progress: false`.
+checks → upload → anonymous HTTP verification of every manifest entry and aggregate metadata, with stale or
+malformed HTTP 200 metadata retried within the configured budget → a copied standalone smoke project
+resolving all six targets from the public repository with no credentials, a fresh Gradle home, and
+`--refresh-dependencies`. `publish-main` concurrency is serialized with `cancel-in-progress: false`.
 
 The standard-library Python tools are:
 

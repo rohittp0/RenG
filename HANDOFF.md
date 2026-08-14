@@ -43,7 +43,9 @@ The standard-library Python tooling is implemented and unit-tested:
 `.github/workflows/ci.yml` now gates Ubuntu and macOS work rather than referencing missing projects.
 `.github/workflows/publish.yml` adds version resolution, a Linux release gate, signed local publication,
 seven POM checks, fresh-home six-target local smoke, exact-key R2 preflight, upload, anonymous artifact
-and metadata verification, and a copied fresh-home credential-free public smoke.
+and retry-budgeted metadata verification, and a copied fresh-home credential-free public smoke. The
+aggregate KotlinMultiplatform R2 task depends on all six target R2 tasks, so target publications complete
+before aggregate artifacts and metadata can become the completion witness.
 
 ## Verified environment facts
 
@@ -102,12 +104,17 @@ and local gates are complete. No push, merge, workflow dispatch, AWS operation, 
 publication has been performed from this worktree. **Public release pending** is the authoritative
 outcome until the exact merged commit's workflow proves otherwise.
 
-The release resolver follows one rule without searching for alternatives: if checked-in `VERSION_NAME`
-is newer than every public stable version, that declaration is the candidate; otherwise the candidate is
-exactly the next patch after the newest public stable version. Only that aggregate POM is probed. An
-occupied candidate, remote uncertainty, malformed metadata, redirect, or unexpected status stops the run;
-the resolver never skips ahead. If a partial release has uploaded any immutable key, recovery requires an
-explicit upward `VERSION_NAME`, full gates, and fresh approval — never overwrite, delete, or reuse.
+The release resolver does not search for alternatives. If checked-in `VERSION_NAME` is newer than every
+public stable version, that explicit declaration is the candidate and is allowed to recover from a partial
+release. Otherwise, automatic next-patch advancement first requires HTTP 200 from the newest
+metadata-listed aggregate POM. A 404, redirect, transport failure, or unexpected status means there is no
+completion witness and stops the run. Because the aggregate R2 task depends on all six target R2 tasks,
+that witness also proves the target publication tasks completed first. The selected candidate then receives
+exactly one aggregate-POM availability probe; an occupied candidate or remote uncertainty stops without
+skipping. Partial-release recovery requires an explicit upward `VERSION_NAME`, full gates, and fresh
+approval. Never overwrite, delete, reuse, or automatically skip the partial version. Public metadata
+verification also retries stale or malformed HTTP 200 responses within its fixed budget and fails closed
+after exhaustion.
 
 Run the local Python and policy gates exactly as follows:
 

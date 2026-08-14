@@ -23,8 +23,8 @@
 - Enable `explicitApi()` and KLIB ABI validation with unsupported targets omitted; generate no JVM ABI dump.
 - Use Apache-2.0 consistently in `LICENSE`, POMs, README, and the static site.
 - Run every workflow Gradle command with `--no-configuration-cache`.
-- Reject snapshots before network access. Select exactly one release candidate and stop if its aggregate POM exists; never skip an occupied candidate.
-- Never overwrite or delete R2 objects. Recover from partial publication only through an explicit upward `VERSION_NAME` change.
+- Reject snapshots before network access. For routine next-patch selection, require HTTP 200 from the newest metadata-listed aggregate POM as the completion witness; explicit upward recovery does not require the previous release to be complete. Select one candidate, probe its aggregate POM exactly once, and never skip an occupied candidate.
+- Make the aggregate KotlinMultiplatform R2 publication task depend on all six target R2 publication tasks. Never overwrite or delete R2 objects. Recover from partial publication only through an explicit upward `VERSION_NAME` change.
 - Do not push, merge, change repository settings, or trigger the first public release without separate explicit approval.
 
 ## File Structure
@@ -183,13 +183,23 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         </versioning></metadata>
         """
         requester = Mock(
-            side_effect=[HttpResponse(200, metadata), HttpResponse(200, b"")]
+            side_effect=[
+                HttpResponse(200, metadata),
+                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(200, b"candidate aggregate POM"),
+            ]
         )
         with self.assertRaisesRegex(
             ResolutionError, "Selected release candidate is already occupied: 1.2.4"
         ):
             resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
-        self.assertEqual(2, requester.call_count)
+        self.assertEqual(3, requester.call_count)
+        self.assertEqual(
+            1,
+            requester.call_args_list.count(
+                call("HEAD", f"{BASE_URL}/1.2.4/kmp-1.2.4.pom")
+            ),
+        )
         self.assertNotIn("1.2.5", repr(requester.call_args_list))
 
     def test_metadata_parser_orders_stable_versions_and_ignores_snapshots(self) -> None:
@@ -269,6 +279,13 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
+The final resolver test set must also prove the completion-witness branch directly: routine advancement
+performs metadata GET, newest aggregate POM HEAD returning 200, and exactly one candidate aggregate POM
+HEAD; metadata listing a newest version whose aggregate POM returns 404 stops before any candidate probe;
+redirects, transport failures, and unexpected witness statuses also stop. A declaration above every
+metadata-listed version probes only the explicit candidate, preserving deliberate upward recovery when
+the preceding release is partial.
+
 - [ ] **Step 2: Run the tests and verify the import failure**
 
 Run:
@@ -304,7 +321,7 @@ def select_candidate(declared: Version, published: Sequence[Version]) -> Version
     return Version(latest.major, latest.minor, latest.patch + 1)
 ```
 
-`resolve_release_version` must GET `<repository>/com/rohittp/reng/kmp/maven-metadata.xml`, interpret only 200 and 404, choose exactly one candidate, then HEAD exactly one aggregate POM. HEAD 404 returns the candidate; HEAD 200 raises `Selected release candidate is already occupied: <version>`; every other status raises. `parse_declared_version` must detect `-SNAPSHOT` before applying the canonical stable regex. `parse_metadata_versions` must compare XML local names so default namespaces work and must reject HTTP-200 metadata with no stable versions.
+`resolve_release_version` must GET `<repository>/com/rohittp/reng/kmp/maven-metadata.xml` and interpret only 200 and 404. When metadata returns 200 and the declaration is not newer than its highest stable version, HEAD that newest version's aggregate POM and require 200 before automatic next-patch selection. That POM is the completion witness. A 404, redirect, transport failure, or any other status stops automatic advancement. A declaration newer than the public line is deliberate upward recovery and bypasses the previous-version witness. After selection, HEAD exactly one candidate aggregate POM. Candidate HEAD 404 returns the candidate; HEAD 200 raises `Selected release candidate is already occupied: <version>`; every other outcome stops. Never skip, overwrite, delete, or reuse a partial version. `parse_declared_version` must detect `-SNAPSHOT` before applying the canonical stable regex. `parse_metadata_versions` must compare XML local names so default namespaces work and must reject HTTP-200 metadata with no stable versions.
 
 The CLI arguments are exactly:
 
@@ -534,7 +551,7 @@ git commit -m $'build: replace placeholder app with KMP skeleton\n\nCo-Authored-
 
 **Interfaces:**
 - Consumes: `:kmp`, `VERSION_NAME`, optional R2/signing environment.
-- Produces: `LocalTest` and `R2` repositories, seven publications, seven POM checks, conditional signatures, empty public KLIB ABI.
+- Produces: `LocalTest` and `R2` repositories, seven publications, seven POM checks, conditional signatures, empty public KLIB ABI, and an aggregate R2 task that depends on all six target R2 tasks.
 
 - [ ] **Step 1: Verify publication tasks are absent**
 
@@ -623,7 +640,7 @@ mavenPublishing {
             license {
                 name.set("The Apache License, Version 2.0")
                 url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-                distribution.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("repo")
             }
         }
         developers {
@@ -652,7 +669,26 @@ publishing {
         }
     }
 }
+
+val targetR2PublicationTasks = listOf(
+    "publishAndroidPublicationToR2Repository",
+    "publishIosArm64PublicationToR2Repository",
+    "publishIosSimulatorArm64PublicationToR2Repository",
+    "publishMacosArm64PublicationToR2Repository",
+    "publishLinuxX64PublicationToR2Repository",
+    "publishLinuxArm64PublicationToR2Repository",
+)
+
+tasks.withType<PublishToMavenRepository>()
+    .matching { it.name == "publishKotlinMultiplatformPublicationToR2Repository" }
+    .configureEach {
+        dependsOn(targetR2PublicationTasks)
+    }
 ```
+
+Import `org.gradle.api.publish.maven.tasks.PublishToMavenRepository`. The aggregate dependency is the
+completion-witness invariant: target artifacts and target metadata must publish before aggregate artifacts
+and aggregate metadata. Validate the graph with `--dry-run`; do not contact R2.
 
 - [ ] **Step 4: Generate and inspect the ABI baseline**
 
@@ -1138,7 +1174,10 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Use `TemporaryDirectory`, injected subprocess/network functions, and no live network.
+Use `TemporaryDirectory`, injected subprocess/network functions, and no live network. Add metadata cases where
+a stale HTTP 200 is followed by current metadata and succeeds within the budget, and where malformed HTTP
+200 metadata is retried until the budget is exhausted. Assert the fetch and sleep counts so a transport-only
+retry loop cannot satisfy the tests.
 
 - [ ] **Step 2: Run the verifier tests and observe the import failure**
 
@@ -1181,7 +1220,7 @@ Parse `KeyCount` as a nonnegative integer. Accept an omitted or empty `Contents`
 
 - [ ] **Step 5: Implement anonymous public verification**
 
-GET every manifest URL, consuming the response body. Retry only within the fixed `attempts`/`retry_delay` budget and fail after exhaustion. Then GET `com/rohittp/reng/kmp/maven-metadata.xml`, parse stable `<version>` entries with Task 1's parser, and require the selected version. Do not inspect only `<latest>` or `<release>`.
+GET every manifest URL, consuming the response body. Retry only within the fixed `attempts`/`retry_delay` budget and fail after exhaustion. Then verify `com/rohittp/reng/kmp/maven-metadata.xml` within its own fixed retry budget. An HTTP 200 response is not yet success: parse stable `<version>` entries with Task 1's parser and retry valid-but-stale metadata that lacks the selected version, as well as malformed metadata, until a valid document lists the selected version. Fail closed after exhaustion. Do not inspect only `<latest>` or `<release>`. Preserve the no-follow redirect behavior of the shared HTTP adapter.
 
 Because workflows invoke the file directly, make sibling imports work in both direct-script and package-test modes before importing Task 1:
 
@@ -1284,13 +1323,13 @@ rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
 <link rel="canonical" href="https://rohittp.com/reng/">
 <link rel="stylesheet" href="style.css">
 <script defer src="versions.js"></script>
-<span data-maven-version="kmp">latest</span>
+<span data-maven-version="kmp">pending</span>
 """)
     write(root, "docs/kmp.html", """
 <link rel="canonical" href="https://rohittp.com/reng/kmp.html">
 <link rel="stylesheet" href="style.css">
 <script defer src="versions.js"></script>
-<span data-maven-version="kmp">latest</span>
+<span data-maven-version="kmp">pending</span>
 """)
     write(root, "docs/style.css", ":focus-visible { outline: 2px solid currentColor; }\n")
     write(root, "docs/versions.js", "https://maven.rohittp.com/com/rohittp/reng\n")
@@ -1473,18 +1512,18 @@ The implementation agent must use `frontend-design:frontend-design`, then retain
 
 Copy the full Apache-2.0 license text from `/Users/rohittp/Data/Other/rentile/LICENSE`; it already names `Copyright 2026 Rohit T P`.
 
-README sections are: current pre-runtime status, coordinate and anonymous repository, exact six targets and exclusions, property-driven dependency example, local gate commands, documentation version convention, and Apache-2.0. The dependency example must use `${rengVersion.get()}` or `<version>`, never a concrete RenG semantic version.
+README sections are: current pre-runtime and first-release-pending status, configured coordinate and anonymous repository after verification, exact six targets and exclusions, property-driven dependency example, local gate commands, documentation version convention, and Apache-2.0. The dependency example must use `${rengVersion.get()}` or `<version>`, never a concrete RenG semantic version. Include JetBrains Compose filtered to `org.jetbrains.skiko` so Rentile's Skiko platform artifacts resolve.
 
 `THIRD_PARTY_NOTICES.md` lists Kotlin 2.3.21 and Rentile 0.1.5 under Apache-2.0 and links Rentile's own third-party notices for its transitive runtime graph. Do not copy direct Wire, schema, Skiko, Ktor, corpus, or Vanniktech rows into RenG.
 
 - [ ] **Step 3: Create the static pages**
 
-`index.html` contains canonical metadata, local `style.css`, deferred local `versions.js`, `SoftwareSourceCode` JSON-LD, a pre-runtime hero/status, coordinate, six-target summary, release behavior, source/ADR links, and Apache-2.0. `kmp.html` contains installation repositories, property-driven dependency syntax, exact target table, and the same explicit statement that Cycle A exposes no runtime API and renders nothing.
+`index.html` contains canonical metadata, local `style.css`, deferred local `versions.js`, `SoftwareSourceCode` JSON-LD, a pre-runtime hero/status, configured coordinate and six-target summary, release behavior, source/ADR links, and Apache-2.0. `kmp.html` contains the repositories and property-driven dependency syntax that become usable after anonymous first-release verification, the configured target table, and the same explicit statement that Cycle A exposes no runtime API and renders nothing. Both pages state that the first public release is pending and must not claim that the coordinate or targets already resolve publicly.
 
 Every browser-rendered version uses:
 
 ```html
-<span data-maven-version="kmp">latest</span>
+<span data-maven-version="kmp">pending</span>
 ```
 
 No HTML file contains a concrete RenG semantic version, external stylesheet, external script, OG image reference, or future API signature.
@@ -1522,7 +1561,7 @@ Create `docs/versions.js`:
       });
     })
     .catch((error) => {
-      console.error("Unable to load the published RenG version.", error);
+      console.error("Unable to load RenG release metadata.", error);
     });
 })();
 ```
@@ -1536,7 +1575,7 @@ Allow: /
 Sitemap: https://rohittp.com/reng/sitemap.xml
 ```
 
-Create `docs/sitemap.xml` with exactly the canonical URLs `https://rohittp.com/reng/` and `https://rohittp.com/reng/kmp.html`. `docs/llms.txt` states canonical/source URLs, coordinate, exact targets, Apache-2.0, immutable fail-closed releases, and pre-runtime scope. `.nojekyll` is empty.
+Create `docs/sitemap.xml` with exactly the canonical URLs `https://rohittp.com/reng/` and `https://rohittp.com/reng/kmp.html`. `docs/llms.txt` states canonical/source URLs, coordinate, configured targets that become available after first-release verification, pending release status, Apache-2.0, immutable fail-closed releases, and pre-runtime scope. `.nojekyll` is empty.
 
 - [ ] **Step 5: Serve and inspect locally**
 
@@ -1727,7 +1766,7 @@ Supply AWS credentials only to this step. Any exact key collision or AWS uncerta
 
 - [ ] **Step 5: Upload and verify the exact public set**
 
-Run the existing `publishAllPublicationsToR2Repository` once. Then verify:
+Run the existing `publishAllPublicationsToR2Repository` once. Its aggregate KotlinMultiplatform R2 task must depend on all six target R2 tasks, ensuring the aggregate POM and metadata are the final publication witness rather than an early signal. Then verify:
 
 ```bash
 python3 tools/verify_publication.py public \
@@ -1803,7 +1842,7 @@ git commit -m $'ci: enforce fail-closed public publication\n\nCo-Authored-By: Cl
 
 - [ ] **Step 1: Update repository-state guidance**
 
-Replace statements that `:kmp`, `consumer-smoke`, static docs, or `VERSION_NAME` do not exist. Record exact implemented commands, policy/verifier tools, and the one-candidate release rule. Mark Cycle A code complete only after local/CI gates; identify Cycle B as the next implementation cycle. Do not claim the public release succeeded before observing it.
+Replace statements that `:kmp`, `consumer-smoke`, static docs, or `VERSION_NAME` do not exist. Record exact implemented commands, policy/verifier tools, aggregate-after-target R2 ordering, the completion witness for routine advancement, one candidate probe, and explicit upward recovery. Mark Cycle A code complete only after local/CI gates; identify Cycle B as the next implementation cycle. Do not claim the public release succeeded before observing it.
 
 - [ ] **Step 2: Commit guidance before verification and review**
 

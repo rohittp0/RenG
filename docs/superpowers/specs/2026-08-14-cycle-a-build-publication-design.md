@@ -28,7 +28,7 @@ The smoke build reads the checked-in version from the parent `gradle.properties`
 
 ## Release version resolution
 
-Version selection moves from inline workflow shell into a Python standard-library tool with a pure selection core and a small HTTP adapter. Its unit tests cover first publication, an explicit upward version, routine patch advancement, occupied candidates, the probe limit, malformed metadata, HTTP 404, transport and server failures, and snapshot rejection.
+Version selection moves from inline workflow shell into a Python standard-library tool with a pure selection core and a small HTTP adapter. Its unit tests cover first publication, an explicit upward version, routine patch advancement, an occupied candidate, malformed metadata, HTTP 404, transport and server failures, and snapshot rejection.
 
 `VERSION_NAME` must match stable `MAJOR.MINOR.PATCH`; a `-SNAPSHOT` declaration always stops public publication before metadata is consulted. Aggregate metadata is interpreted as follows:
 
@@ -36,7 +36,7 @@ Version selection moves from inline workflow shell into a Python standard-librar
 - HTTP 200 must contain at least one parseable stable version; malformed or empty stable metadata stops publication.
 - Transport failure or any other HTTP status stops publication.
 
-A stable declaration strictly greater than every public version governs as an intentional upward release. Otherwise the resolver advances the patch component of the highest public stable version until it finds an aggregate POM returning 404. A candidate returning 200 is occupied; any other outcome stops resolution. The existing limit of twenty occupied candidates remains.
+A stable declaration strictly greater than every public version governs as an intentional upward release. Otherwise the resolver chooses exactly the next patch after the highest public stable version. It probes only that candidate: an aggregate POM returning 404 makes the candidate available, while 200 or any unexpected outcome stops resolution. The resolver never skips an occupied candidate. If public metadata lags a complete release, retry after metadata catches up; if the occupied candidate is a partial release, recovery requires a deliberate upward `VERSION_NAME` change.
 
 Manual dispatch is accepted only from `main`. Every non-documentation push to `main` continues to cut a release, and the existing concurrency group continues to serialize releases without cancelling one mid-upload.
 

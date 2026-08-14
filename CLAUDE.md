@@ -153,13 +153,14 @@ on macOS (Apple compiles, `macosArm64Test`, local publication, then clean-consum
 
 `publish.yml` — **every non-doc push to `main` cuts a release.** A `resolve-version` job reads
 `VERSION_NAME`; if it is strictly greater than everything published it governs the release, otherwise
-the job advances the patch past the newest published version. Docs, `**/*.md`, and `LICENSE` are
+the job selects exactly the next patch after the newest published version. If that candidate's aggregate
+POM already exists, resolution stops rather than skipping it. Docs, `**/*.md`, and `LICENSE` are
 `paths-ignore`d so documentation commits do not consume a version. Snapshots are rejected outright,
 and a `publish-main` concurrency group with `cancel-in-progress: false` serialises runs so two cannot
-race for one immutable coordinate. The gate chain is: reject an existing coordinate → signed local
-publication with per-target `checkPomFileFor*Publication` → clean-consumer resolution from the local
-repo → upload to R2 → verify every uploaded artifact over HTTP → re-resolve from the public repo with
-a fresh Gradle user home and `--refresh-dependencies`.
+race for one immutable coordinate. The gate chain is: signed local publication with per-target
+`checkPomFileFor*Publication` → clean-consumer resolution from the local repo → manifest-derived
+collision checks against R2 → upload → verify every uploaded artifact and aggregate metadata over HTTP
+→ re-resolve from the public repo with a fresh Gradle user home and `--refresh-dependencies`.
 
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SIGNING_KEY`, `SIGNING_KEY_ID`, `SIGNING_KEY_PASSWORD`.

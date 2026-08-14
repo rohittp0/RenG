@@ -1,3 +1,4 @@
+import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -59,7 +60,7 @@ mavenPublishing {
             license {
                 name.set("The Apache License, Version 2.0")
                 url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-                distribution.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("repo")
             }
         }
         developers {
@@ -88,3 +89,18 @@ publishing {
         }
     }
 }
+
+val targetR2PublicationTasks = listOf(
+    "publishAndroidPublicationToR2Repository",
+    "publishIosArm64PublicationToR2Repository",
+    "publishIosSimulatorArm64PublicationToR2Repository",
+    "publishMacosArm64PublicationToR2Repository",
+    "publishLinuxX64PublicationToR2Repository",
+    "publishLinuxArm64PublicationToR2Repository",
+)
+
+tasks.withType<PublishToMavenRepository>()
+    .matching { it.name == "publishKotlinMultiplatformPublicationToR2Repository" }
+    .configureEach {
+        dependsOn(targetR2PublicationTasks)
+    }

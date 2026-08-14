@@ -158,6 +158,18 @@ def resolve_release_version(
             f"Unexpected status {metadata_response.status} fetching release metadata"
         )
 
+    if published:
+        latest = max(published)
+        if declared <= latest:
+            latest_text = str(latest)
+            completion_url = f"{base_url}/{latest_text}/kmp-{latest_text}.pom"
+            completion_response = requester("HEAD", completion_url)
+            if completion_response.status != 200:
+                raise ResolutionError(
+                    "Newest metadata-listed release lacks an aggregate POM completion "
+                    f"witness: {latest_text} (status {completion_response.status})"
+                )
+
     candidate = select_candidate(declared, published)
     candidate_text = str(candidate)
     pom_url = f"{base_url}/{candidate_text}/kmp-{candidate_text}.pom"

@@ -59,19 +59,120 @@ class ResolveReleaseVersionTests(unittest.TestCase):
             ),
         )
 
+    def test_metadata_listed_release_without_aggregate_pom_stops_advancement(self) -> None:
+        metadata = b"""
+        <metadata><versioning><versions><version>1.2.3</version></versions>
+        </versioning></metadata>
+        """
+        requester = Mock(
+            side_effect=[HttpResponse(200, metadata), HttpResponse(404, b"")]
+        )
+
+        with self.assertRaisesRegex(
+            ResolutionError,
+            "Newest metadata-listed release lacks an aggregate POM completion witness: 1.2.3",
+        ):
+            resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
+
+        self.assertEqual(
+            [
+                call("GET", f"{BASE_URL}/maven-metadata.xml"),
+                call("HEAD", f"{BASE_URL}/1.2.3/kmp-1.2.3.pom"),
+            ],
+            requester.call_args_list,
+        )
+
+    def test_routine_release_requires_completed_latest_and_probes_one_candidate(self) -> None:
+        metadata = b"""
+        <metadata><versioning><versions><version>1.2.3</version></versions>
+        </versioning></metadata>
+        """
+        requester = Mock(
+            side_effect=[
+                HttpResponse(200, metadata),
+                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(404, b""),
+            ]
+        )
+
+        resolved = resolve_release_version(
+            Version(1, 2, 3), REPOSITORY_URL, request=requester
+        )
+
+        self.assertEqual(Version(1, 2, 4), resolved)
+        self.assertEqual(
+            [
+                call("GET", f"{BASE_URL}/maven-metadata.xml"),
+                call("HEAD", f"{BASE_URL}/1.2.3/kmp-1.2.3.pom"),
+                call("HEAD", f"{BASE_URL}/1.2.4/kmp-1.2.4.pom"),
+            ],
+            requester.call_args_list,
+        )
+
+    def test_explicit_upward_recovery_does_not_require_previous_completion(self) -> None:
+        metadata = b"""
+        <metadata><versioning><versions><version>1.2.3</version></versions>
+        </versioning></metadata>
+        """
+        requester = Mock(
+            side_effect=[HttpResponse(200, metadata), HttpResponse(404, b"")]
+        )
+
+        resolved = resolve_release_version(
+            Version(2, 0, 0), REPOSITORY_URL, request=requester
+        )
+
+        self.assertEqual(Version(2, 0, 0), resolved)
+        self.assertEqual(
+            [
+                call("GET", f"{BASE_URL}/maven-metadata.xml"),
+                call("HEAD", f"{BASE_URL}/2.0.0/kmp-2.0.0.pom"),
+            ],
+            requester.call_args_list,
+        )
+
+    def test_completion_witness_uncertainty_stops_automatic_advancement(self) -> None:
+        metadata = b"""
+        <metadata><versioning><versions><version>1.2.3</version></versions>
+        </versioning></metadata>
+        """
+        for status in (302, 503):
+            with self.subTest(status=status):
+                requester = Mock(
+                    side_effect=[HttpResponse(200, metadata), HttpResponse(status, b"")]
+                )
+                with self.assertRaisesRegex(
+                    ResolutionError, "lacks an aggregate POM completion witness"
+                ):
+                    resolve_release_version(
+                        Version(1, 2, 3), REPOSITORY_URL, request=requester
+                    )
+                self.assertEqual(2, requester.call_count)
+
+        requester = Mock(side_effect=[HttpResponse(200, metadata), ResolutionError("offline")])
+        with self.assertRaisesRegex(ResolutionError, "offline"):
+            resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
+        self.assertEqual(2, requester.call_count)
+
     def test_occupied_candidate_stops_without_skipping(self) -> None:
         metadata = b"""
         <metadata><versioning><versions><version>1.2.3</version></versions>
         </versioning></metadata>
         """
         requester = Mock(
-            side_effect=[HttpResponse(200, metadata), HttpResponse(200, b"")]
+            side_effect=[
+                HttpResponse(200, metadata),
+                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(200, b"candidate aggregate POM"),
+            ]
         )
         with self.assertRaisesRegex(
             ResolutionError, "Selected release candidate is already occupied: 1.2.4"
         ):
             resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
-        self.assertEqual(2, requester.call_count)
+        self.assertEqual(3, requester.call_count)
+        candidate_probe = call("HEAD", f"{BASE_URL}/1.2.4/kmp-1.2.4.pom")
+        self.assertEqual(1, requester.call_args_list.count(candidate_probe))
         self.assertNotIn("1.2.5", repr(requester.call_args_list))
 
     def test_metadata_parser_orders_stable_versions_and_ignores_snapshots(self) -> None:

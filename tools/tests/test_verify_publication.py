@@ -176,6 +176,57 @@ class VerifyPublicationTests(unittest.TestCase):
             )
         self.assertEqual(2, fetch.call_count)
 
+    def test_public_metadata_retries_stale_200_until_selected_version_appears(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        stale = b"<metadata><versioning><versions><version>0.0.9</version>" \
+                b"</versions></versioning></metadata>"
+        current = b"<metadata><versioning><versions><version>0.1.0</version>" \
+                  b"</versions></versioning></metadata>"
+        fetch = Mock(side_effect=[
+            HttpResponse(200, b"artifact"),
+            HttpResponse(200, stale),
+            HttpResponse(200, current),
+        ])
+        sleep = Mock()
+
+        verify_public(
+            manifest,
+            "https://repo.example",
+            VERSION,
+            fetch,
+            attempts=2,
+            retry_delay=0,
+            sleep=sleep,
+        )
+
+        self.assertEqual(3, fetch.call_count)
+        sleep.assert_called_once_with(0)
+
+    def test_public_metadata_retries_malformed_200_until_budget_is_exhausted(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        fetch = Mock(side_effect=[
+            HttpResponse(200, b"artifact"),
+            HttpResponse(200, b"<metadata>"),
+            HttpResponse(200, b"<metadata>"),
+        ])
+        sleep = Mock()
+
+        with self.assertRaisesRegex(
+            VerificationError, "Public Maven metadata is malformed after 2 attempts"
+        ):
+            verify_public(
+                manifest,
+                "https://repo.example",
+                VERSION,
+                fetch,
+                attempts=2,
+                retry_delay=0,
+                sleep=sleep,
+            )
+
+        self.assertEqual(3, fetch.call_count)
+        sleep.assert_called_once_with(0)
+
     def test_public_metadata_must_list_selected_version(self) -> None:
         manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
         responses = iter((

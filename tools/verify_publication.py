@@ -348,6 +348,41 @@ def _fetch_after_retries(
     raise VerificationError(f"Public verification failed for {key} after {attempts} attempts")
 
 
+def _verify_metadata_after_retries(
+    repository_url: str,
+    version: Version,
+    fetch: Callable[[str], HttpResponse],
+    attempts: int,
+    retry_delay: float,
+    sleep: Callable,
+) -> None:
+    url = f"{repository_url.rstrip('/')}/{_METADATA_KEY}"
+    failure = f"Public verification failed for {_METADATA_KEY}"
+    for attempt in range(1, attempts + 1):
+        try:
+            response = fetch(url)
+        except Exception:
+            response = None
+        if (
+            isinstance(response, HttpResponse)
+            and isinstance(response.status, int)
+            and not isinstance(response.status, bool)
+            and response.status == 200
+            and isinstance(response.body, bytes)
+        ):
+            try:
+                versions = parse_metadata_versions(response.body)
+            except ResolutionError:
+                failure = "Public Maven metadata is malformed"
+            else:
+                if version in versions:
+                    return
+                failure = f"Public Maven metadata does not list {version}"
+        if attempt < attempts:
+            sleep(retry_delay)
+    raise VerificationError(f"{failure} after {attempts} attempts")
+
+
 def verify_public(
     manifest: Manifest,
     repository_url: str,
@@ -364,15 +399,9 @@ def verify_public(
 
     for key in validated.entries:
         _fetch_after_retries(key, repository_url, fetch, attempts, retry_delay, sleep)
-    metadata = _fetch_after_retries(
-        _METADATA_KEY, repository_url, fetch, attempts, retry_delay, sleep
+    _verify_metadata_after_retries(
+        repository_url, version, fetch, attempts, retry_delay, sleep
     )
-    try:
-        versions = parse_metadata_versions(metadata.body)
-    except ResolutionError:
-        raise VerificationError("Public Maven metadata is malformed") from None
-    if version not in versions:
-        raise VerificationError(f"Public Maven metadata does not list {version}")
 
 
 class _ArgumentParser(argparse.ArgumentParser):

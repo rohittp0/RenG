@@ -20,6 +20,17 @@ jobs:
           java-version: "21"
           cache: gradle
       - uses: gradle/actions/setup-gradle@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Test release and policy tooling
+        run: >-
+          python3 -m unittest discover
+          -s tools/tests
+          -p 'test_*.py'
+          -v
+      - name: Check Cycle A repository policy
+        run: python3 tools/check_repository_policy.py --root .
       - name: Test and compile
         run: >-
           ./gradlew --no-configuration-cache
@@ -48,11 +59,15 @@ jobs:
           :kmp:macosArm64Test
           :kmp:publishAllPublicationsToLocalTestRepository
       - name: Resolve aggregate coordinate from clean consumer
-        run: >-
-          ./gradlew --no-configuration-cache -p consumer-smoke
-          compileAndroidMain
-          compileKotlinIosArm64
-          compileKotlinIosSimulatorArm64
-          compileKotlinMacosArm64
-          compileKotlinLinuxX64
-          compileKotlinLinuxArm64
+        run: |
+          smoke_home="$(mktemp -d)"
+          ./gradlew --no-configuration-cache \
+            --gradle-user-home "$smoke_home" \
+            --refresh-dependencies \
+            -p consumer-smoke \
+            compileAndroidMain \
+            compileKotlinIosArm64 \
+            compileKotlinIosSimulatorArm64 \
+            compileKotlinMacosArm64 \
+            compileKotlinLinuxX64 \
+            compileKotlinLinuxArm64

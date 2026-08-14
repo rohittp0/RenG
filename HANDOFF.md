@@ -2,8 +2,9 @@
 
 For whoever picks up RenG next. Cycle 0 — the graphics contract — is complete. Cycle A's
 implementation and local gates are complete; the first public release is pending. Nothing renders and
-there is no public runtime API yet. Cycle B becomes the next implementation cycle only after the release
-workflow succeeds for the merged Cycle A commit.
+there is no public runtime API yet. Cycle B becomes the next implementation cycle only after both CI jobs
+pass the exact merged Cycle A commit and that commit's public workflow anonymously verifies its immutable
+completion record.
 
 ## Read these first, in this order
 
@@ -37,15 +38,23 @@ The standard-library Python tooling is implemented and unit-tested:
   - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
   - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
   - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
-  These cover the seven-publication local manifest, authoritative exact-key collisions, and anonymous
-  public artifacts plus metadata.
+  - `completion-create --version <version> --manifest <path> --source-commit <sha> --output <path>`
+  - `completion-public --repository-url <url> --version <version> --manifest <path> --source-commit <sha> [--attempts <n>] [--retry-delay <seconds>]`
+  These cover the seven-publication local manifest, authoritative exact-key collisions, anonymous public
+  artifacts and metadata, canonical manifest-bound record creation, and anonymous record verification.
 
 `.github/workflows/ci.yml` now gates Ubuntu and macOS work rather than referencing missing projects.
 `.github/workflows/publish.yml` adds version resolution, a Linux release gate, signed local publication,
 seven POM checks, fresh-home six-target local smoke, exact-key R2 preflight, upload, anonymous artifact
-and retry-budgeted metadata verification, and a copied fresh-home credential-free public smoke. The
-aggregate KotlinMultiplatform R2 task depends on all six target R2 tasks, so target publications complete
-before aggregate artifacts and metadata can become the completion witness.
+and retry-budgeted metadata verification, and a copied fresh-home credential-free public smoke. Only after
+those public gates does it derive
+`com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`, conditionally create it with
+`If-None-Match: *`, and verify it anonymously with retries. The record's exact schema-version-1 fields are
+`schemaVersion`, `mavenVersion`, `sourceCommitSha`, and `manifestSha256`; the hash covers the exact
+serialized local manifest. Of those three completion-record stages, only the conditional write receives R2
+credentials; local record derivation and final anonymous verification do not. The aggregate
+KotlinMultiplatform R2 task depends on all six target R2 tasks as defense in depth, but neither aggregate
+POM nor Maven metadata availability proves completion.
 
 ## Verified environment facts
 
@@ -102,19 +111,28 @@ The approved design and its fail-closed release policy are in
 `docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013. The implementation
 and local gates are complete. No push, merge, workflow dispatch, AWS operation, R2 upload, or public
 publication has been performed from this worktree. **Public release pending** is the authoritative
-outcome until the exact merged commit's workflow proves otherwise.
+outcome until both CI jobs pass the exact merged commit and that commit's public workflow anonymously
+verifies its exact completion record.
+
+After that observed outcome, request approval for a separate documentation-only follow-up. Remove or revise
+pending claims in `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
+`docs/versions.js` `pending` fallback if applicable; and record the exact merged CI/public outcome here and
+in `docs/decomposition.md`. Keep the public version display metadata-driven and do not check a RenG semantic
+version literal into README or served docs. Do not pre-apply that follow-up or infer success from artifacts,
+POM, metadata, local publication, or a branch CI run.
 
 The release resolver does not search for alternatives. If checked-in `VERSION_NAME` is newer than every
 public stable version, that explicit declaration is the candidate and is allowed to recover from a partial
-release. Otherwise, automatic next-patch advancement first requires HTTP 200 from the newest
-metadata-listed aggregate POM. A 404, redirect, transport failure, or unexpected status means there is no
-completion witness and stops the run. Because the aggregate R2 task depends on all six target R2 tasks,
-that witness also proves the target publication tasks completed first. The selected candidate then receives
-exactly one aggregate-POM availability probe; an occupied candidate or remote uncertainty stops without
-skipping. Partial-release recovery requires an explicit upward `VERSION_NAME`, full gates, and fresh
-approval. Never overwrite, delete, reuse, or automatically skip the partial version. Public metadata
-verification also retries stale or malformed HTTP 200 responses within its fixed budget and fails closed
-after exhaustion.
+release. Otherwise, automatic next-patch advancement GETs the completion record for the newest
+metadata-listed version and requires HTTP 200 plus strict schema-version-1 JSON with exactly the four fields
+above, matching Maven version, lowercase 40-character source SHA, and lowercase 64-character manifest
+SHA-256. Missing, malformed, mismatched, redirected, transport-failed, uncertain, or otherwise unsuccessful
+record reads stop with an explicit upward-recovery instruction. Explicit upward recovery bypasses the prior
+record. The selected candidate receives exactly one aggregate-POM availability probe; an occupied candidate
+or remote uncertainty stops without skipping. Partial-release recovery requires an explicit upward
+`VERSION_NAME`, full gates, and fresh approval. Never overwrite, delete, reuse, or automatically skip the
+partial version. Public metadata verification retries stale or malformed HTTP 200 responses within its fixed
+budget and fails closed after exhaustion.
 
 Run the local Python and policy gates exactly as follows:
 
@@ -177,9 +195,19 @@ or public repository.
 ## Next cycle after release success: B — public API and pure core
 
 Do not begin Cycle B merely because the feature branch, local publication, or PR is green. First require
-the public workflow to prove seven signed local POMs, no authoritative R2 collision, anonymous retrieval
-of every manifest artifact, aggregate metadata containing the resolved version, and fresh credential-free
-six-target resolution. After that observed success, Cycle B is the next implementation cycle.
+both CI jobs on the exact merged commit and its public workflow to prove signed local publication, no
+authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata
+containing the resolved version, fresh credential-free six-target resolution, conditional completion-record
+creation, and credential-free anonymous verification of the exact record.
+
+Only after that observed success may Cycle B preparation begin, in this order:
+
+1. Read `CONTEXT.md`, ADRs 0001–0013, `docs/decomposition.md`, and this handoff.
+2. Run the required Cycle B feasibility spikes, including coordinate-precision and transform-boundary work.
+3. Invoke `/grill-with-docs` with the governing documents and spike findings.
+4. Write an implementation plan only after that design review resolves its questions.
+
+Cycle B implementation does not begin during Cycle A's release or post-release documentation follow-up.
 
 ## Decisions still open, each needing a spike before its cycle's spec
 

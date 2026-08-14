@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
+from tools.release_completion import CompletionRecord, completion_record_key
 from tools.resolve_release_version import (
     HttpResponse,
     ResolutionError,
@@ -24,6 +25,15 @@ from tools.resolve_release_version import (
 
 REPOSITORY_URL = "https://repo.example"
 BASE_URL = f"{REPOSITORY_URL}/com/rohittp/reng/kmp"
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def completion_document(version: str) -> bytes:
+    return CompletionRecord.create(
+        version,
+        SOURCE_COMMIT,
+        f"manifest for {version}\n".encode(),
+    ).serialize()
 
 
 class ResolveReleaseVersionTests(unittest.TestCase):
@@ -59,7 +69,7 @@ class ResolveReleaseVersionTests(unittest.TestCase):
             ),
         )
 
-    def test_metadata_listed_release_without_aggregate_pom_stops_advancement(self) -> None:
+    def test_metadata_listed_release_without_completion_record_stops_advancement(self) -> None:
         metadata = b"""
         <metadata><versioning><versions><version>1.2.3</version></versions>
         </versioning></metadata>
@@ -70,19 +80,19 @@ class ResolveReleaseVersionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ResolutionError,
-            "Newest metadata-listed release lacks an aggregate POM completion witness: 1.2.3",
+            "valid completion record.*explicit upward VERSION_NAME",
         ):
             resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
 
         self.assertEqual(
             [
                 call("GET", f"{BASE_URL}/maven-metadata.xml"),
-                call("HEAD", f"{BASE_URL}/1.2.3/kmp-1.2.3.pom"),
+                call("GET", f"{REPOSITORY_URL}/{completion_record_key('1.2.3')}"),
             ],
             requester.call_args_list,
         )
 
-    def test_routine_release_requires_completed_latest_and_probes_one_candidate(self) -> None:
+    def test_routine_release_requires_completion_record_and_probes_one_candidate(self) -> None:
         metadata = b"""
         <metadata><versioning><versions><version>1.2.3</version></versions>
         </versioning></metadata>
@@ -90,7 +100,7 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         requester = Mock(
             side_effect=[
                 HttpResponse(200, metadata),
-                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(200, completion_document("1.2.3")),
                 HttpResponse(404, b""),
             ]
         )
@@ -103,13 +113,13 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         self.assertEqual(
             [
                 call("GET", f"{BASE_URL}/maven-metadata.xml"),
-                call("HEAD", f"{BASE_URL}/1.2.3/kmp-1.2.3.pom"),
+                call("GET", f"{REPOSITORY_URL}/{completion_record_key('1.2.3')}"),
                 call("HEAD", f"{BASE_URL}/1.2.4/kmp-1.2.4.pom"),
             ],
             requester.call_args_list,
         )
 
-    def test_explicit_upward_recovery_does_not_require_previous_completion(self) -> None:
+    def test_explicit_upward_recovery_bypasses_previous_completion_record(self) -> None:
         metadata = b"""
         <metadata><versioning><versions><version>1.2.3</version></versions>
         </versioning></metadata>
@@ -131,7 +141,7 @@ class ResolveReleaseVersionTests(unittest.TestCase):
             requester.call_args_list,
         )
 
-    def test_completion_witness_uncertainty_stops_automatic_advancement(self) -> None:
+    def test_completion_record_uncertainty_stops_automatic_advancement(self) -> None:
         metadata = b"""
         <metadata><versioning><versions><version>1.2.3</version></versions>
         </versioning></metadata>
@@ -142,17 +152,41 @@ class ResolveReleaseVersionTests(unittest.TestCase):
                     side_effect=[HttpResponse(200, metadata), HttpResponse(status, b"")]
                 )
                 with self.assertRaisesRegex(
-                    ResolutionError, "lacks an aggregate POM completion witness"
+                    ResolutionError,
+                    "valid completion record.*explicit upward VERSION_NAME",
                 ):
                     resolve_release_version(
                         Version(1, 2, 3), REPOSITORY_URL, request=requester
                     )
                 self.assertEqual(2, requester.call_count)
 
-        requester = Mock(side_effect=[HttpResponse(200, metadata), ResolutionError("offline")])
-        with self.assertRaisesRegex(ResolutionError, "offline"):
+        requester = Mock(
+            side_effect=[HttpResponse(200, metadata), ResolutionError("offline")]
+        )
+        with self.assertRaisesRegex(
+            ResolutionError, "valid completion record.*explicit upward VERSION_NAME"
+        ):
             resolve_release_version(Version(1, 2, 3), REPOSITORY_URL, request=requester)
         self.assertEqual(2, requester.call_count)
+
+    def test_malformed_or_mismatched_completion_record_stops_advancement(self) -> None:
+        metadata = b"""
+        <metadata><versioning><versions><version>1.2.3</version></versions>
+        </versioning></metadata>
+        """
+        for document in (b"not json", completion_document("1.2.2")):
+            with self.subTest(document=document):
+                requester = Mock(
+                    side_effect=[HttpResponse(200, metadata), HttpResponse(200, document)]
+                )
+                with self.assertRaisesRegex(
+                    ResolutionError,
+                    "valid completion record.*explicit upward VERSION_NAME",
+                ):
+                    resolve_release_version(
+                        Version(1, 2, 3), REPOSITORY_URL, request=requester
+                    )
+                self.assertEqual(2, requester.call_count)
 
     def test_occupied_candidate_stops_without_skipping(self) -> None:
         metadata = b"""
@@ -162,7 +196,7 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         requester = Mock(
             side_effect=[
                 HttpResponse(200, metadata),
-                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(200, completion_document("1.2.3")),
                 HttpResponse(200, b"candidate aggregate POM"),
             ]
         )

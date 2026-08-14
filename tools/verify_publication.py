@@ -15,6 +15,11 @@ import xml.etree.ElementTree as ElementTree
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tools.release_completion import (
+    CompletionRecord,
+    CompletionRecordError,
+    completion_record_key,
+)
 from tools.resolve_release_version import (
     HttpResponse,
     ResolutionError,
@@ -249,6 +254,22 @@ def read_manifest(path: Path, version: Version) -> Manifest:
     return Manifest.parse(text, version)
 
 
+def create_completion_record(
+    manifest: Manifest,
+    version: Version,
+    source_commit: str,
+) -> CompletionRecord:
+    validated = Manifest.parse(manifest.serialize(), version)
+    try:
+        return CompletionRecord.create(
+            str(version),
+            source_commit,
+            validated.serialize().encode("utf-8"),
+        )
+    except CompletionRecordError:
+        raise VerificationError("Unable to create release completion record") from None
+
+
 def _validate_aws_response(key: str, completed: object) -> None:
     if getattr(completed, "returncode", None) != 0:
         raise VerificationError("AWS list-objects-v2 command failed")
@@ -404,6 +425,48 @@ def verify_public(
     )
 
 
+def verify_public_completion(
+    manifest: Manifest,
+    repository_url: str,
+    version: Version,
+    source_commit: str,
+    fetch: Callable[[str], HttpResponse],
+    attempts: int,
+    retry_delay: float,
+    sleep: Callable = time.sleep,
+) -> None:
+    if not isinstance(repository_url, str) or not repository_url:
+        raise VerificationError("Public repository URL is required")
+    _validate_retry_options(attempts, retry_delay)
+    expected = create_completion_record(manifest, version, source_commit)
+    key = completion_record_key(str(version))
+    url = f"{repository_url.rstrip('/')}/{key}"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = fetch(url)
+        except Exception:
+            response = None
+        if (
+            isinstance(response, HttpResponse)
+            and isinstance(response.status, int)
+            and not isinstance(response.status, bool)
+            and response.status == 200
+            and isinstance(response.body, bytes)
+        ):
+            try:
+                actual = CompletionRecord.parse(response.body, str(version))
+            except CompletionRecordError:
+                actual = None
+            if actual == expected:
+                return
+        if attempt < attempts:
+            sleep(retry_delay)
+    raise VerificationError(
+        f"Public completion record verification failed after {attempts} attempts"
+    )
+
+
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise VerificationError(f"Invalid command-line arguments: {message}")
@@ -436,6 +499,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     public.add_argument("--attempts", type=int, default=12)
     public.add_argument("--retry-delay", type=float, default=5)
 
+    completion_create = commands.add_parser("completion-create")
+    completion_create.add_argument("--version", required=True)
+    completion_create.add_argument("--manifest", required=True, type=Path)
+    completion_create.add_argument("--source-commit", required=True)
+    completion_create.add_argument("--output", required=True, type=Path)
+
+    completion_public = commands.add_parser("completion-public")
+    completion_public.add_argument("--repository-url", required=True)
+    completion_public.add_argument("--version", required=True)
+    completion_public.add_argument("--manifest", required=True, type=Path)
+    completion_public.add_argument("--source-commit", required=True)
+    completion_public.add_argument("--attempts", type=int, default=12)
+    completion_public.add_argument("--retry-delay", type=float, default=5)
+
     try:
         arguments = parser.parse_args(argv)
         version = parse_declared_version(arguments.version)
@@ -447,12 +524,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "r2-preflight":
             manifest = read_manifest(arguments.manifest, version)
             check_r2_collisions(manifest, arguments.endpoint, arguments.bucket)
-        else:
+        elif arguments.command == "public":
             manifest = read_manifest(arguments.manifest, version)
             verify_public(
                 manifest,
                 arguments.repository_url,
                 version,
+                _public_fetch,
+                arguments.attempts,
+                arguments.retry_delay,
+            )
+        elif arguments.command == "completion-create":
+            manifest = read_manifest(arguments.manifest, version)
+            record = create_completion_record(
+                manifest, version, arguments.source_commit
+            )
+            arguments.output.write_bytes(record.serialize())
+            print(completion_record_key(str(version)))
+        else:
+            manifest = read_manifest(arguments.manifest, version)
+            verify_public_completion(
+                manifest,
+                arguments.repository_url,
+                version,
+                arguments.source_commit,
                 _public_fetch,
                 arguments.attempts,
                 arguments.retry_delay,

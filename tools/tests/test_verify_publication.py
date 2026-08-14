@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from tools.release_completion import CompletionRecord, completion_record_key
 from tools.resolve_release_version import HttpResponse, Version
 from tools.verify_publication import (
     EXPECTED_ARTIFACTS,
     Manifest,
     VerificationError,
     check_r2_collisions,
+    create_completion_record,
     discover_local_manifest,
+    main,
     verify_public,
+    verify_public_completion,
 )
 
 VERSION = Version(0, 1, 0)
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 POM = """<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
@@ -241,6 +248,120 @@ class VerifyPublicationTests(unittest.TestCase):
                 lambda _: next(responses), attempts=1, retry_delay=0,
                 sleep=Mock(),
             )
+
+    def test_completion_create_cli_writes_manifest_bound_record_and_key(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        manifest_path = self.repository / "manifest.txt"
+        record_path = self.repository / "completion.json"
+        manifest_path.write_text(manifest.serialize(), encoding="utf-8")
+        stdout, stderr = io.StringIO(), io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = main([
+                "completion-create",
+                "--version", str(VERSION),
+                "--manifest", str(manifest_path),
+                "--source-commit", SOURCE_COMMIT,
+                "--output", str(record_path),
+            ])
+
+        expected = create_completion_record(manifest, VERSION, SOURCE_COMMIT)
+        self.assertEqual(0, result)
+        self.assertEqual(f"{completion_record_key(str(VERSION))}\n", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(
+            expected,
+            CompletionRecord.parse(record_path.read_bytes(), str(VERSION)),
+        )
+
+    def test_completion_public_cli_verifies_expected_anonymous_record(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        manifest_path = self.repository / "manifest.txt"
+        manifest_path.write_text(manifest.serialize(), encoding="utf-8")
+        expected = create_completion_record(manifest, VERSION, SOURCE_COMMIT)
+        stdout, stderr = io.StringIO(), io.StringIO()
+
+        with patch(
+            "tools.verify_publication._public_fetch",
+            return_value=HttpResponse(200, expected.serialize()),
+        ) as fetch:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = main([
+                    "completion-public",
+                    "--repository-url", "https://repo.example",
+                    "--version", str(VERSION),
+                    "--manifest", str(manifest_path),
+                    "--source-commit", SOURCE_COMMIT,
+                    "--attempts", "1",
+                    "--retry-delay", "0",
+                ])
+
+        self.assertEqual(0, result)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+        fetch.assert_called_once_with(
+            f"https://repo.example/{completion_record_key(str(VERSION))}"
+        )
+
+    def test_public_completion_retries_until_exact_record_is_anonymous(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        expected = create_completion_record(manifest, VERSION, SOURCE_COMMIT)
+        wrong_source = CompletionRecord.create(
+            str(VERSION),
+            "f" * 40,
+            manifest.serialize().encode("utf-8"),
+        )
+        wrong_manifest = CompletionRecord.create(
+            str(VERSION),
+            SOURCE_COMMIT,
+            b"different manifest bytes\n",
+        )
+        fetch = Mock(side_effect=[
+            HttpResponse(404, b""),
+            HttpResponse(200, wrong_source.serialize()),
+            HttpResponse(200, wrong_manifest.serialize()),
+            HttpResponse(200, expected.serialize()),
+        ])
+        sleep = Mock()
+
+        verify_public_completion(
+            manifest,
+            "https://repo.example",
+            VERSION,
+            SOURCE_COMMIT,
+            fetch,
+            attempts=4,
+            retry_delay=0,
+            sleep=sleep,
+        )
+
+        expected_url = (
+            f"https://repo.example/{completion_record_key(str(VERSION))}"
+        )
+        self.assertEqual([unittest.mock.call(expected_url)] * 4, fetch.call_args_list)
+        self.assertEqual([unittest.mock.call(0)] * 3, sleep.call_args_list)
+
+    def test_public_completion_fails_closed_after_malformed_retry_budget(self) -> None:
+        manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/a.module",))
+        fetch = Mock(return_value=HttpResponse(200, b"not json"))
+        sleep = Mock()
+
+        with self.assertRaisesRegex(
+            VerificationError, "completion record.*after 2 attempts"
+        ):
+            verify_public_completion(
+                manifest,
+                "https://repo.example",
+                VERSION,
+                SOURCE_COMMIT,
+                fetch,
+                attempts=2,
+                retry_delay=0,
+                sleep=sleep,
+            )
+
+        self.assertEqual(2, fetch.call_count)
+        sleep.assert_called_once_with(0)
 
     def test_local_cli_runs_as_a_direct_script(self) -> None:
         self.write_all()

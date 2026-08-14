@@ -74,6 +74,27 @@ _DEPENDENCY_CALLS = frozenset({
     "testCompileOnly", "testImplementation", "testRuntimeOnly",
 })
 _PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
+_COMPLETION_STEP_NAMES = (
+    "Verify exact public artifacts and aggregate metadata",
+    "Resolve six targets from the public repository without credentials",
+    "Create immutable release completion record",
+    "Create release completion record in R2",
+    "Verify public release completion record without credentials",
+)
+_COMPLETION_CREDENTIAL_NAMES = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
+_PUBLIC_SMOKE_TASKS = (
+    "compileAndroidMain",
+    "compileKotlinIosArm64",
+    "compileKotlinIosSimulatorArm64",
+    "compileKotlinMacosArm64",
+    "compileKotlinLinuxX64",
+    "compileKotlinLinuxArm64",
+)
 
 
 def _read(path: Path) -> str:
@@ -631,6 +652,92 @@ def check_docs(root: Path) -> list[Violation]:
     return violations
 
 
+def _workflow_step_block(text: str, name: str) -> tuple[int, str] | None:
+    marker = f"name: {name}"
+    if text.count(marker) != 1:
+        return None
+    start = text.index(marker)
+    next_step = re.search(
+        r"(?m)^\s*- (?:id:|name:|uses:)", text[start + len(marker):]
+    )
+    end = len(text) if next_step is None else start + len(marker) + next_step.start()
+    return start, text[start:end]
+
+
+def check_completion_record_workflow(root: Path) -> list[Violation]:
+    path = root / ".github/workflows/publish.yml"
+    if not path.is_file():
+        return [_violation(
+            "COMPLETION_RECORD_WORKFLOW",
+            path,
+            1,
+            "publish workflow must create and verify the immutable completion record",
+        )]
+
+    text = _read(path)
+    steps = {
+        name: _workflow_step_block(text, name) for name in _COMPLETION_STEP_NAMES
+    }
+    if any(step is None for step in steps.values()):
+        return [_violation(
+            "COMPLETION_RECORD_WORKFLOW",
+            path,
+            1,
+            "publish workflow completion-record steps are missing or duplicated",
+        )]
+
+    ordered = [steps[name] for name in _COMPLETION_STEP_NAMES]
+    assert all(step is not None for step in ordered)
+    present_steps = [step for step in ordered if step is not None]
+    offsets = [step[0] for step in present_steps]
+    public_artifacts, public_smoke, create, write, public_completion = (
+        step[1] for step in present_steps
+    )
+    valid = offsets == sorted(offsets)
+    valid = valid and "verify_publication.py public" in public_artifacts
+    valid = valid and "verify_publication.py completion-create" in create
+    valid = valid and "SOURCE_COMMIT: ${{ github.sha }}" in create
+    valid = valid and '--source-commit "$SOURCE_COMMIT"' in create
+    valid = valid and "s3api put-object" in write
+    valid = valid and 'R2_ENDPOINT:' in write
+    valid = valid and 'R2_BUCKET:' in write
+    valid = valid and '--endpoint-url "$R2_ENDPOINT"' in write
+    valid = valid and all(
+        argument in write
+        for argument in ("--bucket", "--key", "--body", "--content-type")
+    )
+    valid = valid and 'RECORD_KEY:' in write
+    valid = valid and '--key "$RECORD_KEY"' in write
+    valid = valid and "--if-none-match '*'" in write
+    valid = valid and all(name in write for name in _COMPLETION_CREDENTIAL_NAMES[:2])
+    valid = valid and "verify_publication.py completion-public" in public_completion
+    valid = valid and "SOURCE_COMMIT: ${{ github.sha }}" in public_completion
+    valid = valid and '--source-commit "$SOURCE_COMMIT"' in public_completion
+    valid = valid and "--attempts" in public_completion
+    valid = valid and "--retry-delay" in public_completion
+    valid = valid and "--gradle-user-home" in public_smoke
+    valid = valid and "--refresh-dependencies" in public_smoke
+    valid = valid and all(task in public_smoke for task in _PUBLIC_SMOKE_TASKS)
+    for credential in _COMPLETION_CREDENTIAL_NAMES:
+        valid = valid and credential not in public_artifacts
+        valid = valid and credential not in public_smoke
+        valid = valid and credential not in create
+        valid = valid and credential not in public_completion
+
+    if valid:
+        return []
+    first_offset = min(offsets, default=0)
+    return [_violation(
+        "COMPLETION_RECORD_WORKFLOW",
+        path,
+        _line(text, first_offset),
+        (
+            "completion record must follow public gates, use conditional create, "
+            "scope its stage credentials to the write, and verify anonymously"
+        ),
+    )]
+
+
 def _has_conflicting_license(text: str) -> bool:
     return _CONFLICTING_LICENSE.search(text) is not None
 
@@ -695,6 +802,7 @@ def check_repository(root: Path) -> list[Violation]:
         check_abi,
         check_public_version_literals,
         check_docs,
+        check_completion_record_workflow,
         check_license,
     )
     violations = [item for check in checks for item in check(root)]

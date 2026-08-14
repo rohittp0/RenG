@@ -15,6 +15,49 @@ linuxX64()
 linuxArm64()
 """
 
+PUBLIC_SMOKE_STEP = """      - name: Resolve six targets from the public repository without credentials
+        run: >-
+          ./gradlew --gradle-user-home "$PUBLIC_HOME" --refresh-dependencies
+          compileAndroidMain compileKotlinIosArm64 compileKotlinIosSimulatorArm64
+          compileKotlinMacosArm64 compileKotlinLinuxX64 compileKotlinLinuxArm64
+"""
+COMPLETION_CREATE_STEP = """      - name: Create immutable release completion record
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: >-
+          python3 tools/verify_publication.py completion-create
+          --source-commit "$SOURCE_COMMIT"
+"""
+COMPLETION_WRITE_STEP = """      - name: Create release completion record in R2
+        env:
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          RECORD_KEY: ${{ steps.completion.outputs.record_key }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: >-
+          aws --endpoint-url "$R2_ENDPOINT" s3api put-object
+          --bucket "$R2_BUCKET" --key "$RECORD_KEY"
+          --body completion.json --content-type application/json --if-none-match '*'
+"""
+COMPLETION_PUBLIC_STEP = """      - name: Verify public release completion record without credentials
+        env:
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: >-
+          python3 tools/verify_publication.py completion-public
+          --source-commit "$SOURCE_COMMIT" --attempts 12 --retry-delay 5
+"""
+PUBLISH_WORKFLOW = (
+    "steps:\n"
+    "      - name: Verify exact public artifacts and aggregate metadata\n"
+    "        run: python3 tools/verify_publication.py public\n"
+    + PUBLIC_SMOKE_STEP
+    + COMPLETION_CREATE_STEP
+    + COMPLETION_WRITE_STEP
+    + COMPLETION_PUBLIC_STEP
+)
+
 
 def write(root: Path, relative: str, text: str) -> None:
     path = root / relative
@@ -64,7 +107,7 @@ rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
 """)
     write(root, "docs/style.css", ":focus-visible { outline: 2px solid currentColor; }\n")
     write(root, "docs/versions.js", "https://maven.rohittp.com/com/rohittp/reng\n")
-    write(root, ".github/workflows/publish.yml", "-PrengVersion=\"$VERSION\"\n")
+    write(root, ".github/workflows/publish.yml", PUBLISH_WORKFLOW)
     write(root, "docs/adr/9999-history.md", "Historical com.rohittp.reng:kmp:9.9.9\n")
 
 
@@ -118,6 +161,47 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertIn("DOCS_STRUCTURE", codes)
             self.assertIn("DOCS_CANONICAL", codes)
 
+    def test_completion_record_workflow_requires_atomic_order_and_credential_scope(self) -> None:
+        mutations = (
+            lambda text: text.replace(" --if-none-match '*'", ""),
+            lambda text: text.replace('--endpoint-url "$R2_ENDPOINT" ', ""),
+            lambda text: text.replace(" compileKotlinLinuxArm64", ""),
+            lambda text: text.replace(
+                "          SOURCE_COMMIT: ${{ github.sha }}\n",
+                "          SOURCE_COMMIT: ${{ github.sha }}\n"
+                "          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}\n",
+                1,
+            ),
+            lambda text: text.replace(
+                PUBLIC_SMOKE_STEP,
+                PUBLIC_SMOKE_STEP.replace(
+                    "        run:",
+                    "        env:\n"
+                    "          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}\n"
+                    "        run:",
+                ),
+            ),
+            lambda text: text.replace(
+                "          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}\n",
+                "          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}\n",
+            ),
+            lambda text: text.replace(
+                PUBLIC_SMOKE_STEP + COMPLETION_CREATE_STEP,
+                COMPLETION_CREATE_STEP + PUBLIC_SMOKE_STEP,
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    workflow = root / ".github/workflows/publish.yml"
+                    workflow.write_text(
+                        mutate(workflow.read_text(encoding="utf-8")),
+                        encoding="utf-8",
+                    )
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("COMPLETION_RECORD_WORKFLOW", codes)
 
     def test_target_checks_reject_real_extra_factory_and_ignore_non_code(self) -> None:
         with TemporaryDirectory() as directory:

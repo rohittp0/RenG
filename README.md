@@ -5,8 +5,9 @@
 ## Current status
 
 RenG is a pre-runtime Kotlin Multiplatform publication skeleton. Cycle A establishes its coordinate,
-target surface, and release gates, but its first public release is still pending anonymous verification.
-It exposes no runtime API and renders nothing.
+target surface, and release gates, but its first public release is still pending anonymous verification of
+its immutable completion record from the exact merged, CI-passing commit. It exposes no runtime API and
+renders nothing.
 
 ## Coordinate and repository
 
@@ -16,9 +17,9 @@ RenG is configured to publish one common-code coordinate:
 com.rohittp.reng:kmp
 ```
 
-After the first release passes anonymous verification, the coordinate will resolve without consumer
-credentials from `https://maven.rohittp.com`. Configure that repository and JetBrains Compose, filtered
-exclusively to `org.jetbrains.skiko` for Rentile's transitive platform artifacts, before the standard
+After the first release's completion record verifies anonymously, the coordinate will resolve without
+consumer credentials from `https://maven.rohittp.com`. Configure that repository and JetBrains Compose,
+filtered exclusively to `org.jetbrains.skiko` for Rentile's transitive platform artifacts, before the standard
 repositories:
 
 ```kotlin
@@ -89,18 +90,26 @@ The local gates are:
 Every non-documentation push to `main` releases only after its gates pass. Releases are immutable and
 fail closed: an occupied coordinate, incomplete remote response, or validation failure stops publication
 rather than overwriting or skipping a version. `VERSION_NAME` in the root `gradle.properties` is the sole
-checked-in version input. Routine next-patch advancement requires the newest metadata-listed aggregate
-POM as a completion witness. That aggregate publishes only after all six target publications complete.
-An explicit upward `VERSION_NAME` is the recovery path for a partial release.
+checked-in version input. Routine next-patch advancement requires a strict completion record for the newest
+metadata-listed release at
+`com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; neither aggregate POM nor metadata
+availability proves completion. The workflow conditionally creates that record only after anonymous
+artifact/metadata verification and credential-free six-target resolution, then verifies it anonymously.
+An explicit upward `VERSION_NAME` bypasses the prior record and is the recovery path for a partial release.
 
 ## Static documentation version convention
 
 Release versions are not hardcoded in HTML. Every displayed RenG release uses
 `data-maven-version="kmp"`, and every applicable page loads `docs/versions.js`. The browser reads
 `<versioning><release>` from
-`https://maven.rohittp.com/com/rohittp/reng/kmp/maven-metadata.xml`; if it cannot load the metadata,
-the readable `pending` fallback remains until release metadata is available. Publishing a release requires
-no documentation version update.
+`https://maven.rohittp.com/com/rohittp/reng/kmp/maven-metadata.xml`; while the first release remains
+pending, failed or unavailable metadata leaves the readable `pending` fallback.
+
+After both CI jobs pass the exact merged commit and the first public completion record verifies
+anonymously, an authorized documentation-only follow-up must remove or revise pending claims in this
+README, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the `docs/versions.js` fallback if
+applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. Version display remains metadata-driven,
+so that follow-up must not hardcode a RenG release version in README or served docs.
 
 Architecture decisions and the evolving publication contract are in [`docs/`](docs/). Public documentation
 is prepared for [https://rohittp.com/reng/](https://rohittp.com/reng/).

@@ -56,7 +56,8 @@
         <p class="hero-lead">
           RenG is a Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract.
           Cycle A establishes its coordinate, target surface, and release discipline. The first public
-          release is pending, and RenG exposes no runtime API or rendering behavior.
+          release is pending anonymous completion-record verification, and RenG exposes no runtime API or
+          rendering behavior.
         </p>
         <div class="hero-actions">
           <a class="button primary" href="kmp.html">Read the KMP setup</a>
@@ -96,8 +97,9 @@
         <h2>The configured surface is intentionally narrow.</h2>
         <p>
           RenG is configured for one anonymous Maven coordinate and six targets. Installation becomes
-          available only after the first release passes anonymous verification. No callable runtime
-          behavior, window, render loop, or frame drawing exists yet.
+          available only after both CI jobs pass the exact merged commit and the first public release's
+          immutable completion record verifies anonymously. No callable runtime behavior, window, render
+          loop, or frame drawing exists yet.
         </p>
       </div>
       <div class="scope-grid">
@@ -124,8 +126,8 @@
         <p class="eyebrow">Pending public Maven repository</p>
         <h2>One coordinate after verification.</h2>
         <p>
-          After the first release passes anonymous verification, add the public repository through
-          <code>dependencyResolutionManagement</code> and declare the common coordinate with your version
+          After the first release's completion record verifies anonymously, add the public repository
+          through <code>dependencyResolutionManagement</code> and declare the common coordinate with your version
           property. The KMP guide includes the complete setup.
         </p>
       </div>
@@ -150,8 +152,9 @@ kotlin {
         <h2>Immutable releases, checked before publication.</h2>
         <p>
           Every non-documentation push to <code>main</code> releases only after its gates pass.
-          <code>VERSION_NAME</code> is the sole checked-in version input; routine releases advance
-          the public patch line, and an intentional upward value requests a new minor or major line.
+          <code>VERSION_NAME</code> is the sole checked-in version input; routine patch advancement requires
+          the newest metadata-listed release's strict completion record, while an intentional upward value
+          bypasses that prior record for partial-release recovery.
         </p>
       </div>
       <div class="release-grid">
@@ -167,12 +170,13 @@ kotlin {
         </article>
         <article>
           <span>03</span>
-          <h3>Resolve publicly</h3>
-          <p>Anonymous HTTP verification and a fresh consumer resolution prove the public result.</p>
+          <h3>Resolve and complete publicly</h3>
+          <p>Anonymous artifact checks and fresh consumer resolution precede conditional record creation and anonymous verification.</p>
         </article>
       </div>
       <div class="callout">
-        <strong>Fail closed by design.</strong> A malformed response, transport failure, validation failure, or occupied coordinate stops publication. Releases never overwrite or skip an existing version.
+        <p><strong>Fail closed by design.</strong> A malformed response, transport failure, validation failure, or occupied coordinate stops publication. Releases never overwrite or skip an existing version. Aggregate POM and metadata availability are not completion proof; only the valid immutable completion record is.</p>
+        <p><strong>Pending documentation follow-up.</strong> Only after both CI jobs pass the exact merged commit and its first public completion record verifies may maintainers remove pending claims from the README, this page, the KMP setup, and <code>llms.txt</code>; adjust the <code>versions.js</code> fallback if applicable; and update the handoff and decomposition. Version display remains metadata-driven.</p>
       </div>
     </section>
 

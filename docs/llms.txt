@@ -6,10 +6,10 @@ Source: https://github.com/rohittp0/RenG
 Architecture decisions: https://github.com/rohittp0/RenG/tree/main/docs/adr
 
 Maven coordinate: com.rohittp.reng:kmp
-Public Maven repository after first-release verification: https://maven.rohittp.com
+Public Maven repository after exact merged CI and anonymous first-release completion-record verification: https://maven.rohittp.com
 Public release status: pending
 
-Configured Kotlin Multiplatform targets, available together after first-release verification:
+Configured Kotlin Multiplatform targets, available together after that verification:
 - android
 - iosArm64
 - iosSimulatorArm64
@@ -21,6 +21,14 @@ License: Apache-2.0
 
 Releases are immutable and fail closed. Every non-documentation push to main publishes only after
 validation; an occupied coordinate, malformed response, or validation failure stops publication rather
-than overwriting or skipping a version.
+than overwriting or skipping a version. Routine next-patch advancement requires the newest metadata-listed
+release's strict record at com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json. POM and metadata
+availability are not completion proof. The workflow conditionally creates the record only after anonymous
+artifact/metadata verification and credential-free six-target resolution, then verifies it anonymously.
+
+After both CI jobs pass the exact merged commit and the first public completion record verifies, an
+authorized documentation-only follow-up must revise pending claims in README.md, docs/index.html,
+docs/kmp.html, and this file; adjust the docs/versions.js pending fallback if applicable; and update
+HANDOFF.md plus docs/decomposition.md. Public version display remains metadata-driven.
 
 RenG is pre-runtime in Cycle A. It exposes no runtime API and renders nothing.

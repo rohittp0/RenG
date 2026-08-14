@@ -10,6 +10,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ElementTree
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tools.release_completion import (
+    CompletionRecord,
+    CompletionRecordError,
+    completion_record_key,
+)
+
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _METADATA_PATH = "com/rohittp/reng/kmp"
@@ -162,13 +171,24 @@ def resolve_release_version(
         latest = max(published)
         if declared <= latest:
             latest_text = str(latest)
-            completion_url = f"{base_url}/{latest_text}/kmp-{latest_text}.pom"
-            completion_response = requester("HEAD", completion_url)
+            completion_url = (
+                f"{repository_url.rstrip('/')}/{completion_record_key(latest_text)}"
+            )
+            completion_error = (
+                "Newest metadata-listed release does not have a valid completion record: "
+                f"{latest_text}; declare an explicit upward VERSION_NAME greater than "
+                f"{latest_text} to recover"
+            )
+            try:
+                completion_response = requester("GET", completion_url)
+            except ResolutionError:
+                raise ResolutionError(completion_error) from None
             if completion_response.status != 200:
-                raise ResolutionError(
-                    "Newest metadata-listed release lacks an aggregate POM completion "
-                    f"witness: {latest_text} (status {completion_response.status})"
-                )
+                raise ResolutionError(completion_error)
+            try:
+                CompletionRecord.parse(completion_response.body, latest_text)
+            except CompletionRecordError:
+                raise ResolutionError(completion_error) from None
 
     candidate = select_candidate(declared, published)
     candidate_text = str(candidate)

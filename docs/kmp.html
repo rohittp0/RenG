@@ -13,7 +13,7 @@
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="RenG" />
   <meta property="og:title" content="KMP setup — RenG" />
-  <meta property="og:description" content="Review the RenG KMP setup that becomes available after first-release verification." />
+  <meta property="og:description" content="Review the RenG KMP setup that becomes available after first-release completion-record verification." />
   <meta property="og:url" content="https://rohittp.com/reng/kmp.html" />
   <script src="versions.js" defer></script>
 </head>
@@ -44,8 +44,9 @@
         <p class="eyebrow">com.rohittp.reng:kmp</p>
         <h1>KMP setup</h1>
         <p class="docs-lead">
-          RenG is configured for one public KMP coordinate. Installation becomes available only after
-          the first release passes anonymous verification. The setup below is ready for that release.
+          RenG is configured for one public KMP coordinate. Installation becomes available only after both
+          CI jobs pass the exact merged commit and the first public completion record verifies anonymously.
+          The setup below is ready for that release.
         </p>
         <div class="tag-row">
           <span class="tag">Kotlin Multiplatform</span>
@@ -54,9 +55,13 @@
           <span class="tag">Release <span data-maven-version="kmp">pending</span></span>
         </div>
         <div class="status-callout">
-          <strong>The first public release is pending.</strong>
+          <p><strong>The first public release is pending.</strong>
           Cycle A exposes no runtime API and renders nothing. This page describes the setup that becomes
-          usable after anonymous first-release verification.
+          usable after anonymous first-release completion-record verification.</p>
+          <p>After that exact merged CI and public outcome, an authorized documentation-only follow-up must
+          revise pending claims in the README, overview, this setup, and <code>llms.txt</code>; adjust the
+          <code>versions.js</code> fallback if applicable; and update the handoff plus decomposition while
+          keeping versions metadata-driven.</p>
         </div>
       </header>
 
@@ -64,9 +69,9 @@
         <p class="doc-label">Step 1</p>
         <h2>Add the repositories.</h2>
         <p>
-          After anonymous first-release verification, RenG will resolve from the public Maven repository
-          without consumer credentials. RenG's Rentile dependency also resolves Skiko platform artifacts
-          from JetBrains' public Compose repository; limit that repository to its owner group.
+          After anonymous first-release completion-record verification, RenG will resolve from the public
+          Maven repository without consumer credentials. RenG's Rentile dependency also resolves Skiko
+          platform artifacts from JetBrains' public Compose repository; limit that repository to its owner group.
         </p>
         <div class="code-card doc-code">
           <div class="code-head"><span>settings.gradle.kts</span><span>root project</span></div>
@@ -116,8 +121,8 @@ kotlin {
         <p class="doc-label">Publication surface</p>
         <h2>Six configured targets.</h2>
         <p>
-          These targets become the complete publication surface after the first release passes anonymous
-          verification. Apple support is Apple Silicon only; RenG deliberately does not publish
+          These targets become the complete publication surface after the first release's completion record
+          verifies anonymously. Apple support is Apple Silicon only; RenG deliberately does not publish
           <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
         </p>
         <div class="table-wrap">

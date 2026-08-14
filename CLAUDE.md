@@ -11,9 +11,11 @@ rendering behavior yet. `consumer-smoke`, the dependency-free static site, publi
 repository-policy tooling, and `VERSION_NAME=0.1.0` now exist.
 
 Cycle A is not complete as a released cycle until the exact merged commit passes both CI jobs and the
-first public publication verifies anonymously. Do not start Cycle B implementation before that release
-succeeds. A passing branch or local publication proves implementation/merge readiness only; it does not
-prove the public outcome.
+first public publication anonymously verifies the immutable release-completion record. Do not start Cycle B
+implementation before that outcome. A passing branch or local publication proves implementation/merge
+readiness only; it does not prove the public outcome. After completion, Cycle B preparation must first read
+`CONTEXT.md`, the governing ADRs, `docs/decomposition.md`, and `HANDOFF.md`, then run the required
+feasibility spikes, invoke `/grill-with-docs` with those findings, and only then write an implementation plan.
 
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 cover the graphics
 contract; ADR 0013 governs fail-closed publication). Read both before proposing anything that touches
@@ -156,15 +158,18 @@ publishes all seven publications to `build/local-maven`, then compiles the stand
 targets with a fresh Gradle home and `--refresh-dependencies`.
 
 `publish.yml` runs for every non-documentation push to `main` and for an explicit dispatch from `main`.
-It implements a fail-closed completion-witness rule. If checked-in stable `VERSION_NAME` is newer than
-every public stable version, that explicit declaration is the candidate and may recover from a partial
-release. Otherwise, automatic next-patch advancement requires HTTP 200 from the newest metadata-listed
-aggregate POM. That POM is a completion witness because the aggregate KotlinMultiplatform R2 task depends
-on all six target R2 publication tasks, so targets publish before aggregate artifacts and metadata. Missing
-witnesses, malformed or empty metadata, redirects, transport errors, unexpected statuses, snapshots, and
-occupied candidates stop resolution. The selected candidate still receives exactly one aggregate-POM
-availability probe, and the resolver never skips it. Partial-release recovery is always an explicit upward
-`VERSION_NAME` change, never overwrite, delete, reuse, or automatic skip.
+It implements a **one-candidate rule**. If checked-in stable `VERSION_NAME` is newer than every public
+stable version, that explicit declaration is the candidate and may recover from a partial release. Otherwise,
+automatic next-patch advancement requires HTTP 200 plus a strict matching completion record for the newest
+metadata-listed version at
+`com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`. Schema version 1 has exactly integer
+`schemaVersion` equal to 1, canonical stable `mavenVersion`, lowercase 40-character `sourceCommitSha`, and
+lowercase 64-character `manifestSha256` over the exact serialized local manifest. Missing, malformed,
+mismatched, redirected, or uncertain records; malformed or empty metadata; transport errors; unexpected
+statuses; snapshots; and occupied candidates stop resolution. Explicit upward recovery bypasses the prior
+record. The selected candidate still receives exactly one aggregate-POM availability probe, and the resolver
+never skips it. Partial-release recovery is always an explicit upward `VERSION_NAME` change, never
+overwrite, delete, reuse, or automatic skip.
 
 The release gate chain is: Python tests and repository policy → Ubuntu ABI/Android/Linux gates → signed
 local publication of `kmp` plus its six target artifacts → all seven POM checks → manifest-derived signed
@@ -172,7 +177,11 @@ POM and artifact validation → fresh-home six-target local smoke → authoritat
 checks → upload → anonymous HTTP verification of every manifest entry and aggregate metadata, with stale or
 malformed HTTP 200 metadata retried within the configured budget → a copied standalone smoke project
 resolving all six targets from the public repository with no credentials, a fresh Gradle home, and
-`--refresh-dependencies`. `publish-main` concurrency is serialized with `cancel-in-progress: false`.
+`--refresh-dependencies` → canonical completion-record derivation → authoritative conditional R2 creation
+with `If-None-Match: *` → credential-free anonymous record verification with retries. Of those three
+completion-record stages, only the conditional write receives R2 credentials. The aggregate publication
+still runs after all six target publications as defense in depth, but neither aggregate-POM nor metadata
+availability proves completion. `publish-main` concurrency is serialized with `cancel-in-progress: false`.
 
 The standard-library Python tools are:
 
@@ -180,18 +189,25 @@ The standard-library Python tools are:
   docs, repository, and license constraints.
 - `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` — prints
   the sole selected candidate or fails closed.
-- `tools/verify_publication.py` has three exact CLI surfaces:
+- `tools/verify_publication.py` has five exact CLI surfaces:
   - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
   - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
   - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
-  They derive and validate the immutable local manifest, reject exact R2 key collisions, and verify
-  anonymous public artifacts and metadata.
+  - `completion-create --version <version> --manifest <path> --source-commit <sha> --output <path>`
+  - `completion-public --repository-url <url> --version <version> --manifest <path> --source-commit <sha> [--attempts <n>] [--retry-delay <seconds>]`
+  They derive and validate the immutable local manifest, reject exact R2 key collisions, verify anonymous
+  public artifacts and metadata, derive the manifest-bound completion record, and verify that record
+  anonymously.
 
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SIGNING_KEY`, `SIGNING_KEY_ID`, `SIGNING_KEY_PASSWORD`.
 A dedicated step fails fast if any is missing. Do not run AWS, upload, push, dispatch, or otherwise infer
 that these outward gates passed without explicit approval and an observed workflow result. The first
-public release is pending.
+public release is pending. After the exact merged CI jobs and first public completion record succeed, an
+authorized documentation-only follow-up must remove or revise pending claims in `README.md`,
+`docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the `docs/versions.js` `pending` fallback if
+applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. Keep public version display
+metadata-driven and do not check a RenG semantic version literal into README or served docs.
 
 Two rentile gates were **not** ported because RenG has no analogue: the credential-free coverage
 manifest check (`tools/check_coverage_manifest.py` over `compatibility/`) and the rolling

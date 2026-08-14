@@ -1,8 +1,9 @@
 # Decomposition
 
 RenG is too large for one specification. It is built as a sequence of cycles, each with its own spec,
-its own implementation plan, and its own gates. A cycle is finished when its gates pass on CI, not when
-its code exists.
+its own implementation plan, and its own gates. A cycle is finished when its outcome gates pass, not when
+its code exists. Cycle A additionally requires both CI jobs on the exact merged commit and anonymous
+verification of that commit's first public completion record.
 
 Cycle 0 is complete: the graphics contract is decided and recorded in ADRs 0001–0012 and `CONTEXT.md`.
 Everything below inherits those decisions rather than revisiting them.
@@ -21,7 +22,7 @@ work in parallel. Everything else is a chain.
 
 | Cycle | Delivers | Gates |
 |---|---|---|
-| A | Publishable `:kmp`, six targets, `:app` gone | CI both legs green, `consumer-smoke` resolves, first public release verifies |
+| A | Publishable `:kmp`, six targets, `:app` gone | Both CI jobs on exact merged commit; public six-target smoke; immutable completion record verifies anonymously |
 | B | Public API surface and the pure core behind it | `checkKotlinAbi`, host + `linuxX64` + `macosArm64` tests |
 | C | Resource acquisition, decode, parse, caching | Host tests against fake transport/store |
 | D | The GL seam and its three implementations | Real-context conformance on macOS and llvmpipe |
@@ -42,8 +43,20 @@ it is Android Studio's skeleton and nothing in it is RenG.
 
 Nothing here renders. The point is that `ci.yml` and `publish.yml`, which already reference `:kmp` and
 `consumer-smoke`, stop failing, so every later cycle lands against a working gate. Publication fails
-closed on remote uncertainty or an occupied artifact, and the cycle ends only when the first public
-release resolves anonymously for all six targets; see ADR 0013.
+closed on remote uncertainty or an occupied artifact. Cycle A ends only when both CI jobs pass the exact
+merged commit and its public workflow anonymously verifies every manifest artifact, valid aggregate
+metadata, credential-free resolution for all six targets, and the final immutable record at
+`com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; POM and metadata availability alone are
+not completion proof. See ADR 0013.
+
+Cycle B preparation starts only after that outcome. First read `CONTEXT.md`, ADRs 0001–0013, this
+decomposition, and `HANDOFF.md`; then run the required feasibility spikes; invoke `/grill-with-docs` with
+the governing documents and spike findings; and only then write an implementation plan.
+
+The implementation and local gates exist, but the public outcome is pending. After it is observed, an
+authorized documentation-only follow-up revises pending claims in `README.md`, `docs/index.html`,
+`docs/kmp.html`, and `docs/llms.txt`; adjusts the `docs/versions.js` fallback if applicable; and records
+the result in `HANDOFF.md` and this file without hardcoding a release version into README or served docs.
 
 ## B — Public API surface and pure core
 

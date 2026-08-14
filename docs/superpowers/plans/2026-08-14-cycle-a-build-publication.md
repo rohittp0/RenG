@@ -23,8 +23,9 @@
 - Enable `explicitApi()` and KLIB ABI validation with unsupported targets omitted; generate no JVM ABI dump.
 - Use Apache-2.0 consistently in `LICENSE`, POMs, README, and the static site.
 - Run every workflow Gradle command with `--no-configuration-cache`.
-- Reject snapshots before network access. For routine next-patch selection, require HTTP 200 from the newest metadata-listed aggregate POM as the completion witness; explicit upward recovery does not require the previous release to be complete. Select one candidate, probe its aggregate POM exactly once, and never skip an occupied candidate.
-- Make the aggregate KotlinMultiplatform R2 publication task depend on all six target R2 publication tasks. Never overwrite or delete R2 objects. Recover from partial publication only through an explicit upward `VERSION_NAME` change.
+- Reject snapshots before network access. For routine next-patch selection, require HTTP 200 plus a strict matching version-scoped completion record for the newest metadata-listed release; explicit upward recovery bypasses the prior record. Select one candidate, probe its aggregate POM exactly once, and never skip an occupied candidate.
+- Define schema version 1 at `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json` with Maven version, source commit SHA, and local-manifest SHA-256. Create it conditionally only after all anonymous public gates, then verify it anonymously.
+- Keep aggregate-after-target R2 ordering as defense in depth, not completion proof. Never overwrite or delete R2 objects. Recover from partial publication only through an explicit upward `VERSION_NAME` change.
 - Do not push, merge, change repository settings, or trigger the first public release without separate explicit approval.
 
 ## File Structure
@@ -43,9 +44,11 @@
 - `consumer-smoke/settings.gradle.kts` — exclusive repository-under-test resolution.
 - `consumer-smoke/build.gradle.kts` — standalone six-target aggregate consumer.
 - `consumer-smoke/src/commonMain/kotlin/com/rohittp/reng/smoke/ConsumerProof.kt` — API-neutral compilation source.
+- `tools/release_completion.py` — shared completion-record path, schema, creation, manifest hashing, serialization, and strict parsing.
 - `tools/resolve_release_version.py` — fail-closed version resolver and CLI.
 - `tools/verify_publication.py` — local publication manifest, authoritative R2 preflight, and anonymous public verification.
 - `tools/check_repository_policy.py` — Cycle A structural and dependency policy checks.
+- `tools/tests/test_release_completion.py` — completion-record schema, path, creation, parsing, and manifest-hash tests.
 - `tools/tests/test_resolve_release_version.py` — resolver tests.
 - `tools/tests/test_verify_publication.py` — publication verifier tests.
 - `tools/tests/test_check_repository_policy.py` — policy checker tests.
@@ -60,7 +63,7 @@
 - `gradle.properties` — add `VERSION_NAME=0.1.0` while retaining configuration cache.
 - `gradle/libs.versions.toml` — reduce to the Cycle A toolchain and Rentile dependency.
 - `.github/workflows/ci.yml` — tool, policy, ABI, target, local publication, and smoke gates.
-- `.github/workflows/publish.yml` — tested resolution, self-contained Linux gate, manifest collision preflight, upload, metadata verification, and clean public smoke.
+- `.github/workflows/publish.yml` — tested resolution, self-contained Linux gate, manifest collision preflight, upload, anonymous artifact/metadata and clean public smoke gates, conditional completion-record create, and anonymous record verification.
 - `CLAUDE.md`, `HANDOFF.md` — replace skeleton-state guidance with the implemented Cycle A structure and Cycle B handoff.
 
 ## Dependency Graph and Parallel Execution
@@ -93,15 +96,19 @@ Wave 6
 
 ---
 
-### Task 1: Implement Fail-Closed Release Version Resolution
+### Task 1: Implement Durable Completion Records and Fail-Closed Release Resolution
 
 **Files:**
+- Create: `tools/release_completion.py`
 - Create: `tools/resolve_release_version.py`
+- Create: `tools/tests/test_release_completion.py`
 - Create: `tools/tests/test_resolve_release_version.py`
 
 **Interfaces:**
-- Consumes: root `gradle.properties` and anonymous Maven repository URL.
+- Consumes: root `gradle.properties`, anonymous Maven repository URL, released Maven version, source commit SHA, and exact serialized local-manifest bytes.
 - Produces:
+  - `CompletionRecord(schema_version: int, maven_version: str, source_commit_sha: str, manifest_sha256: str)` with canonical creation, strict parsing, and serialization.
+  - `completion_record_key(maven_version: str) -> str`.
   - `Version(major: int, minor: int, patch: int)`
   - `HttpResponse(status: int, body: bytes)`
   - `ResolutionError`
@@ -113,7 +120,9 @@ Wave 6
   - `resolve_release_version(declared: Version, repository_url: str, request: Callable | None = None) -> Version`
   - CLI success: stdout contains only `MAJOR.MINOR.PATCH\n`; failure: exit 1, empty stdout, `error:` diagnostic on stderr.
 
-- [ ] **Step 1: Write the resolver tests before the module exists**
+- [ ] **Step 1: Write the completion-record and resolver tests before the modules exist**
+
+Create `tools/tests/test_release_completion.py` first. Require canonical JSON with exactly integer `schemaVersion` equal to 1, canonical stable `mavenVersion`, lowercase 40-character `sourceCommitSha`, and lowercase 64-character `manifestSha256`. Require SHA-256 over the exact supplied manifest bytes, reject duplicate or extra fields and invalid types/values, and require the exact key `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`.
 
 Create `tools/tests/test_resolve_release_version.py` with these concrete cases:
 
@@ -128,6 +137,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
 from urllib.error import URLError
 
+from tools.release_completion import CompletionRecord, completion_record_key
 from tools.resolve_release_version import (
     HttpResponse,
     ResolutionError,
@@ -142,6 +152,15 @@ from tools.resolve_release_version import (
 
 REPOSITORY_URL = "https://repo.example"
 BASE_URL = f"{REPOSITORY_URL}/com/rohittp/reng/kmp"
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def completion_document(version: str) -> bytes:
+    return CompletionRecord.create(
+        version,
+        SOURCE_COMMIT,
+        f"manifest for {version}\n".encode(),
+    ).serialize()
 
 
 class ResolveReleaseVersionTests(unittest.TestCase):
@@ -185,7 +204,7 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         requester = Mock(
             side_effect=[
                 HttpResponse(200, metadata),
-                HttpResponse(200, b"previous aggregate POM"),
+                HttpResponse(200, completion_document("1.2.3")),
                 HttpResponse(200, b"candidate aggregate POM"),
             ]
         )
@@ -279,27 +298,31 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-The final resolver test set must also prove the completion-witness branch directly: routine advancement
-performs metadata GET, newest aggregate POM HEAD returning 200, and exactly one candidate aggregate POM
-HEAD; metadata listing a newest version whose aggregate POM returns 404 stops before any candidate probe;
-redirects, transport failures, and unexpected witness statuses also stop. A declaration above every
-metadata-listed version probes only the explicit candidate, preserving deliberate upward recovery when
-the preceding release is partial.
+The final resolver test set must prove routine advancement directly: metadata GET, newest-version completion-record GET returning a strict matching record, and exactly one candidate aggregate-POM HEAD. A missing, malformed, mismatched, redirected, transport-failed, or otherwise unsuccessful completion-record read stops before any candidate probe and instructs explicit upward `VERSION_NAME` recovery. A declaration above every metadata-listed version performs no prior-record request and probes only the explicit candidate. The successful routine request sequence is:
 
-- [ ] **Step 2: Run the tests and verify the import failure**
+```text
+GET  com/rohittp/reng/kmp/maven-metadata.xml
+GET  com/rohittp/reng/kmp/<newest>/reng-release-completion-v1.json
+HEAD com/rohittp/reng/kmp/<candidate>/kmp-<candidate>.pom
+```
+
+- [ ] **Step 2: Run the tests and verify the import failures**
 
 Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  tools.tests.test_release_completion \
   tools.tests.test_resolve_release_version -v
 ```
 
-Expected: `ModuleNotFoundError: No module named 'tools.resolve_release_version'`.
+Expected: import failures for the two production modules.
 
-- [ ] **Step 3: Implement the resolver core and CLI**
+- [ ] **Step 3: Implement the shared record and resolver core/CLI**
 
-Create `tools/resolve_release_version.py` using only `argparse`, `dataclasses`, `pathlib`, `re`, `urllib`, and `xml.etree.ElementTree`. Use these exact rules:
+Create `tools/release_completion.py` with only Python standard-library dependencies. Serialize canonical JSON with sorted keys, compact separators, ASCII output, and one trailing newline. Hash the exact manifest byte sequence. Parse JSON with duplicate-key detection and reject any shape other than schema version 1's exact four fields. Validate creation inputs with the same strict rules as parsing.
+
+Create `tools/resolve_release_version.py` using only the Python standard library. Use these exact version-selection rules:
 
 ```python
 @dataclass(frozen=True, order=True)
@@ -321,7 +344,7 @@ def select_candidate(declared: Version, published: Sequence[Version]) -> Version
     return Version(latest.major, latest.minor, latest.patch + 1)
 ```
 
-`resolve_release_version` must GET `<repository>/com/rohittp/reng/kmp/maven-metadata.xml` and interpret only 200 and 404. When metadata returns 200 and the declaration is not newer than its highest stable version, HEAD that newest version's aggregate POM and require 200 before automatic next-patch selection. That POM is the completion witness. A 404, redirect, transport failure, or any other status stops automatic advancement. A declaration newer than the public line is deliberate upward recovery and bypasses the previous-version witness. After selection, HEAD exactly one candidate aggregate POM. Candidate HEAD 404 returns the candidate; HEAD 200 raises `Selected release candidate is already occupied: <version>`; every other outcome stops. Never skip, overwrite, delete, or reuse a partial version. `parse_declared_version` must detect `-SNAPSHOT` before applying the canonical stable regex. `parse_metadata_versions` must compare XML local names so default namespaces work and must reject HTTP-200 metadata with no stable versions.
+`resolve_release_version` must GET `<repository>/com/rohittp/reng/kmp/maven-metadata.xml` and interpret only 200 and 404. When metadata returns 200 and the declaration is not newer than its highest stable version, GET `completion_record_key(<highest-version>)` and require HTTP 200 plus a strict record whose Maven version matches that highest version before automatic next-patch selection. A 404, malformed or mismatched record, redirect, transport failure, or any other status stops automatic advancement with an explicit upward-recovery instruction. A declaration newer than the public line is deliberate upward recovery and bypasses the prior completion record. After selection, HEAD exactly one candidate aggregate POM. Candidate HEAD 404 returns the candidate; HEAD 200 raises `Selected release candidate is already occupied: <version>`; every other outcome stops. Never skip, overwrite, delete, or reuse a partial version. Aggregate POM and metadata availability are not completion proof. `parse_declared_version` must detect `-SNAPSHOT` before applying the canonical stable regex. `parse_metadata_versions` must compare XML local names so default namespaces work and must reject HTTP-200 metadata with no stable versions.
 
 The CLI arguments are exactly:
 
@@ -330,17 +353,21 @@ The CLI arguments are exactly:
 --repository-url URL
 ```
 
-- [ ] **Step 4: Run the resolver tests**
+- [ ] **Step 4: Run the completion-record and resolver tests**
 
 Run the Step 2 command again.
 
 Expected: all tests pass and output ends with `OK`.
 
-- [ ] **Step 5: Commit the resolver**
+- [ ] **Step 5: Commit the completion record and resolver**
 
 ```bash
-git add tools/resolve_release_version.py tools/tests/test_resolve_release_version.py
-git commit -m $'feat: add fail-closed release resolver\n\nCo-Authored-By: Claude <noreply@anthropic.com>'
+git add \
+  tools/release_completion.py \
+  tools/resolve_release_version.py \
+  tools/tests/test_release_completion.py \
+  tools/tests/test_resolve_release_version.py
+git commit -m $'feat: add fail-closed release completion and resolution\n\nCo-Authored-By: Claude <noreply@anthropic.com>'
 ```
 
 ---
@@ -686,9 +713,7 @@ tasks.withType<PublishToMavenRepository>()
     }
 ```
 
-Import `org.gradle.api.publish.maven.tasks.PublishToMavenRepository`. The aggregate dependency is the
-completion-witness invariant: target artifacts and target metadata must publish before aggregate artifacts
-and aggregate metadata. Validate the graph with `--dry-run`; do not contact R2.
+Import `org.gradle.api.publish.maven.tasks.PublishToMavenRepository`. The aggregate dependency is defense in depth: target publication tasks must complete before aggregate artifacts and metadata are attempted. Validate the graph with `--dry-run`; do not contact R2. Neither that ordering nor aggregate POM/metadata availability proves release completion; only the final valid completion record does.
 
 - [ ] **Step 4: Generate and inspect the ABI baseline**
 
@@ -936,7 +961,9 @@ git commit -m $'test: add isolated six-target consumer\n\nCo-Authored-By: Claude
   - `read_manifest(path: Path, version: Version) -> Manifest`
   - `check_r2_collisions(manifest: Manifest, endpoint: str, bucket: str, run: Callable = subprocess.run) -> None`
   - `verify_public(manifest: Manifest, repository_url: str, version: Version, fetch: Callable[[str], HttpResponse], attempts: int, retry_delay: float, sleep: Callable = time.sleep) -> None`
-  - CLI subcommands `local`, `r2-preflight`, and `public`.
+  - `create_completion_record(manifest: Manifest, version: Version, source_commit: str) -> CompletionRecord`
+  - `verify_public_completion(manifest: Manifest, repository_url: str, version: Version, source_commit: str, fetch: Callable[[str], HttpResponse], attempts: int, retry_delay: float, sleep: Callable = time.sleep) -> None`
+  - CLI subcommands `local`, `r2-preflight`, `public`, `completion-create`, and `completion-public`.
 
 - [ ] **Step 1: Write verifier tests with a seven-publication fixture**
 
@@ -1174,10 +1201,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Use `TemporaryDirectory`, injected subprocess/network functions, and no live network. Add metadata cases where
-a stale HTTP 200 is followed by current metadata and succeeds within the budget, and where malformed HTTP
-200 metadata is retried until the budget is exhausted. Assert the fetch and sleep counts so a transport-only
-retry loop cannot satisfy the tests.
+Use `TemporaryDirectory`, injected subprocess/network functions, and no live network. Add metadata cases where a stale HTTP 200 is followed by current metadata and succeeds within the budget, and where malformed HTTP 200 metadata is retried until the budget is exhausted. Add completion-record cases that prove `completion-create` writes the manifest-bound canonical record and exact stable key, and that `completion-public` retries missing, malformed, and logically mismatched responses until the exact expected source SHA and manifest hash are anonymously visible or the budget is exhausted. Assert fetch and sleep counts so transport-only retry loops cannot satisfy the tests.
 
 - [ ] **Step 2: Run the verifier tests and observe the import failure**
 
@@ -1231,12 +1255,16 @@ if __package__ in {None, ""}:
 from tools.resolve_release_version import HttpResponse, Version, parse_metadata_versions
 ```
 
+The completion helpers derive their expected record from the parsed manifest's exact serialization, the selected version, and the supplied source commit. `completion-create` writes canonical JSON and prints only the stable object key. `completion-public` GETs that key anonymously with the same no-follow redirect behavior and retries non-200, malformed, or logically mismatched records until the exact expected record is visible or the fixed budget is exhausted.
+
 The CLI contracts are:
 
 ```text
 verify_publication.py local --repository PATH --version VERSION --manifest PATH [--require-signed-poms]
 verify_publication.py r2-preflight --endpoint URL --bucket NAME --version VERSION --manifest PATH
 verify_publication.py public --repository-url URL --version VERSION --manifest PATH [--attempts 12] [--retry-delay 5]
+verify_publication.py completion-create --version VERSION --manifest PATH --source-commit SHA --output PATH
+verify_publication.py completion-public --repository-url URL --version VERSION --manifest PATH --source-commit SHA [--attempts 12] [--retry-delay 5]
 ```
 
 - [ ] **Step 6: Run the verifier suite**
@@ -1286,6 +1314,38 @@ linuxX64()
 linuxArm64()
 """
 
+PUBLISH_WORKFLOW = """steps:
+      - name: Verify exact public artifacts and aggregate metadata
+        run: python3 tools/verify_publication.py public
+      - name: Resolve six targets from the public repository without credentials
+        run: >-
+          ./gradlew --gradle-user-home "$PUBLIC_HOME" --refresh-dependencies
+          compileAndroidMain compileKotlinIosArm64 compileKotlinIosSimulatorArm64
+          compileKotlinMacosArm64 compileKotlinLinuxX64 compileKotlinLinuxArm64
+      - id: completion
+        name: Create immutable release completion record
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python3 tools/verify_publication.py completion-create --source-commit "$SOURCE_COMMIT"
+      - name: Create release completion record in R2
+        env:
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          RECORD_KEY: ${{ steps.completion.outputs.record_key }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: >-
+          aws --endpoint-url "$R2_ENDPOINT" s3api put-object
+          --bucket "$R2_BUCKET" --key "$RECORD_KEY"
+          --body completion.json --content-type application/json --if-none-match '*'
+      - name: Verify public release completion record without credentials
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: >-
+          python3 tools/verify_publication.py completion-public
+          --source-commit "$SOURCE_COMMIT" --attempts 12 --retry-delay 5
+"""
+
 
 def write(root: Path, relative: str, text: str) -> None:
     path = root / relative
@@ -1333,7 +1393,7 @@ rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
 """)
     write(root, "docs/style.css", ":focus-visible { outline: 2px solid currentColor; }\n")
     write(root, "docs/versions.js", "https://maven.rohittp.com/com/rohittp/reng\n")
-    write(root, ".github/workflows/publish.yml", "-PrengVersion=\"$VERSION\"\n")
+    write(root, ".github/workflows/publish.yml", PUBLISH_WORKFLOW)
     write(root, "docs/adr/9999-history.md", "Historical com.rohittp.reng:kmp:9.9.9\n")
 
 
@@ -1432,6 +1492,7 @@ def check_repository(root: Path) -> list[Violation]:
         check_public_version_literals,
         check_docs,
         check_license,
+        check_completion_record_workflow,
     )
     violations = [item for check in checks for item in check(root)]
     return sorted(
@@ -1465,6 +1526,7 @@ The checker must:
 7. Reject literal RenG coordinate versions and `rengVersion` semantic literals in README, top-level static docs, smoke, production Gradle, catalog, and workflows. Exclude ADRs, superpowers docs, decomposition, and third-party notices.
 8. Require `docs/.nojekyll`, `index.html`, `kmp.html`, `style.css`, `versions.js`, `robots.txt`, `sitemap.xml`, and `llms.txt`; require canonical `https://rohittp.com/reng/`, local-only CSS/JS, at least one `data-maven-version="kmp"`, and no CSS `@import`.
 9. Require Apache-2.0 consistency in `LICENSE`, README, docs, and POM build metadata.
+10. Require the publish workflow to order public artifact/metadata verification, credential-free six-target smoke, local completion-record derivation from `${{ github.sha }}`, credential-scoped authoritative R2 `aws --endpoint-url "$R2_ENDPOINT" s3api put-object --if-none-match '*'`, and credential-free anonymous record verification. Reject missing endpoint/atomic-write arguments, credentials in record creation or anonymous verification, and ordering regressions.
 
 - [ ] **Step 4: Run policy tests and the real repository check**
 
@@ -1577,6 +1639,8 @@ Sitemap: https://rohittp.com/reng/sitemap.xml
 
 Create `docs/sitemap.xml` with exactly the canonical URLs `https://rohittp.com/reng/` and `https://rohittp.com/reng/kmp.html`. `docs/llms.txt` states canonical/source URLs, coordinate, configured targets that become available after first-release verification, pending release status, Apache-2.0, immutable fail-closed releases, and pre-runtime scope. `.nojekyll` is empty.
 
+Document the post-release procedure without executing it: only after the exact merged CI commit and first public completion record verify may an authorized documentation-only follow-up remove pending wording from README, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`, adjust the `docs/versions.js` fallback from `pending` if applicable, and update `HANDOFF.md` plus `docs/decomposition.md`. The dynamic Maven metadata display remains the version source; do not replace it with a checked-in RenG version literal.
+
 - [ ] **Step 5: Serve and inspect locally**
 
 Run:
@@ -1685,8 +1749,8 @@ git commit -m $'ci: gate Cycle A build and local publication\n\nCo-Authored-By: 
 - Modify: `.github/workflows/publish.yml`
 
 **Interfaces:**
-- Consumes: Task 1 resolver CLI, Task 5 verifier CLI, Task 6 policy CLI, Gradle publications, smoke consumer, existing R2/signing values.
-- Produces: `resolve-version`, Linux release gate, signed macOS publication, authoritative manifest collision preflight, anonymous artifact/metadata verification, clean public smoke.
+- Consumes: Task 1 resolver/record CLI contracts, Task 5 verifier CLI, Task 6 policy CLI, Gradle publications, smoke consumer, existing R2/signing values.
+- Produces: `resolve-version`, Linux release gate, signed macOS publication, authoritative manifest collision preflight, anonymous artifact/metadata verification, clean public smoke, immutable conditional completion-record creation, and anonymous record verification.
 
 - [ ] **Step 1: Replace inline resolution with tested one-candidate resolution**
 
@@ -1766,7 +1830,7 @@ Supply AWS credentials only to this step. Any exact key collision or AWS uncerta
 
 - [ ] **Step 5: Upload and verify the exact public set**
 
-Run the existing `publishAllPublicationsToR2Repository` once. Its aggregate KotlinMultiplatform R2 task must depend on all six target R2 tasks, ensuring the aggregate POM and metadata are the final publication witness rather than an early signal. Then verify:
+Run the existing `publishAllPublicationsToR2Repository` once. Its aggregate KotlinMultiplatform R2 task must depend on all six target R2 tasks as defense in depth against partial state; neither the aggregate POM nor metadata is a completion witness. Then verify:
 
 ```bash
 python3 tools/verify_publication.py public \
@@ -1808,7 +1872,46 @@ cp -R gradle "$smoke_project/gradle"
 
 Do not copy `consumer-smoke/.gradle`, `.kotlin`, or `build`, root `gradle.properties`, or any publishing credential. This step cannot become up-to-date from the local smoke run.
 
-- [ ] **Step 7: Validate workflow and failure behavior**
+- [ ] **Step 7: Create and anonymously verify the immutable completion record**
+
+Only after Steps 5 and 6 succeed, derive the canonical record and stable key without credentials:
+
+```bash
+record_key="$(
+  python3 tools/verify_publication.py completion-create \
+    --version "$VERSION" \
+    --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+    --source-commit "$GITHUB_SHA" \
+    --output "$RUNNER_TEMP/reng-release-completion.json"
+)"
+```
+
+Of the three completion-record stages, give R2 credentials only to the separate conditional-write step and create the exact key:
+
+```bash
+aws --endpoint-url "$R2_ENDPOINT" s3api put-object \
+  --bucket "$R2_BUCKET" \
+  --key "$RECORD_KEY" \
+  --body "$RUNNER_TEMP/reng-release-completion.json" \
+  --content-type "application/json" \
+  --if-none-match '*'
+```
+
+An existing key or uncertain write stops the workflow; never overwrite it. A following step has no AWS or R2 credentials and runs:
+
+```bash
+python3 tools/verify_publication.py completion-public \
+  --repository-url "$R2_PUBLIC_URL" \
+  --version "$VERSION" \
+  --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+  --source-commit "$GITHUB_SHA" \
+  --attempts 12 \
+  --retry-delay 5
+```
+
+This final command retries anonymous retrieval and requires the exact record derived from the selected version, exact `${{ github.sha }}`, and exact local-manifest bytes.
+
+- [ ] **Step 8: Validate workflow and failure behavior**
 
 ```bash
 python3 -m unittest discover -s tools/tests -p 'test_*.py' -v
@@ -1818,9 +1921,9 @@ rg -n 'linuxX64Test|verify_publication.py|resolve_release_version.py' .github/wo
 git diff --check
 ```
 
-Expected: tests/policy/YAML/diff pass. The workflow contains one-candidate resolution, Linux testing, local manifest, R2 preflight, public verification, and fresh smoke. It contains no old candidate loop or aggregate-POM-only preflight.
+Expected: tests/policy/YAML/diff pass. The workflow contains one-candidate resolution, Linux testing, local manifest, R2 preflight, public artifact/metadata verification, fresh public smoke, conditional completion-record creation, and credential-free anonymous record verification in that order. It contains no old candidate loop, aggregate-POM completion claim, or aggregate-POM-only preflight.
 
-- [ ] **Step 8: Commit publication hardening**
+- [ ] **Step 9: Commit publication hardening**
 
 ```bash
 git add .github/workflows/publish.yml
@@ -1842,7 +1945,7 @@ git commit -m $'ci: enforce fail-closed public publication\n\nCo-Authored-By: Cl
 
 - [ ] **Step 1: Update repository-state guidance**
 
-Replace statements that `:kmp`, `consumer-smoke`, static docs, or `VERSION_NAME` do not exist. Record exact implemented commands, policy/verifier tools, aggregate-after-target R2 ordering, the completion witness for routine advancement, one candidate probe, and explicit upward recovery. Mark Cycle A code complete only after local/CI gates; identify Cycle B as the next implementation cycle. Do not claim the public release succeeded before observing it.
+Replace statements that `:kmp`, `consumer-smoke`, static docs, or `VERSION_NAME` do not exist. Record exact implemented commands, policy/verifier tools, aggregate-after-target R2 ordering as defense in depth, the stable completion-record path/schema and final workflow order, record-gated routine advancement, one candidate aggregate-POM probe, and explicit upward recovery. State that neither POM nor metadata availability proves completion. Keep Cycle A's public release pending until the exact merged commit passes both CI jobs and its public workflow anonymously verifies the exact completion record. Record that Cycle B preparation starts only after that outcome and proceeds in this order: read the governing docs, run feasibility spikes, invoke `/grill-with-docs`, then write any implementation plan.
 
 - [ ] **Step 2: Commit guidance before verification and review**
 
@@ -1923,10 +2026,12 @@ After approval, push the feature branch and open a PR against `main`. Wait for b
 
 - [ ] **Step 9: Trigger the first public release only with fresh explicit approval**
 
-After CI-tested fast-forward integration into local `main`, request a separate approval immediately before `git push origin main`. That push triggers public `0.1.0`. Observe both CI and publish workflows. Cycle A is complete only when the publish run proves seven signed local POMs, no authoritative R2 collision, anonymous retrieval of every manifest artifact, aggregate metadata containing `0.1.0`, and fresh credential-free six-target resolution.
+After CI-tested fast-forward integration into local `main`, request a separate approval immediately before `git push origin main`. That push triggers the first public candidate. Observe both CI and publish workflows on the exact merged commit. Cycle A is complete only when both CI jobs pass that exact commit and the publish run proves signed local publication, no authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata containing the selected version, fresh credential-free six-target resolution, conditional creation of the exact completion record, and final credential-free anonymous verification of that record.
 
 - [ ] **Step 10: Record the observed public outcome without mutating artifacts**
 
 If failure occurs before upload, fix on a new commit and seek fresh push approval. If any versioned object was uploaded, do not retry the same version, overwrite, or delete it. Commit an explicit upward `VERSION_NAME`, rerun every gate, and seek fresh push approval; preserve the version gap.
 
-After a successful public run, update any “public release pending” line in `HANDOFF.md` or `docs/decomposition.md` to the observed released version. That documentation-only follow-up is a separate commit and push requiring explicit approval; do not include it in the CI-reviewed feature commit.
+After a successful public run and anonymous completion-record verification, make an authorized documentation-only follow-up that removes or revises every pending claim in `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; changes the `docs/versions.js` fallback from `pending` only if applicable; and records the observed exact merged CI/public outcome in `HANDOFF.md` and `docs/decomposition.md`. Keep version display metadata-driven and do not check a RenG semantic version literal into README or served docs. This is a separate commit and push requiring explicit approval; do not include it in the CI-reviewed feature commit.
+
+Only after that exact merged CI and public completion outcome may Cycle B preparation begin: read `CONTEXT.md`, the governing ADRs, `docs/decomposition.md`, and `HANDOFF.md`; run the required feasibility spikes; invoke `/grill-with-docs` with those findings; then write any implementation plan. Do not start Cycle B implementation as part of the release follow-up.

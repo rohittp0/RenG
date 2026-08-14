@@ -276,3 +276,56 @@ jobs:
             compileKotlinMacosArm64 \
             compileKotlinLinuxX64 \
             compileKotlinLinuxArm64
+
+      - id: completion
+        name: Create immutable release completion record
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          record_key="$(
+            python3 tools/verify_publication.py completion-create \
+              --version "$VERSION" \
+              --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+              --source-commit "$SOURCE_COMMIT" \
+              --output "$RUNNER_TEMP/reng-release-completion.json"
+          )"
+          printf 'record_key=%s\n' "$record_key" >> "$GITHUB_OUTPUT"
+
+      - name: Create release completion record in R2
+        shell: bash
+        env:
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          RECORD_KEY: ${{ steps.completion.outputs.record_key }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          aws --endpoint-url "$R2_ENDPOINT" s3api put-object \
+            --bucket "$R2_BUCKET" \
+            --key "$RECORD_KEY" \
+            --body "$RUNNER_TEMP/reng-release-completion.json" \
+            --content-type "application/json" \
+            --if-none-match '*'
+
+      - name: Verify public release completion record without credentials
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          python3 tools/verify_publication.py completion-public \
+            --repository-url "$R2_PUBLIC_URL" \
+            --version "$VERSION" \
+            --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+            --source-commit "$SOURCE_COMMIT" \
+            --attempts 12 \
+            --retry-delay 5

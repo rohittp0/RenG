@@ -27,8 +27,10 @@ availability are not completion proof. The workflow conditionally creates the re
 artifact/metadata verification and credential-free six-target resolution, then verifies it anonymously.
 
 After both CI jobs pass the exact merged commit and the first public completion record verifies, an
-authorized documentation-only follow-up must revise pending claims in README.md, docs/index.html,
-docs/kmp.html, and this file; adjust the docs/versions.js pending fallback if applicable; and update
-HANDOFF.md plus docs/decomposition.md. Public version display remains metadata-driven.
+authorized documentation-only follow-up must revise pending claims in CLAUDE.md, README.md,
+docs/index.html, docs/kmp.html, and this file; adjust the docs/versions.js pending fallback if applicable;
+and update HANDOFF.md plus docs/decomposition.md. ADR 0013 and the Cycle A design spec and implementation
+plan remain historical decision records unless the release exposes a contract error. Public version display
+remains metadata-driven.
 
 RenG is pre-runtime in Cycle A. It exposes no runtime API and renders nothing.

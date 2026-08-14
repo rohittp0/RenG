@@ -54,9 +54,11 @@ decomposition, and `HANDOFF.md`; then run the required feasibility spikes; invok
 the governing documents and spike findings; and only then write an implementation plan.
 
 The implementation and local gates exist, but the public outcome is pending. After it is observed, an
-authorized documentation-only follow-up revises pending claims in `README.md`, `docs/index.html`,
-`docs/kmp.html`, and `docs/llms.txt`; adjusts the `docs/versions.js` fallback if applicable; and records
-the result in `HANDOFF.md` and this file without hardcoding a release version into README or served docs.
+authorized documentation-only follow-up revises pending claims in `CLAUDE.md`, `README.md`,
+`docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjusts the `docs/versions.js` fallback if
+applicable; and records the result in `HANDOFF.md` and this file without hardcoding a release version into
+README or served docs. ADR 0013 and the Cycle A design spec and implementation plan remain historical
+decision records unless the release exposes a contract error.
 
 ## B — Public API surface and pure core
 

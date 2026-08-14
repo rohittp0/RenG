@@ -7,12 +7,24 @@ import re
 import sys
 from typing import Callable, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ElementTree
 
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _METADATA_PATH = "com/rohittp/reng/kmp"
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def urlopen(request: Request):
+    return _NO_REDIRECT_OPENER.open(request)
 
 
 @dataclass(frozen=True, order=True)
@@ -52,8 +64,25 @@ def parse_metadata_versions(document: bytes) -> tuple[Version, ...]:
     except ElementTree.ParseError:
         raise ResolutionError("Release metadata contains malformed XML") from None
 
+    if root.tag.rsplit("}", 1)[-1] != "metadata":
+        raise ResolutionError("Release metadata has an invalid Maven metadata structure")
+
+    versioning_elements = [
+        element for element in root if element.tag.rsplit("}", 1)[-1] == "versioning"
+    ]
+    if len(versioning_elements) != 1:
+        raise ResolutionError("Release metadata has an invalid Maven metadata structure")
+
+    versions_elements = [
+        element
+        for element in versioning_elements[0]
+        if element.tag.rsplit("}", 1)[-1] == "versions"
+    ]
+    if len(versions_elements) != 1:
+        raise ResolutionError("Release metadata has an invalid Maven metadata structure")
+
     versions = set()
-    for element in root.iter():
+    for element in versions_elements[0]:
         if element.tag.rsplit("}", 1)[-1] != "version" or element.text is None:
             continue
         match = _VERSION_PATTERN.fullmatch(element.text.strip())
@@ -93,7 +122,11 @@ def request_http(method: str, url: str) -> HttpResponse:
         with urlopen(request) as response:
             return HttpResponse(response.status, response.read())
     except HTTPError as error:
-        return HttpResponse(error.code, error.read())
+        try:
+            body = error.read()
+        finally:
+            error.close()
+        return HttpResponse(error.code, body)
     except (URLError, OSError, ValueError):
         raise ResolutionError(f"Transport failure during {method}") from None
 

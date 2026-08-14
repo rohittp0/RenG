@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from tools.resolve_release_version import (
     HttpResponse,
@@ -83,6 +85,10 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         )
         self.assertEqual((Version(1, 9, 9), Version(1, 10, 0)), versions)
 
+    def test_metadata_requires_maven_versions_hierarchy(self) -> None:
+        with self.assertRaisesRegex(ResolutionError, "invalid Maven metadata structure"):
+            parse_metadata_versions(b"<error><version>9.9.9</version></error>")
+
     def test_malformed_or_stable_empty_metadata_fails(self) -> None:
         for body, message in (
             (b"<metadata>", "malformed XML"),
@@ -104,6 +110,61 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         requester = Mock(side_effect=[HttpResponse(404, b""), HttpResponse(403, b"")])
         with self.assertRaisesRegex(ResolutionError, "status 403 probing"):
             resolve_release_version(Version(0, 1, 0), REPOSITORY_URL, request=requester)
+
+    def test_metadata_redirect_is_unexpected_and_not_followed(self) -> None:
+        metadata_path = "/com/rohittp/reng/kmp/maven-metadata.xml"
+        redirect_target = "/redirect-target"
+        metadata_document = b"<metadata><versioning><versions><version>0.1.0</version></versions></versioning></metadata>"
+        requested_paths: list[str] = []
+
+        class RedirectingRepository(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                requested_paths.append(self.path)
+                if self.path == metadata_path:
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        f"http://127.0.0.1:{self.server.server_port}{redirect_target}",
+                    )
+                elif self.path == redirect_target:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(metadata_document)))
+                else:
+                    self.send_response(404)
+                self.end_headers()
+                if self.path == redirect_target:
+                    self.wfile.write(metadata_document)
+
+            def do_HEAD(self) -> None:
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), RedirectingRepository)
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with self.assertRaisesRegex(ResolutionError, "status 302 fetching"):
+                resolve_release_version(
+                    Version(0, 1, 0), f"http://127.0.0.1:{server.server_port}"
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual([metadata_path], requested_paths)
+
+    def test_http_error_response_is_closed(self) -> None:
+        error = HTTPError(
+            f"{BASE_URL}/maven-metadata.xml", 302, "Found", {}, io.BytesIO()
+        )
+        with patch("tools.resolve_release_version.urlopen", side_effect=error):
+            response = request_http("GET", f"{BASE_URL}/maven-metadata.xml")
+        self.assertEqual(HttpResponse(302, b""), response)
+        self.assertTrue(error.fp.closed)
 
     def test_transport_failure_is_not_absence(self) -> None:
         with patch("tools.resolve_release_version.urlopen", side_effect=URLError("offline")):

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KMP setup — RenG</title>
+  <meta name="description" content="Add the pre-runtime RenG coordinate to a Kotlin Multiplatform project and review its exact publication targets." />
+  <meta name="theme-color" content="#0b3026" />
+  <link rel="canonical"
+    href="https://rohittp.com/reng/kmp.html" />
+  <link rel="stylesheet" href="style.css" />
+
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="RenG" />
+  <meta property="og:title" content="KMP setup — RenG" />
+  <meta property="og:description" content="Add the pre-runtime RenG coordinate to a Kotlin Multiplatform project." />
+  <meta property="og:url" content="https://rohittp.com/reng/kmp.html" />
+  <script src="versions.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <nav class="site-nav" aria-label="Primary navigation">
+    <div class="shell nav-inner">
+      <a class="brand" href="index.html">RenG</a>
+      <div class="nav-links">
+        <a href="index.html">Overview</a>
+        <a href="#install" aria-current="page">KMP setup</a>
+        <a href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">Source <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="docs-shell" id="main-content">
+    <aside class="docs-sidebar" aria-label="On this page">
+      <p>On this page</p>
+      <a href="#overview">Current scope</a>
+      <a href="#install">Repositories</a>
+      <a href="#dependency">Dependency</a>
+      <a href="#targets">Targets</a>
+    </aside>
+
+    <article class="docs-content">
+      <header class="docs-header" id="overview">
+        <p class="eyebrow">com.rohittp.reng:kmp</p>
+        <h1>KMP setup</h1>
+        <p class="docs-lead">
+          RenG has one public KMP coordinate. Configure its repositories once, keep the release value
+          in a Gradle property, and let Gradle select the matching target artifact.
+        </p>
+        <div class="tag-row">
+          <span class="tag">Kotlin Multiplatform</span>
+          <span class="tag">Six targets</span>
+          <span class="tag">Apache-2.0</span>
+          <span class="tag">v<span data-maven-version="kmp">latest</span></span>
+        </div>
+        <div class="status-callout">
+          <strong>Cycle A exposes no runtime API and renders nothing.</strong>
+          This page documents publication setup only; it does not promise a callable rendering interface.
+        </div>
+      </header>
+
+      <section class="doc-section" id="install">
+        <p class="doc-label">Step 1</p>
+        <h2>Add the repositories.</h2>
+        <p>
+          RenG resolves from the public Maven repository with no consumer credentials. Keep it before
+          the standard repositories. RenG's Rentile dependency also resolves Skiko platform artifacts
+          from JetBrains' public Compose repository; limit that repository to its owner group.
+        </p>
+        <div class="code-card doc-code">
+          <div class="code-head"><span>settings.gradle.kts</span><span>root project</span></div>
+          <pre><code>dependencyResolutionManagement {
+    repositories {
+        maven(<span class="str">"https://maven.rohittp.com"</span>)
+        mavenCentral()
+        google()
+        maven(<span class="str">"https://maven.pkg.jetbrains.space/public/p/compose/dev"</span>) {
+            content { includeGroup(<span class="str">"org.jetbrains.skiko"</span>) }
+        }
+    }
+}</code></pre>
+        </div>
+      </section>
+
+      <section class="doc-section" id="dependency">
+        <p class="doc-label">Step 2</p>
+        <h2>Declare the common dependency.</h2>
+        <p>
+          Put the release value in a property. Keeping the declaration property-driven makes dependency
+          updates explicit and keeps the documentation independent of the current public release.
+        </p>
+        <div class="code-card doc-code">
+          <div class="code-head"><span>gradle.properties</span></div>
+          <pre><code>rengVersion=&lt;version&gt;</code></pre>
+        </div>
+        <div class="code-card doc-code">
+          <div class="code-head"><span>build.gradle.kts</span><span>shared module</span></div>
+          <pre><code>val rengVersion = providers.gradleProperty(<span class="str">"rengVersion"</span>)
+
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation(<span class="str">"com.rohittp.reng:kmp:${rengVersion.get()}"</span>)
+        }
+    }
+}</code></pre>
+        </div>
+        <div class="callout">
+          Published release: v<span data-maven-version="kmp">latest</span>. This page reads Maven metadata
+          after loading; if metadata is unavailable, the readable fallback remains <code>latest</code>.
+        </div>
+      </section>
+
+      <section class="doc-section" id="targets">
+        <p class="doc-label">Publication surface</p>
+        <h2>Exactly six targets.</h2>
+        <p>
+          These targets are the complete published surface. Apple support is Apple Silicon only;
+          RenG deliberately does not publish <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Platform</th><th>KMP target</th><th>Publication</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Android</td><td><code>android</code></td><td>Published</td></tr>
+              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Published</td></tr>
+              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Published</td></tr>
+              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Published</td></tr>
+              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Published</td></tr>
+              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Published</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="doc-actions">
+          <a class="button primary" href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">View the source</a>
+          <a class="button secondary" href="https://github.com/rohittp0/RenG/tree/main/docs/adr" target="_blank" rel="noopener noreferrer">Read the ADRs</a>
+        </div>
+      </section>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <div>
+        <a class="brand" href="index.html">RenG</a>
+        <p>com.rohittp.reng:kmp · v<span data-maven-version="kmp">latest</span></p>
+      </div>
+      <div class="footer-links">
+        <a href="index.html">Overview</a>
+        <a href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">Source</a>
+        <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">Apache-2.0</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

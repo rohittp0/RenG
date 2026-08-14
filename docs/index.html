@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RenG — Kotlin Multiplatform 3D rendering contract</title>
+  <meta name="description" content="RenG is a pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract." />
+  <meta name="theme-color" content="#0b3026" />
+  <link rel="canonical"
+    href="https://rohittp.com/reng/" />
+  <link rel="stylesheet" href="style.css" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="RenG" />
+  <meta property="og:title" content="RenG — A rendering contract, before a renderer" />
+  <meta property="og:description" content="A pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract." />
+  <meta property="og:url" content="https://rohittp.com/reng/" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "name": "RenG",
+    "description": "A pre-runtime Kotlin Multiplatform publication for a caller-owned 3D rendering contract.",
+    "codeRepository": "https://github.com/rohittp0/RenG",
+    "url": "https://rohittp.com/reng/",
+    "programmingLanguage": "Kotlin",
+    "license": "https://www.apache.org/licenses/LICENSE-2.0",
+    "author": {
+      "@type": "Person",
+      "name": "Rohit T P",
+      "url": "https://rohittp.com"
+    }
+  }
+  </script>
+  <script src="versions.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <nav class="site-nav" aria-label="Primary navigation">
+    <div class="shell nav-inner">
+      <a class="brand" href="index.html" aria-current="page">RenG</a>
+      <div class="nav-links">
+        <a href="#status">Status</a>
+        <a href="kmp.html">KMP setup</a>
+        <a href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">Source <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main-content">
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">Kotlin Multiplatform · Cycle A</p>
+        <h1 id="hero-title">A rendering contract,<br /><em>before a renderer.</em></h1>
+        <p class="hero-lead">
+          RenG is a Kotlin Multiplatform publication for a caller-owned 3D rendering contract.
+          Cycle A establishes its coordinate, target surface, and release discipline. It exposes no
+          runtime API and renders nothing.
+        </p>
+        <div class="hero-actions">
+          <a class="button primary" href="kmp.html">Read the KMP setup</a>
+          <a class="button secondary" href="#release-model">See release rules</a>
+        </div>
+      </div>
+
+      <aside class="frame-card" aria-label="Cycle A publication status">
+        <div class="frame-grid" aria-hidden="true"></div>
+        <div class="frame-content">
+          <p class="frame-label">Publication frame</p>
+          <p class="frame-state">Cycle A</p>
+          <dl class="frame-facts">
+            <div><dt>Coordinate</dt><dd><code>com.rohittp.reng:kmp</code></dd></div>
+            <div><dt>Release</dt><dd>v<span data-maven-version="kmp">latest</span></dd></div>
+            <div><dt>Runtime</dt><dd>Not exposed</dd></div>
+            <div><dt>Rendering</dt><dd>Not present</dd></div>
+          </dl>
+        </div>
+      </aside>
+    </section>
+
+    <section class="platform-band" aria-label="Published Kotlin Multiplatform targets">
+      <div class="shell target-list">
+        <span>android</span>
+        <span>iosArm64</span>
+        <span>iosSimulatorArm64</span>
+        <span>macosArm64</span>
+        <span>linuxX64</span>
+        <span>linuxArm64</span>
+      </div>
+    </section>
+
+    <section class="section shell" id="status">
+      <div class="section-heading">
+        <p class="eyebrow">Current scope</p>
+        <h2>The published surface is intentionally narrow.</h2>
+        <p>
+          RenG currently gives consumers one anonymous Maven coordinate and six permanently supported
+          targets. It does not yet define callable runtime behavior, create a window, own a render loop,
+          or draw a frame.
+        </p>
+      </div>
+      <div class="scope-grid">
+        <article class="scope-card">
+          <p class="card-label">It is available as</p>
+          <h3>A common KMP coordinate</h3>
+          <p>Resolve <code>com.rohittp.reng:kmp</code> from the public repository without credentials.</p>
+        </article>
+        <article class="scope-card">
+          <p class="card-label">It publishes for</p>
+          <h3>Six selected targets</h3>
+          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux all resolve from one coordinate.</p>
+        </article>
+        <article class="scope-card">
+          <p class="card-label">It does not provide</p>
+          <h3>A runtime API</h3>
+          <p>Cycle A renders nothing. Documentation does not promise a future function, class, or signature.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell setup-section" id="coordinate">
+      <div class="section-heading compact">
+        <p class="eyebrow">Public Maven repository</p>
+        <h2>One coordinate. No consumer credentials.</h2>
+        <p>
+          Add the public repository through <code>dependencyResolutionManagement</code>, then declare
+          the common coordinate with your version property. The KMP guide includes the complete setup.
+        </p>
+      </div>
+      <div class="code-card">
+        <div class="code-head"><span>build.gradle.kts</span><span>commonMain</span></div>
+        <pre><code>val rengVersion = providers.gradleProperty(<span class="str">"rengVersion"</span>)
+
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation(<span class="str">"com.rohittp.reng:kmp:${rengVersion.get()}"</span>)
+        }
+    }
+}</code></pre>
+      </div>
+      <p class="version-note">Published release: v<span data-maven-version="kmp">latest</span>. The displayed value comes from Maven metadata and remains <code>latest</code> when metadata is unavailable.</p>
+    </section>
+
+    <section class="section shell" id="release-model">
+      <div class="section-heading">
+        <p class="eyebrow">Release behavior</p>
+        <h2>Immutable releases, checked before publication.</h2>
+        <p>
+          Every non-documentation push to <code>main</code> releases only after its gates pass.
+          <code>VERSION_NAME</code> is the sole checked-in version input; routine releases advance
+          the public patch line, and an intentional upward value requests a new minor or major line.
+        </p>
+      </div>
+      <div class="release-grid">
+        <article>
+          <span>01</span>
+          <h3>Build and verify</h3>
+          <p>Every target is compiled or tested, then the coordinate resolves from an isolated local repository.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h3>Check exact keys</h3>
+          <p>Each immutable artifact key is checked before upload; an occupied coordinate stops the release.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h3>Resolve publicly</h3>
+          <p>Anonymous HTTP verification and a fresh consumer resolution prove the public result.</p>
+        </article>
+      </div>
+      <div class="callout">
+        <strong>Fail closed by design.</strong> A malformed response, transport failure, validation failure, or occupied coordinate stops publication. Releases never overwrite or skip an existing version.
+      </div>
+    </section>
+
+    <section class="section shell resources-section">
+      <div class="section-heading compact">
+        <p class="eyebrow">Source and decisions</p>
+        <h2>Read the contract in the repository.</h2>
+        <p>
+          The source tree records the vocabulary and architectural decisions behind the published surface.
+        </p>
+      </div>
+      <div class="resource-links">
+        <a href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">
+          <span>Source</span><strong>github.com/rohittp0/RenG <span aria-hidden="true">↗</span></strong>
+        </a>
+        <a href="https://github.com/rohittp0/RenG/tree/main/docs/adr" target="_blank" rel="noopener noreferrer">
+          <span>Architecture decisions</span><strong>Read the ADRs <span aria-hidden="true">↗</span></strong>
+        </a>
+        <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">
+          <span>License</span><strong>Apache-2.0 <span aria-hidden="true">↗</span></strong>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <div>
+        <a class="brand" href="index.html">RenG</a>
+        <p>com.rohittp.reng:kmp · v<span data-maven-version="kmp">latest</span></p>
+      </div>
+      <div class="footer-links">
+        <a href="kmp.html">KMP setup</a>
+        <a href="https://github.com/rohittp0/RenG" target="_blank" rel="noopener noreferrer">Source</a>
+        <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">Apache-2.0</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

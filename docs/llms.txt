@@ -1,0 +1,25 @@
+# RenG
+
+Canonical documentation: https://rohittp.com/reng/
+KMP setup: https://rohittp.com/reng/kmp.html
+Source: https://github.com/rohittp0/RenG
+Architecture decisions: https://github.com/rohittp0/RenG/tree/main/docs/adr
+
+Maven coordinate: com.rohittp.reng:kmp
+Public Maven repository: https://maven.rohittp.com
+
+Published Kotlin Multiplatform targets:
+- android
+- iosArm64
+- iosSimulatorArm64
+- macosArm64
+- linuxX64
+- linuxArm64
+
+License: Apache-2.0
+
+Releases are immutable and fail closed. Every non-documentation push to main publishes only after
+validation; an occupied coordinate, malformed response, or validation failure stops publication rather
+than overwriting or skipping a version.
+
+RenG is pre-runtime in Cycle A. It exposes no runtime API and renders nothing.

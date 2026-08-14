@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 import re
+import tomllib
 from typing import Iterable, Sequence
 
 
@@ -15,41 +17,63 @@ class Violation:
     message: str
 
 
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    value: str
+    start: int
+
+
+@dataclass(frozen=True)
+class _HtmlElement:
+    name: str
+    attributes: dict[str, str | None]
+    line: int
+
+
 EXPECTED_TARGETS = frozenset({
     "android", "iosArm64", "iosSimulatorArm64",
     "macosArm64", "linuxX64", "linuxArm64",
 })
 
 
-_ROOT_GRADLE_SCRIPTS = ("build.gradle.kts", "settings.gradle.kts")
-_MODULE_GRADLE_SCRIPTS = (
-    "kmp/build.gradle.kts",
-    "consumer-smoke/build.gradle.kts",
-    "consumer-smoke/settings.gradle.kts",
-)
 _REQUIRED_DOCS = (
     ".nojekyll", "index.html", "kmp.html", "style.css", "versions.js",
     "robots.txt", "sitemap.xml", "llms.txt",
 )
+_IGNORED_PATH_PARTS = frozenset({".git", ".gradle", "build", ".superpowers"})
 _VERSION_PATTERN = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 _STABLE_VERSION = re.compile(rf"^{_VERSION_PATTERN}$")
-_VERSION_ASSIGNMENT = re.compile(r"^\s*VERSION_NAME\s*[=:]\s*(?P<value>.*?)\s*$")
+_SEMANTIC_LITERAL = rf"(?:v?{_VERSION_PATTERN})(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+_VERSION_ASSIGNMENT = re.compile(
+    r"^\s*VERSION_NAME\s*[=:]\s*(?P<value>.*?)\s*$", re.MULTILINE
+)
 _RENG_COORDINATE_VERSION = re.compile(
-    rf"com\.rohittp\.reng:kmp:(?:v?{_VERSION_PATTERN})(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+    rf"com\.rohittp\.reng:kmp:{_SEMANTIC_LITERAL}"
 )
 _RENG_VERSION_LITERAL = re.compile(
-    rf"\brengVersion\b\s*(?:=|:)\s*[\"']?(?:v?{_VERSION_PATTERN})(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+    rf"\brengVersion\b\s*(?:=|:)\s*[\"']?{_SEMANTIC_LITERAL}", re.IGNORECASE
+)
+_FORBIDDEN_DEPENDENCY = re.compile(r"\b(?:wire|serialization|skiko|ktor|corpus)\b", re.IGNORECASE)
+_CONFLICTING_LICENSE = re.compile(
+    r"\b(?:mit|bsd|gpl|lgpl|agpl|mozilla\s+public\s+license|eclipse\s+public\s+license|isc|unlicense|cc0)\b",
     re.IGNORECASE,
 )
-_KNOWN_TARGETS = frozenset({
-    "android", "androidTarget", "iosArm32", "iosArm64", "iosX64",
-    "iosSimulatorArm64", "iosSimulatorX64", "jvm", "js", "linuxArm64",
-    "linuxX64", "macosArm64", "macosX64", "mingwX64", "tvosArm64",
-    "tvosSimulatorArm64", "tvosX64", "wasmJs", "wasmWasi", "watchosArm32",
-    "watchosArm64", "watchosDeviceArm64", "watchosSimulatorArm64", "watchosX64",
-})
-_FORBIDDEN_DEPENDENCY = re.compile(r"\b(?:wire|serialization|skiko|ktor|corpus)\b", re.IGNORECASE)
 _EXTERNAL_RESOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:|^//")
+_KMP_TARGET_FACTORIES = frozenset({
+    "android", "androidTarget", "androidNative", "androidNativeArm32",
+    "androidNativeArm64", "androidNativeX86", "androidNativeX64", "ios",
+    "iosArm64", "iosX64", "iosSimulatorArm64", "js", "jvm", "linux",
+    "linuxArm64", "linuxX64", "macos", "macosArm64", "macosX64", "mingw",
+    "mingwX64", "native", "tvos", "tvosArm64", "tvosSimulatorArm64", "tvosX64",
+    "wasmJs", "wasmWasi", "watchos", "watchosArm32", "watchosArm64",
+    "watchosDeviceArm64", "watchosSimulatorArm64", "watchosX64", "watchosX86",
+})
+_DEPENDENCY_CALLS = frozenset({
+    "api", "compileOnly", "implementation", "runtimeOnly", "testApi",
+    "testCompileOnly", "testImplementation", "testRuntimeOnly",
+})
+_PLUGIN_CALLS = frozenset({"alias", "id"})
 
 
 def _read(path: Path) -> str:
@@ -64,9 +88,29 @@ def _violation(code: str, path: Path, line: int, message: str) -> Violation:
     return Violation(code=code, path=path, line=line, message=message)
 
 
+def _is_ignored(root: Path, path: Path) -> bool:
+    return any(part in _IGNORED_PATH_PARTS for part in path.relative_to(root).parts)
+
+
+def _files(root: Path, predicate) -> tuple[Path, ...]:
+    return tuple(sorted(
+        (path for path in root.rglob("*") if path.is_file() and not _is_ignored(root, path) and predicate(path)),
+        key=lambda path: path.as_posix(),
+    ))
+
+
 def _production_gradle_scripts(root: Path) -> tuple[Path, ...]:
-    paths = [root / relative for relative in _ROOT_GRADLE_SCRIPTS + _MODULE_GRADLE_SCRIPTS]
-    return tuple(path for path in paths if path.is_file())
+    return _files(root, lambda path: path.name.endswith((".gradle", ".gradle.kts")))
+
+
+def _workflow_files(root: Path) -> tuple[Path, ...]:
+    workflows = root / ".github/workflows"
+    if not workflows.is_dir():
+        return ()
+    return tuple(sorted(
+        (path for path in workflows.rglob("*") if path.is_file() and path.suffix in {".yaml", ".yml"}),
+        key=lambda path: path.as_posix(),
+    ))
 
 
 def _top_level_docs(root: Path) -> tuple[Path, ...]:
@@ -76,82 +120,189 @@ def _top_level_docs(root: Path) -> tuple[Path, ...]:
     return tuple(sorted((path for path in docs.iterdir() if path.is_file()), key=lambda path: path.name))
 
 
-def _without_comments(text: str) -> str:
+def _quoted_end(text: str, start: int, quote: str) -> int:
+    if quote == '"""':
+        end = text.find(quote, start + 3)
+        return len(text) if end == -1 else end + 3
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _mask_kotlin_comments(text: str) -> str:
     result = list(text)
     index = 0
-    state = "code"
     while index < len(text):
-        if state == "code" and text.startswith("//", index):
+        if text.startswith('"""', index):
+            index = _quoted_end(text, index, '"""')
+            continue
+        if text[index] in {'"', "'"}:
+            index = _quoted_end(text, index, text[index])
+            continue
+        if text.startswith("//", index):
             end = text.find("\n", index)
-            if end == -1:
-                end = len(text)
+            end = len(text) if end == -1 else end
             for position in range(index, end):
                 result[position] = " "
             index = end
             continue
-        if state == "code" and text.startswith("/*", index):
-            end = text.find("*/", index + 2)
-            end = len(text) if end == -1 else end + 2
-            for position in range(index, end):
+        if text.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            for position in range(start, index):
                 if result[position] != "\n":
                     result[position] = " "
-            index = end
             continue
-        if state == "code" and text.startswith('"""', index):
-            state = "triple"
-            index += 3
-            continue
-        if state == "triple" and text.startswith('"""', index):
-            state = "code"
-            index += 3
-            continue
-        if state == "code" and text[index] in {'\"', "'"}:
-            state = text[index]
-        elif state in {'\"', "'"} and text[index] == "\\":
-            index += 2
-            continue
-        elif state in {'\"', "'"} and text[index] == state:
-            state = "code"
         index += 1
     return "".join(result)
 
 
+def _mask_hash_comments(text: str, also_bang: bool = False) -> str:
+    result = list(text)
+    index = 0
+    markers = {"#"}
+    if also_bang:
+        markers.add("!")
+    while index < len(text):
+        if text.startswith('"""', index):
+            index = _quoted_end(text, index, '"""')
+            continue
+        if text[index] in {'"', "'"}:
+            index = _quoted_end(text, index, text[index])
+            continue
+        if text[index] in markers:
+            end = text.find("\n", index)
+            end = len(text) if end == -1 else end
+            for position in range(index, end):
+                result[position] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(result)
+
+
+def _active_config_text(path: Path, text: str) -> str:
+    if path.name.endswith((".gradle", ".gradle.kts")) or path.suffix in {".kt", ".kts"}:
+        return _mask_kotlin_comments(text)
+    if path.suffix == ".properties":
+        return _mask_hash_comments(text, also_bang=True)
+    return _mask_hash_comments(text)
+
+
+def _kotlin_tokens(text: str) -> tuple[_Token, ...]:
+    source = _mask_kotlin_comments(text)
+    tokens = []
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character.isspace():
+            index += 1
+            continue
+        if source.startswith('"""', index):
+            end = _quoted_end(source, index, '"""')
+            tokens.append(_Token("string", source[index + 3:end - 3], index))
+            index = end
+            continue
+        if character in {'"', "'"}:
+            end = _quoted_end(source, index, character)
+            tokens.append(_Token("string", source[index + 1:end - 1], index))
+            index = end
+            continue
+        if character.isalpha() or character == "_":
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] == "_"):
+                end += 1
+            tokens.append(_Token("identifier", source[index:end], index))
+            index = end
+            continue
+        tokens.append(_Token("symbol", character, index))
+        index += 1
+    return tuple(tokens)
+
+
+def _call_arguments(tokens: Sequence[_Token], index: int) -> tuple[_Token, ...] | None:
+    if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
+        return None
+    depth = 1
+    argument_start = index + 2
+    for current in range(argument_start, len(tokens)):
+        if tokens[current].value == "(":
+            depth += 1
+        elif tokens[current].value == ")":
+            depth -= 1
+            if depth == 0:
+                return tuple(tokens[argument_start:current])
+    return None
+
+
+def _has_empty_call(tokens: Sequence[_Token], name: str) -> _Token | None:
+    for index, token in enumerate(tokens):
+        if token.value == name and _call_arguments(tokens, index) == ():
+            return token
+    return None
+
+
+def _contains_forbidden(tokens: Iterable[_Token]) -> _Token | None:
+    for token in tokens:
+        if _FORBIDDEN_DEPENDENCY.search(token.value):
+            return token
+    return None
+
+
 def check_maven_local(root: Path) -> list[Violation]:
     violations = []
-    pattern = re.compile(r"\bmavenLocal\s*\(\s*\)")
     for path in _production_gradle_scripts(root):
         text = _read(path)
-        match = pattern.search(_without_comments(text))
-        if match is not None:
+        token = _has_empty_call(_kotlin_tokens(text), "mavenLocal")
+        if token is not None:
             violations.append(_violation(
-                "MAVEN_LOCAL", path, _line(text, match.start()),
+                "MAVEN_LOCAL", path, _line(text, token.start),
                 "production Gradle scripts must not use mavenLocal()",
             ))
     return violations
 
 
 def _version_input_files(root: Path) -> tuple[Path, ...]:
-    ignored_parts = {".git", ".gradle", "build", ".superpowers"}
-    return tuple(sorted(
-        (
-            path for path in root.rglob("*.properties")
-            if not any(part in ignored_parts for part in path.relative_to(root).parts)
-        ),
-        key=lambda path: path.as_posix(),
-    ))
+    paths = set(_files(root, lambda path: path.suffix == ".properties"))
+    paths.update(_production_gradle_scripts(root))
+    paths.update(_workflow_files(root))
+    return tuple(sorted(paths, key=lambda path: path.as_posix()))
+
+
+def _version_assignments(path: Path) -> tuple[tuple[int, str], ...]:
+    text = _read(path)
+    active = _active_config_text(path, text)
+    return tuple(
+        (_line(text, match.start()), match.group("value").strip().strip('"\''))
+        for match in _VERSION_ASSIGNMENT.finditer(active)
+    )
 
 
 def check_version_inputs(root: Path) -> list[Violation]:
     root_properties = root / "gradle.properties"
-    assignments: list[tuple[Path, int, str]] = []
-    for path in _version_input_files(root):
-        for number, source_line in enumerate(_read(path).splitlines(), start=1):
-            match = _VERSION_ASSIGNMENT.match(source_line)
-            if match is not None:
-                assignments.append((path, number, match.group("value")))
-
-    violations = []
+    assignments = [
+        (path, line, value)
+        for path in _version_input_files(root)
+        for line, value in _version_assignments(path)
+    ]
     root_assignments = [item for item in assignments if item[0] == root_properties]
+    violations = []
     if len(root_assignments) != 1:
         violations.append(_violation(
             "VERSION_NAME_INPUT", root_properties, 1,
@@ -168,7 +319,6 @@ def check_version_inputs(root: Path) -> list[Violation]:
                 "VERSION_NAME_INPUT", root_properties, line,
                 "VERSION_NAME must be a stable MAJOR.MINOR.PATCH version",
             ))
-
     for path, line, _ in assignments:
         if path != root_properties:
             violations.append(_violation(
@@ -178,12 +328,10 @@ def check_version_inputs(root: Path) -> list[Violation]:
     return violations
 
 
-def _target_occurrences(text: str, target: str) -> tuple[re.Match[str], ...]:
-    if target == "android":
-        pattern = re.compile(r"\bandroid\s*(?:\(\s*\))?\s*\{")
-    else:
-        pattern = re.compile(rf"\b{re.escape(target)}\s*\(")
-    return tuple(pattern.finditer(text))
+def _target_call(tokens: Sequence[_Token], index: int) -> bool:
+    if tokens[index].value == "android":
+        return index + 1 < len(tokens) and tokens[index + 1].value in {"(", "{"}
+    return index + 1 < len(tokens) and tokens[index + 1].value == "("
 
 
 def check_targets(root: Path) -> list[Violation]:
@@ -191,35 +339,34 @@ def check_targets(root: Path) -> list[Violation]:
     for relative in ("kmp/build.gradle.kts", "consumer-smoke/build.gradle.kts"):
         path = root / relative
         if not path.is_file():
-            violations.append(_violation(
-                "TARGET_SET", path, 1,
-                "required target build script is missing",
-            ))
+            violations.append(_violation("TARGET_SET", path, 1, "required target build script is missing"))
             continue
         text = _read(path)
-        source = _without_comments(text)
-        counts = {target: len(_target_occurrences(source, target)) for target in EXPECTED_TARGETS}
-        unexpected = [
-            target for target in _KNOWN_TARGETS - EXPECTED_TARGETS
-            if _target_occurrences(source, target)
+        tokens = _kotlin_tokens(text)
+        calls = [
+            token for index, token in enumerate(tokens)
+            if token.value in _KMP_TARGET_FACTORIES and _target_call(tokens, index)
         ]
-        if any(count != 1 for count in counts.values()) or unexpected:
-            first_offset = 0
-            for target in tuple(sorted(EXPECTED_TARGETS)) + tuple(sorted(unexpected)):
-                matches = _target_occurrences(source, target)
-                if matches:
-                    first_offset = matches[0].start()
-                    break
+        names = [token.value for token in calls]
+        counts = {target: names.count(target) for target in EXPECTED_TARGETS}
+        extras = [token for token in calls if token.value not in EXPECTED_TARGETS]
+        if any(count != 1 for count in counts.values()) or extras:
+            first = min(calls, key=lambda token: token.start, default=_Token("", "", 0))
             violations.append(_violation(
-                "TARGET_SET", path, _line(text, first_offset),
+                "TARGET_SET", path, _line(text, first.start),
                 "must declare exactly android, iosArm64, iosSimulatorArm64, macosArm64, linuxX64, and linuxArm64",
             ))
     return violations
 
 
-def _first_match(text: str, patterns: Iterable[re.Pattern[str]]) -> re.Match[str] | None:
-    matches = [match for pattern in patterns if (match := pattern.search(text)) is not None]
-    return min(matches, key=lambda match: match.start()) if matches else None
+def _direct_rentile_implementation(tokens: Sequence[_Token]) -> bool:
+    expected = ("libs", ".", "rentile", ".", "kmp")
+    for index, token in enumerate(tokens):
+        if token.value == "implementation" and _call_arguments(tokens, index) is not None:
+            arguments = _call_arguments(tokens, index)
+            if arguments is not None and tuple(item.value for item in arguments) == expected:
+                return True
+    return False
 
 
 def check_dependencies(root: Path) -> list[Violation]:
@@ -231,34 +378,42 @@ def check_dependencies(root: Path) -> list[Violation]:
         )]
 
     text = _read(path)
-    source = _without_comments(text)
+    tokens = _kotlin_tokens(text)
     violations = []
-    implementation = re.compile(r"\bimplementation\s*\(\s*libs\.rentile\.kmp\s*\)")
-    if implementation.search(source) is None:
+    if not _direct_rentile_implementation(tokens):
         violations.append(_violation(
             "RENTILE_IMPLEMENTATION_DEPENDENCY", path, 1,
             "KMP build script must declare implementation(libs.rentile.kmp)",
         ))
 
-    rentile_api = re.compile(
-        r"\bapi\s*\(\s*(?:libs\.rentile\.kmp|[\"'][^\"']*com\.rohittp\.rentile:[^\"']*[\"'])"
-    )
-    api_match = rentile_api.search(source)
-    if api_match is not None:
-        violations.append(_violation(
-            "RENTILE_API_DEPENDENCY", path, _line(text, api_match.start()),
-            "Rentile must remain an implementation dependency",
-        ))
+    for index, token in enumerate(tokens):
+        arguments = _call_arguments(tokens, index)
+        if token.value == "api" and arguments is not None:
+            violations.append(_violation(
+                "RENTILE_API_DEPENDENCY", path, _line(text, token.start),
+                "Cycle A must not expose dependencies through api(...)",
+            ))
+            break
+
+    for index, token in enumerate(tokens):
+        arguments = _call_arguments(tokens, index)
+        if arguments is None or token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
+            continue
+        forbidden = _contains_forbidden(arguments)
+        if forbidden is not None:
+            violations.append(_violation(
+                "FORBIDDEN_CYCLE_A_DEPENDENCY", path, _line(text, forbidden.start),
+                "Cycle A must not declare Wire, serialization, Skiko, Ktor, or corpus dependencies or plugins",
+            ))
+            break
 
     catalog = root / "gradle/libs.versions.toml"
-    for candidate in (path, catalog):
-        if not candidate.is_file():
-            continue
-        candidate_text = _read(candidate)
-        match = _FORBIDDEN_DEPENDENCY.search(_without_comments(candidate_text))
+    if catalog.is_file():
+        catalog_text = _read(catalog)
+        match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))
         if match is not None:
             violations.append(_violation(
-                "FORBIDDEN_CYCLE_A_DEPENDENCY", candidate, _line(candidate_text, match.start()),
+                "FORBIDDEN_CYCLE_A_DEPENDENCY", catalog, _line(catalog_text, match.start()),
                 "Cycle A must not declare Wire, serialization, Skiko, Ktor, or corpus dependencies or plugins",
             ))
     return violations
@@ -269,10 +424,7 @@ def check_abi(root: Path) -> list[Violation]:
     api_file = api_directory / "kmp.klib.api"
     violations = []
     if not api_file.is_file():
-        violations.append(_violation(
-            "KLIB_ABI", api_file, 1,
-            "Cycle A requires kmp/api/kmp.klib.api",
-        ))
+        violations.append(_violation("KLIB_ABI", api_file, 1, "Cycle A requires kmp/api/kmp.klib.api"))
     else:
         text = _read(api_file)
         rentile = re.search(r"com\.rohittp\.rentile", text)
@@ -288,7 +440,6 @@ def check_abi(root: Path) -> list[Violation]:
                     "Cycle A ABI must contain comments only",
                 ))
                 break
-
     if api_directory.is_dir():
         for path in sorted(api_directory.glob("jvm*"), key=lambda item: item.as_posix()):
             violations.append(_violation(
@@ -298,37 +449,116 @@ def check_abi(root: Path) -> list[Violation]:
     return violations
 
 
+def _consumer_smoke_files(root: Path) -> tuple[Path, ...]:
+    smoke = root / "consumer-smoke"
+    if not smoke.is_dir():
+        return ()
+    return tuple(sorted(
+        (path for path in smoke.rglob("*") if path.is_file() and not _is_ignored(root, path)),
+        key=lambda path: path.as_posix(),
+    ))
+
+
 def _public_version_files(root: Path) -> tuple[Path, ...]:
-    paths = [root / "README.md", root / "gradle/libs.versions.toml"]
-    paths.extend(_production_gradle_scripts(root))
-    paths.extend(_top_level_docs(root))
-    workflows = root / ".github/workflows"
-    if workflows.is_dir():
-        paths.extend(sorted(workflows.glob("*.yml"), key=lambda path: path.as_posix()))
-        paths.extend(sorted(workflows.glob("*.yaml"), key=lambda path: path.as_posix()))
-    return tuple(sorted({path for path in paths if path.is_file()}, key=lambda path: path.as_posix()))
+    paths = {root / "README.md", root / "gradle/libs.versions.toml"}
+    paths.update(_production_gradle_scripts(root))
+    paths.update(_consumer_smoke_files(root))
+    paths.update(_top_level_docs(root))
+    paths.update(_workflow_files(root))
+    return tuple(sorted((path for path in paths if path.is_file()), key=lambda path: path.as_posix()))
+
+
+def _catalog_has_literal_reng_version(path: Path, text: str) -> int | None:
+    try:
+        catalog = tomllib.loads(_mask_hash_comments(text))
+    except tomllib.TOMLDecodeError:
+        return None
+    libraries = catalog.get("libraries", {})
+    if not isinstance(libraries, dict):
+        return None
+    for dependency in libraries.values():
+        if not isinstance(dependency, dict):
+            continue
+        if dependency.get("module") != "com.rohittp.reng:kmp":
+            continue
+        version = dependency.get("version")
+        if isinstance(version, str) and re.fullmatch(_SEMANTIC_LITERAL, version):
+            module = re.search(r"module\s*=\s*[\"']com\.rohittp\.reng:kmp[\"']", text)
+            return 0 if module is None else module.start()
+    return None
 
 
 def check_public_version_literals(root: Path) -> list[Violation]:
     violations = []
     for path in _public_version_files(root):
         text = _read(path)
-        match = _first_match(text, (_RENG_COORDINATE_VERSION, _RENG_VERSION_LITERAL))
-        if match is not None:
-            violations.append(_violation(
-                "HARDCODED_RENG_VERSION", path, _line(text, match.start()),
-                "public RenG versions must remain property- or metadata-driven",
-            ))
+        active = _active_config_text(path, text)
+        matches = [
+            match for pattern in (_RENG_COORDINATE_VERSION, _RENG_VERSION_LITERAL)
+            if (match := pattern.search(active)) is not None
+        ]
+        catalog_offset = _catalog_has_literal_reng_version(path, text) if path.name == "libs.versions.toml" else None
+        if catalog_offset is not None:
+            offset = catalog_offset
+        elif matches:
+            offset = min(matches, key=lambda match: match.start()).start()
+        else:
+            continue
+        violations.append(_violation(
+            "HARDCODED_RENG_VERSION", path, _line(text, offset),
+            "public RenG versions must remain property- or metadata-driven",
+        ))
     return violations
 
 
-def _html_tags(text: str, name: str) -> Iterable[re.Match[str]]:
-    return re.finditer(rf"<{name}\b[^>]*>", text, re.IGNORECASE | re.DOTALL)
+class _DocumentationParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.elements: list[_HtmlElement] = []
+        self.text: list[str] = []
+
+    def handle_starttag(self, tag: str, attributes) -> None:
+        self.elements.append(_HtmlElement(tag.lower(), dict(attributes), self.getpos()[0]))
+
+    def handle_startendtag(self, tag: str, attributes) -> None:
+        self.handle_starttag(tag, attributes)
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
 
 
-def _attribute(tag: str, name: str) -> str | None:
-    match = re.search(rf"\b{re.escape(name)}\s*=\s*[\"']([^\"']*)[\"']", tag, re.IGNORECASE)
-    return None if match is None else match.group(1)
+def _parse_html(text: str) -> _DocumentationParser:
+    parser = _DocumentationParser()
+    parser.feed(text)
+    parser.close()
+    return parser
+
+
+def _is_external_resource(value: str | None) -> bool:
+    return value is None or bool(_EXTERNAL_RESOURCE.search(value))
+
+
+def _css_without_comments_and_strings(text: str) -> str:
+    result = list(text)
+    index = 0
+    while index < len(text):
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = len(text) if end == -1 else end + 2
+            for position in range(index, end):
+                if result[position] != "\n":
+                    result[position] = " "
+            index = end
+            continue
+        if text[index] in {'"', "'"}:
+            end = _quoted_end(text, index, text[index])
+            for position in range(index, end):
+                if result[position] != "\n":
+                    result[position] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(result)
 
 
 def check_docs(root: Path) -> list[Violation]:
@@ -346,39 +576,33 @@ def check_docs(root: Path) -> list[Violation]:
     maven_version_marker = False
     for path in html_paths:
         text = _read(path)
+        document = _parse_html(text)
         expected_canonical = "https://rohittp.com/reng/" if path.name == "index.html" else f"https://rohittp.com/reng/{path.name}"
-        canonical_tags = [
-            tag for tag in _html_tags(text, "link")
-            if (_attribute(tag.group(0), "rel") or "").lower() == "canonical"
+        canonical = [
+            element for element in document.elements
+            if element.name == "link" and "canonical" in (element.attributes.get("rel") or "").lower().split()
         ]
-        canonical = _attribute(canonical_tags[0].group(0), "href") if canonical_tags else None
-        if canonical != expected_canonical:
-            offset = canonical_tags[0].start() if canonical_tags else 0
+        canonical_url = canonical[0].attributes.get("href") if canonical else None
+        if canonical_url != expected_canonical:
             violations.append(_violation(
-                "DOCS_CANONICAL", path, _line(text, offset),
+                "DOCS_CANONICAL", path, canonical[0].line if canonical else 1,
                 f"canonical URL must be {expected_canonical}",
             ))
-
-        for tag in _html_tags(text, "link"):
-            source = tag.group(0)
-            if (_attribute(source, "rel") or "").lower() == "stylesheet":
-                href = _attribute(source, "href")
-                if href is None or _EXTERNAL_RESOURCE.search(href):
+        for element in document.elements:
+            if element.name == "link" and "stylesheet" in (element.attributes.get("rel") or "").lower().split():
+                if _is_external_resource(element.attributes.get("href")):
                     violations.append(_violation(
-                        "DOCS_EXTERNAL_DEPENDENCY", path, _line(text, tag.start()),
+                        "DOCS_EXTERNAL_DEPENDENCY", path, element.line,
                         "stylesheets must be local documentation files",
                     ))
-        for tag in _html_tags(text, "script"):
-            source = tag.group(0)
-            src = _attribute(source, "src")
-            if src is not None and _EXTERNAL_RESOURCE.search(src):
-                violations.append(_violation(
-                    "DOCS_EXTERNAL_DEPENDENCY", path, _line(text, tag.start()),
-                    "scripts must be local documentation files",
-                ))
-        if re.search(r"data-maven-version\s*=\s*[\"']kmp[\"']", text):
-            maven_version_marker = True
-
+            if element.name == "script" and "src" in element.attributes:
+                if _is_external_resource(element.attributes.get("src")):
+                    violations.append(_violation(
+                        "DOCS_EXTERNAL_DEPENDENCY", path, element.line,
+                        "scripts must be local documentation files",
+                    ))
+            if element.attributes.get("data-maven-version") == "kmp":
+                maven_version_marker = True
     if html_paths and not maven_version_marker:
         violations.append(_violation(
             "DOCS_VERSION_MARKER", docs, 1,
@@ -388,13 +612,21 @@ def check_docs(root: Path) -> list[Violation]:
     style = docs / "style.css"
     if style.is_file():
         text = _read(style)
-        match = re.search(r"@import\b", text, re.IGNORECASE)
+        match = re.search(r"@import\b", _css_without_comments_and_strings(text), re.IGNORECASE)
         if match is not None:
             violations.append(_violation(
                 "DOCS_EXTERNAL_DEPENDENCY", style, _line(text, match.start()),
                 "documentation CSS must not use @import",
             ))
     return violations
+
+
+def _has_conflicting_license(text: str) -> bool:
+    return _CONFLICTING_LICENSE.search(text) is not None
+
+
+def _apache_page_is_consistent(text: str) -> bool:
+    return "Apache-2.0" in text and not _has_conflicting_license(text)
 
 
 def check_license(root: Path) -> list[Violation]:
@@ -407,7 +639,7 @@ def check_license(root: Path) -> list[Violation]:
     if (
         "apache license" not in license_text.lower()
         or "version 2.0" not in license_text.lower()
-        or re.search(r"\bMIT\b", license_text)
+        or _has_conflicting_license(license_text)
     ):
         violations.append(_violation(
             "LICENSE_MISMATCH", license_file, 1,
@@ -415,27 +647,30 @@ def check_license(root: Path) -> list[Violation]:
         ))
 
     readme = root / "README.md"
-    if not readme.is_file() or "Apache-2.0" not in _read(readme):
+    if not readme.is_file() or not _apache_page_is_consistent(_read(readme)):
         violations.append(_violation(
             "LICENSE_MISMATCH", readme, 1,
-            "README must identify the project as Apache-2.0",
+            "README must identify the project consistently as Apache-2.0",
         ))
 
-    docs_text = "\n".join(_read(path) for path in _top_level_docs(root))
-    if "Apache-2.0" not in docs_text:
-        violations.append(_violation(
-            "LICENSE_MISMATCH", root / "docs", 1,
-            "static documentation must identify the project as Apache-2.0",
-        ))
+    for path in (root / "docs/index.html", root / "docs/kmp.html"):
+        if not path.is_file() or not _apache_page_is_consistent("".join(_parse_html(_read(path)).text)):
+            violations.append(_violation(
+                "LICENSE_MISMATCH", path, 1,
+                "each served documentation page must identify the project consistently as Apache-2.0",
+            ))
 
-    metadata = "\n".join(_read(path) for path in _production_gradle_scripts(root))
+    metadata = "\n".join(
+        _mask_kotlin_comments(_read(path)) for path in _production_gradle_scripts(root)
+    )
     if (
         "The Apache License, Version 2.0" not in metadata
         or "https://www.apache.org/licenses/LICENSE-2.0.txt" not in metadata
+        or _has_conflicting_license(metadata)
     ):
         violations.append(_violation(
             "LICENSE_MISMATCH", root / "build.gradle.kts", 1,
-            "POM build metadata must declare the Apache 2.0 license name and URL",
+            "POM build metadata must declare only the Apache 2.0 license name and URL",
         ))
     return violations
 

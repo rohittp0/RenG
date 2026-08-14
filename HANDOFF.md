@@ -1,25 +1,49 @@
 # Handoff
 
-For whoever picks up RenG next. Cycle 0 — the graphics contract — is complete. No RenG code exists yet.
+For whoever picks up RenG next. Cycle 0 — the graphics contract — is complete. Cycle A's
+implementation and local gates are complete; the first public release is pending. Nothing renders and
+there is no public runtime API yet. Cycle B becomes the next implementation cycle only after the release
+workflow succeeds for the merged Cycle A commit.
 
 ## Read these first, in this order
 
-1. `CLAUDE.md` — project instructions. Corrected in this commit; where it disagrees with an ADR, the ADR wins.
+1. `CLAUDE.md` — current project structure, contracts, tools, and local commands. Where it disagrees with
+   an ADR, the ADR wins.
 2. `CONTEXT.md` — vocabulary. Read it before naming anything.
-3. `docs/adr/0001`–`0012` — the graphics contract. **Do not re-litigate these.** They are backed by
-   driver-level evidence, reproduced below.
+3. `docs/adr/0001`–`0012` — the graphics contract. **Do not re-litigate these.** ADR 0013 separately
+   governs the fail-closed release policy.
 4. `docs/decomposition.md` — cycles A–J, their gates, and their order.
 
 ## What exists and what does not
 
-The tree is still Android Studio's skeleton plus this design record. `:app` exists and is not RenG —
-cycle A deletes it. `:kmp`, `consumer-smoke`, the `docs/` static site, `CONTEXT-MAP.md`, and
-`gradle.properties`'s `VERSION_NAME` do **not** exist yet.
+Android Studio's placeholder `:app` is gone. Root settings include only `:kmp`, the single published
+module for `com.rohittp.reng:kmp`. It declares exactly `android`, `iosArm64`, `iosSimulatorArm64`,
+`macosArm64`, `linuxX64`, and `linuxArm64`; enables `explicitApi()` and KLIB ABI validation; and keeps
+Rentile 0.1.5 as an `implementation` dependency. Cycle A's only Kotlin production code is an internal
+Rentile linkage anchor exercised by a common test, so no Rentile type or RenG runtime symbol is public.
 
-`.github/workflows/ci.yml` and `publish.yml` are ported and reference `:kmp` and `consumer-smoke`, so
-**both currently fail**. Cycle A's job is to make them pass. Note that `publish.yml` cuts a release on
-every non-doc push to `main`; `**/*.md`, `docs`, and `LICENSE` are `paths-ignore`d, which is why this
-design record does not consume a version.
+The standalone `consumer-smoke` build declares the same six targets and resolves RenG through an
+`exclusiveContent` repository. It defaults to `build/local-maven`, reads the sole checked-in version from
+root `gradle.properties`, and accepts explicit `rengRepositoryUrl`/`rengVersion` overrides for copied
+public smoke. `VERSION_NAME=0.1.0`, `kmp/api/kmp.klib.api`, the dependency-free static `docs/` site,
+Apache-2.0 legal files, and the publication/POM configuration all exist.
+
+The standard-library Python tooling is implemented and unit-tested:
+
+- `tools/check_repository_policy.py --root .` enforces the Cycle A repository contract.
+- `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` selects
+  one public candidate or fails closed.
+- `tools/verify_publication.py` exposes:
+  - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
+  - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
+  - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
+  These cover the seven-publication local manifest, authoritative exact-key collisions, and anonymous
+  public artifacts plus metadata.
+
+`.github/workflows/ci.yml` now gates Ubuntu and macOS work rather than referencing missing projects.
+`.github/workflows/publish.yml` adds version resolution, a Linux release gate, signed local publication,
+seven POM checks, fresh-home six-target local smoke, exact-key R2 preflight, upload, anonymous artifact
+and metadata verification, and a copied fresh-home credential-free public smoke.
 
 ## Verified environment facts
 
@@ -70,29 +94,85 @@ Shader dialect, from a headless CGL context on an M3 Max reporting `4.1 Metal - 
   kotlin-native-prebuilt-macos-aarch64-<version>/bin/klib dump-metadata <path>`. `klib contents` does
   not exist.
 
-## Next cycle: A — build and publication skeleton
+## Cycle A local completion and pending public outcome
 
-Scope and gates are in `docs/decomposition.md`. Rentile at `/Users/rohittp/Data/Other/rentile` is the
-structural template — mirror `kmp/build.gradle.kts`, `consumer-smoke/`, and `docs/` unless there is a
-documented reason not to. RenG needs no Wire, no Skiko yet, and no `jvm` target (ADR 0010). The
-approved Cycle A design and its fail-closed release policy are recorded in
-`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013.
+The approved design and its fail-closed release policy are in
+`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013. The implementation
+and local gates are complete. No push, merge, workflow dispatch, AWS operation, R2 upload, or public
+publication has been performed from this worktree. **Public release pending** is the authoritative
+outcome until the exact merged commit's workflow proves otherwise.
 
-Local gate list, exactly what `ci.yml` runs:
+The release resolver follows one rule without searching for alternatives: if checked-in `VERSION_NAME`
+is newer than every public stable version, that declaration is the candidate; otherwise the candidate is
+exactly the next patch after the newest public stable version. Only that aggregate POM is probed. An
+occupied candidate, remote uncertainty, malformed metadata, redirect, or unexpected status stops the run;
+the resolver never skips ahead. If a partial release has uploaded any immutable key, recovery requires an
+explicit upward `VERSION_NAME`, full gates, and fresh approval — never overwrite, delete, or reuse.
+
+Run the local Python and policy gates exactly as follows:
 
 ```bash
-./gradlew :kmp:checkKotlinAbi
-./gradlew :kmp:testAndroidHostTest
-./gradlew :kmp:linuxX64Test
-./gradlew :kmp:compileKotlinIosArm64 :kmp:compileKotlinIosSimulatorArm64
-./gradlew :kmp:macosArm64Test
-./gradlew :kmp:compileKotlinLinuxX64 :kmp:compileKotlinLinuxArm64
-./gradlew :kmp:publishAllPublicationsToLocalTestRepository
-./gradlew -p consumer-smoke compileAndroidMain compileKotlinIosArm64 \
-    compileKotlinIosSimulatorArm64 compileKotlinMacosArm64 compileKotlinLinuxX64 compileKotlinLinuxArm64
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tools/tests -p 'test_*.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
 ```
 
-Pass `--no-configuration-cache` on every invocation.
+On macOS, run the locally compilable Ubuntu-equivalent tasks; `linuxX64Test` cannot execute there:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
+
+Then run Apple/target compilation, local publication, and clean smoke:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:compileKotlinIosArm64 \
+  :kmp:compileKotlinIosSimulatorArm64 \
+  :kmp:macosArm64Test \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:publishAllPublicationsToLocalTestRepository
+
+final_smoke_home="$(mktemp -d)"
+./gradlew --no-configuration-cache \
+  --gradle-user-home "$final_smoke_home" \
+  --refresh-dependencies \
+  -p consumer-smoke \
+  compileAndroidMain \
+  compileKotlinIosArm64 \
+  compileKotlinIosSimulatorArm64 \
+  compileKotlinMacosArm64 \
+  compileKotlinLinuxX64 \
+  compileKotlinLinuxArm64
+```
+
+Ubuntu CI owns the host-executable Linux test and runs:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:linuxX64Test \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
+
+Every Gradle invocation in CI/publication passes `--no-configuration-cache`. The smoke commands use a
+fresh Gradle home and `--refresh-dependencies`, so cached RenG artifacts cannot mask an incomplete local
+or public repository.
+
+## Next cycle after release success: B — public API and pure core
+
+Do not begin Cycle B merely because the feature branch, local publication, or PR is green. First require
+the public workflow to prove seven signed local POMs, no authoritative R2 collision, anonymous retrieval
+of every manifest artifact, aggregate metadata containing the resolved version, and fresh credential-free
+six-target resolution. After that observed success, Cycle B is the next implementation cycle.
 
 ## Decisions still open, each needing a spike before its cycle's spec
 

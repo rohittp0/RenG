@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**RenG is not implemented yet.** The tree is an unmodified Android Studio application skeleton:
-`:app` (`com.rohittp.reng`, AGP 9.3.1, Gradle 9.5.0) with generated `ExampleUnitTest`/
-`ExampleInstrumentedTest` and stock resources. Nothing here is RenG.
+**Cycle A's implementation and local gate surface are complete in this worktree; the public release is
+pending.** The root build includes only the single `:kmp` library module; Android Studio's placeholder
+`:app` has been deleted. `:kmp` is a publishable six-target skeleton with no public runtime API and no
+rendering behavior yet. `consumer-smoke`, the dependency-free static site, publication tooling,
+repository-policy tooling, and `VERSION_NAME=0.1.0` now exist.
 
-The `:app` module is a placeholder. RenG's real structure is a single `:kmp` library module modeled
-on `/Users/rohittp/Data/Other/rentile` (see "Structure to build" below). Do not grow features inside
-`:app`; when the KMP module lands, `:app` is either deleted or demoted to an Android demo consumer.
+Cycle A is not complete as a released cycle until the exact merged commit passes both CI jobs and the
+first public publication verifies anonymously. Do not start Cycle B implementation before that release
+succeeds. A passing branch or local publication proves implementation/merge readiness only; it does not
+prove the public outcome.
 
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 cover the graphics
-contract). Read both before proposing anything that touches the public API — where this file and an ADR
-disagree, the ADR is newer and wins.
+contract; ADR 0013 governs fail-closed publication). Read both before proposing anything that touches
+the public API — where this file and an ADR disagree, the ADR is newer and wins.
 
 ## What RenG is
 
@@ -88,18 +91,19 @@ Non-obvious semantics:
   attribute names only when the shader declares them (ADR 0008). A `Geometry` is a
   lat/lon/altitude-bounded quad the shader pair paints.
 
-## Structure to build (mirroring rentile)
+## Implemented structure (mirroring rentile)
 
-Rentile is the structural template. Match it unless there is a documented reason not to.
+Rentile remains the structural template. The implemented Cycle A surface is:
 
 | Path | Purpose |
 |---|---|
-| `kmp/` | The one published module. API, scene graph, resource layer, and platform renderers are deep package boundaries inside it — **not** separate Gradle subprojects (rentile ADR 0002: KMP publication does not fold unpublished project dependencies into the aggregate artifact, so extra modules would break the single-coordinate guarantee). |
+| `kmp/` | The one published module. Cycle A contains only an internal Rentile linkage anchor and its common test; later API, scene graph, resource layer, and platform renderers remain deep package boundaries inside it — **not** separate Gradle subprojects (rentile ADR 0002: KMP publication does not fold unpublished project dependencies into the aggregate artifact, so extra modules would break the single-coordinate guarantee). |
 | `docs/adr/` | One short ADR per decision, `NNNN-imperative-title.md`, a few paragraphs of prose — no template headings. |
 | `docs/` | Dependency-free static site published to GitHub Pages at `https://rohittp.com/reng/`. |
 | `CONTEXT.md` | Domain vocabulary: each term with its definition and an explicit `_Avoid_:` list of rejected synonyms. Read it before naming anything. |
 | `consumer-smoke/` | **Standalone** Gradle build (own `settings.gradle.kts`) that resolves the published coordinate from an isolated repository with `exclusiveContent`, proving a release resolves without credentials and without Central masking it. Reads `VERSION_NAME` out of `../gradle.properties` rather than pinning a literal. |
-| `.github/workflows/` | Already ported — `ci.yml` and `publish.yml`. See "CI/CD" below. |
+| `.github/workflows/` | `ci.yml` gates the branch on Ubuntu and macOS; `publish.yml` resolves one release candidate and verifies signed local, R2, public HTTP, and clean-consumer publication stages. See "CI/CD" below. |
+| `tools/` | Standard-library Python release resolver, publication verifier, repository-policy checker, and their unit tests. |
 
 Conventions carried over:
 
@@ -127,7 +131,7 @@ android  iosArm64  iosSimulatorArm64  macosArm64  linuxX64  linuxArm64
 reasoning (rentile ADR 0022): every published target is a permanent commitment, because removing one
 later breaks resolution for anyone who adopted it. An Intel Mac gets a hard resolution failure, not a
 degraded render. Adding `macosX64` later is a compatible change; adding it speculatively is not free.
-Write this decision up as RenG's own ADR rather than leaving it implicit in the target list.
+This target decision is recorded in ADR 0010.
 
 **No `jvm` target.** Rentile publishes one; RenG's spec enumerates Android, iOS, macOS, and Linux, so
 the JVM is deliberately out of the published surface and absent from the ported workflows. Android
@@ -142,29 +146,50 @@ and no temporary repository entry. (Earlier guidance here described `macosArm64`
 
 ## CI/CD
 
-`.github/workflows/ci.yml` and `publish.yml` are ported from rentile and adapted to
-`com.rohittp.reng:kmp`. **Both reference `:kmp` and `consumer-smoke`, neither of which exists yet, so
-they fail until those land** — and nothing runs at all until this directory becomes a git repository
-with a GitHub remote.
+`.github/workflows/ci.yml` and `publish.yml` consume the implemented `:kmp`, `consumer-smoke`,
+Python tools, and policy checks.
 
-`ci.yml` — two jobs on push-to-main and every PR: `android-linux` on ubuntu (`checkKotlinAbi`,
-`testAndroidHostTest`, `linuxX64Test`, arm64 compile, `bundleAndroidMainAar`) and `apple-publication`
-on macOS (Apple compiles, `macosArm64Test`, local publication, then clean-consumer resolution).
+`ci.yml` has two jobs on push to `main` and every PR. `android-linux` runs the complete Python suite,
+repository policy, ABI validation, Android host tests, `linuxX64Test`, Linux ARM64 compilation, and the
+Android AAR gate on Ubuntu. `apple-publication` compiles both iOS targets, runs `macosArm64Test`,
+publishes all seven publications to `build/local-maven`, then compiles the standalone consumer's six
+targets with a fresh Gradle home and `--refresh-dependencies`.
 
-`publish.yml` — **every non-doc push to `main` cuts a release.** A `resolve-version` job reads
-`VERSION_NAME`; if it is strictly greater than everything published it governs the release, otherwise
-the job selects exactly the next patch after the newest published version. If that candidate's aggregate
-POM already exists, resolution stops rather than skipping it. Docs, `**/*.md`, and `LICENSE` are
-`paths-ignore`d so documentation commits do not consume a version. Snapshots are rejected outright,
-and a `publish-main` concurrency group with `cancel-in-progress: false` serialises runs so two cannot
-race for one immutable coordinate. The gate chain is: signed local publication with per-target
-`checkPomFileFor*Publication` → clean-consumer resolution from the local repo → manifest-derived
-collision checks against R2 → upload → verify every uploaded artifact and aggregate metadata over HTTP
-→ re-resolve from the public repo with a fresh Gradle user home and `--refresh-dependencies`.
+`publish.yml` runs for every non-documentation push to `main` and for an explicit dispatch from `main`.
+It implements a **one-candidate rule**: `tools/resolve_release_version.py` accepts the checked-in stable
+`VERSION_NAME` only when it is newer than every public stable version; otherwise it selects exactly the
+next patch after the newest public version. It probes only that candidate's aggregate POM and never skips
+an occupied candidate. Missing metadata means no release exists; malformed/empty metadata, redirects,
+transport errors, unexpected HTTP statuses, snapshots, and an occupied candidate all stop resolution.
+After a partial upload, recovery is an explicit upward `VERSION_NAME` change, never overwrite, delete,
+or an automatic skip.
+
+The release gate chain is: Python tests and repository policy → Ubuntu ABI/Android/Linux gates → signed
+local publication of `kmp` plus its six target artifacts → all seven POM checks → manifest-derived signed
+POM and artifact validation → fresh-home six-target local smoke → authoritative exact-key R2 collision
+checks → upload → anonymous HTTP verification of every manifest entry and aggregate metadata → a copied
+standalone smoke project resolving all six targets from the public repository with no credentials, a fresh
+Gradle home, and `--refresh-dependencies`. `publish-main` concurrency is serialized with
+`cancel-in-progress: false`.
+
+The standard-library Python tools are:
+
+- `tools/check_repository_policy.py --root .` — enforces the Cycle A target, dependency, ABI, version,
+  docs, repository, and license constraints.
+- `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` — prints
+  the sole selected candidate or fails closed.
+- `tools/verify_publication.py` has three exact CLI surfaces:
+  - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
+  - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
+  - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
+  They derive and validate the immutable local manifest, reject exact R2 key collisions, and verify
+  anonymous public artifacts and metadata.
 
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SIGNING_KEY`, `SIGNING_KEY_ID`, `SIGNING_KEY_PASSWORD`.
-A dedicated step fails fast if any is missing.
+A dedicated step fails fast if any is missing. Do not run AWS, upload, push, dispatch, or otherwise infer
+that these outward gates passed without explicit approval and an observed workflow result. The first
+public release is pending.
 
 Two rentile gates were **not** ported because RenG has no analogue: the credential-free coverage
 manifest check (`tools/check_coverage_manifest.py` over `compatibility/`) and the rolling
@@ -173,8 +198,8 @@ live public map catalog. RenG's equivalent — golden-image rendering over a cor
 documents — is undesigned; if it lands, it slots into the same two places (a CI job plus a gate step
 in `publish.yml` before upload).
 
-`org.gradle.configuration-cache=true` is set in `gradle.properties`, but every workflow invocation
-passes `--no-configuration-cache` because remote Maven publishing is not CC-compatible.
+`org.gradle.configuration-cache=true` is set in `gradle.properties`, but every workflow and release-gate
+Gradle invocation passes `--no-configuration-cache` because remote Maven publishing is not CC-compatible.
 
 ## The macOS test harness
 
@@ -189,36 +214,68 @@ Apple Silicon — draws into a capture framebuffer, and encodes.
 
 ## Commands
 
-Today, against the placeholder skeleton:
+Run Python and policy gates first:
 
 ```bash
-./gradlew :app:assembleDebug
-./gradlew :app:test
-./gradlew :app:test --tests "com.rohittp.reng.ExampleUnitTest.addition_isCorrect"
-./gradlew :app:connectedAndroidTest        # requires a device/emulator
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tools/tests -p 'test_*.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
 ```
 
-Once `:kmp` exists, the local gate list mirrors rentile's (run before proposing a release):
+On macOS, run every locally compilable Ubuntu-equivalent gate (do **not** claim `linuxX64Test` ran):
 
 ```bash
-./gradlew :kmp:checkKotlinAbi
-./gradlew :kmp:testAndroidHostTest
-./gradlew :kmp:linuxX64Test
-./gradlew :kmp:compileKotlinIosArm64 :kmp:compileKotlinIosSimulatorArm64
-./gradlew :kmp:macosArm64Test                     # Apple leg; macOS host only
-./gradlew :kmp:compileKotlinLinuxX64 :kmp:compileKotlinLinuxArm64
-./gradlew :kmp:publishAllPublicationsToLocalTestRepository
-./gradlew -p consumer-smoke compileAndroidMain compileKotlinIosArm64 \
-    compileKotlinIosSimulatorArm64 compileKotlinMacosArm64 compileKotlinLinuxX64 compileKotlinLinuxArm64
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
 ```
 
-This list is exactly what `ci.yml` runs, split across its ubuntu and macOS jobs.
+Run the Apple, cross-target compilation, local publication, and fresh dependency-cache smoke gates:
 
-`macosArm64` is the one Apple target with a *test* task rather than a compile-only gate — rentile
-runs `macosArm64Test` on its macOS CI leg, which makes it the fastest real-device-free way to
-exercise native rendering code paths.
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:compileKotlinIosArm64 \
+  :kmp:compileKotlinIosSimulatorArm64 \
+  :kmp:macosArm64Test \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:publishAllPublicationsToLocalTestRepository
 
-Single test in any of those source sets: `--tests "com.rohittp.reng.SomeTest"` (works on
-Kotlin/Native test tasks too). CI passes `--no-configuration-cache` on every Gradle invocation.
+final_smoke_home="$(mktemp -d)"
+./gradlew --no-configuration-cache \
+  --gradle-user-home "$final_smoke_home" \
+  --refresh-dependencies \
+  -p consumer-smoke \
+  compileAndroidMain \
+  compileKotlinIosArm64 \
+  compileKotlinIosSimulatorArm64 \
+  compileKotlinMacosArm64 \
+  compileKotlinLinuxX64 \
+  compileKotlinLinuxArm64
+```
+
+On Ubuntu CI, the host-executable command is:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:linuxX64Test \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
+
+`linuxX64Test` is Linux CI coverage, not a macOS-local gate. `macosArm64Test` is the one Apple target
+with a test task rather than a compile-only gate. Both workflow files can be syntax-checked locally with:
+
+```bash
+ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml", aliases: true); YAML.load_file(".github/workflows/publish.yml", aliases: true)'
+```
+
+Single test in any Gradle test source set: `--tests "com.rohittp.reng.SomeTest"` (works on Kotlin/Native
+test tasks too). Every CI and publication Gradle invocation passes `--no-configuration-cache`.
 
 `local.properties` is untracked and machine-specific; do not commit it.

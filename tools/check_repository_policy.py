@@ -70,10 +70,10 @@ _KMP_TARGET_FACTORIES = frozenset({
     "watchosDeviceArm64", "watchosSimulatorArm64", "watchosX64", "watchosX86",
 })
 _DEPENDENCY_CALLS = frozenset({
-    "api", "compileOnly", "implementation", "runtimeOnly", "testApi",
+    "add", "api", "compileOnly", "implementation", "runtimeOnly", "testApi",
     "testCompileOnly", "testImplementation", "testRuntimeOnly",
 })
-_PLUGIN_CALLS = frozenset({"alias", "id"})
+_PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
 
 
 def _read(path: Path) -> str:
@@ -479,12 +479,22 @@ def _catalog_has_literal_reng_version(path: Path, text: str) -> int | None:
     for dependency in libraries.values():
         if not isinstance(dependency, dict):
             continue
-        if dependency.get("module") != "com.rohittp.reng:kmp":
+        is_reng_coordinate = (
+            dependency.get("module") == "com.rohittp.reng:kmp"
+            or (
+                dependency.get("group") == "com.rohittp.reng"
+                and dependency.get("name") == "kmp"
+            )
+        )
+        if not is_reng_coordinate:
             continue
         version = dependency.get("version")
         if isinstance(version, str) and re.fullmatch(_SEMANTIC_LITERAL, version):
-            module = re.search(r"module\s*=\s*[\"']com\.rohittp\.reng:kmp[\"']", text)
-            return 0 if module is None else module.start()
+            coordinate = re.search(
+                r"(?:module\s*=\s*[\"']com\.rohittp\.reng:kmp[\"']|group\s*=\s*[\"']com\.rohittp\.reng[\"'])",
+                text,
+            )
+            return 0 if coordinate is None else coordinate.start()
     return None
 
 

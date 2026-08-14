@@ -164,6 +164,21 @@ class RepositoryPolicyTests(unittest.TestCase):
                 "HARDCODED_RENG_VERSION",
             ),
             (
+                "gradle/libs.versions.toml",
+                "\nreng-kmp = { group = \"com.rohittp.reng\", name = \"kmp\", version = \"0.2.0\" }\n",
+                "HARDCODED_RENG_VERSION",
+            ),
+            (
+                "gradle/libs.versions.toml",
+                "\nreng-kmp = { group = \"com.rohittp.reng\", name = \"kmp\", version.ref = \"reng\" }\n",
+                None,
+            ),
+            (
+                "gradle/libs.versions.toml",
+                "\nother-kmp = { group = \"example.org\", name = \"kmp\", version = \"0.2.0\" }\n",
+                None,
+            ),
+            (
                 "consumer-smoke/src/commonMain/kotlin/Comment.kt",
                 "// com.rohittp.reng:kmp:0.2.0\n",
                 None,
@@ -212,6 +227,20 @@ class RepositoryPolicyTests(unittest.TestCase):
             )
             codes = {violation.code for violation in check_repository(root)}
             self.assertIn("RENTILE_API_DEPENDENCY", codes)
+
+        forbidden_shapes = (
+            "\nval serializationPlugin = kotlin(\"plugin.serialization\")\n",
+            "\nadd(\"commonMainImplementation\", \"io.ktor:ktor-client-core:1\")\n",
+        )
+        for mutation in forbidden_shapes:
+            with self.subTest(mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "kmp/build.gradle.kts"
+                    build.write_text(build.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_A_DEPENDENCY", codes)
 
         with TemporaryDirectory() as directory:
             root = Path(directory)

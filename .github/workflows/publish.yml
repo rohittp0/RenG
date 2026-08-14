@@ -29,7 +29,24 @@ jobs:
       version: ${{ steps.release.outputs.version }}
 
     steps:
+      - name: Require main for manual publication
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "::error::Manual publication is allowed only from refs/heads/main"
+          exit 1
+
       - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify release tooling and repository policy
+        run: |
+          python3 -m unittest discover -s tools/tests -p 'test_*.py' -v
+          python3 tools/check_repository_policy.py --root .
 
       - id: release
         name: Resolve the next public version
@@ -44,91 +61,46 @@ jobs:
             exit 1
           fi
 
-          base="${R2_PUBLIC_URL%/}/com/rohittp/reng/kmp"
+          version="$(
+            python3 tools/resolve_release_version.py \
+              --properties-file gradle.properties \
+              --repository-url "$R2_PUBLIC_URL"
+          )"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
-          pom_status() {
-            curl --silent --output /dev/null --write-out '%{http_code}' \
-              --retry 5 --retry-delay 3 --retry-all-errors \
-              --head "${base}/$1/kmp-$1.pom" || echo 000
-          }
+  linux-release:
+    needs: resolve-version
+    name: Linux release gate
+    runs-on: ubuntu-latest
 
-          # Strictly greater, semver-ordered.
-          is_greater() {
-            [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
-          }
+    steps:
+      - uses: actions/checkout@v6
 
-          declared=$(sed -n 's/^VERSION_NAME=//p' gradle.properties | tr -d '[:space:]')
-          if [[ -z "$declared" ]]; then
-            echo "::error::VERSION_NAME is missing"
-            exit 1
-          fi
-          if [[ ! "$declared" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-SNAPSHOT)?$ ]]; then
-            echo "::error::VERSION_NAME must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-SNAPSHOT: $declared"
-            exit 1
-          fi
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
 
-          # An absent metadata document means nothing has been published yet,
-          # which is not an error. `latest` is not trusted; the versions list is
-          # ordered explicitly.
-          metadata=$(curl --fail --silent --retry 3 --retry-delay 2 \
-            "${base}/maven-metadata.xml" || true)
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
 
-          published_latest=""
-          if [[ -n "$metadata" ]]; then
-            published_latest=$(printf '%s' "$metadata" \
-              | grep -o '<version>[^<]*</version>' \
-              | sed -e 's|<version>||g' -e 's|</version>||g' \
-              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -V | tail -1 || true)
-          fi
-
-          if [[ -z "$published_latest" ]] \
-            || { [[ "$declared" != *-SNAPSHOT ]] && is_greater "$declared" "$published_latest"; }; then
-            # A declared version above everything public is a deliberate minor or
-            # major bump and governs the release outright.
-            if [[ "$declared" == *-SNAPSHOT ]]; then
-              echo "::error::Snapshot versions cannot be published to the public repository: $declared"
-              exit 1
-            fi
-            status=$(pom_status "$declared")
-            if [[ "$status" == "200" ]]; then
-              echo "::error::Declared VERSION_NAME already exists in the public repository: $declared"
-              exit 1
-            fi
-            if [[ "$status" != "404" ]]; then
-              echo "::error::Unexpected status $status probing version $declared"
-              exit 1
-            fi
-            version="$declared"
-            source="declared VERSION_NAME"
-          else
-            # Routine push: take the newest public version and advance the patch
-            # past anything already present, so stale metadata cannot collide.
-            IFS='.' read -r major minor patch <<<"$published_latest"
-            attempts=0
-            while :; do
-              patch=$((patch + 1))
-              version="${major}.${minor}.${patch}"
-              status=$(pom_status "$version")
-              [[ "$status" == "404" ]] && break
-              if [[ "$status" != "200" ]]; then
-                echo "::error::Unexpected status $status probing version $version"
-                exit 1
-              fi
-              attempts=$((attempts + 1))
-              if ((attempts >= 20)); then
-                echo "::error::No unused patch version found after 20 attempts from $published_latest"
-                exit 1
-              fi
-            done
-            source="patch increment from published $published_latest"
-          fi
-
-          echo "Resolved version $version ($source)" >> "$GITHUB_STEP_SUMMARY"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Test Linux and Android release outputs
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          ./gradlew --no-configuration-cache \
+            -PVERSION_NAME="$VERSION" \
+            :kmp:checkKotlinAbi \
+            :kmp:testAndroidHostTest \
+            :kmp:linuxX64Test \
+            :kmp:compileKotlinLinuxArm64 \
+            :kmp:bundleAndroidMainAar
 
   publish:
-    needs: resolve-version
+    needs: [resolve-version, linux-release]
     name: Publish kmp ${{ needs.resolve-version.outputs.version }}
     runs-on: macos-latest
 
@@ -176,33 +148,6 @@ jobs:
             fi
           done
 
-      - name: Reject an existing release
-        shell: bash
-        env:
-          VERSION: ${{ needs.resolve-version.outputs.version }}
-          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          set -euo pipefail
-          key="com/rohittp/reng/kmp/${VERSION}/kmp-${VERSION}.pom"
-
-          count=$(aws \
-            --endpoint-url "$R2_ENDPOINT" \
-            s3api list-objects-v2 \
-            --bucket "$R2_BUCKET" \
-            --prefix "$key" \
-            --max-keys 1 \
-            --query KeyCount \
-            --output text)
-
-          if [[ "$count" != "0" ]]; then
-            echo "::error::Release already exists: $key"
-            exit 1
-          fi
-
       - name: Test and publish to isolated local repository
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
@@ -229,40 +174,50 @@ jobs:
           :kmp:checkPomFileForLinuxX64Publication
           :kmp:checkPomFileForMacosArm64Publication
 
-      - name: Verify signed local publication
+      - name: Derive and verify signed local publication manifest
         shell: bash
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
-          set -euo pipefail
-          artifact_root="build/local-maven/com/rohittp/reng"
-          publication_count=0
+          python3 tools/verify_publication.py local \
+            --repository build/local-maven \
+            --version "$VERSION" \
+            --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+            --require-signed-poms
 
-          while IFS= read -r pom; do
-            publication_count=$((publication_count + 1))
-            if [[ ! -f "$pom.asc" ]]; then
-              echo "::error::Unsigned publication POM: $pom"
-              exit 1
-            fi
-          done < <(find "$artifact_root" -type f -path "*/$VERSION/*" -name '*.pom' | sort)
-
-          if (( publication_count == 0 )); then
-            echo "::error::The local repository contains no publication POMs"
-            exit 1
-          fi
-
-      - name: Resolve aggregate coordinate from isolated local repository
+      - name: Resolve six targets from isolated local repository
+        shell: bash
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
-        run: >-
-          ./gradlew --no-configuration-cache -p consumer-smoke
-          -PrengVersion="$VERSION"
-          compileAndroidMain
-          compileKotlinIosArm64
-          compileKotlinIosSimulatorArm64
-          compileKotlinMacosArm64
-          compileKotlinLinuxX64
-          compileKotlinLinuxArm64
+        run: |
+          local_smoke_home="$(mktemp -d)"
+          ./gradlew --no-configuration-cache \
+            --gradle-user-home "$local_smoke_home" \
+            --refresh-dependencies \
+            -p consumer-smoke \
+            -PrengVersion="$VERSION" \
+            compileAndroidMain \
+            compileKotlinIosArm64 \
+            compileKotlinIosSimulatorArm64 \
+            compileKotlinMacosArm64 \
+            compileKotlinLinuxX64 \
+            compileKotlinLinuxArm64
+
+      - name: Reject any manifest key collision in R2
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          python3 tools/verify_publication.py r2-preflight \
+            --endpoint "$R2_ENDPOINT" \
+            --bucket "$R2_BUCKET" \
+            --version "$VERSION" \
+            --manifest "$RUNNER_TEMP/reng-release-manifest.txt"
 
       - name: Publish coordinated KMP artifacts to R2
         env:
@@ -280,33 +235,20 @@ jobs:
           -PVERSION_NAME="$VERSION"
           :kmp:publishAllPublicationsToR2Repository
 
-      - name: Verify public artifacts
+      - name: Verify exact public artifacts and aggregate metadata
         shell: bash
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
           R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
         run: |
-          set -euo pipefail
-          repository_root="build/local-maven"
-          artifact_root="$repository_root/com/rohittp/reng"
-          artifact_count=0
+          python3 tools/verify_publication.py public \
+            --repository-url "$R2_PUBLIC_URL" \
+            --version "$VERSION" \
+            --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
+            --attempts 12 \
+            --retry-delay 5
 
-          while IFS= read -r artifact; do
-            relative_path="${artifact#"$repository_root/"}"
-            url="${R2_PUBLIC_URL%/}/$relative_path"
-            curl --fail --silent --show-error \
-              --retry 12 --retry-delay 5 --retry-all-errors \
-              --output /dev/null "$url"
-            artifact_count=$((artifact_count + 1))
-          done < <(find "$artifact_root" -type f -path "*/$VERSION/*" \
-            ! -name 'maven-metadata.xml*' | sort)
-
-          if (( artifact_count == 0 )); then
-            echo "::error::No local publication artifacts were available to verify"
-            exit 1
-          fi
-
-      - name: Resolve from the public repository without credentials
+      - name: Resolve six targets from the public repository without credentials
         shell: bash
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
@@ -314,17 +256,19 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          smoke_project="$RUNNER_TEMP/reng-r2-consumer"
-          gradle_home="$RUNNER_TEMP/reng-r2-gradle-home"
-          cp -R consumer-smoke "$smoke_project"
+          smoke_project="$(mktemp -d "$RUNNER_TEMP/reng-r2-consumer.XXXXXX")"
+          public_gradle_home="$(mktemp -d "$RUNNER_TEMP/reng-r2-gradle-home.XXXXXX")"
+          cp consumer-smoke/settings.gradle.kts "$smoke_project/"
+          cp consumer-smoke/build.gradle.kts "$smoke_project/"
+          cp -R consumer-smoke/src "$smoke_project/src"
           cp gradlew "$smoke_project/gradlew"
           cp -R gradle "$smoke_project/gradle"
 
           "$smoke_project/gradlew" --no-configuration-cache \
-            --gradle-user-home "$gradle_home" \
+            --gradle-user-home "$public_gradle_home" \
             --refresh-dependencies \
             -p "$smoke_project" \
-            -PrengRepositoryUrl="$R2_PUBLIC_URL" \
+            -PrengRepositoryUrl="${R2_PUBLIC_URL%/}" \
             -PrengVersion="$VERSION" \
             compileAndroidMain \
             compileKotlinIosArm64 \

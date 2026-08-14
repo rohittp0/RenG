@@ -17,11 +17,28 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "Rentile"
+                    url = uri("https://maven.rohittp.com")
+                }
+            }
+            filter {
+                includeGroup("com.rohittp.rentile")
+            }
+        }
         google()
         mavenCentral()
+        maven {
+            url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+            content {
+                includeGroup("org.jetbrains.skiko")
+            }
+        }
     }
 }
 
 rootProject.name = "RenG"
-include(":app")
+include(":kmp")
  

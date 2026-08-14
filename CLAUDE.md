@@ -12,7 +12,9 @@ The `:app` module is a placeholder. RenG's real structure is a single `:kmp` lib
 on `/Users/rohittp/Data/Other/rentile` (see "Structure to build" below). Do not grow features inside
 `:app`; when the KMP module lands, `:app` is either deleted or demoted to an Android demo consumer.
 
-This is not a git repository yet.
+Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 cover the graphics
+contract). Read both before proposing anything that touches the public API — where this file and an ADR
+disagree, the ADR is newer and wins.
 
 ## What RenG is
 
@@ -37,11 +39,16 @@ not an optimization to bolt on later.
 
 ### Lifecycle contract
 
-- Setup takes the surface and native resources (transport, store); the render loop takes only a `FramePlan`.
+- Setup takes the caller's already-current GL context and native resources (transport, store, basemap
+  style, output pixel size); the render loop takes a **prepared** `FramePlan`. Acquisition and drawing
+  are separate operations — see ADRs 0001, 0002, 0004, 0012.
 - RenG exposes API to query and free the resources it holds; the consumer calls it when it needs to.
-- `close()` frees everything. `close()` and `free()` are idempotent.
+- `close()` frees everything. `close()` and `free()` are idempotent, and both require the GL context to
+  be current on the calling thread.
 - Accessing a freed resource **reloads it and emits a warning** — freeing is never an error for the
   caller to recover from, so the resource layer needs a reload path on every access, not an assert.
+- Losing the GL context is **not** freeing: a separate operation makes RenG forget its GL handles
+  without deleting them, keeping every CPU-side resource intact (ADR 0007).
 
 ## Domain model
 
@@ -75,9 +82,11 @@ Non-obvious semantics:
 - **`SCREEN` anchoring turns `position.z` into a z-index** — ordered compositing, no depth test.
   **`MAP` anchoring requires full occlusion testing** against the 3D scene. These are two distinct
   draw regimes in one frame; ordering between them is a design decision worth an ADR.
-- **Geometry shaders are plain, fully self-contained OpenGL shaders.** No RenG-injected includes or
-  uniform preamble beyond what is documented. A `Geometry` is a lat/lon/altitude-bounded quad the
-  shader pair paints.
+- **Geometry shaders are GLSL ES 3.00 sources, self-contained but for their version directive.** No
+  RenG-injected includes or uniform preamble; RenG substitutes `#version 330 core` for
+  `#version 300 es` on desktop GL contexts and changes nothing else, and binds documented uniform and
+  attribute names only when the shader declares them (ADR 0008). A `Geometry` is a
+  lat/lon/altitude-bounded quad the shader pair paints.
 
 ## Structure to build (mirroring rentile)
 
@@ -124,11 +133,11 @@ the JVM is deliberately out of the published surface and absent from the ported 
 host tests still run on the JVM — that is a test source set, not a published target. If the macOS
 harness or a future consumer needs it, adding `jvm` means touching both workflows and `consumer-smoke`.
 
-**`macosArm64` is not published by rentile yet.** It exists only in rentile's working tree —
-`VERSION_NAME` is still `0.1.4`, and `com.rohittp.rentile:kmp-macosarm64:0.1.4` 404s on
-`https://maven.rohittp.com` while `kmp-iosarm64:0.1.4` resolves. Until rentile cuts a release
-carrying the target, RenG's `macosArm64` target can only resolve rentile from a local publication
-(`./gradlew publishToMavenLocal` in rentile, temporary repository entry, reverted before committing).
+**Rentile publishes every target RenG needs, as of `0.1.5`.** `kmp-android`, `kmp-iosarm64`,
+`kmp-iossimulatorarm64`, `kmp-macosarm64`, `kmp-linuxx64`, and `kmp-linuxarm64` all resolve from
+`https://maven.rohittp.com`, so RenG depends on `com.rohittp.rentile:kmp:0.1.5` with no `mavenLocal()`
+and no temporary repository entry. (Earlier guidance here described `macosArm64` as unpublished at
+`0.1.4`; that was true then and is not now.)
 
 ## CI/CD
 
@@ -171,8 +180,10 @@ A local development client that consumes a locally published RenG, feeds it a se
 JSON documents, and encodes the output as an MP4. **Capture and MP4 encoding live in the harness,
 not in RenG** — RenG only draws. Treat the harness as a consumer that happens to live in this repo,
 under its own build like `consumer-smoke`, so it exercises the real published coordinate rather than
-a project dependency. It targets `macosArm64`, so it inherits the unpublished-rentile-target
-constraint above until rentile releases that target.
+a project dependency. It targets `macosArm64`, and it is the component that owns context creation:
+RenG requires an already-current GL context, so the harness creates a headless core-profile context
+through CGL — proven to work with no window and no display server, reporting `4.1 Metal - 90.5` on
+Apple Silicon — draws into a capture framebuffer, and encodes.
 
 ## Commands
 

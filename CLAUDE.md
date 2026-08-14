@@ -269,10 +269,11 @@ On Ubuntu CI, the host-executable command is:
 ```
 
 `linuxX64Test` is Linux CI coverage, not a macOS-local gate. `macosArm64Test` is the one Apple target
-with a test task rather than a compile-only gate. Both workflow files can be syntax-checked locally with:
+with a test task rather than a compile-only gate. On the current macOS system Ruby 2.6 toolchain, parse
+both workflow files with Psych's aliases-enabled positional API:
 
 ```bash
-ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml", aliases: true); YAML.load_file(".github/workflows/publish.yml", aliases: true)'
+ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/ci.yml"), [], [], true); YAML.safe_load(File.read(".github/workflows/publish.yml"), [], [], true)'
 ```
 
 Single test in any Gradle test source set: `--tests "com.rohittp.reng.SomeTest"` (works on Kotlin/Native

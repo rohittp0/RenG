@@ -104,8 +104,9 @@ Rentile is the structural template. Match it unless there is a documented reason
 Conventions carried over:
 
 - `explicitApi()` plus Kotlin ABI validation (`checkKotlinAbi`) — public API changes are a reviewed diff.
-- `VERSION_NAME` in the root `gradle.properties` is the **sole** version source. Never hardcode a
-  version in docs HTML, the smoke consumer, or the README.
+- `VERSION_NAME` in the root `gradle.properties` is the **sole checked-in version input**. Never
+  hardcode a RenG version in docs HTML, the smoke consumer, or the README. The release workflow may
+  derive a later patch from the public version line under ADR 0013.
 - `org.gradle.configuration-cache=true` is on, but publish/CI invocations pass
   `--no-configuration-cache` because remote Maven publishing is not CC-compatible.
 - Typed exceptions with stable error codes, pipeline stage, and **redacted** diagnostics. Never

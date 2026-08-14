@@ -74,7 +74,9 @@ Shader dialect, from a headless CGL context on an M3 Max reporting `4.1 Metal - 
 
 Scope and gates are in `docs/decomposition.md`. Rentile at `/Users/rohittp/Data/Other/rentile` is the
 structural template — mirror `kmp/build.gradle.kts`, `consumer-smoke/`, and `docs/` unless there is a
-documented reason not to. RenG needs no Wire, no Skiko yet, and no `jvm` target (ADR 0010).
+documented reason not to. RenG needs no Wire, no Skiko yet, and no `jvm` target (ADR 0010). The
+approved Cycle A design and its fail-closed release policy are recorded in
+`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013.
 
 Local gate list, exactly what `ci.yml` runs:
 
@@ -110,10 +112,11 @@ Pass `--no-configuration-cache` on every invocation.
 - The repository owner's standing instruction: **run `/grill-with-docs` before writing any plan**, and
   use parallel subagents for genuinely independent implementation tasks.
 - ADRs are a few paragraphs of prose, no template headings, `NNNN-imperative-title.md`. Next number is
-  0013.
+  0014.
 - Update `CONTEXT.md` as terms resolve rather than batching it.
-- Never commit `mavenLocal()`, a `-SNAPSHOT` dependency, or a hardcoded version — `VERSION_NAME` in the
-  root `gradle.properties` is the sole version source.
+- Never commit `mavenLocal()`, a `-SNAPSHOT` dependency, or an independently hardcoded RenG version —
+  `VERSION_NAME` in the root `gradle.properties` is the sole checked-in version input. ADR 0013 defines
+  how publication may derive a later patch from the public version line.
 
 ## Throwaway spike code
 

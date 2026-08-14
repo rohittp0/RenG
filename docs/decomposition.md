@@ -21,7 +21,7 @@ work in parallel. Everything else is a chain.
 
 | Cycle | Delivers | Gates |
 |---|---|---|
-| A | Publishable `:kmp`, six targets, `:app` gone | CI both legs green, `consumer-smoke` resolves |
+| A | Publishable `:kmp`, six targets, `:app` gone | CI both legs green, `consumer-smoke` resolves, first public release verifies |
 | B | Public API surface and the pure core behind it | `checkKotlinAbi`, host + `linuxX64` + `macosArm64` tests |
 | C | Resource acquisition, decode, parse, caching | Host tests against fake transport/store |
 | D | The GL seam and its three implementations | Real-context conformance on macOS and llvmpipe |
@@ -37,11 +37,13 @@ work in parallel. Everything else is a chain.
 The `:kmp` module with `android`, `iosArm64`, `iosSimulatorArm64`, `macosArm64`, `linuxX64`, and
 `linuxArm64`; `explicitApi()` and Kotlin ABI validation; `com.rohittp.rentile:kmp:0.1.5` resolving from
 `https://maven.rohittp.com` with no `mavenLocal()`; the standalone `consumer-smoke` build; the
-dependency-free `docs/` site; `VERSION_NAME` as the sole version source. `:app` is deleted — it is
-Android Studio's skeleton and nothing in it is RenG.
+dependency-free `docs/` site; `VERSION_NAME` as the sole checked-in version input. `:app` is deleted —
+it is Android Studio's skeleton and nothing in it is RenG.
 
 Nothing here renders. The point is that `ci.yml` and `publish.yml`, which already reference `:kmp` and
-`consumer-smoke`, stop failing, so every later cycle lands against a working gate.
+`consumer-smoke`, stop failing, so every later cycle lands against a working gate. Publication fails
+closed on remote uncertainty or an occupied artifact, and the cycle ends only when the first public
+release resolves anonymously for all six targets; see ADR 0013.
 
 ## B — Public API surface and pure core
 

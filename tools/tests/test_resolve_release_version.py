@@ -296,10 +296,12 @@ class ResolveReleaseVersionTests(unittest.TestCase):
         error = HTTPError(
             f"{BASE_URL}/maven-metadata.xml", 302, "Found", {}, io.BytesIO()
         )
-        with patch("tools.resolve_release_version.urlopen", side_effect=error):
+        with patch("tools.resolve_release_version.urlopen", side_effect=error) as opener:
             response = request_http("GET", f"{BASE_URL}/maven-metadata.xml")
         self.assertEqual(HttpResponse(302, b""), response)
         self.assertTrue(error.fp.closed)
+        request = opener.call_args.args[0]
+        self.assertEqual("RenG-release-tools/1.0", request.get_header("User-agent"))
 
     def test_transport_failure_is_not_absence(self) -> None:
         with patch("tools.resolve_release_version.urlopen", side_effect=URLError("offline")):

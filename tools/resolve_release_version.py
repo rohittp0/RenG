@@ -22,6 +22,7 @@ from tools.release_completion import (
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _METADATA_PATH = "com/rohittp/reng/kmp"
+_USER_AGENT = "RenG-release-tools/1.0"
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -127,7 +128,11 @@ def read_declared_version(properties_file: Path) -> str:
 
 def request_http(method: str, url: str) -> HttpResponse:
     try:
-        request = Request(url, method=method)
+        request = Request(
+            url,
+            headers={"User-Agent": _USER_AGENT},
+            method=method,
+        )
         with urlopen(request) as response:
             return HttpResponse(response.status, response.read())
     except HTTPError as error:

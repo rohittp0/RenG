@@ -104,7 +104,7 @@ Rentile remains the structural template. The implemented Cycle A surface is:
 | `docs/` | Dependency-free static site published to GitHub Pages at `https://rohittp.com/reng/`. |
 | `CONTEXT.md` | Domain vocabulary: each term with its definition and an explicit `_Avoid_:` list of rejected synonyms. Read it before naming anything. |
 | `consumer-smoke/` | **Standalone** Gradle build (own `settings.gradle.kts`) that resolves the published coordinate from an isolated repository with `exclusiveContent`, proving a release resolves without credentials and without Central masking it. Reads `VERSION_NAME` out of `../gradle.properties` rather than pinning a literal. |
-| `.github/workflows/` | `ci.yml` gates the branch on Ubuntu and macOS; `publish.yml` resolves one release candidate and verifies signed local, R2, public HTTP, and clean-consumer publication stages. See "CI/CD" below. |
+| `.github/workflows/` | `ci.yml` gates the branch on Ubuntu and macOS; `publish.yml` resolves one release candidate and verifies local, R2, public HTTP, and clean-consumer publication stages. See "CI/CD" below. |
 | `tools/` | Standard-library Python release resolver, publication verifier, repository-policy checker, and their unit tests. |
 
 Conventions carried over:
@@ -171,9 +171,9 @@ record. The selected candidate still receives exactly one aggregate-POM availabi
 never skips it. Partial-release recovery is always an explicit upward `VERSION_NAME` change, never
 overwrite, delete, reuse, or automatic skip.
 
-The release gate chain is: Python tests and repository policy → Ubuntu ABI/Android/Linux gates → signed
-local publication of `kmp` plus its six target artifacts → all seven POM checks → manifest-derived signed
-POM and artifact validation → fresh-home six-target local smoke → authoritative exact-key R2 collision
+The release gate chain is: Python tests and repository policy → Ubuntu ABI/Android/Linux gates → local
+publication of `kmp` plus its six target artifacts → all seven POM checks → manifest-derived POM and
+artifact validation → fresh-home six-target local smoke → authoritative exact-key R2 collision
 checks → upload → anonymous HTTP verification of every manifest entry and aggregate metadata, with stale or
 malformed HTTP 200 metadata retried within the configured budget → a copied standalone smoke project
 resolving all six targets from the public repository with no credentials, a fresh Gradle home, and
@@ -190,7 +190,7 @@ The standard-library Python tools are:
 - `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` — prints
   the sole selected candidate or fails closed.
 - `tools/verify_publication.py` has five exact CLI surfaces:
-  - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
+  - `local --repository <path> --version <version> --manifest <path>`
   - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
   - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
   - `completion-create --version <version> --manifest <path> --source-commit <sha> --output <path>`
@@ -200,16 +200,15 @@ The standard-library Python tools are:
   anonymously.
 
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SIGNING_KEY`, `SIGNING_KEY_ID`, `SIGNING_KEY_PASSWORD`.
-A dedicated step fails fast if any is missing. Do not run AWS, upload, push, dispatch, or otherwise infer
-that these outward gates passed without explicit approval and an observed workflow result. The first
-public release is pending. After the exact merged CI jobs and first public completion record succeed, an
-authorized documentation-only follow-up must remove or revise pending claims in `CLAUDE.md`, `README.md`,
-`docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the `docs/versions.js` `pending` fallback if
-applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. ADR 0013 and the Cycle A design spec and
-implementation plan remain historical decision records unless the release exposes a contract error. Keep
-public version display metadata-driven and do not check a RenG semantic version literal into README or
-served docs.
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. A dedicated step fails fast if any is missing. Do not run AWS,
+upload, push, dispatch, or otherwise infer that these outward gates passed without explicit approval and an
+observed workflow result. The first public release is pending. After the exact merged CI jobs and first public
+completion record succeed, an authorized documentation-only follow-up must remove or revise pending claims in
+`CLAUDE.md`, `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
+`docs/versions.js` `pending` fallback if applicable; and update `HANDOFF.md` plus `docs/decomposition.md`.
+ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records unless the
+release exposes a contract error. Keep public version display metadata-driven and do not check a RenG semantic
+version literal into README or served docs.
 
 Two rentile gates were **not** ported because RenG has no analogue: the credential-free coverage
 manifest check (`tools/check_coverage_manifest.py` over `compatibility/`) and the rolling

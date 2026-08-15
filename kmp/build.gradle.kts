@@ -45,10 +45,6 @@ kotlin {
 }
 
 mavenPublishing {
-    if (System.getenv("ORG_GRADLE_PROJECT_signingInMemoryKey") != null) {
-        signAllPublications()
-    }
-
     pom {
         name.set("RenG KMP")
         description.set(

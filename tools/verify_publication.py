@@ -45,8 +45,6 @@ _LICENSE_NAME = "The Apache License, Version 2.0"
 _LICENSE_URL = "https://www.apache.org/licenses/LICENSE-2.0.txt"
 _SCM_URL = "https://github.com/rohittp0/RenG"
 _METADATA_KEY = "com/rohittp/reng/kmp/maven-metadata.xml"
-_BEGIN_SIGNATURE = "-----BEGIN PGP SIGNATURE-----"
-_END_SIGNATURE = "-----END PGP SIGNATURE-----"
 
 
 class VerificationError(RuntimeError):
@@ -164,17 +162,6 @@ def _verify_pom(path: Path, artifact: str, version: Version) -> None:
     _require_pom_value(scm, "url", "SCM URL", _SCM_URL)
 
 
-def _verify_signature(pom: Path) -> None:
-    signature = Path(f"{pom}.asc")
-    _require_regular_file(signature, "POM signature")
-    try:
-        text = signature.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        raise VerificationError("Unable to read POM signature") from None
-    if not text.startswith(_BEGIN_SIGNATURE) or not text.rstrip("\r\n").endswith(_END_SIGNATURE):
-        raise VerificationError("POM signature is not armored")
-
-
 def _discover_publication_files(directory: Path, repository: Path) -> tuple[str, ...]:
     entries: list[str] = []
     try:
@@ -197,9 +184,7 @@ def _discover_publication_files(directory: Path, repository: Path) -> tuple[str,
     return tuple(sorted(entries))
 
 
-def discover_local_manifest(
-    repository: Path, version: Version, require_signed_poms: bool
-) -> Manifest:
+def discover_local_manifest(repository: Path, version: Version) -> Manifest:
     root = _publication_root(repository)
     try:
         root_mode = root.lstat().st_mode
@@ -239,8 +224,6 @@ def discover_local_manifest(
 
         pom = directory / f"{artifact}-{version}.pom"
         _verify_pom(pom, artifact, version)
-        if require_signed_poms:
-            _verify_signature(pom)
         entries.extend(_discover_publication_files(directory, repository))
 
     return Manifest.parse("".join(f"{entry}\n" for entry in sorted(entries)), version)
@@ -484,7 +467,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     local.add_argument("--repository", required=True, type=Path)
     local.add_argument("--version", required=True)
     local.add_argument("--manifest", required=True, type=Path)
-    local.add_argument("--require-signed-poms", action="store_true")
 
     r2 = commands.add_parser("r2-preflight")
     r2.add_argument("--endpoint", required=True)
@@ -517,9 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = parser.parse_args(argv)
         version = parse_declared_version(arguments.version)
         if arguments.command == "local":
-            manifest = discover_local_manifest(
-                arguments.repository, version, arguments.require_signed_poms
-            )
+            manifest = discover_local_manifest(arguments.repository, version)
             arguments.manifest.write_text(manifest.serialize(), encoding="utf-8")
         elif arguments.command == "r2-preflight":
             manifest = read_manifest(arguments.manifest, version)

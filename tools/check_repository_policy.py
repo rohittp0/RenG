@@ -95,6 +95,15 @@ _PUBLIC_SMOKE_TASKS = (
     "compileKotlinLinuxX64",
     "compileKotlinLinuxArm64",
 )
+_ARTIFACT_SIGNING = re.compile(
+    r"signAllPublications|signingInMemoryKey|SIGNING_KEY|require-signed-poms|BEGIN PGP SIGNATURE",
+    re.IGNORECASE,
+)
+_ARTIFACT_SIGNING_PATHS = (
+    "kmp/build.gradle.kts",
+    ".github/workflows/publish.yml",
+    "tools/verify_publication.py",
+)
 
 
 def _read(path: Path) -> str:
@@ -542,6 +551,24 @@ def check_public_version_literals(root: Path) -> list[Violation]:
     return violations
 
 
+def check_unsigned_publication(root: Path) -> list[Violation]:
+    violations = []
+    for relative in _ARTIFACT_SIGNING_PATHS:
+        path = root / relative
+        if not path.is_file():
+            continue
+        text = _read(path)
+        match = _ARTIFACT_SIGNING.search(text)
+        if match is not None:
+            violations.append(_violation(
+                "ARTIFACT_SIGNING",
+                path,
+                _line(text, match.start()),
+                "RenG publishes unsigned artifacts to its custom R2 Maven repository",
+            ))
+    return violations
+
+
 class _DocumentationParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -801,6 +828,7 @@ def check_repository(root: Path) -> list[Violation]:
         check_dependencies,
         check_abi,
         check_public_version_literals,
+        check_unsigned_publication,
         check_docs,
         check_completion_record_workflow,
         check_license,

@@ -35,7 +35,7 @@ The standard-library Python tooling is implemented and unit-tested:
 - `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` selects
   one public candidate or fails closed.
 - `tools/verify_publication.py` exposes:
-  - `local --repository <path> --version <version> --manifest <path> [--require-signed-poms]`
+  - `local --repository <path> --version <version> --manifest <path>`
   - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
   - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
   - `completion-create --version <version> --manifest <path> --source-commit <sha> --output <path>`
@@ -44,7 +44,7 @@ The standard-library Python tooling is implemented and unit-tested:
   artifacts and metadata, canonical manifest-bound record creation, and anonymous record verification.
 
 `.github/workflows/ci.yml` now gates Ubuntu and macOS work rather than referencing missing projects.
-`.github/workflows/publish.yml` adds version resolution, a Linux release gate, signed local publication,
+`.github/workflows/publish.yml` adds version resolution, a Linux release gate, local publication,
 seven POM checks, fresh-home six-target local smoke, exact-key R2 preflight, upload, anonymous artifact
 and retry-budgeted metadata verification, and a copied fresh-home credential-free public smoke. Only after
 those public gates does it derive
@@ -197,7 +197,7 @@ or public repository.
 ## Next cycle after release success: B — public API and pure core
 
 Do not begin Cycle B merely because the feature branch, local publication, or PR is green. First require
-both CI jobs on the exact merged commit and its public workflow to prove signed local publication, no
+both CI jobs on the exact merged commit and its public workflow to prove local publication, no
 authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata
 containing the resolved version, fresh credential-free six-target resolution, conditional completion-record
 creation, and credential-free anonymous verification of the exact record.

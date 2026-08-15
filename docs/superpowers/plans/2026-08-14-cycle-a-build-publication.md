@@ -36,7 +36,7 @@
 
 ### Create
 
-- `kmp/build.gradle.kts` — six targets, ABI, Rentile dependency, POM metadata, signing, and local publication.
+- `kmp/build.gradle.kts` — six targets, ABI, Rentile dependency, POM metadata, and local publication.
 - `kmp/.gitignore` — module build outputs.
 - `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/RentileLinkage.kt` — internal dependency linkage proof.
 - `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/RentileLinkageTest.kt` — common linkage test.
@@ -577,8 +577,8 @@ git commit -m $'build: replace placeholder app with KMP skeleton\n\nCo-Authored-
 - Create: `kmp/api/kmp.klib.api` through the ABI task
 
 **Interfaces:**
-- Consumes: `:kmp`, `VERSION_NAME`, optional R2/signing environment.
-- Produces: `LocalTest` and `R2` repositories, seven publications, seven POM checks, conditional signatures, empty public KLIB ABI, and an aggregate R2 task that depends on all six target R2 tasks.
+- Consumes: `:kmp`, `VERSION_NAME`, and optional R2 environment.
+- Produces: `LocalTest` and `R2` repositories, seven publications, seven POM checks, empty public KLIB ABI, and an aggregate R2 task that depends on all six target R2 tasks.
 
 - [ ] **Step 1: Verify publication tasks are absent**
 
@@ -646,16 +646,12 @@ subprojects {
 
 Ordinary builds must configure successfully when every R2 value is absent.
 
-- [ ] **Step 3: Add POM, signing, and LocalTest publication**
+- [ ] **Step 3: Add POM and LocalTest publication**
 
 Apply `alias(libs.plugins.maven.publish)` in `kmp/build.gradle.kts`. Add:
 
 ```kotlin
 mavenPublishing {
-    if (System.getenv("ORG_GRADLE_PROJECT_signingInMemoryKey") != null) {
-        signAllPublications()
-    }
-
     pom {
         name.set("RenG KMP")
         description.set(
@@ -957,7 +953,7 @@ git commit -m $'test: add isolated six-target consumer\n\nCo-Authored-By: Claude
 - Produces:
   - `VerificationError(RuntimeError)`
   - `Manifest(entries: tuple[str, ...])` with `parse(text: str, version: Version) -> Manifest` and `serialize() -> str`
-  - `discover_local_manifest(repository: Path, version: Version, require_signed_poms: bool) -> Manifest`
+  - `discover_local_manifest(repository: Path, version: Version) -> Manifest`
   - `read_manifest(path: Path, version: Version) -> Manifest`
   - `check_r2_collisions(manifest: Manifest, endpoint: str, bucket: str, run: Callable = subprocess.run) -> None`
   - `verify_public(manifest: Manifest, repository_url: str, version: Version, fetch: Callable[[str], HttpResponse], attempts: int, retry_delay: float, sleep: Callable = time.sleep) -> None`
@@ -1014,7 +1010,6 @@ POM = """<?xml version="1.0" encoding="UTF-8"?>
   <scm><url>https://github.com/rohittp0/RenG</url></scm>
 </project>
 """
-SIGNATURE = "-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n"
 
 
 class VerifyPublicationTests(unittest.TestCase):
@@ -1025,14 +1020,12 @@ class VerifyPublicationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_publication(self, artifact: str, *, signed: bool = True) -> Path:
+    def write_publication(self, artifact: str) -> Path:
         directory = self.repository / "com/rohittp/reng" / artifact / "0.1.0"
         directory.mkdir(parents=True)
         pom = directory / f"{artifact}-0.1.0.pom"
         pom.write_text(POM.format(artifact=artifact), encoding="utf-8")
         (directory / f"{artifact}-0.1.0.module").write_text("{}\n", encoding="utf-8")
-        if signed:
-            Path(f"{pom}.asc").write_text(SIGNATURE, encoding="utf-8")
         return pom
 
     def write_all(self) -> None:
@@ -1044,7 +1037,7 @@ class VerifyPublicationTests(unittest.TestCase):
         other = self.repository / "com/rohittp/reng/kmp/0.2.0/ignored.pom"
         other.parent.mkdir(parents=True)
         other.write_text("ignored", encoding="utf-8")
-        manifest = discover_local_manifest(self.repository, VERSION, True)
+        manifest = discover_local_manifest(self.repository, VERSION)
         self.assertEqual(tuple(sorted(manifest.entries)), manifest.entries)
         self.assertTrue(all("/0.1.0/" in entry for entry in manifest.entries))
         self.assertEqual(manifest.serialize(), "".join(f"{entry}\n" for entry in manifest.entries))
@@ -1053,18 +1046,11 @@ class VerifyPublicationTests(unittest.TestCase):
         for artifact in EXPECTED_ARTIFACTS - {"kmp-linuxarm64"}:
             self.write_publication(artifact)
         with self.assertRaisesRegex(VerificationError, "missing.*kmp-linuxarm64"):
-            discover_local_manifest(self.repository, VERSION, True)
+            discover_local_manifest(self.repository, VERSION)
         self.write_publication("kmp-linuxarm64")
         self.write_publication("kmp-jvm")
         with self.assertRaisesRegex(VerificationError, "unexpected.*kmp-jvm"):
-            discover_local_manifest(self.repository, VERSION, True)
-
-    def test_signed_mode_requires_armored_pom_signatures(self) -> None:
-        self.write_all()
-        signature = next(self.repository.rglob("*.pom.asc"))
-        signature.write_text("", encoding="utf-8")
-        with self.assertRaisesRegex(VerificationError, "signature"):
-            discover_local_manifest(self.repository, VERSION, True)
+            discover_local_manifest(self.repository, VERSION)
 
     def test_poms_require_canonical_url_license_and_scm(self) -> None:
         self.write_all()
@@ -1076,7 +1062,7 @@ class VerifyPublicationTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(VerificationError, "project URL"):
-            discover_local_manifest(self.repository, VERSION, False)
+            discover_local_manifest(self.repository, VERSION)
 
     def test_manifest_rejects_malformed_entries(self) -> None:
         invalid = (
@@ -1220,7 +1206,7 @@ A valid manifest contains every regular file under:
 <repository>/com/rohittp/reng/<artifact>/<version>/**
 ```
 
-Store repository-relative POSIX paths, sorted lexically, one per line with one trailing newline. Reject an empty manifest and any entry that is blank, duplicate, unsorted, absolute, contains `..`, lies outside `com/rohittp/reng`, or names another version. Local verification must require the exact seven artifact directories and exact canonical POM path for each. In signed mode each POM sibling `.asc` must be nonempty armored text beginning with `-----BEGIN PGP SIGNATURE-----` and ending with `-----END PGP SIGNATURE-----`.
+Store repository-relative POSIX paths, sorted lexically, one per line with one trailing newline. Reject an empty manifest and any entry that is blank, duplicate, unsorted, absolute, contains `..`, lies outside `com/rohittp/reng`, or names another version. Local verification must require the exact seven artifact directories and exact canonical POM path for each.
 
 Parse POM XML by local element name and require:
 
@@ -1260,7 +1246,7 @@ The completion helpers derive their expected record from the parsed manifest's e
 The CLI contracts are:
 
 ```text
-verify_publication.py local --repository PATH --version VERSION --manifest PATH [--require-signed-poms]
+verify_publication.py local --repository PATH --version VERSION --manifest PATH
 verify_publication.py r2-preflight --endpoint URL --bucket NAME --version VERSION --manifest PATH
 verify_publication.py public --repository-url URL --version VERSION --manifest PATH [--attempts 12] [--retry-delay 5]
 verify_publication.py completion-create --version VERSION --manifest PATH --source-commit SHA --output PATH
@@ -1749,8 +1735,8 @@ git commit -m $'ci: gate Cycle A build and local publication\n\nCo-Authored-By: 
 - Modify: `.github/workflows/publish.yml`
 
 **Interfaces:**
-- Consumes: Task 1 resolver/record CLI contracts, Task 5 verifier CLI, Task 6 policy CLI, Gradle publications, smoke consumer, existing R2/signing values.
-- Produces: `resolve-version`, Linux release gate, signed macOS publication, authoritative manifest collision preflight, anonymous artifact/metadata verification, clean public smoke, immutable conditional completion-record creation, and anonymous record verification.
+- Consumes: Task 1 resolver/record CLI contracts, Task 5 verifier CLI, Task 6 policy CLI, Gradle publications, smoke consumer, and existing R2 values.
+- Produces: `resolve-version`, Linux release gate, macOS publication, authoritative manifest collision preflight, anonymous artifact/metadata verification, clean public smoke, immutable conditional completion-record creation, and anonymous record verification.
 
 - [ ] **Step 1: Replace inline resolution with tested one-candidate resolution**
 
@@ -1783,18 +1769,17 @@ Add an Ubuntu job depending on `resolve-version`. Set up JDK 21/Gradle and run w
 
 Make the macOS publish job depend on both version resolution and this Linux gate. Do not rely on the concurrently running ordinary CI workflow.
 
-- [ ] **Step 3: Keep the complete signed local macOS gate**
+- [ ] **Step 3: Keep the complete local macOS gate**
 
-Retain validation of all eight R2/signing values. Run `clean`, ABI, Android host, macOS tests, Apple/Linux compilations, Android AAR, local publication, and all seven `checkPomFileFor*Publication` tasks with signing properties. Add `linuxX64Test` only to the Ubuntu job, because it cannot execute on macOS.
+Retain validation of the five R2 values. Run `clean`, ABI, Android host, macOS tests, Apple/Linux compilations, Android AAR, local publication, and all seven `checkPomFileFor*Publication` tasks. Add `linuxX64Test` only to the Ubuntu job, because it cannot execute on macOS.
 
-Replace inline signed-publication scanning with:
+Replace inline publication scanning with:
 
 ```bash
 python3 tools/verify_publication.py local \
   --repository build/local-maven \
   --version "$VERSION" \
-  --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
-  --require-signed-poms
+  --manifest "$RUNNER_TEMP/reng-release-manifest.txt"
 ```
 
 Then force six-target local smoke resolution before any R2 read/write:
@@ -1816,7 +1801,7 @@ local_smoke_home="$(mktemp -d)"
 
 - [ ] **Step 4: Replace aggregate-POM preflight with manifest-derived exact checks**
 
-Delete the old pre-build `Reject an existing release` step. After signed local verification and local smoke, run:
+Delete the old pre-build `Reject an existing release` step. After local verification and local smoke, run:
 
 ```bash
 python3 tools/verify_publication.py r2-preflight \
@@ -2026,7 +2011,7 @@ After approval, push the feature branch and open a PR against `main`. Wait for b
 
 - [ ] **Step 9: Trigger the first public release only with fresh explicit approval**
 
-After CI-tested fast-forward integration into local `main`, request a separate approval immediately before `git push origin main`. That push triggers the first public candidate. Observe both CI and publish workflows on the exact merged commit. Cycle A is complete only when both CI jobs pass that exact commit and the publish run proves signed local publication, no authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata containing the selected version, fresh credential-free six-target resolution, conditional creation of the exact completion record, and final credential-free anonymous verification of that record.
+After CI-tested fast-forward integration into local `main`, request a separate approval immediately before `git push origin main`. That push triggers the first public candidate. Observe both CI and publish workflows on the exact merged commit. Cycle A is complete only when both CI jobs pass that exact commit and the publish run proves local publication, no authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata containing the selected version, fresh credential-free six-target resolution, conditional creation of the exact completion record, and final credential-free anonymous verification of that record.
 
 - [ ] **Step 10: Record the observed public outcome without mutating artifacts**
 

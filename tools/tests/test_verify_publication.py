@@ -35,7 +35,6 @@ POM = """<?xml version="1.0" encoding="UTF-8"?>
   <scm><url>https://github.com/rohittp0/RenG</url></scm>
 </project>
 """
-SIGNATURE = "-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n"
 
 
 class VerifyPublicationTests(unittest.TestCase):
@@ -46,14 +45,12 @@ class VerifyPublicationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_publication(self, artifact: str, *, signed: bool = True) -> Path:
+    def write_publication(self, artifact: str) -> Path:
         directory = self.repository / "com/rohittp/reng" / artifact / "0.1.0"
         directory.mkdir(parents=True)
         pom = directory / f"{artifact}-0.1.0.pom"
         pom.write_text(POM.format(artifact=artifact), encoding="utf-8")
         (directory / f"{artifact}-0.1.0.module").write_text("{}\n", encoding="utf-8")
-        if signed:
-            Path(f"{pom}.asc").write_text(SIGNATURE, encoding="utf-8")
         return pom
 
     def write_all(self) -> None:
@@ -65,7 +62,7 @@ class VerifyPublicationTests(unittest.TestCase):
         other = self.repository / "com/rohittp/reng/kmp/0.2.0/ignored.pom"
         other.parent.mkdir(parents=True)
         other.write_text("ignored", encoding="utf-8")
-        manifest = discover_local_manifest(self.repository, VERSION, True)
+        manifest = discover_local_manifest(self.repository, VERSION)
         self.assertEqual(tuple(sorted(manifest.entries)), manifest.entries)
         self.assertTrue(all("/0.1.0/" in entry for entry in manifest.entries))
         self.assertEqual(manifest.serialize(), "".join(f"{entry}\n" for entry in manifest.entries))
@@ -74,18 +71,11 @@ class VerifyPublicationTests(unittest.TestCase):
         for artifact in EXPECTED_ARTIFACTS - {"kmp-linuxarm64"}:
             self.write_publication(artifact)
         with self.assertRaisesRegex(VerificationError, "missing.*kmp-linuxarm64"):
-            discover_local_manifest(self.repository, VERSION, True)
+            discover_local_manifest(self.repository, VERSION)
         self.write_publication("kmp-linuxarm64")
         self.write_publication("kmp-jvm")
         with self.assertRaisesRegex(VerificationError, "unexpected.*kmp-jvm"):
-            discover_local_manifest(self.repository, VERSION, True)
-
-    def test_signed_mode_requires_armored_pom_signatures(self) -> None:
-        self.write_all()
-        signature = next(self.repository.rglob("*.pom.asc"))
-        signature.write_text("", encoding="utf-8")
-        with self.assertRaisesRegex(VerificationError, "signature"):
-            discover_local_manifest(self.repository, VERSION, True)
+            discover_local_manifest(self.repository, VERSION)
 
     def test_poms_require_canonical_url_license_and_scm(self) -> None:
         self.write_all()
@@ -97,7 +87,7 @@ class VerifyPublicationTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(VerificationError, "project URL"):
-            discover_local_manifest(self.repository, VERSION, False)
+            discover_local_manifest(self.repository, VERSION)
 
     def test_manifest_rejects_malformed_entries(self) -> None:
         invalid = (

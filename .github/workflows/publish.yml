@@ -125,9 +125,6 @@ jobs:
           R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           required=(
@@ -136,9 +133,6 @@ jobs:
             R2_PUBLIC_URL
             R2_ACCESS_KEY_ID
             R2_SECRET_ACCESS_KEY
-            SIGNING_KEY
-            SIGNING_KEY_ID
-            SIGNING_KEY_PASSWORD
           )
 
           for name in "${required[@]}"; do
@@ -151,9 +145,6 @@ jobs:
       - name: Test and publish to isolated local repository
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: >-
           ./gradlew --no-configuration-cache clean
           -PVERSION_NAME="$VERSION"
@@ -174,7 +165,7 @@ jobs:
           :kmp:checkPomFileForLinuxX64Publication
           :kmp:checkPomFileForMacosArm64Publication
 
-      - name: Derive and verify signed local publication manifest
+      - name: Derive and verify local publication manifest
         shell: bash
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
@@ -182,8 +173,7 @@ jobs:
           python3 tools/verify_publication.py local \
             --repository build/local-maven \
             --version "$VERSION" \
-            --manifest "$RUNNER_TEMP/reng-release-manifest.txt" \
-            --require-signed-poms
+            --manifest "$RUNNER_TEMP/reng-release-manifest.txt"
 
       - name: Resolve six targets from isolated local repository
         shell: bash
@@ -227,9 +217,6 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: >-
           ./gradlew --no-configuration-cache
           -PVERSION_NAME="$VERSION"

@@ -18,11 +18,10 @@ The `:kmp` module applies Kotlin Multiplatform, Android KMP Library, and Vannikt
 
 The module publishes POM metadata for RenG, Apache-2.0, `https://rohittp.com/reng/`, and
 `https://github.com/rohittp0/RenG`; the license keeps the Apache URL in `url` and uses Maven's
-conventional `distribution` value `repo`. In-memory signing is enabled only when signing properties are
-present. The `LocalTest` repository is rooted at the repository's `build/local-maven`, while the optional
-`R2` repository consumes the existing endpoint, bucket, and credential inputs. The aggregate
-KotlinMultiplatform R2 publication task depends on all six target R2 publication tasks, so aggregate
-artifacts and aggregate metadata cannot publish before the target publications complete. This is defense
+conventional `distribution` value `repo`. The `LocalTest` repository is rooted at the repository's
+`build/local-maven`, while the optional R2 repository consumes the existing endpoint, bucket, and credential
+inputs. The aggregate KotlinMultiplatform R2 publication task depends on all six target R2 publication tasks,
+so aggregate artifacts and aggregate metadata cannot publish before the target publications complete. This is defense
 in depth against partial state; aggregate POM and metadata availability are not completion proof.
 Configuration-cache exclusions remain limited to remote Maven publishing tasks.
 
@@ -48,12 +47,12 @@ After that check, the resolver selects one candidate and probes that candidate's
 
 Manual dispatch is accepted only from `main`. Every non-documentation push to `main` continues to cut a release, and the existing concurrency group continues to serialize releases without cancelling one mid-upload.
 
-## Signed local gate and authoritative collision check
+## Local gate and authoritative collision check
 
-The publish job first builds, tests, signs, validates POMs, and publishes all seven publications into `build/local-maven`. This local gate includes ABI validation, Android host tests, Linux x64 tests, macOS ARM64 tests, both iOS compilations, Linux ARM64 compilation, Android AAR creation, all seven POM checks, signed-POM verification, and six-target isolated consumer resolution.
+The publish job first builds, tests, validates POMs, and publishes all seven publications into `build/local-maven`. This local gate includes ABI validation, Android host tests, Linux x64 tests, macOS ARM64 tests, both iOS compilations, Linux ARM64 compilation, Android AAR creation, all seven POM checks, local-manifest validation, and six-target isolated consumer resolution.
 
 After local publication, the workflow derives an immutable-key manifest from every path under
-`build/local-maven/com/rohittp/reng` matching `*/<version>/*`. It checks each exact relative key against the authoritative R2 bucket before upload. This avoids hardcoding artifact IDs and covers the POMs, modules, archives, checksums, and signatures Gradle actually produced. If any key already exists, publication stops; no object is overwritten or deleted.
+`build/local-maven/com/rohittp/reng` matching `*/<version>/*`. It checks each exact relative key against the authoritative R2 bucket before upload. This avoids hardcoding artifact IDs and covers the POMs, modules, archives, and checksums Gradle actually produced. If any key already exists, publication stops; no object is overwritten or deleted.
 
 A partial release is deliberately not repaired automatically. Its surviving objects remain immutable evidence, and the next attempt fails the same authoritative preflight. Recovery is an explicit upward `VERSION_NAME` change, leaving a harmless version gap. The workflow never silently selects another version after an authoritative collision.
 
@@ -73,9 +72,9 @@ The dependency-free static site follows Rentile's structure but documents only t
 
 ## Tests and completion
 
-Repository policy checks reject `mavenLocal()`, RenG snapshot dependencies, leaked Rentile types in the ABI, extra published targets, independently hardcoded RenG versions, and completion-record workflow regressions in ordering, conditional creation, credential scope, or anonymous verification. Completion-record, resolver, verifier, and policy unit tests run on the Ubuntu CI leg and before public version resolution. The existing Ubuntu and macOS Gradle gates then prove ABI, host tests, target compilation, local publication, and isolated resolution.
+Repository policy checks reject `mavenLocal()`, RenG snapshot dependencies, artifact-signing configuration, leaked Rentile types in the ABI, extra published targets, independently hardcoded RenG versions, and completion-record workflow regressions in ordering, conditional creation, credential scope, or anonymous verification. Completion-record, resolver, verifier, and policy unit tests run on the Ubuntu CI leg and before public version resolution. The existing Ubuntu and macOS Gradle gates then prove ABI, host tests, target compilation, local publication, and isolated resolution.
 
-A branch is merge-ready only when both CI legs pass on its exact commit. Cycle A itself is complete only after the exact merged `main` commit passes both CI jobs, publishes the first public release, and anonymously verifies the exact completion record after signed local validation, authoritative collision checks, public artifact and metadata verification, and clean credential-free six-target resolution. Merging and pushing remain separate outward-facing actions requiring explicit approval.
+A branch is merge-ready only when both CI legs pass on its exact commit. Cycle A itself is complete only after the exact merged `main` commit passes both CI jobs, publishes the first public release, and anonymously verifies the exact completion record after local publication validation, authoritative collision checks, public artifact and metadata verification, and clean credential-free six-target resolution. Merging and pushing remain separate outward-facing actions requiring explicit approval.
 
 ## Deferred work
 

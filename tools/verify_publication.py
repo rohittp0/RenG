@@ -260,27 +260,18 @@ def _validate_aws_response(key: str, completed: object) -> None:
     if not isinstance(stdout, str):
         raise VerificationError("AWS list-objects-v2 output is malformed")
     try:
-        response = json.loads(stdout)
+        keys = json.loads(stdout)
     except json.JSONDecodeError:
         raise VerificationError("AWS list-objects-v2 output is malformed") from None
-    if not isinstance(response, dict):
-        raise VerificationError("AWS list-objects-v2 output is malformed")
 
-    key_count = response.get("KeyCount")
-    if isinstance(key_count, bool) or not isinstance(key_count, int) or key_count < 0:
-        raise VerificationError("AWS KeyCount is malformed")
-    contents = response.get("Contents", None)
-    if key_count == 0:
-        if "Contents" in response and response["Contents"] != []:
-            raise VerificationError("AWS KeyCount and Contents are inconsistent")
+    if keys is None:
         return
-    if not isinstance(contents, list) or len(contents) != key_count:
-        raise VerificationError("AWS KeyCount and Contents are inconsistent")
-
-    for item in contents:
-        if not isinstance(item, dict) or not isinstance(item.get("Key"), str) or not item["Key"]:
+    if not isinstance(keys, list):
+        raise VerificationError("AWS list-objects-v2 output is malformed")
+    for listed_key in keys:
+        if not isinstance(listed_key, str) or not listed_key:
             raise VerificationError("AWS object key is malformed")
-        if item["Key"] == key:
+        if listed_key == key:
             raise VerificationError(f"R2 object already exists: {key}")
 
 
@@ -303,6 +294,8 @@ def check_r2_collisions(
             bucket,
             "--prefix",
             key,
+            "--query",
+            "Contents[].Key",
             "--output",
             "json",
         ]

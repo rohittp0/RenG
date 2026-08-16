@@ -107,7 +107,7 @@ class VerifyPublicationTests(unittest.TestCase):
         manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom",))
         runner = Mock(return_value=subprocess.CompletedProcess(
             args=[], returncode=0,
-            stdout='{"KeyCount":1,"Contents":[{"Key":"com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom"}]}',
+            stdout='["com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom"]',
             stderr="",
         ))
         with self.assertRaisesRegex(VerificationError, "already exists"):
@@ -115,24 +115,37 @@ class VerifyPublicationTests(unittest.TestCase):
         command = runner.call_args.args[0]
         self.assertIn("--prefix", command)
         self.assertIn(manifest.entries[0], command)
+        self.assertIn("--query", command)
+        self.assertIn("Contents[].Key", command)
 
-    def test_r2_preflight_accepts_zero_keycount_without_contents(self) -> None:
+    def test_r2_preflight_accepts_empty_key_projection(self) -> None:
         manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom",))
+        for output in ("null", "[]"):
+            with self.subTest(output=output):
+                runner = Mock(return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=output, stderr="",
+                ))
+                check_r2_collisions(
+                    manifest, "https://r2.example", "bucket", run=runner
+                )
+                self.assertEqual(1, runner.call_count)
+
+    def test_r2_preflight_ignores_nonexact_prefix_matches(self) -> None:
+        key = "com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom"
+        manifest = Manifest((key,))
         runner = Mock(return_value=subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='{"KeyCount":0}', stderr="",
+            args=[], returncode=0, stdout=f'["{key}.sha256"]', stderr="",
         ))
-        check_r2_collisions(
-            manifest, "https://r2.example", "bucket", run=runner
-        )
-        self.assertEqual(1, runner.call_count)
+        check_r2_collisions(manifest, "https://r2.example", "bucket", run=runner)
 
     def test_r2_preflight_fails_on_aws_error_or_bad_json(self) -> None:
         manifest = Manifest(("com/rohittp/reng/kmp/0.1.0/kmp-0.1.0.pom",))
         for completed in (
             subprocess.CompletedProcess([], 2, "", "denied"),
             subprocess.CompletedProcess([], 0, "not-json", ""),
-            subprocess.CompletedProcess([], 0, '{"KeyCount":1}', ""),
-            subprocess.CompletedProcess([], 0, '{"KeyCount":0,"Contents":null}', ""),
+            subprocess.CompletedProcess([], 0, "{}", ""),
+            subprocess.CompletedProcess([], 0, "[1]", ""),
+            subprocess.CompletedProcess([], 0, '[""]', ""),
         ):
             with self.subTest(completed=completed):
                 with self.assertRaises(VerificationError):

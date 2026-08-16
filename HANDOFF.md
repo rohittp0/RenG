@@ -1,18 +1,17 @@
 # Handoff
 
-For whoever picks up RenG next. Cycle 0 — the graphics contract — is complete. Cycle A's
-implementation and local gates are complete; the first public release is pending. Nothing renders and
-there is no public runtime API yet. Cycle B becomes the next implementation cycle only after both CI jobs
-pass the exact merged Cycle A commit and that commit's public workflow anonymously verifies its immutable
-completion record.
+For whoever picks up RenG next. Cycle 0 established the graphics contract, with later superseding decisions
+recorded in ADRs 0014–0015. Cycle A is publicly complete. RenG still renders nothing and exposes no public
+runtime API; Cycle B design preparation is underway, but production implementation has not started.
 
 ## Read these first, in this order
 
 1. `CLAUDE.md` — current project structure, contracts, tools, and local commands. Where it disagrees with
    an ADR, the ADR wins.
 2. `CONTEXT.md` — vocabulary. Read it before naming anything.
-3. `docs/adr/0001`–`0012` — the graphics contract. **Do not re-litigate these.** ADR 0013 separately
-   governs the fail-closed release policy.
+3. `docs/adr/0001`–`0015` — ADRs 0001–0012 establish the original graphics contract, ADR 0013
+   governs fail-closed release policy, and ADRs 0014–0015 supersede preparation ordering and exact-context
+   deletion behavior. **Do not re-litigate resolved contracts without new evidence.**
 4. `docs/decomposition.md` — cycles A–J, their gates, and their order.
 
 ## What exists and what does not
@@ -105,23 +104,21 @@ Shader dialect, from a headless CGL context on an M3 Max reporting `4.1 Metal - 
   kotlin-native-prebuilt-macos-aarch64-<version>/bin/klib dump-metadata <path>`. `klib contents` does
   not exist.
 
-## Cycle A local completion and pending public outcome
+## Cycle A public completion
 
 The approved design and its fail-closed release policy are in
-`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013. The implementation
-and local gates are complete. No push, merge, workflow dispatch, AWS operation, R2 upload, or public
-publication has been performed from this worktree. **Public release pending** is the authoritative
-outcome until both CI jobs pass the exact merged commit and that commit's public workflow anonymously
-verifies its exact completion record.
+`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013. Cycle A completed from
+exact source commit `af92901b2ef045078b855a6b47533bc95aca6886`. CI run `31968682132` passed its Android
+and Linux job and its Apple and publication-metadata job. Publication run `31968682290` resolved and
+published `0.1.0`, passed the Linux release gate, completed isolated and public six-target smoke checks,
+and anonymously verified the immutable record at
+`com/rohittp/reng/kmp/0.1.0/reng-release-completion-v1.json`. That public record has schema version 1,
+identifies the exact source commit, and carries the expected lowercase manifest SHA-256.
 
-After that observed outcome, request approval for a separate documentation-only follow-up. Remove or revise
-pending claims in `CLAUDE.md`, `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust
-the `docs/versions.js` `pending` fallback if applicable; and record the exact merged CI/public outcome here
-and in `docs/decomposition.md`. ADR 0013 and the Cycle A design spec and implementation plan remain
-historical decision records unless the release exposes a contract error. Keep the public version display
-metadata-driven and do not check a RenG semantic version literal into README or served docs. Do not
-pre-apply that follow-up or infer success from artifacts, POM, metadata, local publication, or a branch CI
-run.
+The first release is therefore complete rather than inferred from artifacts, POM, metadata, local
+publication, or branch CI alone. The required documentation-only follow-up keeps README and served-doc
+version display metadata-driven and preserves ADR 0013 plus the Cycle A design spec and implementation
+plan as historical decision records.
 
 The release resolver does not search for alternatives. If checked-in `VERSION_NAME` is newer than every
 public stable version, that explicit declaration is the candidate and is allowed to recover from a partial
@@ -194,22 +191,21 @@ Every Gradle invocation in CI/publication passes `--no-configuration-cache`. The
 fresh Gradle home and `--refresh-dependencies`, so cached RenG artifacts cannot mask an incomplete local
 or public repository.
 
-## Next cycle after release success: B — public API and pure core
+## Current cycle: B — public API and pure core
 
-Do not begin Cycle B merely because the feature branch, local publication, or PR is green. First require
-both CI jobs on the exact merged commit and its public workflow to prove local publication, no
-authoritative R2 collision, anonymous retrieval of every manifest artifact, valid aggregate metadata
-containing the resolved version, fresh credential-free six-target resolution, conditional completion-record
-creation, and credential-free anonymous verification of the exact record.
+Cycle A's exact-SHA public gate is satisfied. Cycle B preparation has read the governing documents, run the
+initial feasibility spikes, and captured the resolved vocabulary in `CONTEXT.md`; follow-up proofs remain
+in progress. ADRs 0014–0015 supersede the earlier preparation-ordering and exact-context deletion details.
 
-Only after that observed success may Cycle B preparation begin, in this order:
+Before Cycle B implementation:
 
-1. Read `CONTEXT.md`, ADRs 0001–0013, `docs/decomposition.md`, and this handoff.
-2. Run the required Cycle B feasibility spikes, including coordinate-precision and transform-boundary work.
-3. Invoke `/grill-with-docs` with the governing documents and spike findings.
-4. Write an implementation plan only after that design review resolves its questions.
+1. Read `CONTEXT.md`, ADRs 0001–0015, `docs/decomposition.md`, and this handoff.
+2. Complete and review the required follow-up feasibility proofs.
+3. Invoke `/grill-with-docs` with the governing documents and all spike findings.
+4. Write and obtain approval of the design specification.
+5. Write an implementation plan only after that design review resolves its questions.
 
-Cycle B implementation does not begin during Cycle A's release or post-release documentation follow-up.
+No Cycle B production implementation has started.
 
 ## Decisions still open, each needing a spike before its cycle's spec
 
@@ -222,14 +218,13 @@ Cycle B implementation does not begin during Cycle A's release or post-release d
   map-anchored things are occlusion-tested. How the two interleave in one frame is ADR-worthy.
 - **Golden images (cycle E onward).** llvmpipe and Apple's GL will never be pixel-identical. Baselines
   are per-platform with a tolerance, never cross-platform equality.
-- **Basemap suppression per frame.** Left undecided in ADR 0004 until the basemap cycle needs an answer.
 
 ## Process expectations
 
 - The repository owner's standing instruction: **run `/grill-with-docs` before writing any plan**, and
   use parallel subagents for genuinely independent implementation tasks.
 - ADRs are a few paragraphs of prose, no template headings, `NNNN-imperative-title.md`. Next number is
-  0014.
+  0016.
 - Update `CONTEXT.md` as terms resolve rather than batching it.
 - Never commit `mavenLocal()`, a `-SNAPSHOT` dependency, or an independently hardcoded RenG version —
   `VERSION_NAME` in the root `gradle.properties` is the sole checked-in version input. ADR 0013 defines

@@ -5,8 +5,9 @@ its own implementation plan, and its own gates. A cycle is finished when its out
 its code exists. Cycle A additionally requires both CI jobs on the exact merged commit and anonymous
 verification of that commit's first public completion record.
 
-Cycle 0 is complete: the graphics contract is decided and recorded in ADRs 0001–0012 and `CONTEXT.md`.
-Everything below inherits those decisions rather than revisiting them.
+Cycle 0 is complete: the original graphics contract is recorded in ADRs 0001–0012 and `CONTEXT.md`;
+ADRs 0014–0015 supersede its preparation-ordering and exact-context deletion details. Everything below
+inherits the current decisions rather than revisiting them without new evidence.
 
 ## Order
 
@@ -49,20 +50,21 @@ metadata, credential-free resolution for all six targets, and the final immutabl
 `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; POM and metadata availability alone are
 not completion proof. See ADR 0013.
 
-Cycle B preparation starts only after that outcome. First read `CONTEXT.md`, ADRs 0001–0013, this
-decomposition, and `HANDOFF.md`; then run the required feasibility spikes; invoke `/grill-with-docs` with
-the governing documents and spike findings; and only then write an implementation plan.
+That outcome is satisfied. Cycle B preparation reads `CONTEXT.md`, ADRs 0001–0015, this decomposition,
+and `HANDOFF.md`; completes the required feasibility proofs; invokes `/grill-with-docs` with the governing
+documents and findings; obtains design-specification approval; and only then writes an implementation plan.
 
-The implementation and local gates exist, but the public outcome is pending. After it is observed, an
-authorized documentation-only follow-up revises pending claims in `CLAUDE.md`, `README.md`,
-`docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjusts the `docs/versions.js` fallback if
-applicable; and records the result in `HANDOFF.md` and this file without hardcoding a release version into
-README or served docs. ADR 0013 and the Cycle A design spec and implementation plan remain historical
-decision records unless the release exposes a contract error.
+Cycle A is publicly complete from exact source commit
+`af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`
+succeeded, public six-target resolution passed, and the immutable `0.1.0` completion record verified
+anonymously. The required documentation follow-up keeps README and served-doc version display
+metadata-driven. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision
+records.
 
 ## B — Public API surface and pure core
 
-Every type a consumer touches, embodying ADRs 0001–0012: the frame vocabulary (`FramePlan`,
+Every type a consumer touches, embodying ADRs 0001–0012 as superseded by ADRs 0014–0015: the frame
+vocabulary (`FramePlan`,
 `Placement`, `Sticker`, `Model`, `Geometry`, `AnimationTrack`, camera), the renderer boundary
 (`prepare`, `draw`, cancellation, resource query and free, the GPU-objects-are-gone operation, `close`),
 RenG's own transport and store interfaces with RenG's resource classes, and typed exceptions carrying

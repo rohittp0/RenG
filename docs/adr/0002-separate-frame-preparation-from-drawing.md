@@ -1,5 +1,8 @@
 # Separate frame preparation from drawing
 
+ADR 0014 supersedes this record's concurrent, out-of-order preparation and multi-invocation cancellation
+semantics; the acquisition/drawing split and repeat-drawable **Prepared Frame** contract remain in force.
+
 Acquiring what a frame needs and drawing that frame are two separate public operations. Preparation
 is suspending, performs every network read, decode, and parse, and issues no GL call whatsoever;
 drawing is non-suspending, issues only GL calls, and must run on the thread holding the current

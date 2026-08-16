@@ -6,10 +6,10 @@ Source: https://github.com/rohittp0/RenG
 Architecture decisions: https://github.com/rohittp0/RenG/tree/main/docs/adr
 
 Maven coordinate: com.rohittp.reng:kmp
-Public Maven repository after exact merged CI and anonymous first-release completion-record verification: https://maven.rohittp.com
-Public release status: pending
+Public Maven repository: https://maven.rohittp.com
+Public release status: available; read Maven metadata for the current version
 
-Configured Kotlin Multiplatform targets, available together after that verification:
+Published Kotlin Multiplatform targets:
 - android
 - iosArm64
 - iosSimulatorArm64
@@ -26,11 +26,8 @@ release's strict record at com/rohittp/reng/kmp/<version>/reng-release-completio
 availability are not completion proof. The workflow conditionally creates the record only after anonymous
 artifact/metadata verification and credential-free six-target resolution, then verifies it anonymously.
 
-After both CI jobs pass the exact merged commit and the first public completion record verifies, an
-authorized documentation-only follow-up must revise pending claims in CLAUDE.md, README.md,
-docs/index.html, docs/kmp.html, and this file; adjust the docs/versions.js pending fallback if applicable;
-and update HANDOFF.md plus docs/decomposition.md. ADR 0013 and the Cycle A design spec and implementation
-plan remain historical decision records unless the release exposes a contract error. Public version display
-remains metadata-driven.
+The first public completion record verified anonymously from its exact CI-passing source commit. ADR 0013
+and the Cycle A design spec and implementation plan remain historical decision records. Public version
+display remains metadata-driven.
 
-RenG is pre-runtime in Cycle A. It exposes no runtime API and renders nothing.
+RenG remains pre-runtime after Cycle A. It exposes no runtime API and renders nothing.

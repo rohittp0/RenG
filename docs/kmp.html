@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KMP setup — RenG</title>
-  <meta name="description" content="Review the pending RenG KMP installation and its configured publication targets." />
+  <meta name="description" content="Review the public RenG KMP installation and its six publication targets." />
   <meta name="theme-color" content="#0b3026" />
   <link rel="canonical"
     href="https://rohittp.com/reng/kmp.html" />
@@ -13,7 +13,7 @@
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="RenG" />
   <meta property="og:title" content="KMP setup — RenG" />
-  <meta property="og:description" content="Review the RenG KMP setup that becomes available after first-release completion-record verification." />
+  <meta property="og:description" content="Review the public RenG KMP repository, dependency, and six-target setup." />
   <meta property="og:url" content="https://rohittp.com/reng/kmp.html" />
   <script src="versions.js" defer></script>
 </head>
@@ -44,26 +44,21 @@
         <p class="eyebrow">com.rohittp.reng:kmp</p>
         <h1>KMP setup</h1>
         <p class="docs-lead">
-          RenG is configured for one public KMP coordinate. Installation becomes available only after both
-          CI jobs pass the exact merged commit and the first public completion record verifies anonymously.
-          The setup below is ready for that release.
+          RenG publishes one public KMP coordinate. Its exact-source CI jobs and first immutable completion
+          record verified anonymously, so the setup below is available now.
         </p>
         <div class="tag-row">
           <span class="tag">Kotlin Multiplatform</span>
           <span class="tag">Six configured targets</span>
           <span class="tag">Apache-2.0</span>
-          <span class="tag">Release <span data-maven-version="kmp">pending</span></span>
+          <span class="tag">Release <span data-maven-version="kmp">available</span></span>
         </div>
         <div class="status-callout">
-          <p><strong>The first public release is pending.</strong>
-          Cycle A exposes no runtime API and renders nothing. This page describes the setup that becomes
-          usable after anonymous first-release completion-record verification.</p>
-          <p>After that exact merged CI and public outcome, an authorized documentation-only follow-up must
-          revise pending claims in <code>CLAUDE.md</code>, the README, overview, this setup, and
-          <code>llms.txt</code>; adjust the <code>versions.js</code> fallback if applicable; and update the
-          handoff plus decomposition while keeping versions metadata-driven. ADR 0013 and the Cycle A design
-          spec and implementation plan remain historical decision records unless the release exposes a
-          contract error.</p>
+          <p><strong>The first public release is complete.</strong>
+          Exact-source CI, credential-free six-target resolution, and anonymous completion-record
+          verification passed. Cycle A still exposes no runtime API and renders nothing.</p>
+          <p>Version display remains metadata-driven. ADR 0013 and the Cycle A design spec and implementation
+          plan remain historical decision records.</p>
         </div>
       </header>
 
@@ -71,9 +66,9 @@
         <p class="doc-label">Step 1</p>
         <h2>Add the repositories.</h2>
         <p>
-          After anonymous first-release completion-record verification, RenG will resolve from the public
-          Maven repository without consumer credentials. RenG's Rentile dependency also resolves Skiko
-          platform artifacts from JetBrains' public Compose repository; limit that repository to its owner group.
+          RenG resolves from the public Maven repository without consumer credentials. RenG's Rentile
+          dependency also resolves Skiko platform artifacts from JetBrains' public Compose repository; limit
+          that repository to its owner group.
         </p>
         <div class="code-card doc-code">
           <div class="code-head"><span>settings.gradle.kts</span><span>root project</span></div>
@@ -114,18 +109,18 @@ kotlin {
 }</code></pre>
         </div>
         <div class="callout">
-          Release status: <span data-maven-version="kmp">pending</span>. This page reads Maven metadata
-          after loading. Until metadata reports a release, the fallback remains <code>pending</code>.
+          Current release: <span data-maven-version="kmp">available</span>. This page reads the exact version
+          from Maven metadata after loading; if metadata is unavailable, the readable fallback remains
+          <code>available</code>.
         </div>
       </section>
 
       <section class="doc-section" id="targets">
         <p class="doc-label">Publication surface</p>
-        <h2>Six configured targets.</h2>
+        <h2>Six published targets.</h2>
         <p>
-          These targets become the complete publication surface after the first release's completion record
-          verifies anonymously. Apple support is Apple Silicon only; RenG deliberately does not publish
-          <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
+          These targets are the complete publication surface. Apple support is Apple Silicon only; RenG
+deliberately does not publish <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
         </p>
         <div class="table-wrap">
           <table>
@@ -133,12 +128,12 @@ kotlin {
               <tr><th>Platform</th><th>KMP target</th><th>Publication</th></tr>
             </thead>
             <tbody>
-              <tr><td>Android</td><td><code>android</code></td><td>Pending first release</td></tr>
-              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Pending first release</td></tr>
-              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Pending first release</td></tr>
-              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Pending first release</td></tr>
-              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Pending first release</td></tr>
-              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Pending first release</td></tr>
+              <tr><td>Android</td><td><code>android</code></td><td>Available</td></tr>
+              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Available</td></tr>
+              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Available</td></tr>
+              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Available</td></tr>
+              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Available</td></tr>
+              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Available</td></tr>
             </tbody>
           </table>
         </div>
@@ -154,7 +149,7 @@ kotlin {
     <div class="shell footer-inner">
       <div>
         <a class="brand" href="index.html">RenG</a>
-        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">pending</span></p>
+        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">available</span></p>
       </div>
       <div class="footer-links">
         <a href="index.html">Overview</a>

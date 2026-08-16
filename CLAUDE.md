@@ -4,22 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Cycle A's implementation and local gate surface are complete in this worktree; the public release is
-pending.** The root build includes only the single `:kmp` library module; Android Studio's placeholder
-`:app` has been deleted. `:kmp` is a publishable six-target skeleton with no public runtime API and no
-rendering behavior yet. `consumer-smoke`, the dependency-free static site, publication tooling,
-repository-policy tooling, and `VERSION_NAME=0.1.0` now exist.
+**Cycle A is complete as an implemented and publicly released cycle.** Exact source commit
+`af92901b2ef045078b855a6b47533bc95aca6886` passed both CI jobs and the publication workflow; its first
+public `0.1.0` completion record verified anonymously. The root build includes only the single `:kmp`
+library module; Android Studio's placeholder `:app` has been deleted. `:kmp` is a publishable six-target
+skeleton with no public runtime API and no rendering behavior yet. `consumer-smoke`, the dependency-free
+static site, publication tooling, repository-policy tooling, and `VERSION_NAME=0.1.0` exist.
 
-Cycle A is not complete as a released cycle until the exact merged commit passes both CI jobs and the
-first public publication anonymously verifies the immutable release-completion record. Do not start Cycle B
-implementation before that outcome. A passing branch or local publication proves implementation/merge
-readiness only; it does not prove the public outcome. After completion, Cycle B preparation must first read
-`CONTEXT.md`, the governing ADRs, `docs/decomposition.md`, and `HANDOFF.md`, then run the required
-feasibility spikes, invoke `/grill-with-docs` with those findings, and only then write an implementation plan.
+Cycle B preparation is in progress. Before implementation, read `CONTEXT.md`, the governing ADRs,
+`docs/decomposition.md`, and `HANDOFF.md`; complete the required feasibility spikes; invoke
+`/grill-with-docs` with those findings; obtain approval of the design specification; and only then write
+and execute an implementation plan.
 
-Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 cover the graphics
-contract; ADR 0013 governs fail-closed publication). Read both before proposing anything that touches
-the public API — where this file and an ADR disagree, the ADR is newer and wins.
+Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
+original graphics contract, ADR 0013 governs fail-closed publication, and ADRs 0014–0015 supersede
+preparation ordering and GL-deletion context behavior). Read both before proposing anything that touches
+the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is
 
@@ -45,38 +45,44 @@ not an optimization to bolt on later.
 ### Lifecycle contract
 
 - Setup takes the caller's already-current GL context and native resources (transport, store, basemap
-  style, output pixel size); the render loop takes a **prepared** `FramePlan`. Acquisition and drawing
-  are separate operations — see ADRs 0001, 0002, 0004, 0012.
+  style, output pixel size); the render loop takes a **Prepared Frame**. Acquisition and drawing
+  are separate operations — see ADRs 0001, 0002, 0004, 0012, and 0014.
 - RenG exposes API to query and free the resources it holds; the consumer calls it when it needs to.
-- `close()` frees everything. `close()` and `free()` are idempotent, and both require the GL context to
-  be current on the calling thread.
+- `close()` frees everything. `close()` and `free()` are idempotent deletion operations; while live GL
+  handles exist, both require the renderer's exact GL context to be current and otherwise fail without
+  changing state (ADR 0015).
 - Accessing a freed resource **reloads it and emits a warning** — freeing is never an error for the
   caller to recover from, so the resource layer needs a reload path on every access, not an assert.
-- Losing the GL context is **not** freeing: a separate operation makes RenG forget its GL handles
-  without deleting them, keeping every CPU-side resource intact (ADR 0007).
+- Losing the GL context is **not** freeing: a separate context-free operation makes RenG forget its GL
+  handles without deleting them, keeping every CPU-side resource intact (ADRs 0007 and 0015).
 
 ## Domain model
 
 ```
-FramePlan(projectionMode = MERCATOR|GLOBE, stickers, models, geometries,
-          camera = (lat, lon, zoom, bearing, pitch))
+FramePlan(frameIndex, camera, projectionMode = MERCATOR, drawBasemap = true,
+          stickers = emptyList(), models = emptyList(), geometries = emptyList())
+
+Camera(latitude, unwrappedLongitude, zoom, bearing, pitch)
 
 Placement(positionMode: AnchoringMode, position: Vector3,
           rotationMode: AnchoringMode, rotation: Vector3,
-          pitchMode:    AnchoringMode, pitch: Double,
           scaleMode:    AnchoringMode, scale: Double /* [0, inf) */)
 
 AnchoringMode = SCREEN | MAP
 
-Sticker(placement, image: String /* url or local file path */)
+Sticker(placement, image: ResourceLocator /* PNG */)
 
-Model(placement, glb: String, texture: String /* png */,
-      animationStates: Array<AnimationTrack>)
+Model(placement, glb: ResourceLocator, texture: ResourceLocator? = null,
+      animationTracks: List<AnimationTrack>)
 
-AnimationTrack(name: String, frame: Int)
+AnimationSelector = Name(exactName) | Index(zeroBasedIndex)
+AnimationTrack(animation: AnimationSelector, timeSeconds: Double)
 
-Geometry(topLeft: Vector3(lat, lon, altitude), bottomRight: Vector3(lat, lon, altitude),
-         fragmentShader: Program, vertexShader: Program)
+Geometry(topLeft: Vector3(latitude, unwrappedLongitude, altitude),
+         bottomRight: Vector3(latitude, unwrappedLongitude, altitude),
+         shaderPair: ShaderPair)
+
+ShaderPair(vertexSource: String, fragmentSource: String)
 ```
 
 Non-obvious semantics:
@@ -201,14 +207,12 @@ The standard-library Python tools are:
 
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. A dedicated step fails fast if any is missing. Do not run AWS,
-upload, push, dispatch, or otherwise infer that these outward gates passed without explicit approval and an
-observed workflow result. The first public release is pending. After the exact merged CI jobs and first public
-completion record succeed, an authorized documentation-only follow-up must remove or revise pending claims in
-`CLAUDE.md`, `README.md`, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
-`docs/versions.js` `pending` fallback if applicable; and update `HANDOFF.md` plus `docs/decomposition.md`.
-ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records unless the
-release exposes a contract error. Keep public version display metadata-driven and do not check a RenG semantic
-version literal into README or served docs.
+upload, push, dispatch, or otherwise infer that outward gates passed without explicit approval and an
+observed workflow result. The first public release completed from
+`af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`
+succeeded, and the immutable `0.1.0` completion record verified anonymously. ADR 0013 and the Cycle A
+design spec and implementation plan remain historical decision records. Keep public version display
+metadata-driven and do not check a RenG semantic version literal into README or served docs.
 
 Two rentile gates were **not** ported because RenG has no analogue: the credential-free coverage
 manifest check (`tools/check_coverage_manifest.py` over `compatibility/`) and the rolling

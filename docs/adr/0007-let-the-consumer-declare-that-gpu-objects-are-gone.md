@@ -1,5 +1,9 @@
 # Let the consumer declare that GPU objects are gone
 
+ADR 0015 supersedes this record's drop-and-warn fallback for free and close; GPU-object-loss declaration
+remains context-free, while deletion operations now fail without state change unless the renderer's exact
+context is current.
+
 RenG exposes one operation meaning "the GL objects you hold no longer exist". It makes RenG forget
 every GL handle without issuing a single delete, while keeping decoded images, parsed meshes, compiled
 shader sources, and live **Prepared Frame**s exactly as they were; the next draw re-uploads what it

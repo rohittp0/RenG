@@ -4,10 +4,9 @@
 
 ## Current status
 
-RenG is a pre-runtime Kotlin Multiplatform publication skeleton. Cycle A establishes its coordinate,
-target surface, and release gates, but its first public release is still pending anonymous verification of
-its immutable completion record from the exact merged, CI-passing commit. It exposes no runtime API and
-renders nothing.
+RenG is a pre-runtime Kotlin Multiplatform publication skeleton. Cycle A established its public coordinate,
+six-target surface, and immutable release gates; its first public completion record has verified anonymously
+from the exact CI-passing source commit. It exposes no runtime API and renders nothing.
 
 ## Coordinate and repository
 
@@ -17,10 +16,9 @@ RenG is configured to publish one common-code coordinate:
 com.rohittp.reng:kmp
 ```
 
-After the first release's completion record verifies anonymously, the coordinate will resolve without
-consumer credentials from `https://maven.rohittp.com`. Configure that repository and JetBrains Compose,
-filtered exclusively to `org.jetbrains.skiko` for Rentile's transitive platform artifacts, before the standard
-repositories:
+The coordinate resolves without consumer credentials from `https://maven.rohittp.com`. Configure that
+repository and JetBrains Compose, filtered exclusively to `org.jetbrains.skiko` for Rentile's transitive
+platform artifacts, before the standard repositories:
 
 ```kotlin
 dependencyResolutionManagement {
@@ -37,8 +35,7 @@ dependencyResolutionManagement {
 
 ## Targets
 
-RenG is configured to publish exactly these six Kotlin Multiplatform targets after the first release gate
-succeeds:
+RenG publishes exactly these six Kotlin Multiplatform targets:
 
 - `android`
 - `iosArm64`
@@ -102,16 +99,12 @@ An explicit upward `VERSION_NAME` bypasses the prior record and is the recovery 
 Release versions are not hardcoded in HTML. Every displayed RenG release uses
 `data-maven-version="kmp"`, and every applicable page loads `docs/versions.js`. The browser reads
 `<versioning><release>` from
-`https://maven.rohittp.com/com/rohittp/reng/kmp/maven-metadata.xml`; while the first release remains
-pending, failed or unavailable metadata leaves the readable `pending` fallback.
+`https://maven.rohittp.com/com/rohittp/reng/kmp/maven-metadata.xml`. When metadata is temporarily
+unavailable, served pages retain a readable `available` fallback rather than embedding a semantic version.
 
-After both CI jobs pass the exact merged commit and the first public completion record verifies
-anonymously, an authorized documentation-only follow-up must remove or revise pending claims in
-`CLAUDE.md`, this README, `docs/index.html`, `docs/kmp.html`, and `docs/llms.txt`; adjust the
-`docs/versions.js` fallback if applicable; and update `HANDOFF.md` plus `docs/decomposition.md`. ADR 0013
-and the Cycle A design spec and implementation plan remain historical decision records unless the release
-exposes a contract error. Version display remains metadata-driven, so that follow-up must not hardcode a
-RenG release version in README or served docs.
+The first public completion record has verified anonymously. ADR 0013 and the Cycle A design spec and
+implementation plan remain historical decision records. Version display remains metadata-driven, so RenG
+release versions are not hardcoded in this README or served documentation.
 
 Architecture decisions and the evolving publication contract are in [`docs/`](docs/). Public documentation
 is prepared for [https://rohittp.com/reng/](https://rohittp.com/reng/).

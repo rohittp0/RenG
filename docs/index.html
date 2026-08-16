@@ -55,8 +55,8 @@
         <h1 id="hero-title">A rendering contract,<br /><em>before a renderer.</em></h1>
         <p class="hero-lead">
           RenG is a Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract.
-          Cycle A establishes its coordinate, target surface, and release discipline. The first public
-          release is pending anonymous completion-record verification, and RenG exposes no runtime API or
+          Cycle A established its public coordinate, target surface, and release discipline. Its first
+          immutable completion record verified anonymously, while RenG still exposes no runtime API or
           rendering behavior.
         </p>
         <div class="hero-actions">
@@ -72,7 +72,7 @@
           <p class="frame-state">Cycle A</p>
           <dl class="frame-facts">
             <div><dt>Coordinate</dt><dd><code>com.rohittp.reng:kmp</code></dd></div>
-            <div><dt>Release</dt><dd><span data-maven-version="kmp">pending</span></dd></div>
+            <div><dt>Release</dt><dd><span data-maven-version="kmp">available</span></dd></div>
             <div><dt>Runtime</dt><dd>Not exposed</dd></div>
             <div><dt>Rendering</dt><dd>Not present</dd></div>
           </dl>
@@ -96,22 +96,21 @@
         <p class="eyebrow">Current scope</p>
         <h2>The configured surface is intentionally narrow.</h2>
         <p>
-          RenG is configured for one anonymous Maven coordinate and six targets. Installation becomes
-          available only after both CI jobs pass the exact merged commit and the first public release's
-          immutable completion record verifies anonymously. No callable runtime behavior, window, render
+          RenG publishes one anonymous Maven coordinate and six targets. Its exact-source CI and first
+          immutable completion record verified anonymously. No callable runtime behavior, window, render
           loop, or frame drawing exists yet.
         </p>
       </div>
       <div class="scope-grid">
         <article class="scope-card">
-          <p class="card-label">It will be available as</p>
+          <p class="card-label">It is available as</p>
           <h3>A common KMP coordinate</h3>
-          <p>After verification, resolve <code>com.rohittp.reng:kmp</code> without credentials.</p>
+          <p>Resolve <code>com.rohittp.reng:kmp</code> without credentials.</p>
         </article>
         <article class="scope-card">
-          <p class="card-label">It is configured for</p>
+          <p class="card-label">It is published for</p>
           <h3>Six selected targets</h3>
-          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux become available together.</p>
+          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux are available together.</p>
         </article>
         <article class="scope-card">
           <p class="card-label">It does not provide</p>
@@ -123,12 +122,11 @@
 
     <section class="section shell setup-section" id="coordinate">
       <div class="section-heading compact">
-        <p class="eyebrow">Pending public Maven repository</p>
-        <h2>One coordinate after verification.</h2>
+        <p class="eyebrow">Public Maven repository</p>
+        <h2>One public coordinate.</h2>
         <p>
-          After the first release's completion record verifies anonymously, add the public repository
-          through <code>dependencyResolutionManagement</code> and declare the common coordinate with your version
-          property. The KMP guide includes the complete setup.
+          Add the public repository through <code>dependencyResolutionManagement</code> and declare the common
+          coordinate with your version property. The KMP guide includes the complete setup.
         </p>
       </div>
       <div class="code-card">
@@ -143,7 +141,7 @@ kotlin {
     }
 }</code></pre>
       </div>
-      <p class="version-note">Release status: <span data-maven-version="kmp">pending</span>. The browser replaces this fallback only when public Maven metadata reports a release.</p>
+      <p class="version-note">Current release: <span data-maven-version="kmp">available</span>. The browser loads the exact version from public Maven metadata; the readable fallback remains available if metadata cannot be loaded.</p>
     </section>
 
     <section class="section shell" id="release-model">
@@ -176,7 +174,7 @@ kotlin {
       </div>
       <div class="callout">
         <p><strong>Fail closed by design.</strong> A malformed response, transport failure, validation failure, or occupied coordinate stops publication. Releases never overwrite or skip an existing version. Aggregate POM and metadata availability are not completion proof; only the valid immutable completion record is.</p>
-        <p><strong>Pending documentation follow-up.</strong> Only after both CI jobs pass the exact merged commit and its first public completion record verifies may maintainers remove pending claims from <code>CLAUDE.md</code>, the README, this page, the KMP setup, and <code>llms.txt</code>; adjust the <code>versions.js</code> fallback if applicable; and update the handoff and decomposition. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records unless the release exposes a contract error. Version display remains metadata-driven.</p>
+        <p><strong>First release complete.</strong> Both exact-source CI jobs and the public workflow passed, including credential-free six-target resolution and anonymous verification of the immutable completion record. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records. Version display remains metadata-driven.</p>
       </div>
     </section>
 
@@ -206,7 +204,7 @@ kotlin {
     <div class="shell footer-inner">
       <div>
         <a class="brand" href="index.html">RenG</a>
-        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">pending</span></p>
+        <p>com.rohittp.reng:kmp · release <span data-maven-version="kmp">available</span></p>
       </div>
       <div class="footer-links">
         <a href="kmp.html">KMP setup</a>

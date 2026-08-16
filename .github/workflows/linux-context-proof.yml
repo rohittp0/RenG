@@ -35,6 +35,6 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
           EGL_PLATFORM: surfaceless
         run: >-
-          ./gradlew --no-configuration-cache
+          ./gradlew --no-configuration-cache --info --console=plain
           -p build/cycle-b-spikes/follow-up/linux-runtime-proof
           linuxX64Test

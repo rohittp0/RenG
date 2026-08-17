@@ -11,14 +11,18 @@ frames; it owns no window, no render loop, no capture path, and no encoder.
 **Frame Plan**:
 A complete, self-contained definition of one frame's content, drawn by whichever renderer prepared it.
 Its required non-negative `frameIndex` orders strict, history-aware preparation within that renderer;
-`drawBasemap`, defaulting to true, may suppress ground for that frame.
+`drawBasemap`, defaulting to true, may suppress ground for that frame. Plan list inputs are snapshotted, and
+every public list read returns a defensive copy whose platform mutation cannot change the plan, its equality,
+or its canonical identity.
 _Avoid_: Scene graph, render command, frame delta, mutation batch
 
 **Camera**:
 The view of a **Frame Plan**, with geographic latitude, unwrapped longitude, zoom, bearing, and pitch.
 Latitude and longitude are finite degrees; latitude lies in `[-90, 90]`, while longitude preserves the
-selected world copy and is never wrapped or clamped by RenG. Zoom is a finite fractional value in
-`[0, 22]`; Mercator has `512` logical pixels at zoom zero and scales by `2^zoom`, independently of tile
+selected world copy and is never wrapped or clamped by RenG. `MERCATOR` preparation further requires
+latitude in `[-85.0511287798066, 85.0511287798066]` and a derived world-copy index in
+`[-16384, 16384]`; `copyIndex = floor((unwrappedLongitude + 180) / 360)`. Zoom is a finite fractional
+value in `[0, 22]`; Mercator has `512` logical pixels at zoom zero and scales by `2^zoom`, independently of tile
 image resolution. Bearing is finite clockwise degrees from true north in `[0, 360)`. Pitch is finite degrees
 in `[0, 90)`, where `0` looks straight down and increasing values tilt toward the horizon. RenG uses a
 fixed `45`-degree vertical field of view. Map-occluded projection uses a fixed one-logical-pixel near
@@ -34,16 +38,20 @@ _Avoid_: Anchoring mode, coordinate space, projection fallback
 **Frame History**:
 The renderer's clearable record of its last successfully prepared frame index, **Frame Plan**, and selected
 basemap tile LOD. Only one prepare invocation runs at a time. A batch's indices must be strictly increasing
-and above history; planning and LOD selection proceed in index order while independent resource work runs
-in parallel. History commits only when the whole batch succeeds, and returned prepared frames preserve
-input order. Structural diffing uses the last successfully prepared plan as the first baseline and each
-immediately preceding input plan as the next baseline within a batch; missing history is an empty baseline.
+and above history; every item completes pure validation, projection, tile-budget, diff, and resource-reference
+planning in index order before any resource work begins. Independent resource work then runs in parallel.
+History commits only when the whole batch succeeds, and returned prepared frames preserve input order.
+Structural diffing uses the last successfully prepared plan as the first baseline and each immediately preceding
+input plan as the next baseline within a batch; missing history is an empty baseline.
 A diff may reuse content-keyed work, but every **Prepared Frame** leases the complete resource set derived
 from its own plan. Failure or cancellation exposes no partial history, though valid acquired content may
-remain cached. For zoom `n + f`, an upward transition occurs at `f >= 0.75` and a downward transition at
-`f < 0.25`; without history, the nearest integer LOD is selected with midpoint ties downward. The
-context-free `clearFrameHistory()` clears the structural-diff and LOD baseline, permits a new sequence,
-and neither frees resources nor invalidates prepared frames. Drawing never changes history.
+remain cached. With prior selected integer LOD `L`, selection repeatedly increments while
+`zoom >= L + 0.75` and repeatedly decrements while `zoom < L - 0.75`, bounded to `[0, 22]`; this defines
+multi-level jumps as the same one-level hysteresis applied until stable. Without history, the nearest integer
+LOD is selected with midpoint ties downward. Every successfully prepared Mercator plan advances provisional
+LOD history even when no Basemap Style is configured or `drawBasemap` is false; those frames select and acquire
+no tiles. The context-free `clearFrameHistory()` clears the structural-diff and LOD baseline, permits a new
+sequence, and neither frees resources nor invalidates prepared frames. Drawing never changes history.
 _Avoid_: Cache, draw order, partial batch commit, previous-frame mutation
 
 **Tile Budget**:
@@ -52,11 +60,17 @@ LOD. It defaults to `512`, is configurable from `1` through `4096`, and fails pr
 before acquisition when exceeded; RenG never drops required tiles.
 _Avoid_: Cache size, tile limit fallback, resource retry budget
 
+**Output Pixel Size**:
+The renderer-lifetime positive integer width and height of every frame and target in physical output pixels.
+It determines camera aspect ratio, screen anchoring, and basemap coverage and is not read from a framebuffer.
+_Avoid_: Viewport, logical size, density-independent size, Render Target dimensions
+
 **Renderer Configuration**:
-The renderer-lifetime values fixed at setup: required output pixel size, **Transport**, and **Store**;
-optional **Basemap Style**, defaulting to none; maximum basemap tile instances, defaulting to `512`;
-maximum preparation batch size, defaulting to `256`; maximum concurrent resource operations, defaulting to
-`8`; and a non-throwing **Diagnostic** sink, defaulting to none. The already-current **Render Context** is
+The renderer-lifetime values fixed at setup: required **Output Pixel Size**, **Transport**, and **Store**;
+optional **Basemap Style**, defaulting to none; **Resource Limits**, defaulting to their documented ceilings;
+maximum basemap tile instances, defaulting to `512`; maximum preparation batch size, defaulting to `256`;
+maximum concurrent resource operations, defaulting to `8`; and a non-throwing **Diagnostic** sink, defaulting
+to none. The already-current **Render Context** is
 passed separately to renderer creation and setup does not suspend; style acquisition occurs during frame
 preparation.
 _Avoid_: Frame Plan, render options, mutable settings
@@ -66,6 +80,14 @@ The renderer's strict ordered-batch bounds: at most `maximumPreparationBatchSize
 and configurable from `1` through `4096`, with at most `maximumConcurrentResourceOperations` independent
 resource operations, default `8` and configurable from `1` through `64`.
 _Avoid_: Coroutine dispatcher, unbounded async, transport retry count
+
+**Resource Limits**:
+The immutable configurable encoded-response ceilings supplied at setup. Every value is bytes in
+`[1, 2147483647]`. Defaults are: basemap style `8 MiB`; basemap metadata (TileJSON and sprite JSON) `4 MiB`;
+basemap vector/raster/DEM tile `32 MiB`; basemap sprite image `32 MiB`; basemap GeoJSON `64 MiB`; sticker
+image `32 MiB`; model GLB `256 MiB`; and model texture `32 MiB`. A request carries its selected ceiling and
+oversize resident, stored, or transported content fails before decode or use.
+_Avoid_: Transport timeout, cache size, decoded-memory estimate, retry budget
 
 **Basemap Style**:
 The style document identified by one **Resource Locator**, acquired through the configured adapters, and
@@ -78,14 +100,17 @@ _Avoid_: Map style, theme, basemap, style profile
 A network-free, GL-free rendering input holding every resource one **Frame Plan** needs, produced
 before any drawing occurs and owned by the renderer that prepared it. It may be drawn repeatedly until
 its idempotent, context-free `close()` releases its resource leases; closing it performs no immediate GL
-deletion.
+deletion. Renderer close invalidates it for drawing but does not change the harmless idempotence of its own
+later `close()`.
 _Avoid_: Frame buffer, render pass, draw queue, prepared batch
 
 **Render Target**:
 A renderer-minted identity for the caller-owned framebuffer RenG composites one finished frame into. It
-publicly carries only `FramebufferName(UInt)`; its dimensions are the renderer's configured output size,
-not a property of the target. Hidden renderer and context-generation identity make foreign and stale
-targets invalid.
+publicly carries only `FramebufferName(UInt)`; its dimensions are the renderer's configured **Output Pixel
+Size**, not a property of the target. Hidden renderer and context-generation identity make foreign and stale
+targets invalid. Framebuffer zero names the default framebuffer; a nonzero name must still identify an existing
+framebuffer, and every target must be framebuffer-complete when minted and when drawn. RenG never infers target
+dimensions from GL.
 _Avoid_: Surface, canvas, viewport, swapchain
 
 **Render Context**:
@@ -96,6 +121,14 @@ context, but the consumer serializes them. Preparation invocations are serialize
 history; one batch still performs independent resource work concurrently.
 _Avoid_: Surface, device, GL session, EGL context
 
+**Renderer State**:
+One of three terminally ordered owner states. `LIVE` has one adopted exact **Render Context**;
+`AWAITING_CONTEXT_ADOPTION` follows **GPU Object Loss**, has no adopted context or live GL handle, and still
+permits GL-free preparation and resource work; `CLOSED` owns no usable frame, target, resource, or context and
+can never transition again. Adoption moves only `AWAITING_CONTEXT_ADOPTION` to `LIVE`; requesting adoption
+while already live fails without inspecting or replacing the adopted context.
+_Avoid_: Boolean closed flag, implicit context switch, recoverable close
+
 **GPU Object Loss**:
 The consumer's declaration that the renderer's GL objects no longer exist. `notifyGpuObjectsGone()` is
 context-free, forgets handles without deleting them, retains CPU state, and invalidates prior render
@@ -103,16 +136,22 @@ targets. Further GL work requires explicit adoption of an already-current replac
 _Avoid_: Free, close, context switch, automatic recovery
 
 **Renderer Close**:
-The idempotent non-suspending terminal operation that rejects new work, releases CPU state, and deletes
-live GL objects. Active preparation makes close fail without changing state; the consumer first uses the
-suspending cancellation barrier. Close requires the exact current **Render Context** only while live
-handles exist; after **GPU Object Loss** or an earlier close, it is context-free.
+The idempotent non-suspending terminal operation that rejects new work, clears **Frame History**, invalidates
+all owned **Prepared Frame**s and **Render Target**s, releases CPU state, and deletes live GL objects. Active
+preparation makes close fail without changing state; the consumer first uses the suspending cancellation
+barrier. Close requires the exact current **Render Context** only while live handles exist; after **GPU Object
+Loss** or an earlier close, it is context-free. Once closed, renderer close, preparation cancellation, GPU-loss
+notification, resource query/free, and Prepared Frame close remain harmless idempotent operations; query
+returns an empty report and free returns an empty result. Preparation, history clearing, context adoption,
+Render Target minting, and drawing fail `RENDERER_CLOSED`.
 _Avoid_: Free resources, GPU object loss, frame close, reset
 
 **Preparation Cancellation**:
 The idempotent suspending snapshot barrier requested by `cancelPreparations()`. It cancels only the prepare
 invocation active when called and returns after that invocation terminates; no active invocation is a no-op.
-Cancellation propagates unchanged, commits no **Frame History**, and is not a persistent cancellation mode.
+Cancellation remains an unwrapped `CancellationException` and commits no **Frame History**. Kotlin stack
+recovery may provide a copy whose immediate cause is the original exception, so referential identity is not
+part of the contract. Cancellation is not a persistent mode.
 _Avoid_: Renderer close, cancel latch, frame close, partial batch commit
 
 ### Placement
@@ -133,30 +172,37 @@ Whether one placement property is resolved against the map (`MAP`) or against th
 _Avoid_: Coordinate space, reference frame, projection mode
 
 **Rotation**:
-A finite `Vector3` of canonical degrees in `[-180, 180)`, applied as right-handed intrinsic X, then Y,
-then Z rotations. Map-anchored rotation starts from east/north/up axes; screen-anchored rotation starts
-from screen-right/screen-up/toward-viewer axes.
-_Avoid_: Quaternion, orientation matrix, extrinsic rotation
+A finite `Vector3` of canonical degrees in `[-180, 180)`, applied as right-handed fixed-axis X, then Y,
+then Z rotations (extrinsic XYZ), with column-vector matrix `Rz * Ry * Rx`. Map-anchored rotation starts from
+east/north/up axes at its geographic anchor and converts that anchor basis into the camera's local ENU basis;
+screen-anchored rotation starts from screen-right/screen-up/toward-viewer axes.
+_Avoid_: Quaternion, orientation matrix, intrinsic XYZ, moving-axis rotation
 
 **Scale**:
 A finite non-negative scalar converting asset-local units. Map-anchored scale is metres per local unit;
 screen-anchored scale is output pixels per local unit. Sticker local dimensions are encoded-image pixels,
-and Model local dimensions are GLB coordinates. Zero scale is valid.
+and Model local dimensions are GLB coordinates. Zero scale is valid. Planning requires the final converted
+scale to remain finite as a GPU-bound Float and reports `fieldName=placement.scale` otherwise.
 _Avoid_: Size, zoom, density-independent scale
 
 **Screen Anchoring**:
 Resolution against continuous output-pixel screen space. The output bounds are `[0, width]` by
 `[0, height]`, and pixel centres lie at half-integer coordinates. `position.x` and `position.y` locate
-the object's local origin from the top-left, with positive x rightward and positive y downward. `position.z` is a
-compositing z-index rather than depth; greater values composite on top. Equal z-index values use stable
-plan order: stickers in list order, followed by models in list order, with later entries on top.
+the object's local origin from the top-left, with positive x rightward and positive y downward; each must
+remain finite as a GPU-bound Float or planning reports `screenPosition.x` or `screenPosition.y`.
+`position.z` is a CPU-side `Double` compositing z-index rather than depth; greater values composite on top.
+Equal z-index values use stable plan order: stickers in list order, followed by models in list order, with later
+entries on top.
 _Avoid_: Overlay mode, 2D mode, billboard
 
 **Map Anchoring**:
 Resolution against map space, in which the drawn thing is depth-tested and occluded by the 3D scene.
 A map position's `(x, y, z)` components mean `(latitude degrees, unwrapped longitude degrees, WGS84
-ellipsoidal altitude metres)`. Altitude accepts any finite value, but frame planning rejects values that
-cannot remain finite and representable through camera-relative Double and GPU-bound Float conversion.
+ellipsoidal altitude metres)`. `MERCATOR` preparation applies the **Camera** latitude and world-copy bounds
+to every map position and **Geometry** corner; out-of-domain values fail rather than clamp or wrap. Altitude
+accepts any finite value, but planning rejects values that cannot remain finite through camera-relative Double
+and GPU-bound Float conversion. Those failures report `mapPosition.altitude` or `geometry.altitude`; latitude
+and world-copy failures retain their corresponding latitude or unwrapped-longitude field.
 _Avoid_: World mode, 3D mode, geo mode
 
 **Draw Regime**:
@@ -180,8 +226,10 @@ rendered primitive's base-colour texture while preserving other material propert
 _Avoid_: Mesh, asset, actor, entity
 
 **Animation Selector**:
-Either the exact non-blank name or non-negative index of one animation in a GLB. Preparation rejects a
-missing name, an out-of-range index, or different selectors that resolve to the same animation.
+Either the exact non-blank name or non-negative `Long` index of one animation in a GLB. Names are exact Unicode
+scalar sequences: RenG performs no normalization and rejects isolated UTF-16 surrogates. A GLB catalog with
+duplicate nonblank exact animation names is invalid. Preparation rejects a missing or out-of-range selector,
+or different selectors that resolve to the same animation.
 _Avoid_: Animation id, clip key, nullable name/index pair
 
 **Animation Track**:
@@ -203,27 +251,43 @@ The `vertexSource` and `fragmentSource` shader sources a **Geometry** is painted
 _Avoid_: Program, material, effect
 
 **Shader Profile**:
-The single accepted shader source dialect — a GLSL ES 3.00 body — that RenG adapts to a desktop
-**Render Context** by substituting `#version 330 core` for `#version 300 es` and changing nothing else.
+The single accepted shader source dialect — a GLSL ES 3.00 body whose first directive physical line, after
+trimming ASCII space/tab only, is exactly `#version 300 es`. Prefix lines may contain only ASCII space/tab and
+`//` or non-nesting `/* ... */` comments and must end with LF, CRLF, or bare CR; comments cannot share the
+directive line. A GLES context receives the original source unchanged. A desktop **Render Context** replaces
+the directive physical line's complete non-terminator span with `#version 330 core`, preserves its terminator
+and every other code unit, and performs no other substitution. A missing or different directive is
+`INVALID_VALUE` at `FRAME_PLANNING`, not a driver compilation failure.
 _Avoid_: Shader language, GLSL version, compatibility profile
 
 **Basemap Tile**:
 One canonical PNG tile acquired from Rentile and drawn as the ground beneath a frame. A canonical tile
 may back multiple unwrapped world-copy draw instances when repeated Mercator worlds intersect the output.
+Mercator selection traces physical output-pixel-centre rays, excludes non-downward sky/horizon samples, and
+selects every closed tile cell intersecting the conservative closed finite ground footprint. Tile edges are
+inclusive for coverage and canonical instances are deduplicated only after unwrapped draw instances and the
+pre-acquisition **Tile Budget** are determined.
 _Avoid_: Output tile, source tile, map tile, raster
 
 ### Resources
 
 **Frame Identity**:
-An internal versioned canonical encoding of one **Frame Plan**, identified as
-`reng-frame-v1:<lowercase SHA-256>`. RenG compares canonical bytes before sharing and fails closed if one
-digest names different bytes. The key is not public API.
+An internal versioned canonical binary encoding of one **Frame Plan**, identified as
+`reng-frame-v1:<lowercase SHA-256>`. The encoded root begins `RNGC`, schema byte `1`, and frame-kind byte `1`;
+strict tagged fields preserve every exact scalar, ordered list, duplicate, and canonicalized numeric bit under
+ADR 0018. Frame and animation indices use unsigned 64-bit big-endian payloads, enum and shader-profile values
+use unsigned 16-bit big-endian payloads, and canonically encoded strings reject isolated UTF-16 surrogates
+before exact UTF-8 encoding. RenG retains and compares canonical bytes before sharing and fails
+`IDENTITY_COLLISION` if one digest names different bytes. The key is not public API.
 _Avoid_: Public frame id, cache key, caller id
 
 **Resource Locator**:
 A non-blank, opaque caller-supplied string identifying encoded resource bytes. RenG preserves its exact
-text, redacts it from diagnostics, and gives it only to the injected **Transport** and **Store**; RenG
-never parses it as a URL or opens it as a file path.
+text, redacts it from diagnostics, gives that text only to the injected **Transport**, and derives the
+credential-free **Raw Resource** Store key from a canonical root containing the exact text and class. In every
+canonical locator-valued field, the payload is the exact UTF-8 of this text rather than a nested tagged object;
+an optional locator uses only its presence byte followed by those UTF-8 bytes when present. RenG never parses
+it as a URL or opens it as a file path.
 _Avoid_: URL, file path, URI, resource key
 
 **Raw Resource**:
@@ -245,8 +309,10 @@ _Avoid_: Resource Class, GL object type, cache tier
 
 **Resource Key**:
 A credential-free logical resource identity containing its **Resource Kind** and a lowercase SHA-256
-stable id. External keys also retain their **Resource Class**. A key selects all resident or retired
-generations of that logical resource and never reveals its **Resource Locator**.
+stable id over ADR 0018's domain-separated canonical resource root. External roots include the exact
+**Resource Locator** and **Resource Class**, though neither appears in the stable id's textual representation;
+external keys also retain their Resource Class for typed selection. Geometry-program roots include the shader
+profile version and exact sources. A key selects all resident or retired generations of that logical resource.
 _Avoid_: Resource Locator, URL hash label, generation handle
 
 **Resource Selector**:
@@ -264,38 +330,89 @@ sum remains present and `hasUnknownGpuBytes` is true. Driver and program overhea
 Free-operation totals count logical keys as matched, fully freed, deferred, or already free.
 _Avoid_: Singular aggregate state, cache dump, resource map, diagnostic log
 
+**Resource Operation**:
+One preparation-scoped attempt to make one logical **Raw Resource** available under one **Resource Access
+Mode**. A prelookup route identity contains access mode, exact **Resource Locator**, exhaustive **Resource
+Class**, and response-byte limit; equal routes join one freshness sample, resident decision, Store read, and
+outcome. After that lookup, complete allowlisted request metadata joins the route identity to form the final
+Transport-latch identity. Static route occurrences preregister during batch planning only for joins and
+collision detection, with no execution order or permission to start work. Content-discovered occurrences
+register at deterministic depth-first discovery frontiers before work on that route; later occurrences stay
+withheld until all earlier frontiers close. Distinct routes that collapse to one private Rentile Store key fail
+`AMBIGUOUS_RESOURCE_ROUTE`; no call is made for the newly colliding route, though already completed parent
+calls cannot be undone.
+The first consumer **Transport** outcome is latched for that identity until the operation ends, so concurrent
+joins and repeated internal Rentile adapter calls replay the same complete response, sanitized failure, or
+unwrapped cancellation outcome rather than performing another consumer exchange. A latch never outlives its
+operation. The first logically eligible occurrence, not preregistration, assigns the shared route's traversal
+ordinal; an earlier dynamic occurrence can therefore activate a route first seen in a later static segment.
+Frontier withholding ensures no unknown earlier occurrence remains when an ordinal is assigned. Concurrent
+outcomes retire in ordinal order, so the earliest route-terminal failure or adapter cancellation wins
+independently of worker completion order. Caller or explicit preparation cancellation wins only when it claims
+the invocation's terminal slot before that in-order outcome; cleanup cancellation never replaces an already
+selected outcome.
+_Avoid_: Renderer-lifetime request cache, retry, URL-only identity, unpartitioned single flight
+
 **Resource Access Mode**:
 Preparation policy selected once for a whole prepare invocation: `NORMAL`, `CACHE_ONLY`, or `RELOAD`.
-`NORMAL` uses valid fresh resident or stored content and otherwise performs at most one exchange,
-conditionally when valid stale content has a validator. `CACHE_ONLY` accepts valid resident or stored
-content regardless of freshness and performs no exchange; missing content fails unavailable. `RELOAD`
-skips resident and Store reads, sends no conditional metadata, accepts only a full-body success, and writes
-that content before use. No mode adds retries, repairs, redirects, status fallbacks, or byte ranges, and
-single-flight work is shared only within the same mode.
+`NORMAL` uses a fresh resident without reading Store. With no resident or a stale resident, it reads Store once;
+a valid Store record supersedes the stale resident for that operation, while a null Store result leaves the
+stale resident as baseline. A stale baseline sends ETag first, otherwise last-modified; with neither validator,
+NORMAL sends an unconditional request that accepts only `200` and never falls back to the stale bytes.
+`CACHE_ONLY` uses a valid resident regardless of freshness, otherwise reads Store once and uses valid stored
+content regardless of freshness; missing content fails unavailable. `RELOAD` skips resident and Store reads,
+sends no conditional metadata, accepts only a full-body success, and writes that content at its class boundary
+before visibility. Resident- or Store-sourced content is never redundantly written. No mode adds retries,
+repairs, redirects, status fallbacks, or byte ranges, and single-flight work is shared only within the same mode.
 _Avoid_: Request header, retry policy, cache flag
 
 **Transport**:
 The consumer-supplied adapter RenG performs every bounded network exchange through, for its own resources
 and for the ones it proxies to Rentile. Requests carry the exact **Resource Locator**, **Resource Class**,
-response-byte limit, and optional ETag or last-modified condition, while their textual representation
-redacts the locator. Responses carry status, defensively copied bytes, and optional `contentType`, `etag`,
-`lastModified`, and `freshUntilEpochMillis`. A `200` response must provide a bounded nonempty body. A
-`304` is valid only for a conditional `NORMAL` exchange with valid stale baseline content; it reuses those
-bytes, merges allowlisted metadata, and writes the refreshed record before use. Every other status,
-including redirects and a `304` without its baseline, fails. Byte ranges and arbitrary headers are outside
-the contract.
+selected **Resource Limits** byte ceiling, and only optional `ifNoneMatch`, `ifModifiedSince`, and `accept`
+metadata; their textual representation redacts the locator and all metadata values. A conditional `NORMAL`
+request sends exactly one validator, preferring a nonblank ETag over a nonblank last-modified value. Accept is
+fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract. Responses
+carry status, defensively copied bytes, and optional `contentType`, `etag`, `lastModified`, and
+`freshUntilEpochMillis`. Consumer response constructors snapshot and redact but deliberately admit malformed
+values; operation validation, not adapter-side construction, reports invalid status, bytes, metadata, or epochs
+as a typed RenG failure. Valid optional text is a nonblank Unicode scalar sequence with no CR or LF;
+isolated UTF-16 surrogates and negative optional epochs are invalid. Response validation always checks metadata
+first and then branches on status. A `200` must be nonempty before its body is compared with the selected limit;
+an empty `200` is invalid response and an oversized nonempty `200` is resource-limit exceeded. A `304` must
+have an exactly empty body, with no limit comparison, and is valid only for a conditional `NORMAL` exchange with
+valid stale baseline content. It preserves baseline bytes and digest, overrides each allowlisted metadata field
+only when the response supplies a nonnull value, retains baseline metadata otherwise, sets stored-at to the
+operation's one time sample, and passes the merged record to its class-specific write/visibility boundary.
+Basemap Style may be staged privately for Rentile compilation before that write but cannot complete an item or
+enter a Prepared Frame until the write succeeds. Every other status, including redirects and a `304` without
+its baseline, fails. Byte ranges and arbitrary headers are outside the contract.
+One **Resource Operation** performs at most one consumer exchange for each structural identity; Rentile's
+repeated internal adapter calls are contained behind RenG and are not consumer retries.
 _Avoid_: HTTP client, fetcher, network layer
 
 **Store**:
-The consumer-supplied persistent adapter RenG reads and writes **Raw Resource** bytes through; RenG
-owns no persistent cache of its own. `RawResourceKey` contains only a credential-free stable id and
-**Resource Class**. `StoredRawResource` contains defensively copied bytes, a SHA-256 digest, and optional
-content type, ETag, last-modified, and fresh-until epoch milliseconds plus required stored-at epoch
-milliseconds. A record is fresh only while `freshUntilEpochMillis > now`; equality, an absent freshness
-value, or an earlier value is stale. The **Store** exposes suspending read and write only. Malformed or
-digest-invalid records fail integrity validation and are never removed, bypassed, or repaired; valid stale
-records follow the selected **Resource Access Mode**, and every required write must succeed before content
-is used.
+The consumer-supplied persistent adapter RenG reads and writes **Raw Resource** bytes through; RenG owns no
+persistent cache of its own. `RawResourceKey` contains only a credential-free stable id and **Resource
+Class**. `StoredRawResource` contains defensively copied bytes, a caller-supplied digest, optional content type,
+ETag, last-modified, and fresh-until epoch milliseconds, plus stored-at epoch milliseconds. Its consumer-facing
+constructors snapshot and redact but admit malformed shape, digest, metadata, and epochs so operation validation
+can report `STORE_INTEGRITY_FAILED / STORE_VALIDATION`. A valid record is nonempty, within the class's
+**Resource Limits** ceiling, has an exactly 64-character lowercase hexadecimal SHA-256 digest matching its
+bytes, has nonblank CR/LF-free Unicode-scalar optional text, and has non-negative optional and stored-at epochs.
+A record is fresh only while `freshUntilEpochMillis > now` for the
+**Resource Operation**'s single non-negative system epoch-millisecond sample; equality, an absent freshness
+value, or an earlier value is stale. The **Store** exposes suspending read and write only. Shape-, digest-, metadata-, or class-format-invalid
+records fail integrity validation and are never removed, bypassed, or repaired. RenG validates consumer
+records before exposing them to Rentile and traps Rentile's private remove request without consumer mutation.
+Valid stale records follow the selected **Resource Access Mode**. A fetched or `304`-metadata-refreshed record
+reaches consumer write only after its class-specific validation boundary defined by ADR 0016; a resident or
+Store-sourced record is not rewritten. Store-sourced Basemap Style bytes compile privately and may become
+preparation-visible only after compilation and whole-batch success, without a redundant consumer write. Fetched
+or metadata-refreshed Basemap Style may enter the same private staged Rentile input, but its one consumer write
+waits for successful `Prefetched` compilation and completion of all other work for every referencing batch item;
+only then can the style become preparation-visible. Every required write must succeed before content enters a
+completed item or Prepared Frame.
 _Avoid_: Cache, disk cache, repository
 
 ### Errors and diagnostics
@@ -306,18 +423,22 @@ diagnostics. Its message is stable, its cause is always absent, and a `Cancellat
 wrapped as a **RenG Failure**. A non-increasing frame index or one not above committed history is
 `PREPARATION_ORDER_VIOLATION` at `FRAME_PLANNING`. A second prepare is `PREPARATION_IN_PROGRESS` at
 `FRAME_PREPARATION`; before any context validation, the same code rejects active-preparation interference
-from history clearing, resource freeing, or renderer close at that operation's stage. Empty or oversized batches and invalid configuration
-use `INVALID_VALUE` or `RESOURCE_LIMIT_EXCEEDED` with only allowlisted `limit` and `actual` values.
-Unexpected transport statuses, integrity failures, and deferred GPU-deletion failures remain distinct
-errors and never trigger fallback work.
+from history clearing, resource freeing, or renderer close at that operation's stage. Empty batches use
+`INVALID_VALUE`; oversized batches and tile plans use `RESOURCE_LIMIT_EXCEEDED` with allowlisted `fieldName`,
+`limit`, and `actual`. Public value/configuration constructor violations instead throw non-sensitive
+`IllegalArgumentException` before renderer work; their implementation-defined messages are not caller
+contracts. Unexpected transport statuses, integrity failures, and deferred GPU-deletion failures remain
+distinct errors and never trigger fallback work.
 _Avoid_: Adapter exception, cause chain, message-based recovery
 
 **Diagnostic**:
 An immutable event containing only an allowlisted field name, **Resource Class**, credential-free resource
 key, status code, limit, or actual value. A non-throwing consumer sink receives diagnostics, serialized
 per renderer without thread affinity or a total order across otherwise concurrent operations; callbacks
-run outside renderer locks and sink failures are swallowed. `RESOURCE_RELOADED_AFTER_FREE` is a warning, and no diagnostic contains a
-**Resource Locator** or adapter text.
+run outside renderer locks and sink failures are swallowed. `RESOURCE_RELOADED_AFTER_FREE` is a sink-emitted
+warning. `FAILURE_CONTEXT` is an error carried only in one `RenGException`, shares that exception's stage, and
+is never emitted separately. No diagnostic contains a **Resource Locator**, adapter text, arbitrary field name,
+or secret metadata.
 _Avoid_: Log message, arbitrary metadata, exception cause
 
 ## Relationships
@@ -327,10 +448,21 @@ _Avoid_: Log message, arbitrary metadata, exception cause
 - `prepare(plan, accessMode = NORMAL)` is equivalent to one nonempty atomic batch item
 - `prepareBatch(plans, accessMode = NORMAL)` snapshots a nonempty input List, applies one access mode to
   the whole invocation, enforces the configured batch limit and strict frame-index order, and returns one
-  same-order immutable List only after complete success
+  same-order defensive List only after complete success; that List is not renderer backing state
+- One prepare invocation owns all of its **Resource Operation** route resolutions and latches. Equal prelookup
+  routes in that invocation join one resident/Store decision; finalized equal exchange identities join one
+  Transport outcome. Different routes or access modes never join, and no resolution survives the invocation
 - Equal **Frame Plan** values may produce independent leases after history is cleared; `frameIndex` orders
   and identifies a plan but creates no resource dependency by itself
 - Many **Prepared Frame**s may exist at once and be drawn in any order
+- Drawing may overlap GL-free preparation. Resource query and Prepared Frame close may overlap either and
+  linearize at renderer state boundaries; an in-flight draw holds its own temporary lease, so a concurrent
+  Prepared Frame close cannot free resources out from under it
+- The consumer serializes all GL-bound renderer calls. **GPU Object Loss** may overlap preparation but
+  serializes with an in-flight GL call before it forgets handles
+- For an operation they affect, error precedence is: active-preparation interference; `RENDERER_CLOSED`;
+  `RENDER_CONTEXT_ADOPTION_REQUIRED`; Prepared Frame ownership/closed state; Render Target ownership/context
+  generation; exact current-context validation; deferred deletion; then operation-specific validation/work
 - Successful atomic preparation updates **Frame History**; cancellation, failure, and drawing do not
 - A consumer may clear **Frame History** without freeing resources or invalidating prepared frames
 - One **Prepared Frame** draws into any number of **Render Target**s, and drawing does not consume it
@@ -354,6 +486,9 @@ _Avoid_: Log message, arbitrary metadata, exception cause
   **Renderer Close**
 - Free retires leased generations without invalidating live **Prepared Frame**s; new preparation reloads a
   fresh generation and emits one warning
+- A free result is a linearized point-in-time account. If free wins a race with the last lease release, it
+  reports that generation deferred even if release immediately queues deletion; if release wins, free reports
+  the generation fully freed. Resource query uses the same snapshot boundary
 - Closing the last lease of a retired generation queues its live handles for deferred deletion. After
   exact-context validation and before operation-specific work, Render Target minting, drawing, resource
   freeing, and live-handle **Renderer Close** drain that queue; validation failure changes nothing
@@ -397,3 +532,15 @@ _Avoid_: Log message, arbitrary metadata, exception cause
   objects no longer exist". Resolved: these are separate operations, because the first deletes GL
   objects and the second must not; see ADR 0007. Exact-context deletion enforcement is superseded by
   ADR 0015.
+- Rentile 0.1.5 internally retries some tile exchanges and requests removal of invalid stored content.
+  Resolved: those are private implementation calls behind an operation-scoped adapter firewall, not
+  consumer retries or Store mutations; see ADR 0016.
+- "Propagate cancellation unchanged" was read as requiring referentially identical exception objects.
+  Resolved: cancellation is never translated into a RenG failure, but Kotlin stack recovery may copy the
+  exception while retaining the original as its immediate cause.
+- A Prepared Frame was described as independently live while renderer close promised to release everything.
+  Resolved: renderer close invalidates every owned frame and target for use while their later cleanup remains
+  harmless; see ADR 0017.
+- Rentile's resource key removes selected credential-query values while RenG's locator is exact opaque content.
+  Resolved: RenG hashes its own versioned canonical root containing the exact locator and redacts only textual
+  representations and diagnostics; see ADR 0018.

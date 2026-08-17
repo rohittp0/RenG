@@ -5,7 +5,8 @@ RenG renders through OpenGL on every published target and requires the consumer 
 framebuffer object and its pixel dimensions. RenG never creates a context, never makes one current,
 never presents or swaps buffers, and never references CGL, EAGL, EGL, `NSOpenGLContext`, or
 `ANativeWindow`. A consumer that wants a window, a swapchain, a capture path, or an encoder builds it
-outside RenG.
+outside RenG. ADR 0012 later moved pixel dimensions out of **Render Target** and into immutable renderer
+configuration; the target now publicly names only its framebuffer object.
 
 OpenGL is the only API available across `android`, `iosArm64`, `iosSimulatorArm64`, `macosArm64`,
 `linuxX64`, and `linuxArm64` without shipping a translation layer, and the public API already commits

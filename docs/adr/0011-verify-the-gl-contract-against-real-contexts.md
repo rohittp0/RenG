@@ -4,7 +4,9 @@ CI runs RenG's GL conformance tests against genuine OpenGL contexts on two targe
 creates a headless core-profile context through CGL, with no window and no display server, which the
 spike proved works and which reports `4.1 Metal - 90.5` on Apple Silicon. `linuxX64Test` creates a
 surfaceless EGL context backed by Mesa's llvmpipe software rasterizer, which needs no GPU and no
-display server on an ordinary `ubuntu-latest` runner. The remaining targets — `iosArm64`,
+display server on an ordinary `ubuntu-latest` runner. A Cycle B throwaway fixture has now proved the
+surfaceless EGL/llvmpipe exact-context mechanism; the permanent GL conformance job and production binding
+still land with Cycle D rather than being inferred from that fixture. The remaining targets — `iosArm64`,
 `iosSimulatorArm64`, `linuxArm64`, and `android` — stay at compile-and-host-test.
 
 These two cover both binding implementations that can be tested cheaply: the shipped `platform.*` klibs

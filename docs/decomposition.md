@@ -6,7 +6,9 @@ its code exists. Cycle A additionally requires both CI jobs on the exact merged 
 verification of that commit's first public completion record.
 
 Cycle 0 is complete: the original graphics contract is recorded in ADRs 0001–0012 and `CONTEXT.md`;
-ADRs 0014–0015 supersede its preparation-ordering and exact-context deletion details. Everything below
+ADRs 0014–0015 supersede its preparation-ordering and exact-context deletion details, ADRs 0016–0017
+add the strict Rentile firewall and terminal renderer ownership rules, and ADR 0018 fixes canonical content
+identities. Everything below
 inherits the current decisions rather than revisiting them without new evidence.
 
 ## Order
@@ -50,9 +52,10 @@ metadata, credential-free resolution for all six targets, and the final immutabl
 `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; POM and metadata availability alone are
 not completion proof. See ADR 0013.
 
-That outcome is satisfied. Cycle B preparation reads `CONTEXT.md`, ADRs 0001–0015, this decomposition,
-and `HANDOFF.md`; completes the required feasibility proofs; invokes `/grill-with-docs` with the governing
-documents and findings; obtains design-specification approval; and only then writes an implementation plan.
+That outcome is satisfied. Cycle B preparation has read `CONTEXT.md`, ADRs 0001–0018, this decomposition,
+and `HANDOFF.md`; completed the required feasibility and closure proofs; and invoked `/grill-with-docs` with
+the governing documents and findings. Its design specification now awaits repository-owner approval; an
+implementation plan comes only after that approval.
 
 Cycle A is publicly complete from exact source commit
 `af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`
@@ -63,7 +66,7 @@ records.
 
 ## B — Public API surface and pure core
 
-Every type a consumer touches, embodying ADRs 0001–0012 as superseded by ADRs 0014–0015: the frame
+Every type a consumer touches, embodying ADRs 0001–0012 as refined by ADRs 0014–0018: the frame
 vocabulary (`FramePlan`,
 `Placement`, `Sticker`, `Model`, `Geometry`, `AnimationTrack`, camera), the renderer boundary
 (`prepare`, `draw`, cancellation, resource query and free, the GPU-objects-are-gone operation, `close`),
@@ -73,18 +76,23 @@ stable codes, pipeline stage, and redacted diagnostics.
 Behind it, the parts that need no GPU and no network: resolving a camera to matrices, resolving each
 placement property independently under its own anchoring mode, selecting basemap tiles for a camera at
 the configured output size, diffing consecutive plans, and deriving content-keyed identity for every
-cacheable resource. All of it is host-testable, which is why it comes before both C and D.
+cacheable resource. Cycle B also lands the production pure decision engines for ordered preparation, resource
+route/frontier/lookup/response/write actions, and renderer lifecycle/error precedence. Those engines consume
+supplied observations and emit immutable actions; they call no adapter, Rentile, decoder, parser, context API,
+or GL function. Cycles C and D connect their respective real observations and execute their actions. All Cycle B
+behavior is host-testable, which is why it comes before both C and D.
 
-This cycle must decide how coordinates keep their precision: latitude and longitude need doubles at high
-zoom and the GPU only has floats, so some form of camera-relative rebasing is required and its boundary
-belongs in the transform code, not scattered through the passes.
+Coordinate precision is resolved here: geographic and camera-relative transform math remains `Double` through
+clipping and rebasing, and only small camera-relative values cross the GPU boundary as `Float`. Mercator
+preparation rejects coordinates outside its latitude and proved world-copy bounds rather than clamping or
+wrapping them.
 
 ## C — Resource layer
 
-Acquisition through the consumer's transport and store, proxying basemap resources down to Rentile and
-fetching RenG's own; PNG decode; GLB parse; the content-keyed cache with refcounted lifetime across
-concurrently live prepared frames; the reload-on-access path that makes freeing safe; cancellation of
-everything in flight.
+Acquisition through the consumer's transport and store by driving Cycle B's pure resource-operation decisions,
+proxying basemap resources down to Rentile and fetching RenG's own; PNG decode; GLB parse; the content-keyed
+cache with refcounted lifetime across concurrently live prepared frames; the reload-on-access path that makes
+freeing safe; cancellation of everything in flight.
 
 Two open technical decisions belong here and both deserve a spike before the spec is written. PNG
 decoding across six targets has no free answer — Skiko is proven on these targets but heavy, and a pure
@@ -95,10 +103,11 @@ than discovered.
 ## D — GL foundation
 
 The internal GL seam and its three implementations — `platform.OpenGL3`/`platform.OpenGLCommon`,
-`platform.gles3`, `dlsym`, and Android's `GLES30` — with signatures both pointer-based and
-JVM-array-based sides can implement. Context and dialect detection at setup; the offscreen colour+depth
-surface and the composite pass; the documented save-and-restore state set; shader compilation with
-version-directive substitution and program caching.
+`platform.gles3`, `dlsym`, and Android's `GLES30` — with signatures both pointer-based and JVM-array-based
+sides can implement. It supplies real context, target, and handle observations to Cycle B's lifecycle decisions,
+then executes their GL actions. Context and dialect detection at setup; the offscreen colour+depth surface and
+the composite pass; the documented save-and-restore state set; shader compilation with version-directive
+substitution and program caching.
 
 The conformance suite lands here and is the reason ADR 0006 and ADR 0008 are claims rather than hopes:
 state identical before and after a draw, and a GLSL ES 3.00 source compiling under both a substituted
@@ -113,7 +122,7 @@ equality, since llvmpipe and Apple's GL will not agree.
 
 ## F — Drawn things
 
-Stickers, models with their textures and animation-track frame selection, and geometries painted by
+Stickers, models with their textures and animation-track time sampling, and geometries painted by
 consumer shader pairs. This cycle owns the decision CLAUDE.md flags as ADR-worthy: how the two draw
 regimes order against each other within one frame, given screen-anchored things composite by z-index
 with no depth test while map-anchored things are occlusion-tested against the scene. It also fixes the

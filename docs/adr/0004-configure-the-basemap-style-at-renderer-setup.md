@@ -20,4 +20,5 @@ simpler setup path: a style change is a rare, coarse event, not per-frame state,
 per-frame state invites consumers to vary it accidentally. The consequence to accept is that a
 mid-sequence style change costs a new renderer and a cold GPU cache, and that whether a single frame
 can suppress an otherwise-configured basemap is deliberately left undecided until the basemap
-sub-project needs an answer.
+sub-project needs an answer. That later answer is `FramePlan.drawBasemap`, defaulting to true: it may suppress
+the configured basemap for one frame without selecting or changing the renderer's style.

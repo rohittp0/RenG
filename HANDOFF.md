@@ -1,17 +1,19 @@
 # Handoff
 
-For whoever picks up RenG next. Cycle 0 established the graphics contract, with later superseding decisions
-recorded in ADRs 0014–0015. Cycle A is publicly complete. RenG still renders nothing and exposes no public
-runtime API; Cycle B design preparation is underway, but production implementation has not started.
+For whoever picks up RenG next. Cycle 0 established the graphics contract, with later decisions
+recorded in ADRs 0014–0018. Cycle A is publicly complete. RenG still renders nothing and exposes no public
+runtime API; Cycle B design preparation and feasibility closure are complete, but the specification still
+requires repository-owner approval and production implementation has not started.
 
 ## Read these first, in this order
 
 1. `CLAUDE.md` — current project structure, contracts, tools, and local commands. Where it disagrees with
    an ADR, the ADR wins.
 2. `CONTEXT.md` — vocabulary. Read it before naming anything.
-3. `docs/adr/0001`–`0015` — ADRs 0001–0012 establish the original graphics contract, ADR 0013
-   governs fail-closed release policy, and ADRs 0014–0015 supersede preparation ordering and exact-context
-   deletion behavior. **Do not re-litigate resolved contracts without new evidence.**
+3. `docs/adr/0001`–`0018` — ADRs 0001–0012 establish the original graphics contract, ADR 0013
+   governs fail-closed release policy, ADRs 0014–0015 supersede preparation ordering and exact-context
+   deletion behavior, ADRs 0016–0017 define the Rentile firewall and terminal renderer ownership, and ADR
+   0018 defines canonical identities. **Do not re-litigate resolved contracts without new evidence.**
 4. `docs/decomposition.md` — cycles A–J, their gates, and their order.
 
 ## What exists and what does not
@@ -71,6 +73,9 @@ not by recall.
 | Linux sysroots ship `dlfcn.h`, no `GL/` or `EGL/` headers | `find ~/.konan -name 'GL' -o -name 'EGL'` → empty |
 | Android `GLES20`+`GLES30` cover every entry point needed | `javap` over `android.jar` (android-37.0) |
 | Toolchain: Kotlin 2.3.21, AGP 9.3.1, Gradle 9.5.0 wrapper | `gradle/libs.versions.toml` here and in rentile |
+| Linux exact-context facade works under Mesa llvmpipe | Ubuntu 24.04 workflow run `31972966052`: three tests, EGL 1.5, OpenGL 4.5 core, distinct contexts, FBO 0/nonzero, exact-context delete rules |
+| One long-lived Rentile 0.1.5 firewall can preserve RenG strictness | 18 Android-host + 18 macOS tests, all eight basemap classes, 256 actual tiles at concurrency 8, six-target compile and clean ABI |
+| Canonical tagged bytes and pure Kotlin SHA-256 are cross-target deterministic | Seven Android-host + seven macOS tests; complete 1,431-byte encoding and identity matched; all six targets compiled |
 
 Shader dialect, from a headless CGL context on an M3 Max reporting `4.1 Metal - 90.5`:
 
@@ -193,24 +198,27 @@ or public repository.
 
 ## Current cycle: B — public API and pure core
 
-Cycle A's exact-SHA public gate is satisfied. Cycle B preparation has read the governing documents, run the
-initial feasibility spikes, and captured the resolved vocabulary in `CONTEXT.md`; follow-up proofs remain
-in progress. ADRs 0014–0015 supersede the earlier preparation-ordering and exact-context deletion details.
+Cycle A's exact-SHA public gate is satisfied. Cycle B preparation read every governing document, completed
+all initial, follow-up, and design-closure proofs, and captured resolved vocabulary in `CONTEXT.md` plus ADRs
+0014–0018. The design specification is
+`docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md`. It freezes the proposed public
+surface and pure-core behavior while deliberately exposing no renderer factory before Cycles C and D can
+honor the resource and GL seams. Cycle B includes production pure decision engines for ordered preparation,
+resource-operation actions, and lifecycle/error precedence; they consume supplied observations but perform no
+consumer adapter, Rentile, decoder/parser, platform-context, or GL call.
 
 Before Cycle B implementation:
 
-1. Read `CONTEXT.md`, ADRs 0001–0015, `docs/decomposition.md`, and this handoff.
-2. Complete and review the required follow-up feasibility proofs.
-3. Invoke `/grill-with-docs` with the governing documents and all spike findings.
-4. Write and obtain approval of the design specification.
-5. Write an implementation plan only after that design review resolves its questions.
+1. Read `CONTEXT.md`, ADRs 0001–0018, `docs/decomposition.md`, this handoff, and the design specification.
+2. Obtain repository-owner review and approval of the design specification.
+3. Invoke `/grill-with-docs` again only if that review changes or reopens a contract.
+4. Write and independently review an implementation plan after specification approval.
+5. Implement no resource acquisition, decoder/parser, GL call, pixel output, or renderer factory in Cycle B.
 
-No Cycle B production implementation has started.
+No Cycle B production implementation or implementation plan has started.
 
 ## Decisions still open, each needing a spike before its cycle's spec
 
-- **Coordinate precision (cycle B).** Latitude/longitude need doubles at high zoom; the GPU has floats.
-  Camera-relative rebasing is required and its boundary belongs in the transform code.
 - **PNG decode and GLB parse (cycle C).** No free answer for PNG across six targets — Skiko is proven
   but heavy, a pure-Kotlin decoder needs inflate. GLB is tractable in pure Kotlin but its supported
   feature subset must be written down, not discovered.
@@ -224,7 +232,7 @@ No Cycle B production implementation has started.
 - The repository owner's standing instruction: **run `/grill-with-docs` before writing any plan**, and
   use parallel subagents for genuinely independent implementation tasks.
 - ADRs are a few paragraphs of prose, no template headings, `NNNN-imperative-title.md`. Next number is
-  0016.
+  0019.
 - Update `CONTEXT.md` as terms resolve rather than batching it.
 - Never commit `mavenLocal()`, a `-SNAPSHOT` dependency, or an independently hardcoded RenG version —
   `VERSION_NAME` in the root `gradle.properties` is the sole checked-in version input. ADR 0013 defines
@@ -232,7 +240,13 @@ No Cycle B production implementation has started.
 
 ## Throwaway spike code
 
-Cycle 0's probes live in this session's scratchpad, not the repo, and are deliberately disposable:
-`gl_dialect_probe.c` and `gl_330_probe.c` (headless CGL, C), and `glspike/` (a five-target Kotlin/Native
-build whose `macosArm64Test` drives a real context). If the scratchpad is gone, the tables above are the
-findings; reproducing them takes about an hour.
+Cycle B's ignored evidence pack is retained locally under `build/cycle-b-spikes/`. The ordered evidence tree
+starts at `GRILLING-PREP.txt`; the consolidated follow-up report and closure proofs are
+`follow-up/REPORT.txt`, `follow-up/rentile-production-firewall/REPORT.txt`,
+`follow-up/canonical-identity/REPORT.txt`, and `follow-up/linux-runtime-proof/REPORT.txt`. Linux's complete
+public job log is also retained there and remains available in workflow run `31972966052` after its temporary
+draft PR and branch were removed. These fixtures prove feasibility only; none is production RenG source or
+public API.
+
+Cycle 0's older GL probes may still exist only in a session scratchpad: `gl_dialect_probe.c`,
+`gl_330_probe.c`, and `glspike/`. Their durable findings are the shader table above and ADRs 0008–0011.

@@ -11,14 +11,15 @@ library module; Android Studio's placeholder `:app` has been deleted. `:kmp` is 
 skeleton with no public runtime API and no rendering behavior yet. `consumer-smoke`, the dependency-free
 static site, publication tooling, repository-policy tooling, and `VERSION_NAME=0.1.0` exist.
 
-Cycle B preparation is in progress. Before implementation, read `CONTEXT.md`, the governing ADRs,
-`docs/decomposition.md`, and `HANDOFF.md`; complete the required feasibility spikes; invoke
-`/grill-with-docs` with those findings; obtain approval of the design specification; and only then write
-and execute an implementation plan.
+Cycle B preparation, grilling, and feasibility closure are complete. The proposed public API and pure-core
+design is in `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and awaits
+repository-owner review. Do not write an implementation plan or start implementation until that specification is
+approved; invoke `/grill-with-docs` again first only if review reopens a contract.
 
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
-original graphics contract, ADR 0013 governs fail-closed publication, and ADRs 0014–0015 supersede
-preparation ordering and GL-deletion context behavior). Read both before proposing anything that touches
+original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
+preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and
+terminal renderer ownership, and ADR 0018 governs canonical identities). Read both before proposing anything that touches
 the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is
@@ -75,7 +76,7 @@ Sticker(placement, image: ResourceLocator /* PNG */)
 Model(placement, glb: ResourceLocator, texture: ResourceLocator? = null,
       animationTracks: List<AnimationTrack>)
 
-AnimationSelector = Name(exactName) | Index(zeroBasedIndex)
+AnimationSelector = Name(exactName) | Index(zeroBasedLongIndex)
 AnimationTrack(animation: AnimationSelector, timeSeconds: Double)
 
 Geometry(topLeft: Vector3(latitude, unwrappedLongitude, altitude),
@@ -89,7 +90,7 @@ Non-obvious semantics:
 
 - **Anchoring is per-property, not per-object.** One `Placement` can mix modes — e.g. `MAP` position
   with `SCREEN` rotation (a billboard pinned to a coordinate). The transform pipeline must resolve
-  each of position/rotation/pitch/scale independently.
+  each of position, rotation, and scale independently.
 - **`SCREEN` anchoring turns `position.z` into a z-index** — ordered compositing, no depth test.
   **`MAP` anchoring requires full occlusion testing** against the 3D scene. These are two distinct
   draw regimes in one frame; ordering between them is a design decision worth an ADR.
@@ -123,7 +124,9 @@ Conventions carried over:
   `--no-configuration-cache` because remote Maven publishing is not CC-compatible.
 - Typed exceptions with stable error codes, pipeline stage, and **redacted** diagnostics. Never
   forward messages or causes from injected transport/store adapters — they can carry signed URLs.
-  Propagate `CancellationException` unchanged. No internal retries or fallbacks; the caller owns recovery.
+  Keep cancellation as an unwrapped `CancellationException`; Kotlin stack recovery may copy it with the
+  original as its immediate cause. RenG performs no repeated consumer exchanges, retries, repairs, or
+  fallbacks; Rentile's private retry calls replay the operation's latched outcome. The caller owns recovery.
 - Never commit a `mavenLocal()` entry or a `-SNAPSHOT` dependency. Local cross-repo development uses
   `./gradlew publishToMavenLocal` in rentile plus a temporary repository entry, reverted before committing.
 

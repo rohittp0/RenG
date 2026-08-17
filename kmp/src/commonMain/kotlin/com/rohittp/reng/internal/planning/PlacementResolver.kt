@@ -6,17 +6,13 @@ import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.projection.GeographicPosition
-import com.rohittp.reng.internal.projection.MERCATOR_MAXIMUM_LATITUDE_DEGREES
 import com.rohittp.reng.internal.projection.MercatorPosition
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.WORLD_CIRCUMFERENCE_METRES
 import com.rohittp.reng.internal.projection.validateMercatorMapPosition
 import com.rohittp.reng.internal.projection.wgs84LocalFrame
 import kotlin.math.PI
-import kotlin.math.atan
 import kotlin.math.cos
-import kotlin.math.floor
-import kotlin.math.sinh
 
 internal enum class DrawRegime {
     MAP_OCCLUDED,
@@ -72,7 +68,7 @@ internal fun resolvePlacement(
                 return gpuRepresentabilityFailure(DiagnosticField.SCREEN_POSITION_Y)
             }
 
-            geographicAnchor = cameraGeographicGroundAnchor(camera)
+            geographicAnchor = camera.geographicGroundAnchor
             logicalPosition = DoubleVector3(
                 x = placement.position.x,
                 y = placement.position.y,
@@ -91,7 +87,7 @@ internal fun resolvePlacement(
     val directionTransform = when (placement.rotationMode) {
         AnchoringMode.SCREEN -> localRotation
         AnchoringMode.MAP -> {
-            val cameraGroundAnchor = cameraGeographicGroundAnchor(camera)
+            val cameraGroundAnchor = camera.geographicGroundAnchor
             val viewBasis = DoubleMatrix3.fromRows(
                 listOf(
                     listOf(camera.right.x, camera.right.y, camera.right.z),
@@ -141,21 +137,6 @@ internal fun resolveCameraRelativeMapPosition(
     if (!isGpuRepresentable(logicalPosition.y)) return gpuRepresentabilityFailure(latitudeField)
     if (!isGpuRepresentable(logicalPosition.z)) return gpuRepresentabilityFailure(altitudeField)
     return SpatialOutcome.Success(logicalPosition)
-}
-
-private fun cameraGeographicGroundAnchor(camera: ResolvedMercatorCamera): GeographicPosition {
-    val latitude = when (camera.mercatorAnchor.y) {
-        0.0 -> MERCATOR_MAXIMUM_LATITUDE_DEGREES
-        1.0 -> -MERCATOR_MAXIMUM_LATITUDE_DEGREES
-        else -> atan(sinh(PI * (1.0 - 2.0 * camera.mercatorAnchor.y))) * 180.0 / PI
-    }
-    val copyIndex = floor(camera.mercatorAnchor.x)
-    val canonicalLongitude = (camera.mercatorAnchor.x - copyIndex) * 360.0 - 180.0
-    return GeographicPosition(
-        latitude = latitude,
-        unwrappedLongitude = canonicalLongitude,
-        altitudeMetres = 0.0,
-    )
 }
 
 private fun Double.degreesToRadians(): Double = this * PI / 180.0

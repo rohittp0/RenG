@@ -296,6 +296,7 @@ class MercatorGroundFootprintTest {
         cameraDistanceLogicalPixels = cameraDistanceLogicalPixels,
         viewMatrix = DoubleMatrix4.identity,
         projectionMatrix = DoubleMatrix4.identity,
+        geographicGroundAnchor = GeographicPosition(0.0, 0.0, 0.0),
     )
 
     private fun assertSegment(

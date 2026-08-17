@@ -17,6 +17,25 @@ import kotlin.test.assertTrue
 
 class CameraMatricesTest {
     @Test
+    fun resolutionRetainsExactCameraGroundAnchorAtHighLatitudeAndNonzeroWorldCopy() {
+        val latitude = 84.98765432101234
+        val unwrappedLongitude = 444363.4567890123
+        val resolved = resolve(
+            camera = camera(
+                latitude = latitude,
+                unwrappedLongitude = unwrappedLongitude,
+            ),
+        )
+
+        assertEquals(latitude.toBits(), resolved.geographicGroundAnchor.latitude.toBits())
+        assertEquals(
+            unwrappedLongitude.toBits(),
+            resolved.geographicGroundAnchor.unwrappedLongitude.toBits(),
+        )
+        assertEquals(0.0.toBits(), resolved.geographicGroundAnchor.altitudeMetres.toBits())
+    }
+
+    @Test
     fun zeroBearingAndPitchResolveNorthUpStraightDownView() {
         val outputSize = OutputPixelSize(width = 640, height = 480)
         val resolved = resolve(camera = camera(bearing = 0.0, pitch = 0.0), outputPixelSize = outputSize)
@@ -271,6 +290,7 @@ class CameraMatricesTest {
         cameraDistanceLogicalPixels = cameraDistanceLogicalPixels,
         viewMatrix = DoubleMatrix4.identity,
         projectionMatrix = DoubleMatrix4.identity,
+        geographicGroundAnchor = GeographicPosition(0.0, 0.0, 0.0),
     )
 
     private fun windowDepthAtViewDepth(projection: DoubleMatrix4, depth: Double): Double {

@@ -23,6 +23,7 @@ internal data class ResolvedMercatorCamera(
     val cameraDistanceLogicalPixels: Double,
     val viewMatrix: DoubleMatrix4,
     val projectionMatrix: DoubleMatrix4,
+    val geographicGroundAnchor: GeographicPosition,
 )
 
 internal sealed interface GroundRayResult {
@@ -41,13 +42,12 @@ internal fun resolveMercatorCamera(
     camera: Camera,
     outputPixelSize: OutputPixelSize,
 ): SpatialOutcome<ResolvedMercatorCamera> {
-    val anchorOutcome = validateMercatorCamera(
-        GeographicPosition(
-            latitude = camera.latitude,
-            unwrappedLongitude = camera.unwrappedLongitude,
-            altitudeMetres = 0.0,
-        ),
+    val geographicGroundAnchor = GeographicPosition(
+        latitude = camera.latitude,
+        unwrappedLongitude = camera.unwrappedLongitude,
+        altitudeMetres = 0.0,
     )
+    val anchorOutcome = validateMercatorCamera(geographicGroundAnchor)
     if (anchorOutcome is SpatialOutcome.Failure) return anchorOutcome
     val mercatorAnchor = (anchorOutcome as SpatialOutcome.Success).value
 
@@ -93,6 +93,7 @@ internal fun resolveMercatorCamera(
             cameraDistanceLogicalPixels = cameraDistance,
             viewMatrix = viewMatrix,
             projectionMatrix = projectionMatrix,
+            geographicGroundAnchor = geographicGroundAnchor,
         ),
     )
 }

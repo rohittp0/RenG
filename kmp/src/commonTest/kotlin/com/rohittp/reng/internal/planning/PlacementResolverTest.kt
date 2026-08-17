@@ -158,7 +158,7 @@ class PlacementResolverTest {
             wgs84LocalFrame(anchor).basisEastNorthUp *
             DoubleMatrix3.rotationXyzDegrees(rotation.x, rotation.y, rotation.z)
 
-        assertMatrixClose(expected, resolved.directionTransform)
+        assertMatrixBitsEqual(expected, resolved.directionTransform)
         assertTrue(
             matrixMaximumDifference(cameraViewBasis(camera), resolved.directionTransform) > 1e-3,
             "a geographically different anchor must change the direction basis",
@@ -198,6 +198,47 @@ class PlacementResolverTest {
         assertEquals(4.0, resolved.screenCompositeZ)
         assertMatrixClose(expectedDirection, resolved.directionTransform, tolerance = 1e-12)
         assertClose(expectedScale, resolved.logicalScale)
+    }
+
+    @Test
+    fun mapCameraFallbackUsesOriginalCoordinatesBitExactly() {
+        val cameraLatitude = 31.0
+        val cameraLongitude = 444363.4567890123
+        val camera = resolvedCamera(
+            latitude = cameraLatitude,
+            unwrappedLongitude = cameraLongitude,
+            zoom = 5.25,
+            bearing = 25.0,
+            pitch = 50.0,
+        )
+        val rotation = Vector3(15.0, 25.0, -35.0)
+        val scale = 12.0
+        val resolved = resolve(
+            Placement(
+                positionMode = AnchoringMode.SCREEN,
+                position = Vector3(200.0, 300.0, 4.0),
+                rotationMode = AnchoringMode.MAP,
+                rotation = rotation,
+                scaleMode = AnchoringMode.MAP,
+                scale = scale,
+            ),
+            camera,
+        )
+        val exactGroundAnchor = GeographicPosition(
+            latitude = cameraLatitude,
+            unwrappedLongitude = cameraLongitude,
+            altitudeMetres = 0.0,
+        )
+        val exactBasis = wgs84LocalFrame(exactGroundAnchor).basisEastNorthUp
+        val expectedDirection = cameraViewBasis(camera) *
+            exactBasis.transpose() *
+            exactBasis *
+            DoubleMatrix3.rotationXyzDegrees(rotation.x, rotation.y, rotation.z)
+        val expectedScale = scale * camera.worldSizeLogicalPixels /
+            (WORLD_CIRCUMFERENCE_METRES * cos(cameraLatitude * PI / 180.0))
+
+        assertMatrixBitsEqual(expectedDirection, resolved.directionTransform)
+        assertEquals(expectedScale.toBits(), resolved.logicalScale.toBits())
     }
 
     @Test
@@ -363,6 +404,18 @@ class PlacementResolverTest {
         assertNull(diagnostic.statusCode)
         assertNull(diagnostic.limit)
         assertNull(diagnostic.actual)
+    }
+
+    private fun assertMatrixBitsEqual(expected: DoubleMatrix3, actual: DoubleMatrix3) {
+        for (row in 0..2) {
+            for (column in 0..2) {
+                assertEquals(
+                    expected[row, column].toBits(),
+                    actual[row, column].toBits(),
+                    "matrix value at [$row,$column] differs bit-exactly",
+                )
+            }
+        }
     }
 
     private fun assertMatrixClose(

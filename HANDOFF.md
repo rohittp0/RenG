@@ -1,252 +1,166 @@
-# Handoff
+# RenG Cycle B handoff — 2026-08-17
 
-For whoever picks up RenG next. Cycle 0 established the graphics contract, with later decisions
-recorded in ADRs 0014–0018. Cycle A is publicly complete. RenG still renders nothing and exposes no public
-runtime API; Cycle B design preparation and feasibility closure are complete, but the specification still
-requires repository-owner approval and production implementation has not started.
+This is the durable recovery point for the next agent. Cycle A is publicly complete. Cycle B's owner-approved public-API/pure-core implementation is partially complete on branch
+`docs/cycle-b-resource-contract` and has been pushed to `origin`.
 
-## Read these first, in this order
+The implementation checkpoint immediately before this handoff commit is
+`2f5dd211d3eac3e5c4774e07c341943e569b382d`. The handoff commit itself should be the branch's current HEAD.
 
-1. `CLAUDE.md` — current project structure, contracts, tools, and local commands. Where it disagrees with
-   an ADR, the ADR wins.
-2. `CONTEXT.md` — vocabulary. Read it before naming anything.
-3. `docs/adr/0001`–`0018` — ADRs 0001–0012 establish the original graphics contract, ADR 0013
-   governs fail-closed release policy, ADRs 0014–0015 supersede preparation ordering and exact-context
-   deletion behavior, ADRs 0016–0017 define the Rentile firewall and terminal renderer ownership, and ADR
-   0018 defines canonical identities. **Do not re-litigate resolved contracts without new evidence.**
-4. `docs/decomposition.md` — cycles A–J, their gates, and their order.
+## Read first
 
-## What exists and what does not
+1. `CLAUDE.md` — repository constraints, purity contract, six targets, commands, and publication rules.
+2. `CONTEXT.md` — canonical vocabulary.
+3. `docs/adr/0001`–`0018` — newer ADRs override older prose.
+4. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` — owner-approved Cycle B authority, approved at `11d7a03`.
+5. `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md` — independently reviewed implementation plan, committed with its canonical fixture at `4ff05ee`.
+6. This handoff, then the relevant implementation and tests.
 
-Android Studio's placeholder `:app` is gone. Root settings include only `:kmp`, the single published
-module for `com.rohittp.reng:kmp`. It declares exactly `android`, `iosArm64`, `iosSimulatorArm64`,
-`macosArm64`, `linuxX64`, and `linuxArm64`; enables `explicitApi()` and KLIB ABI validation; and keeps
-Rentile 0.1.5 as an `implementation` dependency. Cycle A's only Kotlin production code is an internal
-Rentile linkage anchor exercised by a common test, so no Rentile type or RenG runtime symbol is public.
+The specification and plan are already approved. Do not re-run grilling or write another plan unless repository-owner review explicitly reopens a contract.
 
-The standalone `consumer-smoke` build declares the same six targets and resolves RenG through an
-`exclusiveContent` repository. It defaults to `build/local-maven`, reads the sole checked-in version from
-root `gradle.properties`, and accepts explicit `rengRepositoryUrl`/`rengVersion` overrides for copied
-public smoke. `VERSION_NAME=0.1.0`, `kmp/api/kmp.klib.api`, the dependency-free static `docs/` site,
-Apache-2.0 legal files, and the publication/POM configuration all exist.
+## Binding scope
 
-The standard-library Python tooling is implemented and unit-tested:
+Cycle B is pure core only. It includes public immutable values/protocols/failures, canonical identities and SHA-256, spatial/diff planning, and pure lifecycle/resource/preparation reducers driven by supplied values.
 
-- `tools/check_repository_policy.py --root .` enforces the Cycle A repository contract.
-- `tools/resolve_release_version.py --properties-file gradle.properties --repository-url <url>` selects
-  one public candidate or fails closed.
-- `tools/verify_publication.py` exposes:
-  - `local --repository <path> --version <version> --manifest <path>`
-  - `r2-preflight --endpoint <url> --bucket <bucket> --version <version> --manifest <path>`
-  - `public --repository-url <url> --version <version> --manifest <path> [--attempts <n>] [--retry-delay <seconds>]`
-  - `completion-create --version <version> --manifest <path> --source-commit <sha> --output <path>`
-  - `completion-public --repository-url <url> --version <version> --manifest <path> --source-commit <sha> [--attempts <n>] [--retry-delay <seconds>]`
-  These cover the seven-publication local manifest, authoritative exact-key collisions, anonymous public
-  artifacts and metadata, canonical manifest-bound record creation, and anonymous record verification.
+Do not add a renderer factory, consumer adapter call, Rentile acquisition, decoder/parser, production cache, platform-context or GL call, shader compilation, pixels, retry, repair, fallback, or repeated consumer exchange. Never forward injected adapter messages or causes. Preserve selected cancellation as an opaque, unwrapped cancellation ID/cause value.
 
-`.github/workflows/ci.yml` now gates Ubuntu and macOS work rather than referencing missing projects.
-`.github/workflows/publish.yml` adds version resolution, a Linux release gate, local publication,
-seven POM checks, fresh-home six-target local smoke, exact-key R2 preflight, upload, anonymous artifact
-and retry-budgeted metadata verification, and a copied fresh-home credential-free public smoke. Only after
-those public gates does it derive
-`com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`, conditionally create it with
-`If-None-Match: *`, and verify it anonymously with retries. The record's exact schema-version-1 fields are
-`schemaVersion`, `mavenVersion`, `sourceCommitSha`, and `manifestSha256`; the hash covers the exact
-serialized local manifest. Of those three completion-record stages, only the conditional write receives R2
-credentials; local record derivation and final anonymous verification do not. The aggregate
-KotlinMultiplatform R2 task depends on all six target R2 tasks as defense in depth, but neither aggregate
-POM nor Maven metadata availability proves completion.
+The branch must retain exactly six published targets: Android, iOS Arm64, iOS Simulator Arm64, macOS Arm64, Linux x64, and Linux Arm64. No JVM publication, `macosX64`, or `iosX64`. Never commit `mavenLocal()`, a `-SNAPSHOT`, or `local.properties`.
 
-## Verified environment facts
+## Completed and independently approved tasks
 
-Re-verify rather than trust if months have passed. Each fact below was established by running something,
-not by recall.
+The following plan tasks were implemented, task-reviewed, fixed where necessary, integrated into this branch, controller-tested, and had their auxiliary worktrees removed:
 
-| Fact | How it was verified |
-|---|---|
-| Rentile 0.1.5 publishes all six targets RenG needs | `curl` on `maven.rohittp.com` for `kmp-{android,iosarm64,iossimulatorarm64,macosarm64,linuxx64,linuxarm64}-0.1.5.pom` → all 200 |
-| Depend on `com.rohittp.rentile:kmp:0.1.5`, no `mavenLocal()` | same |
-| Kotlin/Native ships Apple GL bindings | `klib dump-metadata` on `~/.konan/.../klib/platform/*` |
-| `macosArm64` → `platform.OpenGL3` (509 fns) + `platform.OpenGLCommon` (52 CGL fns) | same |
-| iOS targets → **`platform.gles3`** (296 fns) — *not* `platform.OpenGLES3` | same; the module is named `OpenGLES3` but its package is `platform.gles3` |
-| Linux has no GL platform klib (only `builtin`, `iconv`, `linux`, `posix`, `zlib`) | `ls ~/.konan/.../klib/platform/linux_x64` |
-| Linux sysroots ship `dlfcn.h`, no `GL/` or `EGL/` headers | `find ~/.konan -name 'GL' -o -name 'EGL'` → empty |
-| Android `GLES20`+`GLES30` cover every entry point needed | `javap` over `android.jar` (android-37.0) |
-| Toolchain: Kotlin 2.3.21, AGP 9.3.1, Gradle 9.5.0 wrapper | `gradle/libs.versions.toml` here and in rentile |
-| Linux exact-context facade works under Mesa llvmpipe | Ubuntu 24.04 workflow run `31972966052`: three tests, EGL 1.5, OpenGL 4.5 core, distinct contexts, FBO 0/nonzero, exact-context delete rules |
-| One long-lived Rentile 0.1.5 firewall can preserve RenG strictness | 18 Android-host + 18 macOS tests, all eight basemap classes, 256 actual tiles at concurrency 8, six-target compile and clean ABI |
-| Canonical tagged bytes and pure Kotlin SHA-256 are cross-target deterministic | Seven Android-host + seven macOS tests; complete 1,431-byte encoding and identity matched; all six targets compiled |
+- Task 0 — approved plan and canonical fixture
+- Tasks 1–3 — public values, adapters, and frame model
+- Tasks 4A–4C — renderer ownership/API, diagnostics/failures, configuration/protocol
+- Task 5 — ABI, policy, consumer smoke, and build firewall
+- Tasks 6–7 — canonical binary/SHA-256, identities, encoding, and structural diff
+- Tasks 8A–8C — Mercator projection, camera/rays, and closed ground footprint
+- Tasks 9A–9C — LOD/tile selection, placement/geometry, and shader-profile scanning
+- Task 11 — renderer lifecycle reducer
+- Tasks 12A–12C — preregistration, frontier scheduling, ordered retirement, and terminal arbitration
 
-Shader dialect, from a headless CGL context on an M3 Max reporting `4.1 Metal - 90.5`:
+Important completed hardening includes:
 
-| Source | Core 4.1 | Legacy 2.1 |
-|---|---|---|
-| `#version 300 es` | **FAIL** — "version '300' is not supported" | FAIL |
-| `#version 410 core` + ES-style body | OK | FAIL |
-| `#version 330 core` + ES-style body | **OK, and links** | FAIL |
-| `#version 120` / no directive | FAIL | OK |
+- dependency-free common Kotlin SHA-256 without a full-message copy;
+- exact retained camera geographic anchor rather than inverse-projection reconstruction;
+- exact epsilon tile admission and bounded row/edge counting for full-support LOD 22;
+- scanner rejection of unterminated block comments anywhere in shader source;
+- linear 4,096-child frontier scheduling;
+- route/external cancellation-channel invariants;
+- repeat private-key collision attribution without duplicate terminal buffering;
+- complete assigned-ordinal and ordered-buffer invariants;
+- unresolved discovery cannot be bypassed by `RouteCompleted(Success)`.
 
-"ES-style body" means `precision mediump float;`, `in`/`out`, `texture()`, `textureSize()`,
-`layout(location = …)`, and integer uniforms. This is why ADR 0008 substitutes `330 core`.
+## Implemented but review-pending
 
-## Traps that cost time — do not rediscover them
+The repository owner explicitly instructed the prior agent to stop starting reviews and hand these off. Do not treat either task as review-approved yet.
 
-- **Hand-rolled cinterop against Apple GL headers silently produces an empty binding.** Clang
-  availability attributes (`API_DEPRECATED(macos(10.5, 10.14))`) make cinterop *drop* declarations with
-  no error and no warning: a def naming `OpenGL/gl3.h` yielded 19 GLU functions and zero GL ones.
-  `GL_SILENCE_DEPRECATION` in `compilerOpts` did not fix it under Clang modules. Use the shipped
-  platform klibs (ADR 0009).
-- **A cinterop package name comes from the `.def` filename, not the `cinterops.create(...)` name.**
-  `gl_macos.def` produces package `gl_macos`.
-- **Inline C in a def file's `---` section *is* imported** even when the header declarations are dropped.
-  Useful as an escape hatch; not needed for RenG.
-- **Platform GL klibs are invisible from shared source sets.** `platform.gles3` resolves in
-  `iosArm64Main` and fails in `iosMain`. `kotlin.mpp.enableCInteropCommonization=true` did not change
-  this. GL code lives in leaf source sets.
-- **Cinterops declared on the `main` compilation are not visible to the test compilation.** Put GL calls
-  in main source and have tests call them — which is what RenG does anyway.
-- **`klib dump-metadata` is the tool** for answering "what is actually in this klib": `~/.konan/
-  kotlin-native-prebuilt-macos-aarch64-<version>/bin/klib dump-metadata <path>`. `klib contents` does
-  not exist.
+### Task 9D — integrated Mercator spatial planning
 
-## Cycle A public completion
+Controller commits:
 
-The approved design and its fail-closed release policy are in
-`docs/superpowers/specs/2026-08-14-cycle-a-build-publication-design.md` and ADR 0013. Cycle A completed from
-exact source commit `af92901b2ef045078b855a6b47533bc95aca6886`. CI run `31968682132` passed its Android
-and Linux job and its Apple and publication-metadata job. Publication run `31968682290` resolved and
-published `0.1.0`, passed the Linux release gate, completed isolated and public six-target smoke checks,
-and anonymously verified the immutable record at
-`com/rohittp/reng/kmp/0.1.0/reng-release-completion-v1.json`. That public record has schema version 1,
-identifies the exact source commit, and carries the expected lowercase manifest SHA-256.
+- `de7f714` — `feat: integrate Mercator spatial planning`
+- `fdd9c59` — `fix: enforce Mercator spatial plan invariants`
 
-The first release is therefore complete rather than inferred from artifacts, POM, metadata, local
-publication, or branch CI alone. The required documentation-only follow-up keeps README and served-doc
-version display metadata-driven and preserves ADR 0013 plus the Cycle A design spec and implementation
-plan as historical decision records.
+The initial independent review found the generated planner path correct but reported that direct `MercatorSpatialPlan` construction admitted contradictory state. The fix now enforces:
 
-The release resolver does not search for alternatives. If checked-in `VERSION_NAME` is newer than every
-public stable version, that explicit declaration is the candidate and is allowed to recover from a partial
-release. Otherwise, automatic next-patch advancement GETs the completion record for the newest
-metadata-listed version and requires HTTP 200 plus strict schema-version-1 JSON with exactly the four fields
-above, matching Maven version, lowercase 40-character source SHA, and lowercase 64-character manifest
-SHA-256. Missing, malformed, mismatched, redirected, transport-failed, uncertain, or otherwise unsuccessful
-record reads stop with an explicit upward-recovery instruction. Explicit upward recovery bypasses the prior
-record. The selected candidate receives exactly one aggregate-POM availability probe; an occupied candidate
-or remote uncertainty stops without skipping. Partial-release recovery requires an explicit upward
-`VERSION_NAME`, full gates, and fresh approval. Never overwrite, delete, reuse, or automatically skip the
-partial version. Public metadata verification retries stale or malformed HTTP 200 responses within its fixed
-budget and fails closed after exhaustion.
+- footprint and tile selection are jointly absent or jointly present;
+- geometry/profile list cardinality matches;
+- each geometry's exact vertex/fragment source matches its same-index profile pair;
+- map entries use `MAP_OCCLUDED` and screen entries use `SCREEN_COMPOSITED`.
 
-Run the local Python and policy gates exactly as follows:
+The implementation worker ran focused, retained, full Android/macOS, native compilation, and AAR gates after the fix. **First next action:** perform a scoped independent re-review of `de7f714..fdd9c59` against Task 9D and the approved spec. Verify the direct-constructor RED controls, source pairing, nullability, draw regimes, copies/equality, and no regression to basemap suppression or failure order.
+
+The initial reviewer also made a Minor observation that the suppression test cannot detect deliberately computing then discarding footprint/tile work. The prior ruling parked it: production branches before that work, the otherwise-over-budget suppressed fixture catches behavioral accidental execution, and an injected instrumentation seam would exceed the exact approved Task 9D interface. Reopen only with a concrete failure.
+
+### Task 13 — resource lookup and response rules
+
+Controller commit:
+
+- `2f5dd21` — `feat: add resource lookup decisions`
+
+This is a large unreviewed task: five files and roughly 2,390 added lines. It implements pure lookup actions/events/cursors, strict freshness, resident/Store/Transport decisions, closed transport latches, stored-record integrity, response validation, 200 formation, 304 merge, provenance, and transition correlation. It stops successful content at `PendingClassGates`; Task 14A still exclusively owns class gates, writes, and visibility.
+
+The worker reports controls for:
+
+- strict freshness `freshUntil > sample`;
+- NORMAL/CACHE_ONLY/RELOAD tables;
+- invalid nonnull Store records failing terminally with Store provenance;
+- no stale fallback, retry, repair, remove, or repeated exchange;
+- exact ETag/last-modified/unconditional request rules;
+- metadata-before-status/body response precedence;
+- empty/oversized 200 and nonempty 304 handling;
+- 304 requiring conditional NORMAL plus a stale valid validator-bearing baseline;
+- defensive body/latch/list copies;
+- opaque ADAPTER-only supplied cancellation;
+- positive monotonic action IDs and exact cursor/event correlation;
+- one transport call for 4,096 joined occurrences;
+- no lookup start after terminal selection.
+
+**Second next action:** independently review only `fdd9c59..2f5dd21` against Task 13 and the approved spec before starting Task 14A. This needs a high-judgment resource-state-machine review, especially malformed state admission, freshness/provenance, response precedence, cancellation, latch identity/replay, action correlation, one-exchange guarantees, linear complexity, and redaction. Do not infer approval from green tests.
+
+## Remaining implementation order
+
+After both pending reviews are approved and any fixes are integrated:
+
+1. Task 10 — integrated pure frame planning (blocked only by Task 9D approval).
+2. Task 14A — ordinary class gates, write outcomes, and visibility (blocked by Task 13 approval).
+3. Task 14B — sprite pair commit and parked scheduling.
+4. Task 14C — style staging/compile barriers and visibility.
+5. Task 15 — ordered preparation reducer (requires Task 10 and Task 14C).
+6. Task 16 — cross-engine tests.
+7. Task 17 — final documentation/status and complete gates.
+
+Task 10 and Task 14A can run in parallel after their separate review dependencies close. Tasks 14A → 14B → 14C remain ordered.
+
+Use fresh isolated workers only for genuinely parallel file-mutating tasks. Integrate each approved commit into `docs/cycle-b-resource-contract`, archive needed results in the controller, and remove its auxiliary worktree/branch. Keep at most ten workers, per repository-owner instruction.
+
+## Fresh verification at the handoff checkpoint
+
+After integrating Tasks 9D and 13, the controller ran:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s tools/tests -p 'test_*.py' -v
 PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
-```
-
-On macOS, run the locally compilable Ubuntu-equivalent tasks; `linuxX64Test` cannot execute there:
-
-```bash
 ./gradlew --no-configuration-cache \
   :kmp:checkKotlinAbi \
   :kmp:testAndroidHostTest \
-  :kmp:compileKotlinLinuxX64 \
-  :kmp:compileKotlinLinuxArm64 \
-  :kmp:bundleAndroidMainAar
-```
-
-Then run Apple/target compilation, local publication, and clean smoke:
-
-```bash
-./gradlew --no-configuration-cache \
+  :kmp:macosArm64Test \
   :kmp:compileKotlinIosArm64 \
   :kmp:compileKotlinIosSimulatorArm64 \
-  :kmp:macosArm64Test \
+  :kmp:compileKotlinMacosArm64 \
   :kmp:compileKotlinLinuxX64 \
   :kmp:compileKotlinLinuxArm64 \
-  :kmp:publishAllPublicationsToLocalTestRepository
-
-final_smoke_home="$(mktemp -d)"
-./gradlew --no-configuration-cache \
-  --gradle-user-home "$final_smoke_home" \
-  --refresh-dependencies \
-  -p consumer-smoke \
-  compileAndroidMain \
-  compileKotlinIosArm64 \
-  compileKotlinIosSimulatorArm64 \
-  compileKotlinMacosArm64 \
-  compileKotlinLinuxX64 \
-  compileKotlinLinuxArm64
-```
-
-Ubuntu CI owns the host-executable Linux test and runs:
-
-```bash
-./gradlew --no-configuration-cache \
-  :kmp:checkKotlinAbi \
-  :kmp:testAndroidHostTest \
-  :kmp:linuxX64Test \
-  :kmp:compileKotlinLinuxArm64 \
   :kmp:bundleAndroidMainAar
+git diff --check d86a4b9e716cb6d40e6a3522cdc43a2dbf500682..HEAD
 ```
 
-Every Gradle invocation in CI/publication passes `--no-configuration-cache`. The smoke commands use a
-fresh Gradle home and `--refresh-dependencies`, so cached RenG artifacts cannot mask an incomplete local
-or public repository.
+Observed results:
 
-## Current cycle: B — public API and pure core
+- 73 Python tests passed.
+- `Cycle B repository policy passed`.
+- ABI check passed.
+- Full Android host and macOS Arm64 suites passed.
+- Both iOS, macOS, and both Linux compilation gates passed.
+- Android AAR gate passed.
+- Diff check passed.
+- No Linux runtime test was claimed on macOS.
 
-Cycle A's exact-SHA public gate is satisfied. Cycle B preparation read every governing document, completed
-all initial, follow-up, and design-closure proofs, and captured resolved vocabulary in `CONTEXT.md` plus ADRs
-0014–0018. The design specification is
-`docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md`. It freezes the proposed public
-surface and pure-core behavior while deliberately exposing no renderer factory before Cycles C and D can
-honor the resource and GL seams. Cycle B includes production pure decision engines for ordered preparation,
-resource-operation actions, and lifecycle/error precedence; they consume supplied observations but perform no
-consumer adapter, Rentile, decoder/parser, platform-context, or GL call.
+These commands verify integration/build state, not the two pending code-review gates.
 
-Before Cycle B implementation:
+## Git and worktree state
 
-1. Read `CONTEXT.md`, ADRs 0001–0018, `docs/decomposition.md`, this handoff, and the design specification.
-2. Obtain repository-owner review and approval of the design specification.
-3. Invoke `/grill-with-docs` again only if that review changes or reopens a contract.
-4. Write and independently review an implementation plan after specification approval.
-5. Implement no resource acquisition, decoder/parser, GL call, pixel output, or renderer factory in Cycle B.
+All completed Task 9D and Task 13 worker commits and reports were moved into the controller before their auxiliary worktrees and branches were deleted. At handoff creation, no `agent-*` worktree remained.
 
-No Cycle B production implementation or implementation plan has started.
+The live Claude session itself is pinned to:
 
-## Decisions still open, each needing a spike before its cycle's spec
+`/Users/rohittp/Data/Other/RenG/.claude/worktrees/cycle-a-implementation`
 
-- **PNG decode and GLB parse (cycle C).** No free answer for PNG across six targets — Skiko is proven
-  but heavy, a pure-Kotlin decoder needs inflate. GLB is tractable in pure Kotlin but its supported
-  feature subset must be written down, not discovered.
-- **Draw-regime ordering (cycle F).** Screen-anchored things composite by z-index with no depth test;
-  map-anchored things are occlusion-tested. How the two interleave in one frame is ADR-worthy.
-- **Golden images (cycle E onward).** llvmpipe and Apple's GL will never be pixel-identical. Baselines
-  are per-platform with a tolerance, never cross-platform equality.
+That directory name is stale; it contains the Cycle B branch, not unintegrated Cycle A work. A session cannot safely delete its own current working directory. After verifying this handoff commit exists on `origin/docs/cycle-b-resource-contract`, a new agent operating from the primary checkout may remove that controller worktree. Do not remove it before confirming local and remote branch SHAs match.
 
-## Process expectations
+The primary checkout is on its pre-existing branch and was not merged or modified by this handoff. No PR, merge, workflow dispatch, R2 upload, publication, or release was performed.
 
-- The repository owner's standing instruction: **run `/grill-with-docs` before writing any plan**, and
-  use parallel subagents for genuinely independent implementation tasks.
-- ADRs are a few paragraphs of prose, no template headings, `NNNN-imperative-title.md`. Next number is
-  0019.
-- Update `CONTEXT.md` as terms resolve rather than batching it.
-- Never commit `mavenLocal()`, a `-SNAPSHOT` dependency, or an independently hardcoded RenG version —
-  `VERSION_NAME` in the root `gradle.properties` is the sole checked-in version input. ADR 0013 defines
-  how publication may derive a later patch from the public version line.
+## Publication boundary
 
-## Throwaway spike code
-
-Cycle B's ignored evidence pack is retained locally under `build/cycle-b-spikes/`. The ordered evidence tree
-starts at `GRILLING-PREP.txt`; the consolidated follow-up report and closure proofs are
-`follow-up/REPORT.txt`, `follow-up/rentile-production-firewall/REPORT.txt`,
-`follow-up/canonical-identity/REPORT.txt`, and `follow-up/linux-runtime-proof/REPORT.txt`. Linux's complete
-public job log is also retained there and remains available in workflow run `31972966052` after its temporary
-draft PR and branch were removed. These fixtures prove feasibility only; none is production RenG source or
-public API.
-
-Cycle 0's older GL probes may still exist only in a session scratchpad: `gl_dialect_probe.c`,
-`gl_330_probe.c`, and `glspike/`. Their durable findings are the shader table above and ADRs 0008–0011.
+Pushing this development branch is authorized as a recovery checkpoint. It is not permission to merge, dispatch publication, upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record remains historical; Cycle B is not complete or released.

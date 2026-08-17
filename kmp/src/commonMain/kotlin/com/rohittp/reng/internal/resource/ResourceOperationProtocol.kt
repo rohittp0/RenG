@@ -5,6 +5,9 @@ import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceLocator
+import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.TransportRequest
+import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
@@ -124,6 +127,87 @@ internal class TransportLatchKey(
             "ifModifiedSincePresent=${ifModifiedSince != null}, " +
             "acceptPresent=${accept != null})"
 }
+
+internal enum class ContentProvenance {
+    RESIDENT,
+    STORE,
+    TRANSPORT_200,
+    TRANSPORT_304_MERGED,
+}
+
+internal data class ResolvedResourceContent(
+    val route: ResourceRouteKey,
+    val resourceKey: ResourceKey,
+    val stored: StoredRawResource,
+    val provenance: ContentProvenance,
+) {
+    init {
+        require(resourceKey.resourceClass == route.resourceClass) {
+            "resolved content must match its route resource class"
+        }
+    }
+}
+
+internal data class LookupProgress(
+    val sampleEpochMillis: Long?,
+    val resident: StoredRawResource?,
+    val staleBaseline: StoredRawResource?,
+    val storeReadStarted: Boolean,
+    val transportLatch: TransportLatchKey?,
+    val selectedContent: ResolvedResourceContent?,
+) {
+    init {
+        require(sampleEpochMillis == null || sampleEpochMillis >= 0L) {
+            "freshness sample must be non-negative"
+        }
+        if (sampleEpochMillis == null) {
+            require(
+                resident == null && staleBaseline == null && !storeReadStarted &&
+                    transportLatch == null && selectedContent == null,
+            ) { "lookup work requires a freshness sample" }
+        }
+        require(staleBaseline == null || storeReadStarted) {
+            "a stale baseline requires a started Store read"
+        }
+    }
+}
+
+internal sealed interface SuppliedCallOutcome<out T> {
+    data class Success<T>(val value: T) : SuppliedCallOutcome<T>
+
+    data object Failed : SuppliedCallOutcome<Nothing>
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : SuppliedCallOutcome<Nothing> {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "supplied call cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
+internal sealed interface LatchedTransportOutcome {
+    data class Response(val response: TransportResponse) : LatchedTransportOutcome
+
+    data object Failed : LatchedTransportOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : LatchedTransportOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "latched cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
+internal data class TransportLatchRecord(
+    val key: TransportLatchKey,
+    val outcome: LatchedTransportOutcome,
+)
 
 internal data class ResourceRouteRegistration(
     val route: ResourceRouteKey,
@@ -410,12 +494,69 @@ internal enum class ResourceRouteStatus {
 
 internal sealed interface ResourceRouteCursor
 
+internal data class AwaitingClockSample(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingResident(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingStoreRead(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingTransport(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val latchKey: TransportLatchKey,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingLatchedTransportReplay(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val latchKey: TransportLatchKey,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class PendingClassGates(
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
 internal class RouteRecord(
     val registration: ResourceRouteRegistration,
     joinedOccurrenceIds: List<ResourceOccurrenceId>,
     val ordinal: Long?,
     val cursor: ResourceRouteCursor?,
     val status: ResourceRouteStatus,
+    val lookup: LookupProgress? = null,
 ) {
     private val joinedOccurrenceIdSnapshot: List<ResourceOccurrenceId> = freshListCopy(joinedOccurrenceIds)
 
@@ -486,6 +627,34 @@ internal sealed interface ResourceTerminalSelection {
 
 internal sealed interface ResourceOperationEvent
 
+internal data class ClockSampled(
+    val actionId: ResourceActionId,
+    val sampleEpochMillis: Long,
+) : ResourceOperationEvent {
+    init {
+        require(sampleEpochMillis >= 0L) { "freshness sample must be non-negative" }
+    }
+}
+
+internal data class ResidentObserved(
+    val actionId: ResourceActionId,
+    val resource: StoredRawResource?,
+) : ResourceOperationEvent
+
+internal data class StoreReadCompleted(
+    val actionId: ResourceActionId,
+    val outcome: SuppliedCallOutcome<StoredRawResource?>,
+) : ResourceOperationEvent
+
+internal data class TransportCompleted(
+    val actionId: ResourceActionId,
+    val outcome: SuppliedCallOutcome<TransportResponse>,
+) : ResourceOperationEvent
+
+internal data class LatchedTransportReplayCompleted(
+    val actionId: ResourceActionId,
+) : ResourceOperationEvent
+
 internal class ChildrenDiscovered(
     val parentOccurrenceId: ResourceOccurrenceId,
     children: List<DiscoveredResourceChild>,
@@ -543,6 +712,70 @@ internal data class CleanupCancellationObserved(
 }
 
 internal sealed interface ResourceOperationAction
+
+internal data class SampleClock(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class ObserveResident(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val resourceKey: ResourceKey,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class ReadStore(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val rawKey: RawResourceKey,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class CallTransport(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val request: TransportRequest,
+    val latchKey: TransportLatchKey,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        require(
+            latchKey.route.locator == request.locator &&
+                latchKey.route.resourceClass == request.resourceClass &&
+                latchKey.route.maximumResponseBytes == request.maximumResponseBytes,
+        ) { "Transport request must match its latch route" }
+        require(request.metadata.ifNoneMatch == latchKey.ifNoneMatch) {
+            "Transport request ETag must match its latch"
+        }
+        require(request.metadata.ifModifiedSince == latchKey.ifModifiedSince) {
+            "Transport request last-modified value must match its latch"
+        }
+        require(request.metadata.accept == latchKey.accept) {
+            "Transport request accept value must match its latch"
+        }
+    }
+}
+
+internal data class ReplayLatchedTransport(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val latch: TransportLatchRecord,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
 
 internal data class StartRoute(
     val ordinal: Long,
@@ -658,6 +891,12 @@ private fun compareUnsignedUtf8(first: String, second: String): Int {
     return firstBytes.size.compareTo(secondBytes.size)
 }
 
+internal sealed interface ResponseRuleOutcome {
+    data class Selected(val content: ResolvedResourceContent) : ResponseRuleOutcome
+
+    data class Failure(val failure: FailureDescriptor) : ResponseRuleOutcome
+}
+
 internal sealed interface ResourceOperationOutcome {
     data class Failure(val failure: FailureDescriptor) : ResourceOperationOutcome
 
@@ -673,6 +912,8 @@ internal sealed interface ResourceOperationState {
         routeRecords: List<RouteRecord>,
         privateRentileKeyClaims: List<PrivateRentileKeyClaim>,
         identityRecords: List<CanonicalIdentityRecord>,
+        transportLatches: List<TransportLatchRecord> = emptyList(),
+        val nextActionId: Long = 1L,
         val traversal: TraversalState = TraversalState(emptyList(), emptyList(), emptyList()),
         val nextRouteOrdinal: Long = 0L,
         activeRouteOrdinals: List<Long> = emptyList(),
@@ -686,12 +927,14 @@ internal sealed interface ResourceOperationState {
         private val privateRentileKeyClaimSnapshot: List<PrivateRentileKeyClaim> =
             freshListCopy(privateRentileKeyClaims)
         private val identityRecordSnapshot: List<CanonicalIdentityRecord> = freshListCopy(identityRecords)
+        private val transportLatchSnapshot: List<TransportLatchRecord> = freshListCopy(transportLatches)
         private val activeRouteOrdinalSnapshot: List<Long> = freshListCopy(activeRouteOrdinals)
         private val bufferedRouteOutcomeSnapshot: List<BufferedRouteOutcome> =
             freshListCopy(bufferedRouteOutcomes)
 
         init {
             require(nextRouteOrdinal >= 0L) { "next route ordinal must be non-negative" }
+            require(nextActionId > 0L) { "next action ID must be positive" }
             require(nextRetirementOrdinal in 0L..nextRouteOrdinal) {
                 "next retirement ordinal must not exceed assigned route ordinals"
             }
@@ -708,10 +951,17 @@ internal sealed interface ResourceOperationState {
             require(privateRentileKeyClaimSnapshot.all { privateKeys.add(it.privateKey) }) {
                 "private Rentile key claims must be unique"
             }
+            val transportLatchKeys = mutableSetOf<TransportLatchKey>()
+            require(transportLatchSnapshot.all { transportLatchKeys.add(it.key) }) {
+                "Transport latch keys must be unique"
+            }
 
             val assignedOrdinals = mutableSetOf<Long>()
             val runningOrdinals = mutableSetOf<Long>()
+            val registeredRoutes = mutableSetOf<ResourceRouteKey>()
+            val cursorActionIds = mutableSetOf<ResourceActionId>()
             routeRecordSnapshot.forEach { record ->
+                registeredRoutes += record.registration.route
                 val joinedIds = record.joinedOccurrenceIds
                 require(joinedIds.toSet().size == joinedIds.size && joinedIds.all(occurrenceIds::contains)) {
                     "joined resource occurrence IDs must be unique and registered"
@@ -732,6 +982,64 @@ internal sealed interface ResourceOperationState {
                         ResourceRouteStatus.BLOCKED_BY_COLLISION -> true
                     },
                 ) { "route status must agree with ordinal assignment" }
+
+                val lookup = record.lookup
+                lookup?.transportLatch?.let { latchKey ->
+                    require(latchKey.route == record.registration.route) {
+                        "lookup latch must belong to its route"
+                    }
+                }
+                lookup?.selectedContent?.let { selected ->
+                    require(
+                        selected.route == record.registration.route &&
+                            selected.resourceKey == record.registration.resourceKey,
+                    ) { "selected content must belong to its registered route" }
+                }
+
+                record.cursor?.let { cursor ->
+                    val ordinal = requireNotNull(record.ordinal) {
+                        "a route cursor requires an assigned ordinal"
+                    }
+                    require(record.status == ResourceRouteStatus.RUNNING) {
+                        "a route cursor requires a running route"
+                    }
+                    require(cursorOrdinal(cursor) == ordinal) {
+                        "route cursor ordinal must match its record"
+                    }
+                    cursorActionId(cursor)?.let { actionId ->
+                        require(actionId.value < nextActionId && cursorActionIds.add(actionId)) {
+                            "cursor action IDs must be unique and allocated below the next action ID"
+                        }
+                    }
+                    when (cursor) {
+                        is AwaitingClockSample -> require(
+                            lookup != null && lookup.sampleEpochMillis == null,
+                        ) { "clock cursor requires an unsampled lookup" }
+                        is AwaitingResident -> require(lookup?.sampleEpochMillis != null) {
+                            "resident cursor requires a freshness sample"
+                        }
+                        is AwaitingStoreRead -> require(
+                            lookup?.sampleEpochMillis != null && lookup.storeReadStarted,
+                        ) { "Store cursor requires a sampled started read" }
+                        is AwaitingTransport -> require(
+                            lookup?.transportLatch == cursor.latchKey &&
+                                cursor.latchKey !in transportLatchKeys,
+                        ) { "Transport cursor requires one open matching latch" }
+                        is AwaitingLatchedTransportReplay -> require(
+                            lookup?.transportLatch == cursor.latchKey &&
+                                cursor.latchKey in transportLatchKeys,
+                        ) { "replay cursor requires one closed matching latch" }
+                        is PendingClassGates -> require(
+                            lookup?.selectedContent == cursor.content,
+                        ) { "pending class gates require matching selected content" }
+                    }
+                }
+                if (record.status == ResourceRouteStatus.RUNNING && lookup != null) {
+                    require(record.cursor != null) { "started lookup requires a route cursor" }
+                }
+            }
+            require(transportLatchSnapshot.all { it.key.route in registeredRoutes }) {
+                "Transport latches must belong to registered routes"
             }
             require(assignedOrdinals.size.toLong() == nextRouteOrdinal) {
                 "assigned route ordinals must form the complete contiguous range"
@@ -792,12 +1100,33 @@ internal sealed interface ResourceOperationState {
         val identityRecords: List<CanonicalIdentityRecord>
             get() = freshListCopy(identityRecordSnapshot)
 
+        val transportLatches: List<TransportLatchRecord>
+            get() = freshListCopy(transportLatchSnapshot)
+
         val activeRouteOrdinals: List<Long>
             get() = freshListCopy(activeRouteOrdinalSnapshot)
 
         val bufferedRouteOutcomes: List<BufferedRouteOutcome>
             get() = freshListCopy(bufferedRouteOutcomeSnapshot)
     }
+}
+
+private fun cursorOrdinal(cursor: ResourceRouteCursor): Long = when (cursor) {
+    is AwaitingClockSample -> cursor.ordinal
+    is AwaitingResident -> cursor.ordinal
+    is AwaitingStoreRead -> cursor.ordinal
+    is AwaitingTransport -> cursor.ordinal
+    is AwaitingLatchedTransportReplay -> cursor.ordinal
+    is PendingClassGates -> cursor.ordinal
+}
+
+private fun cursorActionId(cursor: ResourceRouteCursor): ResourceActionId? = when (cursor) {
+    is AwaitingClockSample -> cursor.actionId
+    is AwaitingResident -> cursor.actionId
+    is AwaitingStoreRead -> cursor.actionId
+    is AwaitingTransport -> cursor.actionId
+    is AwaitingLatchedTransportReplay -> cursor.actionId
+    is PendingClassGates -> null
 }
 
 internal class ResourceOperationTransition(

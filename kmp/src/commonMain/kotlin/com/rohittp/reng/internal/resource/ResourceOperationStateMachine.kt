@@ -2,9 +2,18 @@ package com.rohittp.reng.internal.resource
 
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.ResourceAccessMode
+import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.StoredRawResourceMetadata
+import com.rohittp.reng.TransportRequest
+import com.rohittp.reng.TransportRequestMetadata
+import com.rohittp.reng.TransportResponse
+import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.acceptValue
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.identity.PureKotlinSha256
 
 internal object ResourceOperationStateMachine {
     internal fun preRegister(
@@ -112,12 +121,26 @@ internal object ResourceOperationStateMachine {
         return work.toTransition()
     }
 
+    internal fun beginLookup(
+        state: ResourceOperationState.Running,
+        ordinal: Long,
+    ): ResourceOperationTransition {
+        val work = SchedulerWork(state)
+        work.beginLookup(ordinal)
+        return work.toTransition()
+    }
+
     internal fun transition(
         state: ResourceOperationState.Running,
         event: ResourceOperationEvent,
     ): ResourceOperationTransition {
         val work = SchedulerWork(state)
         when (event) {
+            is ClockSampled -> work.clockSampled(event)
+            is ResidentObserved -> work.residentObserved(event)
+            is StoreReadCompleted -> work.storeReadCompleted(event)
+            is TransportCompleted -> work.transportCompleted(event)
+            is LatchedTransportReplayCompleted -> work.latchedTransportReplayCompleted(event)
             is RouteReadyForDiscovery -> work.routeReadyForDiscovery(event)
             is ChildrenDiscovered -> work.childrenDiscovered(event)
             is RouteCompleted -> work.routeCompleted(event)
@@ -144,6 +167,9 @@ internal object ResourceOperationStateMachine {
         private val claimIndexByPrivateKey: MutableMap<RentilePrivateKey, Int> = mutableMapOf()
         private val identityRecords: MutableList<CanonicalIdentityRecord> = initial.identityRecords.toMutableList()
         private val identityByStableId: MutableMap<String, CanonicalIdentityRecord> = mutableMapOf()
+        private val transportLatches: MutableList<TransportLatchRecord> = initial.transportLatches.toMutableList()
+        private val transportLatchIndexByKey: MutableMap<TransportLatchKey, Int> = mutableMapOf()
+        private val routeIndexByActionId: MutableMap<ResourceActionId, Int> = mutableMapOf()
         private val eligibleFifo: ArrayDeque<ResourceOccurrenceId> = ArrayDeque()
         private var staticContinuation: ResourceOccurrenceIdSlice = initial.traversal.staticSlice()
         private val frontierStack: MutableList<DiscoveryFrontier> =
@@ -152,6 +178,7 @@ internal object ResourceOperationStateMachine {
         private val bufferedRouteOutcomes: MutableList<BufferedRouteOutcome> =
             initial.bufferedRouteOutcomes.toMutableList()
         private val actions: MutableList<ResourceOperationAction> = mutableListOf()
+        private var nextActionId: Long = initial.nextActionId
         private var nextRouteOrdinal: Long = initial.nextRouteOrdinal
         private var nextRetirementOrdinal: Long = initial.nextRetirementOrdinal
         private var startCeilingOrdinal: Long? = initial.startCeilingOrdinal
@@ -167,6 +194,11 @@ internal object ResourceOperationStateMachine {
             identityRecords.forEach { identity ->
                 require(identityByStableId.put(identity.resourceKey.stableId, identity) == null) {
                     "canonical identity stable IDs must be unique"
+                }
+            }
+            transportLatches.forEachIndexed { index, latch ->
+                require(transportLatchIndexByKey.put(latch.key, index) == null) {
+                    "Transport latch keys must be unique"
                 }
             }
             privateRentileKeyClaims.forEachIndexed { index, claim ->
@@ -194,6 +226,11 @@ internal object ResourceOperationStateMachine {
                     }
                     require(routeIndexByOrdinal.put(ordinal, index) == null) {
                         "route ordinals must be unique"
+                    }
+                }
+                cursorActionId(record.cursor)?.let { actionId ->
+                    require(routeIndexByActionId.put(actionId, index) == null) {
+                        "route cursor action IDs must be unique"
                     }
                 }
                 require(
@@ -225,6 +262,409 @@ internal object ResourceOperationStateMachine {
         fun setStaticContinuation(ids: List<ResourceOccurrenceId>) {
             require(staticContinuation.isEmpty) { "static traversal continuation must be initialized once" }
             staticContinuation = ResourceOccurrenceIdSlice.snapshot(ids)
+        }
+
+        fun beginLookup(ordinal: Long) {
+            require(terminalSelection == null) { "lookup cannot begin after terminal selection" }
+            val routeIndex = requireNotNull(routeIndexByOrdinal[ordinal]) {
+                "lookup must name an assigned route"
+            }
+            val record = routeRecords[routeIndex]
+            require(record.status == ResourceRouteStatus.RUNNING && ordinal in activeRouteOrdinals) {
+                "lookup requires an active running route"
+            }
+
+            val cursor = record.cursor
+            if (cursor is PendingClassGates) {
+                val lookup = requireNotNull(record.lookup)
+                val latchKey = requireNotNull(lookup.transportLatch) {
+                    "only Transport-selected content has a latch to replay"
+                }
+                val latch = transportLatch(latchKey)
+                val actionId = takeNextActionId()
+                updateRouteRecord(
+                    routeIndex,
+                    cursor = AwaitingLatchedTransportReplay(actionId, ordinal, latchKey),
+                )
+                actions += ReplayLatchedTransport(actionId, ordinal, copyLatch(latch))
+                return
+            }
+
+            require(cursor == null && record.lookup == null) {
+                "lookup may begin only once before a closed latch replay"
+            }
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingClockSample(actionId, ordinal),
+                lookup = LookupProgress(
+                    sampleEpochMillis = null,
+                    resident = null,
+                    staleBaseline = null,
+                    storeReadStarted = false,
+                    transportLatch = null,
+                    selectedContent = null,
+                ),
+            )
+            actions += SampleClock(actionId, ordinal)
+        }
+
+        fun clockSampled(event: ClockSampled) {
+            val routeIndex = routeIndexForAction<AwaitingClockSample>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val record = routeRecords[routeIndex]
+            val cursor = record.cursor as AwaitingClockSample
+            val progress = requireNotNull(record.lookup)
+            require(progress.sampleEpochMillis == null) { "route freshness may be sampled exactly once" }
+            val sampled = progress.copy(sampleEpochMillis = event.sampleEpochMillis)
+            if (record.registration.route.accessMode == ResourceAccessMode.RELOAD) {
+                requestTransport(routeIndex, cursor.ordinal, sampled)
+                return
+            }
+
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingResident(actionId, cursor.ordinal),
+                lookup = sampled,
+            )
+            actions += ObserveResident(
+                actionId = actionId,
+                ordinal = cursor.ordinal,
+                resourceKey = record.registration.resourceKey,
+            )
+        }
+
+        fun residentObserved(event: ResidentObserved) {
+            val routeIndex = routeIndexForAction<AwaitingResident>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val record = routeRecords[routeIndex]
+            val cursor = record.cursor as AwaitingResident
+            val progress = requireNotNull(record.lookup)
+            val sample = requireNotNull(progress.sampleEpochMillis)
+            val resident = event.resource?.let(::copyStored)
+
+            when (record.registration.route.accessMode) {
+                ResourceAccessMode.RELOAD -> error("reload must not observe resident content")
+                ResourceAccessMode.CACHE_ONLY -> {
+                    if (resident != null) {
+                        selectContent(routeIndex, cursor.ordinal, progress.copy(resident = resident), resident, ContentProvenance.RESIDENT)
+                    } else {
+                        startStoreRead(routeIndex, cursor.ordinal, progress.copy(resident = null))
+                    }
+                }
+                ResourceAccessMode.NORMAL -> {
+                    if (resident != null && isFresh(resident, sample)) {
+                        selectContent(routeIndex, cursor.ordinal, progress.copy(resident = resident), resident, ContentProvenance.RESIDENT)
+                    } else {
+                        startStoreRead(
+                            routeIndex,
+                            cursor.ordinal,
+                            progress.copy(resident = resident),
+                            staleBaseline = resident,
+                        )
+                    }
+                }
+            }
+        }
+
+        fun storeReadCompleted(event: StoreReadCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStoreRead>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val record = routeRecords[routeIndex]
+            val cursor = record.cursor as AwaitingStoreRead
+            val progress = requireNotNull(record.lookup)
+            val sample = requireNotNull(progress.sampleEpochMillis)
+
+            when (val outcome = event.outcome) {
+                SuppliedCallOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(storeReadFailure(record)),
+                )
+                is SuppliedCallOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+                is SuppliedCallOutcome.Success -> {
+                    val supplied = outcome.value
+                    if (supplied == null) {
+                        if (record.registration.route.accessMode == ResourceAccessMode.CACHE_ONLY) {
+                            completeLookupRoute(
+                                routeIndex,
+                                ResourceRouteOutcome.Failure(resourceUnavailableFailure(record)),
+                            )
+                        } else {
+                            requestTransport(routeIndex, cursor.ordinal, progress)
+                        }
+                        return
+                    }
+
+                    val validated = copyValidStoredResource(
+                        supplied,
+                        record.registration.route.maximumResponseBytes,
+                        PureKotlinSha256,
+                    )
+                    if (validated == null) {
+                        completeLookupRoute(
+                            routeIndex,
+                            ResourceRouteOutcome.Failure(storeIntegrityFailure(record)),
+                        )
+                        return
+                    }
+
+                    when (record.registration.route.accessMode) {
+                        ResourceAccessMode.RELOAD -> error("reload must not read Store content")
+                        ResourceAccessMode.CACHE_ONLY -> selectContent(
+                            routeIndex,
+                            cursor.ordinal,
+                            progress,
+                            validated,
+                            ContentProvenance.STORE,
+                        )
+                        ResourceAccessMode.NORMAL -> {
+                            if (isFresh(validated, sample)) {
+                                selectContent(
+                                    routeIndex,
+                                    cursor.ordinal,
+                                    progress,
+                                    validated,
+                                    ContentProvenance.STORE,
+                                )
+                            } else {
+                                requestTransport(
+                                    routeIndex,
+                                    cursor.ordinal,
+                                    progress.copy(staleBaseline = validated),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        fun transportCompleted(event: TransportCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingTransport>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val record = routeRecords[routeIndex]
+            val cursor = record.cursor as AwaitingTransport
+            require(cursor.latchKey !in transportLatchIndexByKey) {
+                "consumer Transport may close a latch only once"
+            }
+
+            when (val outcome = event.outcome) {
+                SuppliedCallOutcome.Failed -> {
+                    addTransportLatch(TransportLatchRecord(cursor.latchKey, LatchedTransportOutcome.Failed))
+                    completeLookupRoute(
+                        routeIndex,
+                        ResourceRouteOutcome.Failure(transportFailure(record)),
+                    )
+                }
+                is SuppliedCallOutcome.Cancelled -> {
+                    addTransportLatch(
+                        TransportLatchRecord(
+                            cursor.latchKey,
+                            LatchedTransportOutcome.Cancelled(outcome.cancellation),
+                        ),
+                    )
+                    completeLookupRoute(
+                        routeIndex,
+                        ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                    )
+                }
+                is SuppliedCallOutcome.Success -> {
+                    val response = copyResponse(outcome.value)
+                    addTransportLatch(
+                        TransportLatchRecord(cursor.latchKey, LatchedTransportOutcome.Response(response)),
+                    )
+                    resolveLatchedResponse(routeIndex, cursor.ordinal, cursor.latchKey, response)
+                }
+            }
+        }
+
+        fun latchedTransportReplayCompleted(event: LatchedTransportReplayCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingLatchedTransportReplay>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val record = routeRecords[routeIndex]
+            val cursor = record.cursor as AwaitingLatchedTransportReplay
+            val latch = transportLatch(cursor.latchKey)
+            when (val outcome = latch.outcome) {
+                LatchedTransportOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(transportFailure(record)),
+                )
+                is LatchedTransportOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+                is LatchedTransportOutcome.Response -> resolveLatchedResponse(
+                    routeIndex,
+                    cursor.ordinal,
+                    cursor.latchKey,
+                    outcome.response,
+                )
+            }
+        }
+
+        private fun startStoreRead(
+            routeIndex: Int,
+            ordinal: Long,
+            progress: LookupProgress,
+            staleBaseline: StoredRawResource? = null,
+        ) {
+            require(!progress.storeReadStarted) { "Store read may start at most once per route" }
+            val actionId = takeNextActionId()
+            val started = progress.copy(
+                staleBaseline = staleBaseline,
+                storeReadStarted = true,
+            )
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingStoreRead(actionId, ordinal),
+                lookup = started,
+            )
+            actions += ReadStore(
+                actionId,
+                ordinal,
+                routeRecords[routeIndex].registration.rawKey,
+            )
+        }
+
+        private fun requestTransport(
+            routeIndex: Int,
+            ordinal: Long,
+            progress: LookupProgress,
+        ) {
+            require(progress.transportLatch == null) {
+                "route may finalize Transport metadata only once"
+            }
+            val registration = routeRecords[routeIndex].registration
+            val route = registration.route
+            val baseline = progress.staleBaseline
+            val etag = baseline?.metadata?.etag.takeIf { route.accessMode == ResourceAccessMode.NORMAL }
+            val lastModified = baseline?.metadata?.lastModified
+                .takeIf { route.accessMode == ResourceAccessMode.NORMAL && etag == null }
+            val metadata = TransportRequestMetadata(
+                ifNoneMatch = etag,
+                ifModifiedSince = lastModified,
+                accept = route.resourceClass.acceptValue,
+            )
+            val request = TransportRequest(
+                locator = route.locator,
+                resourceClass = route.resourceClass,
+                maximumResponseBytes = route.maximumResponseBytes,
+                metadata = metadata,
+            )
+            val latchKey = TransportLatchKey(
+                route = route,
+                ifNoneMatch = metadata.ifNoneMatch,
+                ifModifiedSince = metadata.ifModifiedSince,
+                accept = metadata.accept,
+            )
+            val actionId = takeNextActionId()
+            val withLatch = progress.copy(transportLatch = latchKey)
+            val closedLatchIndex = transportLatchIndexByKey[latchKey]
+            if (closedLatchIndex == null) {
+                updateRouteRecord(
+                    routeIndex,
+                    cursor = AwaitingTransport(actionId, ordinal, latchKey),
+                    lookup = withLatch,
+                )
+                actions += CallTransport(actionId, ordinal, request, latchKey)
+            } else {
+                val latch = transportLatches[closedLatchIndex]
+                updateRouteRecord(
+                    routeIndex,
+                    cursor = AwaitingLatchedTransportReplay(actionId, ordinal, latchKey),
+                    lookup = withLatch,
+                )
+                actions += ReplayLatchedTransport(actionId, ordinal, copyLatch(latch))
+            }
+        }
+
+        private fun resolveLatchedResponse(
+            routeIndex: Int,
+            ordinal: Long,
+            latchKey: TransportLatchKey,
+            response: TransportResponse,
+        ) {
+            val record = routeRecords[routeIndex]
+            val progress = requireNotNull(record.lookup)
+            val sample = requireNotNull(progress.sampleEpochMillis)
+            val outcome = resolveTransportResponse(
+                route = record.registration.route,
+                resourceKey = record.registration.resourceKey,
+                sampleEpochMillis = sample,
+                staleBaseline = progress.staleBaseline,
+                conditionalRequest = latchKey.ifNoneMatch != null || latchKey.ifModifiedSince != null,
+                response = response,
+                sha256 = PureKotlinSha256,
+            )
+            when (outcome) {
+                is ResponseRuleOutcome.Failure -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(outcome.failure),
+                )
+                is ResponseRuleOutcome.Selected -> {
+                    val selected = outcome.content
+                    updateRouteRecord(
+                        routeIndex,
+                        cursor = PendingClassGates(ordinal, selected),
+                        lookup = progress.copy(selectedContent = selected),
+                    )
+                }
+            }
+        }
+
+        private fun selectContent(
+            routeIndex: Int,
+            ordinal: Long,
+            progress: LookupProgress,
+            stored: StoredRawResource,
+            provenance: ContentProvenance,
+        ) {
+            val registration = routeRecords[routeIndex].registration
+            val selected = ResolvedResourceContent(
+                route = registration.route,
+                resourceKey = registration.resourceKey,
+                stored = copyStored(stored),
+                provenance = provenance,
+            )
+            updateRouteRecord(
+                routeIndex,
+                cursor = PendingClassGates(ordinal, selected),
+                lookup = progress.copy(selectedContent = selected),
+            )
+        }
+
+        private fun completeLookupRoute(
+            routeIndex: Int,
+            outcome: ResourceRouteOutcome,
+        ) {
+            val record = routeRecords[routeIndex]
+            val ordinal = requireNotNull(record.ordinal)
+            require(record.status == ResourceRouteStatus.RUNNING) {
+                "lookup completion requires a running route"
+            }
+            require(activeRouteOrdinals.remove(ordinal)) {
+                "lookup completion requires an active route"
+            }
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            if (terminalSelection == null) {
+                bufferRouteOutcome(ordinal, outcome)
+                if (terminalSelection == null) startEligibleRoutes()
+            }
+        }
+
+        private fun finishActionAfterTerminal(routeIndex: Int): Boolean {
+            if (terminalSelection == null) return false
+            val record = routeRecords[routeIndex]
+            val ordinal = requireNotNull(record.ordinal)
+            require(record.status == ResourceRouteStatus.RUNNING && activeRouteOrdinals.remove(ordinal)) {
+                "terminal cleanup action must belong to an active route"
+            }
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            return true
         }
 
         fun routeReadyForDiscovery(event: RouteReadyForDiscovery) {
@@ -293,7 +733,7 @@ internal object ResourceOperationStateMachine {
             require(routeRecords[routeIndex].status == ResourceRouteStatus.RUNNING) {
                 "cleanup cancellation requires a running route"
             }
-            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
         }
 
         fun childrenDiscovered(event: ChildrenDiscovered) {
@@ -606,6 +1046,11 @@ internal object ResourceOperationStateMachine {
                     "route ordinals must be unique"
                 }
             }
+            cursorActionId(record.cursor)?.let { actionId ->
+                require(routeIndexByActionId.put(actionId, index) == null) {
+                    "route cursor action IDs must be unique"
+                }
+            }
             return index
         }
 
@@ -614,8 +1059,14 @@ internal object ResourceOperationStateMachine {
             ordinal: Long? = routeRecords[index].ordinal,
             cursor: ResourceRouteCursor? = routeRecords[index].cursor,
             status: ResourceRouteStatus = routeRecords[index].status,
+            lookup: LookupProgress? = routeRecords[index].lookup,
         ) {
             val previous = routeRecords[index]
+            cursorActionId(previous.cursor)?.let { actionId ->
+                require(routeIndexByActionId.remove(actionId) == index) {
+                    "previous cursor action must remain indexed"
+                }
+            }
             if (previous.ordinal != ordinal) {
                 previous.ordinal?.let(routeIndexByOrdinal::remove)
                 ordinal?.let { assigned ->
@@ -624,13 +1075,55 @@ internal object ResourceOperationStateMachine {
                     }
                 }
             }
+            cursorActionId(cursor)?.let { actionId ->
+                require(routeIndexByActionId.put(actionId, index) == null) {
+                    "route cursor action IDs must be unique"
+                }
+            }
             routeRecords[index] = RouteRecord(
                 registration = previous.registration,
                 joinedOccurrenceIds = joinedOccurrenceIdsByRouteIndex[index],
                 ordinal = ordinal,
                 cursor = cursor,
                 status = status,
+                lookup = lookup,
             )
+        }
+
+        private fun takeNextActionId(): ResourceActionId {
+            check(nextActionId < Long.MAX_VALUE) { "resource action ID space exhausted" }
+            val actionId = ResourceActionId(nextActionId)
+            nextActionId += 1L
+            return actionId
+        }
+
+        private inline fun <reified T : ResourceRouteCursor> routeIndexForAction(
+            actionId: ResourceActionId,
+        ): Int {
+            val routeIndex = requireNotNull(routeIndexByActionId[actionId]) {
+                "resource event must match a current action ID"
+            }
+            val cursor = routeRecords[routeIndex].cursor
+            require(cursor is T && cursorActionId(cursor) == actionId) {
+                "resource event must match its current cursor"
+            }
+            return routeIndex
+        }
+
+        private fun addTransportLatch(latch: TransportLatchRecord) {
+            require(latch.key !in transportLatchIndexByKey) {
+                "Transport latch may close only once"
+            }
+            val copied = copyLatch(latch)
+            transportLatchIndexByKey[copied.key] = transportLatches.size
+            transportLatches += copied
+        }
+
+        private fun transportLatch(key: TransportLatchKey): TransportLatchRecord {
+            val index = requireNotNull(transportLatchIndexByKey[key]) {
+                "latched replay requires a closed exact latch"
+            }
+            return transportLatches[index]
         }
 
         private fun takeNextOrdinal(): Long {
@@ -655,6 +1148,8 @@ internal object ResourceOperationStateMachine {
                 routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRouteIndex),
                 privateRentileKeyClaims = privateRentileKeyClaims,
                 identityRecords = identityRecords,
+                transportLatches = transportLatches,
+                nextActionId = nextActionId,
                 traversal = TraversalState.fromSlices(
                     eligibleFifo = eligibleFifo.toList(),
                     staticContinuation = staticContinuation,
@@ -694,6 +1189,7 @@ internal object ResourceOperationStateMachine {
                 ordinal = record.ordinal,
                 cursor = record.cursor,
                 status = record.status,
+                lookup = record.lookup,
             )
         }
     }
@@ -723,6 +1219,8 @@ internal object ResourceOperationStateMachine {
         routeRecords: List<RouteRecord>,
         privateRentileKeyClaims: List<PrivateRentileKeyClaim>,
         identityRecords: List<CanonicalIdentityRecord>,
+        transportLatches: List<TransportLatchRecord> = emptyList(),
+        nextActionId: Long = 1L,
         traversal: TraversalState = TraversalState(emptyList(), emptyList(), emptyList()),
         nextRouteOrdinal: Long = 0L,
         activeRouteOrdinals: List<Long> = emptyList(),
@@ -736,6 +1234,8 @@ internal object ResourceOperationStateMachine {
         routeRecords = routeRecords,
         privateRentileKeyClaims = privateRentileKeyClaims,
         identityRecords = identityRecords,
+        transportLatches = transportLatches,
+        nextActionId = nextActionId,
         traversal = traversal,
         nextRouteOrdinal = nextRouteOrdinal,
         activeRouteOrdinals = activeRouteOrdinals,
@@ -765,5 +1265,93 @@ internal object ResourceOperationStateMachine {
             resourceClass = established.resourceKey.resourceClass,
             resourceKey = established.resourceKey,
         ),
+    )
+
+    private fun resourceUnavailableFailure(record: RouteRecord): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.RESOURCE_UNAVAILABLE,
+        stage = PipelineStage.RESOURCE_LOOKUP,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.RESOURCE_LOOKUP,
+            fieldName = DiagnosticField.RESOURCE,
+            resourceClass = record.registration.route.resourceClass,
+            resourceKey = record.registration.resourceKey,
+        ),
+    )
+
+    private fun storeReadFailure(record: RouteRecord): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.STORE_READ_FAILED,
+        stage = PipelineStage.STORE_READ,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.STORE_READ,
+            resourceClass = record.registration.route.resourceClass,
+            resourceKey = record.registration.resourceKey,
+        ),
+    )
+
+    private fun storeIntegrityFailure(record: RouteRecord): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.STORE_INTEGRITY_FAILED,
+        stage = PipelineStage.STORE_VALIDATION,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.STORE_VALIDATION,
+            fieldName = DiagnosticField.RESOURCE,
+            resourceClass = record.registration.route.resourceClass,
+            resourceKey = record.registration.resourceKey,
+        ),
+    )
+
+    private fun transportFailure(record: RouteRecord): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.TRANSPORT_EXECUTION_FAILED,
+        stage = PipelineStage.TRANSPORT,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.TRANSPORT,
+            resourceClass = record.registration.route.resourceClass,
+            resourceKey = record.registration.resourceKey,
+        ),
+    )
+
+    private fun isFresh(stored: StoredRawResource, sampleEpochMillis: Long): Boolean =
+        stored.metadata.freshUntilEpochMillis?.let { it > sampleEpochMillis } == true
+
+    private fun cursorActionId(cursor: ResourceRouteCursor?): ResourceActionId? = when (cursor) {
+        null,
+        is PendingClassGates,
+        -> null
+        is AwaitingClockSample -> cursor.actionId
+        is AwaitingResident -> cursor.actionId
+        is AwaitingStoreRead -> cursor.actionId
+        is AwaitingTransport -> cursor.actionId
+        is AwaitingLatchedTransportReplay -> cursor.actionId
+    }
+
+    private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(
+        bytes = stored.bytes,
+        contentDigest = stored.contentDigest,
+        metadata = StoredRawResourceMetadata(
+            contentType = stored.metadata.contentType,
+            etag = stored.metadata.etag,
+            lastModified = stored.metadata.lastModified,
+            freshUntilEpochMillis = stored.metadata.freshUntilEpochMillis,
+            storedAtEpochMillis = stored.metadata.storedAtEpochMillis,
+        ),
+    )
+
+    private fun copyResponse(response: TransportResponse): TransportResponse = TransportResponse(
+        statusCode = response.statusCode,
+        body = response.body,
+        metadata = TransportResponseMetadata(
+            contentType = response.metadata.contentType,
+            etag = response.metadata.etag,
+            lastModified = response.metadata.lastModified,
+            freshUntilEpochMillis = response.metadata.freshUntilEpochMillis,
+        ),
+    )
+
+    private fun copyLatch(latch: TransportLatchRecord): TransportLatchRecord = TransportLatchRecord(
+        key = latch.key,
+        outcome = when (val outcome = latch.outcome) {
+            LatchedTransportOutcome.Failed -> LatchedTransportOutcome.Failed
+            is LatchedTransportOutcome.Cancelled -> LatchedTransportOutcome.Cancelled(outcome.cancellation)
+            is LatchedTransportOutcome.Response -> LatchedTransportOutcome.Response(copyResponse(outcome.response))
+        },
     )
 }

@@ -1,157 +1,144 @@
 # RenG Cycle B handoff — 2026-08-17
 
-This is the durable recovery point for the next agent. Cycle A is publicly complete. Cycle B's owner-approved public-API/pure-core implementation is partially complete on branch
-`docs/cycle-b-resource-contract` and has been pushed to `origin`.
+This is the durable recovery point for the next agent. Cycle A is publicly complete. **Cycle B's
+owner-approved public-API and pure-core implementation is complete on branch
+`docs/cycle-b-resource-contract`** and pushed to `origin`. It is not merged, not released, and awaits
+integration review.
 
-The implementation checkpoint immediately before this handoff commit is
-`2f5dd211d3eac3e5c4774e07c341943e569b382d`. The handoff commit itself should be the branch's current HEAD.
+Every plan task is implemented, and every task was independently reviewed with its findings fixed. RenG
+still renders nothing and exposes no public runtime API.
 
 ## Read first
 
 1. `CLAUDE.md` — repository constraints, purity contract, six targets, commands, and publication rules.
 2. `CONTEXT.md` — canonical vocabulary.
 3. `docs/adr/0001`–`0018` — newer ADRs override older prose.
-4. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` — owner-approved Cycle B authority, approved at `11d7a03`.
-5. `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md` — independently reviewed implementation plan, committed with its canonical fixture at `4ff05ee`.
+4. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` — owner-approved Cycle B
+   authority, approved at `11d7a03`.
+5. `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md` — independently reviewed
+   implementation plan, committed with its canonical fixture at `4ff05ee`.
 6. This handoff, then the relevant implementation and tests.
 
-The specification and plan are already approved. Do not re-run grilling or write another plan unless repository-owner review explicitly reopens a contract.
+The specification and plan are approved. Do not re-run grilling or write another plan unless
+repository-owner review explicitly reopens a contract.
 
 ## Binding scope
 
-Cycle B is pure core only. It includes public immutable values/protocols/failures, canonical identities and SHA-256, spatial/diff planning, and pure lifecycle/resource/preparation reducers driven by supplied values.
+Cycle B is pure core only: public immutable values, protocols and sanitized failures, canonical identities
+and SHA-256, spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven by
+supplied values.
 
-Do not add a renderer factory, consumer adapter call, Rentile acquisition, decoder/parser, production cache, platform-context or GL call, shader compilation, pixels, retry, repair, fallback, or repeated consumer exchange. Never forward injected adapter messages or causes. Preserve selected cancellation as an opaque, unwrapped cancellation ID/cause value.
+Do not add a renderer factory, consumer adapter call, Rentile acquisition, decoder or parser, production
+cache, platform-context or GL call, shader compilation, pixels, retry, repair, fallback, or repeated
+consumer exchange. Never forward injected adapter messages or causes. Preserve selected cancellation as an
+opaque, unwrapped cancellation identifier and cause.
 
-The branch must retain exactly six published targets: Android, iOS Arm64, iOS Simulator Arm64, macOS Arm64, Linux x64, and Linux Arm64. No JVM publication, `macosX64`, or `iosX64`. Never commit `mavenLocal()`, a `-SNAPSHOT`, or `local.properties`.
+The branch retains exactly six published targets: Android, iOS Arm64, iOS Simulator Arm64, macOS Arm64,
+Linux x64, and Linux Arm64. No JVM publication, `macosX64`, or `iosX64`. Never commit `mavenLocal()`, a
+`-SNAPSHOT`, or `local.properties`.
 
-## Completed and independently approved tasks
+## Implementation status
 
-The following plan tasks were implemented, task-reviewed, fixed where necessary, integrated into this branch, controller-tested, and had their auxiliary worktrees removed:
+All plan tasks are complete: Task 0; Tasks 1–3; Tasks 4A–4C; Task 5; Tasks 6–7; Tasks 8A–8C; Tasks 9A–9D;
+Task 10; Task 11; Tasks 12A–12C; Task 13; Tasks 14A–14C; Task 15; Task 16; and this documentation task.
 
-- Task 0 — approved plan and canonical fixture
-- Tasks 1–3 — public values, adapters, and frame model
-- Tasks 4A–4C — renderer ownership/API, diagnostics/failures, configuration/protocol
-- Task 5 — ABI, policy, consumer smoke, and build firewall
-- Tasks 6–7 — canonical binary/SHA-256, identities, encoding, and structural diff
-- Tasks 8A–8C — Mercator projection, camera/rays, and closed ground footprint
-- Tasks 9A–9C — LOD/tile selection, placement/geometry, and shader-profile scanning
-- Task 11 — renderer lifecycle reducer
-- Tasks 12A–12C — preregistration, frontier scheduling, ordered retirement, and terminal arbitration
+The commits added after the previous handoff (`e4f2ace`) are:
 
-Important completed hardening includes:
+| Commit | Content |
+|---|---|
+| `143ab67` | Task 9D review fix — screen compositing placement invariants |
+| `afed63d` | Task 13 review fix — route cursor clearing and response controls |
+| `c134e90` | Task 10 — integrated pure frame planning |
+| `db74e8a` | Task 14A — ordinary resource class gates, writes, visibility |
+| `d0bca59` | Task 14B — atomic sprite pair commit and parked scheduler |
+| `c42caa3` | Task 14C — basemap style staging behind its owner barrier |
+| `5949575` | Task 15 — ordered preparation reducer |
+| `30b92b3` | Task 10 review fixes |
+| `9bdbeeb` | Discovery-parent install and sprite closure fixes |
+| `6eeb752` | Remaining review fixes — contradictory commit states rejected |
+| `b91dbbb` | Task 16 — cross-engine pure-core contract proof |
 
-- dependency-free common Kotlin SHA-256 without a full-message copy;
-- exact retained camera geographic anchor rather than inverse-projection reconstruction;
-- exact epsilon tile admission and bounded row/edge counting for full-support LOD 22;
-- scanner rejection of unterminated block comments anywhere in shader source;
-- linear 4,096-child frontier scheduling;
-- route/external cancellation-channel invariants;
-- repeat private-key collision attribution without duplicate terminal buffering;
-- complete assigned-ordinal and ordered-buffer invariants;
-- unresolved discovery cannot be bypassed by `RouteCompleted(Success)`.
+## What independent review found, and why it mattered
 
-## Implemented but review-pending
+Every implemented task was reviewed by an independent reviewer that read the code rather than trusting the
+suite. Six of eight reviews returned changes required, totalling seven major and thirteen minor findings,
+all now fixed. Two were serious enough to record permanently, because both lived in code whose own full
+suite passed:
 
-The repository owner explicitly instructed the prior agent to stop starting reviews and hand these off. Do not treat either task as review-approved yet.
+**Discovery parents never installed, so operations hung silently.** Route success requires every occurrence
+installed and the style barrier requires every non-style occurrence installed, but discovery readiness
+resolved a route without recording installed visibility. Any plan carrying a `BASEMAP_TILE_JSON` discovery
+source produced no outcome at all, and a style waiting on that owner parked forever. Install and discovery
+readiness had been mutually exclusive terminals. A discovery parent now installs its own content, stays
+running under a child-discovery cursor, and retires only at readiness. Two reviewers found this
+independently from different symptoms.
 
-### Task 9D — integrated Mercator spatial planning
+**Arbitration crashed a sprite group at concurrency two.** A buffered failure above a parked sprite image
+member closed that member while its group owner still had validation, write, or install work in flight; the
+group then wrote and installed into a resolved route and the reducer threw. The pre-existing trace missed it
+only because it placed the unrelated route at a lower ordinal. Arbitration now skips a parked member whose
+group has work outstanding, and the owner is not aborted, because its in-flight work may still report a
+lower-ordinal failure that must win arbitration.
 
-Controller commits:
+The rest were state-admission gaps: values whose constructors accepted self-contradictory combinations that
+the reducer never produced. The pattern recurred often enough to be worth stating as guidance — **when a
+reducer's own state type is the boundary that makes an illegal state impossible, write the invariant into
+the type, not only into the paths that build it.**
 
-- `de7f714` — `feat: integrate Mercator spatial planning`
-- `fdd9c59` — `fix: enforce Mercator spatial plan invariants`
+## Verification record
 
-The initial independent review found the generated planner path correct but reported that direct `MercatorSpatialPlan` construction admitted contradictory state. The fix now enforces:
+Verified on Linux with forced task re-execution at `b91dbbb`:
 
-- footprint and tile selection are jointly absent or jointly present;
-- geometry/profile list cardinality matches;
-- each geometry's exact vertex/fragment source matches its same-index profile pair;
-- map entries use `MAP_OCCLUDED` and screen entries use `SCREEN_COMPOSITED`.
+- `:kmp:checkKotlinAbi` — clean. Cycle B's public surface was frozen earlier by Task 5 at `817f917`, and
+  `kmp/api/kmp.klib.api` is byte-identical from the previous handoff `e4f2ace` through `b91dbbb` — every
+  addition in this session is `internal`. The dump contains no Rentile type, platform binding, or renderer
+  factory.
+- `:kmp:testAndroidHostTest` — 431 tests, 0 failures.
+- `:kmp:linuxX64Test` — 427 tests, 0 failures.
+- `:kmp:compileKotlinLinuxX64`, `:kmp:compileKotlinLinuxArm64`, `:kmp:bundleAndroidMainAar` — pass.
+- 73 Python tests pass; `tools/check_repository_policy.py --root .` prints `Cycle B repository policy passed`.
 
-The implementation worker ran focused, retained, full Android/macOS, native compilation, and AAR gates after the fix. **First next action:** perform a scoped independent re-review of `de7f714..fdd9c59` against Task 9D and the approved spec. Verify the direct-constructor RED controls, source pairing, nullability, draw regimes, copies/equality, and no regression to basemap suppression or failure order.
+The Apple gates cannot execute on Linux, so they were verified in GitHub Actions rather than claimed. CI run
+`32055118061` on source commit `9bdbeeb` passed both jobs: `Android and Linux` on `ubuntu-latest`, and
+`Apple and publication metadata` on `macos-latest`, which compiled both iOS targets, ran `macosArm64Test`,
+published all seven publications locally, and resolved the aggregate coordinate from a clean six-target
+consumer with a fresh Gradle home. A second run, `32058579004`, was started on the final commit `b91dbbb`;
+confirm its result before relying on it. Those runs came from a temporary branch
+`ci/cycle-b-apple-verification` and draft pull request #2, which exist only to borrow macOS hardware and
+must not be merged.
 
-The initial reviewer also made a Minor observation that the suppression test cannot detect deliberately computing then discarding footprint/tile work. The prior ruling parked it: production branches before that work, the otherwise-over-budget suppressed fixture catches behavioral accidental execution, and an injected instrumentation seam would exceed the exact approved Task 9D interface. Reopen only with a concrete failure.
+**Not observed, and not to be claimed:** exact merged-commit CI, publication, `linuxX64Test` on macOS, or
+`macosArm64Test` on Linux. Cycle B is unreleased; `VERSION_NAME` remains `0.1.0` and the public `0.1.0`
+record remains Cycle A's.
 
-### Task 13 — resource lookup and response rules
+## Open decisions for the repository owner
 
-Controller commit:
+None of these block integration review. All were found by independent review and deliberately left
+unfixed, because each changes approved code or approved contracts.
 
-- `2f5dd21` — `feat: add resource lookup decisions`
-
-This is a large unreviewed task: five files and roughly 2,390 added lines. It implements pure lookup actions/events/cursors, strict freshness, resident/Store/Transport decisions, closed transport latches, stored-record integrity, response validation, 200 formation, 304 merge, provenance, and transition correlation. It stops successful content at `PendingClassGates`; Task 14A still exclusively owns class gates, writes, and visibility.
-
-The worker reports controls for:
-
-- strict freshness `freshUntil > sample`;
-- NORMAL/CACHE_ONLY/RELOAD tables;
-- invalid nonnull Store records failing terminally with Store provenance;
-- no stale fallback, retry, repair, remove, or repeated exchange;
-- exact ETag/last-modified/unconditional request rules;
-- metadata-before-status/body response precedence;
-- empty/oversized 200 and nonempty 304 handling;
-- 304 requiring conditional NORMAL plus a stale valid validator-bearing baseline;
-- defensive body/latch/list copies;
-- opaque ADAPTER-only supplied cancellation;
-- positive monotonic action IDs and exact cursor/event correlation;
-- one transport call for 4,096 joined occurrences;
-- no lookup start after terminal selection.
-
-**Second next action:** independently review only `fdd9c59..2f5dd21` against Task 13 and the approved spec before starting Task 14A. This needs a high-judgment resource-state-machine review, especially malformed state admission, freshness/provenance, response precedence, cancellation, latch identity/replay, action correlation, one-exchange guarantees, linear complexity, and redaction. Do not infer approval from green tests.
-
-## Remaining implementation order
-
-After both pending reviews are approved and any fixes are integrated:
-
-1. Task 10 — integrated pure frame planning (blocked only by Task 9D approval).
-2. Task 14A — ordinary class gates, write outcomes, and visibility (blocked by Task 13 approval).
-3. Task 14B — sprite pair commit and parked scheduling.
-4. Task 14C — style staging/compile barriers and visibility.
-5. Task 15 — ordered preparation reducer (requires Task 10 and Task 14C).
-6. Task 16 — cross-engine tests.
-7. Task 17 — final documentation/status and complete gates.
-
-Task 10 and Task 14A can run in parallel after their separate review dependencies close. Tasks 14A → 14B → 14C remain ordered.
-
-Use fresh isolated workers only for genuinely parallel file-mutating tasks. Integrate each approved commit into `docs/cycle-b-resource-contract`, archive needed results in the controller, and remove its auxiliary worktree/branch. Keep at most ten workers, per repository-owner instruction.
-
-## Fresh verification at the handoff checkpoint
-
-After integrating Tasks 9D and 13, the controller ran:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s tools/tests -p 'test_*.py' -v
-PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
-./gradlew --no-configuration-cache \
-  :kmp:checkKotlinAbi \
-  :kmp:testAndroidHostTest \
-  :kmp:macosArm64Test \
-  :kmp:compileKotlinIosArm64 \
-  :kmp:compileKotlinIosSimulatorArm64 \
-  :kmp:compileKotlinMacosArm64 \
-  :kmp:compileKotlinLinuxX64 \
-  :kmp:compileKotlinLinuxArm64 \
-  :kmp:bundleAndroidMainAar
-git diff --check d86a4b9e716cb6d40e6a3522cdc43a2dbf500682..HEAD
-```
-
-Observed results:
-
-- 73 Python tests passed.
-- `Cycle B repository policy passed`.
-- ABI check passed.
-- Full Android host and macOS Arm64 suites passed.
-- Both iOS, macOS, and both Linux compilation gates passed.
-- Android AAR gate passed.
-- Diff check passed.
-- No Linux runtime test was claimed on macOS.
-
-These commands verify integration/build state, not the two pending code-review gates.
+1. **Transport response copy amplification.** A successful 200 duplicates its body four to five times and
+   retains three simultaneously. With `maximumModelGlbBytes` at 256 MiB the peak live set approaches 1.75 GB
+   for one GLB, before any concurrency multiplier. Latch retention is required by ADR 0016; the
+   copy-then-latch-copy and the digest copy are not. `TransportResponse` already snapshots on construction
+   and copies on every read, so the extra copies are removable without weakening purity.
+2. **`ShaderProfilePlan` validates nothing.** A directly constructed profile can claim a source it does not
+   describe, and desktop substitution then emits `#version 330 core#version 300 es`, which will not compile.
+   That breaks ADR 0008's substitution contract. The fix belongs in Task 9C's construction surface, which is
+   approved, so it was not changed.
+3. **Scheduling cost across distinct routes.** Per-event work is proportional to total registry size, so a
+   full run over R distinct routes is quadratic. This is pre-existing from Task 12B, and Cycle B multiplies
+   the event count per route. The plan's stated case — 4,096 joined occurrences on one route — is linear and
+   passes.
+4. **The plan omits advancement events.** Tasks 14A, 14B, and 14C each required a driving event to preserve
+   Task 13's zero-action lookup boundary, but only `AdvancePendingClassGates` is specified. The three
+   implementations added `AdvancePendingClassGates`, `AdvancePendingSpriteCommit`, and
+   `AdvancePendingStyleCommit` consistently. Worth folding into the plan or an ADR so the next cycle does not
+   rediscover it.
+5. **Two guards proved unkillable by test.** `successOutcome`'s buffered-outcome guard and the
+   `gates.indexOf`-versus-`gateIndex` distinction survive mutation because no admissible state distinguishes
+   them. They were kept and documented rather than removed or covered by a vacuous test.
 
 ## Fresh-device checkout and environment setup
-
-The next agent is expected to run on a different device. None of the absolute paths, ignored SDD ledger/reports, Gradle caches, or worktrees from the source machine will exist there. All required source, tests, specification, plan, decisions, and recovery instructions are committed on the remote branch.
 
 Start from a fresh clone:
 
@@ -161,10 +148,9 @@ git clone --branch docs/cycle-b-resource-contract --single-branch \
 cd RenG
 git status --short
 git rev-parse HEAD
-git log -5 --oneline
 ```
 
-`git status --short` must be empty. If the repository already exists on the new device, stop if it has local changes, then fetch and switch without resetting or discarding anything:
+`git status --short` must be empty. If the repository already exists, stop if it has local changes, then:
 
 ```bash
 git fetch origin
@@ -172,54 +158,35 @@ git switch docs/cycle-b-resource-contract 2>/dev/null || \
   git switch --create docs/cycle-b-resource-contract \
     --track origin/docs/cycle-b-resource-contract
 git pull --ff-only
-git status --short
 ```
 
 Required local tools:
 
-- Git.
-- A 64-bit JDK 21. Android host compilation targets JVM 21.
-- Python 3; repository tools use only the standard library.
-- Android SDK Platform 37. Set its path in untracked `local.properties`, for example:
+- Git; a 64-bit JDK 21; Python 3 (standard library only); the checked-in Gradle 9.5.0 wrapper — do not
+  substitute a system Gradle.
+- **Android SDK Platform 37.0.** The package identifier is `platforms;android-37.0`, not
+  `platforms;android-37`, and on older `cmdline-tools` it resolves only from the canary channel. Installing
+  it on a bare Linux host looks like:
 
-  ```properties
-  sdk.dir=/absolute/path/to/Android/sdk
+  ```bash
+  sdkmanager --sdk_root="$ANDROID_HOME" --channel=3 \
+    "platforms;android-37.0" "build-tools;37.0.0" "platform-tools"
   ```
 
-- The checked-in Gradle 9.5.0 wrapper; do not substitute a system Gradle.
-- Network access on the first build for the Gradle distribution, Kotlin/Native toolchain, Google Maven, Maven Central, and `https://maven.rohittp.com`.
-- For complete local Apple gates: Apple Silicon macOS with Xcode and Command Line Tools installed. The project deliberately has no Intel macOS/iOS simulator targets.
-- On Ubuntu x64, use the Linux CI command below; Apple targets cannot be built there. Linux Arm64 is a compile-only cross-target gate from x64.
+  Then point untracked `local.properties` at it with `sdk.dir=/absolute/path/to/Android/sdk`. Without the
+  SDK, AGP fails at configuration time and **every** Gradle task is blocked, including `linuxX64Test`.
+- Network access on the first build for the Gradle distribution, the Kotlin/Native toolchain, Google Maven,
+  Maven Central, and `https://maven.rohittp.com`.
+- For the complete Apple gates: Apple Silicon macOS with Xcode and Command Line Tools. Alternatively, push a
+  temporary branch and open a **draft** pull request; `ci.yml` runs on every pull request and its
+  `apple-publication` job covers `macosArm64Test`, both iOS targets, local publication, and the clean
+  six-target consumer. `publish.yml` triggers only on push to `main` or explicit dispatch, so a pull request
+  cannot consume a version or reach R2.
 
-No Docker, R2/AWS credentials, signing key, Firebase setup, publication secret, or `mavenLocal()` repository is needed for the pending Cycle B reviews and pure-core tasks. Do not create or commit `local.properties` beyond the local machine.
+No Docker, R2 or AWS credentials, signing key, publication secret, or `mavenLocal()` entry is needed for any
+Cycle B work.
 
-Sanity-check the fresh environment before reviewing code:
-
-```bash
-java -version
-python3 --version
-./gradlew --version
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s tools/tests -p 'test_*.py' -v
-PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
-```
-
-On Apple Silicon macOS, run the locally complete implementation gate:
-
-```bash
-./gradlew --no-configuration-cache \
-  :kmp:checkKotlinAbi \
-  :kmp:testAndroidHostTest \
-  :kmp:macosArm64Test \
-  :kmp:compileKotlinIosArm64 \
-  :kmp:compileKotlinIosSimulatorArm64 \
-  :kmp:compileKotlinMacosArm64 \
-  :kmp:compileKotlinLinuxX64 \
-  :kmp:compileKotlinLinuxArm64 \
-  :kmp:bundleAndroidMainAar
-```
-
-On Ubuntu x64, use the host-executable CI subset instead:
+On Linux, the host-executable gate is:
 
 ```bash
 ./gradlew --no-configuration-cache \
@@ -230,22 +197,32 @@ On Ubuntu x64, use the host-executable CI subset instead:
   :kmp:bundleAndroidMainAar
 ```
 
-Do not claim `linuxX64Test` from macOS or `macosArm64Test` from Linux. Kotlin/Native's first invocation may download toolchains and take substantially longer than later runs.
+On Apple Silicon macOS, run the locally complete implementation gate instead:
 
-The ignored `.superpowers/sdd/...` ledger, extracted task briefs, and `/tmp` worker reports are intentionally not transportable. The tracked plan contains every task requirement. If the next agent uses the Superpowers SDD workflow, initialize a new local ledger from this handoff and regenerate Task 9D/13 briefs from the tracked plan rather than looking for source-machine scratch files. The exact pending review ranges are recorded above.
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:macosArm64Test \
+  :kmp:compileKotlinIosArm64 \
+  :kmp:compileKotlinIosSimulatorArm64 \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
 
-## Git and source-machine worktree state
+Do not claim `linuxX64Test` from macOS or `macosArm64Test` from Linux. Gradle reports `UP-TO-DATE` for test
+tasks whose inputs have not changed, so pass `--rerun-tasks` when a run is meant to be evidence.
 
-All completed Task 9D and Task 13 worker commits were cherry-picked into `docs/cycle-b-resource-contract` before their auxiliary worktrees and branches were deleted. At handoff creation, no `agent-*` worktree remained.
+## Next work
 
-The source machine's live Claude session was pinned to:
-
-`/Users/rohittp/Data/Other/RenG/.claude/worktrees/cycle-a-implementation`
-
-That absolute path and worktree are irrelevant on the new device and do not need to be recreated. Its stale directory name contained the Cycle B branch, not unintegrated Cycle A work. The remote branch is the authority for cross-device continuation.
-
-The source machine's primary checkout remained on its pre-existing branch and was not merged or modified by this handoff. No PR, merge, workflow dispatch, R2 upload, publication, or release was performed.
+Cycle B awaits integration review. After it is approved and merged, the decomposition's next cycles are C
+(resource acquisition, decode, parse, caching) and D (the GL seam and its three implementations), which are
+genuinely independent and the natural place to work in parallel. Both connect real observations and execute
+the actions Cycle B's pure engines already decide.
 
 ## Publication boundary
 
-Pushing this development branch is authorized as a recovery checkpoint. It is not permission to merge, dispatch publication, upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record remains historical; Cycle B is not complete or released.
+Pushing this development branch is authorized as a recovery checkpoint. It is not permission to merge,
+dispatch publication, upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record
+remains historical; Cycle B is neither complete as a released cycle nor published.

@@ -11,10 +11,20 @@ library module; Android Studio's placeholder `:app` has been deleted. `:kmp` is 
 skeleton with no public runtime API and no rendering behavior yet. `consumer-smoke`, the dependency-free
 static site, publication tooling, repository-policy tooling, and `VERSION_NAME=0.1.0` exist.
 
-Cycle B preparation, grilling, and feasibility closure are complete. The proposed public API and pure-core
-design is in `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and awaits
-repository-owner review. Do not write an implementation plan or start implementation until that specification is
-approved; invoke `/grill-with-docs` again first only if review reopens a contract.
+**Cycle B is implemented on branch `docs/cycle-b-resource-contract` and awaits integration review.** Its
+owner-approved design is `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and its
+reviewed plan is `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md`; every plan task
+including the cross-engine contract proof is complete, and each was independently reviewed with its findings
+fixed. The specification and plan are approved, so do not re-run grilling or write another plan unless
+repository-owner review reopens a contract.
+
+Cycle B is pure core only: public immutable values, protocols and sanitized failures, canonical identities,
+spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven entirely by supplied
+values. There is still no renderer factory, consumer adapter call, Rentile acquisition, decoder, parser,
+production cache, GL call, shader compilation, or pixel, and no public runtime API — the KLIB ABI dump
+contains no Rentile type, platform binding, or renderer factory. Cycle B has **not** been merged to `main`,
+has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
+remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
 
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede

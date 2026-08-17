@@ -52,10 +52,12 @@ metadata, credential-free resolution for all six targets, and the final immutabl
 `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; POM and metadata availability alone are
 not completion proof. See ADR 0013.
 
-That outcome is satisfied. Cycle B preparation has read `CONTEXT.md`, ADRs 0001–0018, this decomposition,
-and `HANDOFF.md`; completed the required feasibility and closure proofs; and invoked `/grill-with-docs` with
-the governing documents and findings. Its design specification now awaits repository-owner approval; an
-implementation plan comes only after that approval.
+That outcome is satisfied, and Cycle B's design specification and implementation plan were subsequently
+approved. Cycle B is implemented on branch `docs/cycle-b-resource-contract`, where every plan task including
+the cross-engine contract proof is complete and each was independently reviewed with its findings fixed. Its
+own gates pass: `checkKotlinAbi` reports no public ABI change, and the Android host, `linuxX64`, and
+`macosArm64` suites all pass. Cycle B awaits integration review; it is not merged and not released, so its
+exact merged-commit CI and publication have not been observed.
 
 Cycle A is publicly complete from exact source commit
 `af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`

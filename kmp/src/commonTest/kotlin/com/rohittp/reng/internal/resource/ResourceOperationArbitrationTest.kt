@@ -260,6 +260,179 @@ class ResourceOperationArbitrationTest {
     }
 
     @Test
+    fun cancellationOriginsAreAcceptedOnlyThroughTheirMatchingChannels() {
+        val adapter = cancellation(CancellationCause.ADAPTER, 401L)
+        assertEquals(adapter, ResourceRouteOutcome.Cancelled(adapter).cancellation)
+        listOf(CancellationCause.CALLER, CancellationCause.CANCEL_PREPARATIONS).forEach { cause ->
+            assertFailsWith<IllegalArgumentException> {
+                ResourceRouteOutcome.Cancelled(cancellation(cause, 402L))
+            }
+        }
+
+        val caller = cancellation(CancellationCause.CALLER, 403L)
+        val cancelPreparations = cancellation(CancellationCause.CANCEL_PREPARATIONS, 404L)
+        assertEquals(caller, ExternalCancellationRequested(caller).cancellation)
+        assertEquals(
+            cancelPreparations,
+            ExternalCancellationRequested(cancelPreparations).cancellation,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            ExternalCancellationRequested(cancellation(CancellationCause.ADAPTER, 405L))
+        }
+    }
+
+    @Test
+    fun repeatedPrivateKeyCollidersAttributeTheInvalidatedRouteOnlyOnce() {
+        val sharedPrivateKey = RentilePrivateKey("review-shared-private-key")
+        val root = occurrence(index = 0, discoveryRequired = true)
+        val laterStatic = occurrence(
+            index = 1,
+            registration = registration(2, privateKey = sharedPrivateKey),
+        )
+        val earlierLeaf = occurrence(index = 2)
+        val activatedLaterStatic = occurrence(index = 3, registration = laterStatic.registration)
+        val firstCollider = occurrence(
+            index = 4,
+            registration = registration(5, privateKey = sharedPrivateKey),
+        )
+        val secondCollider = occurrence(
+            index = 5,
+            registration = registration(6, privateKey = sharedPrivateKey),
+        )
+        val definition = definition(1, root, laterStatic)
+        val started = ResourceOperationStateMachine.start(definition)
+        val ready = transition(started, RouteReadyForDiscovery(0L, root.id))
+
+        val collisions = transition(
+            ready,
+            ChildrenDiscovered(
+                root.id,
+                listOf(
+                    DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(3), secondCollider),
+                    DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(2), firstCollider),
+                    DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(1), activatedLaterStatic),
+                    DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(0), earlierLeaf),
+                ),
+            ),
+        )
+
+        assertNull(collisions.outcome)
+        assertEquals(listOf(StartRoute(1L, earlierLeaf.registration)), collisions.actions)
+        val collisionState = state(collisions)
+        assertEquals(listOf(1L), collisionState.activeRouteOrdinals)
+        assertEquals(2L, routeRecord(collisionState, laterStatic).ordinal)
+        assertEquals(ResourceRouteStatus.ELIGIBLE, routeRecord(collisionState, laterStatic).status)
+        assertEquals(
+            listOf(laterStatic.id, activatedLaterStatic.id),
+            routeRecord(collisionState, laterStatic).joinedOccurrenceIds,
+        )
+        assertEquals(
+            listOf(2L, 4L),
+            collisionState.bufferedRouteOutcomes.map(BufferedRouteOutcome::ordinal),
+        )
+        collisionState.bufferedRouteOutcomes.forEach { buffered ->
+            val routeFailure = assertIs<ResourceRouteOutcome.Failure>(buffered.outcome)
+            assertEquals(RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE, routeFailure.failure.code)
+        }
+        assertEquals(2L, collisionState.startCeilingOrdinal)
+        assertTrue(
+            collisionState.privateRentileKeyClaims
+                .single { it.privateKey == sharedPrivateKey }
+                .usable
+                .not(),
+        )
+
+        val selected = transition(
+            collisions,
+            RouteCompleted(1L, ResourceRouteOutcome.Success),
+        )
+
+        val selectedFailure = assertIs<ResourceOperationOutcome.Failure>(selected.outcome)
+        assertEquals(RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE, selectedFailure.failure.code)
+        val terminal = assertIs<ResourceTerminalSelection.Route>(state(selected).terminalSelection)
+        assertEquals(2L, terminal.ordinal)
+        assertEquals(3L, state(selected).nextRetirementOrdinal)
+        assertEquals(listOf(4L), state(selected).bufferedRouteOutcomes.map(BufferedRouteOutcome::ordinal))
+    }
+
+    @Test
+    fun runningRejectsOrdinalHolesUnsortedBuffersAndSuccessfulRouteTerminal() {
+        val started = state(start(routeCount = 3, concurrency = 3))
+        val records = started.routeRecords
+
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition = started.definition,
+                occurrences = started.occurrences,
+                routeRecords = listOf(records[0], records[2]),
+                privateRentileKeyClaims = started.privateRentileKeyClaims,
+                identityRecords = started.identityRecords,
+                traversal = started.traversal,
+                nextRouteOrdinal = 3L,
+                activeRouteOrdinals = listOf(0L, 2L),
+            )
+        }
+
+        val resolvedRecords = records.map { record ->
+            RouteRecord(
+                registration = record.registration,
+                joinedOccurrenceIds = record.joinedOccurrenceIds,
+                ordinal = record.ordinal,
+                cursor = record.cursor,
+                status = ResourceRouteStatus.RESOLVED,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition = started.definition,
+                occurrences = started.occurrences,
+                routeRecords = resolvedRecords,
+                privateRentileKeyClaims = started.privateRentileKeyClaims,
+                identityRecords = started.identityRecords,
+                traversal = started.traversal,
+                nextRouteOrdinal = 3L,
+                activeRouteOrdinals = emptyList(),
+                nextRetirementOrdinal = 0L,
+                bufferedRouteOutcomes = listOf(
+                    BufferedRouteOutcome(2L, ResourceRouteOutcome.Success),
+                    BufferedRouteOutcome(1L, ResourceRouteOutcome.Success),
+                ),
+            )
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            ResourceTerminalSelection.Route(0L, ResourceRouteOutcome.Success)
+        }
+    }
+
+    @Test
+    fun successfulCompletionCannotRetireAnUnresolvedDiscoveryFrontier() {
+        val root = occurrence(index = 0, discoveryRequired = true)
+        val later = occurrence(index = 1)
+        val started = ResourceOperationStateMachine.start(definition(1, root, later))
+        val startedState = state(started)
+
+        assertFailsWith<IllegalArgumentException> {
+            transition(started, RouteCompleted(0L, ResourceRouteOutcome.Success))
+        }
+        assertEquals(listOf(0L), startedState.activeRouteOrdinals)
+        assertEquals(0L, startedState.nextRetirementOrdinal)
+        assertEquals(
+            listOf(root.id),
+            startedState.traversal.frontierStack.map(DiscoveryFrontier::parentOccurrenceId),
+        )
+        assertNull(routeRecord(startedState, later).ordinal)
+
+        val ready = transition(started, RouteReadyForDiscovery(0L, root.id))
+        assertEquals(listOf(DiscoverChildren(0L, root.id)), ready.actions)
+        assertEquals(1L, state(ready).nextRetirementOrdinal)
+        val closed = transition(ready, ChildrenDiscovered(root.id, emptyList()))
+        assertEquals(listOf(StartRoute(1L, later.registration)), closed.actions)
+        assertEquals(listOf(1L), state(closed).activeRouteOrdinals)
+        assertTrue(state(closed).traversal.frontierStack.isEmpty())
+    }
+
+    @Test
     fun retirementBuffersSnapshotInputAndReturnFreshCopies() {
         val started = state(start(routeCount = 1, concurrency = 1))
         val bufferedValue = BufferedRouteOutcome(0L, ResourceRouteOutcome.Success)
@@ -301,16 +474,7 @@ class ResourceOperationArbitrationTest {
     private fun start(routeCount: Int, concurrency: Int): ResourceOperationTransition {
         val occurrences = (0 until routeCount).map { index -> occurrence(index) }
         val transition = ResourceOperationStateMachine.start(
-            ResourceOperationDefinition(
-                maximumConcurrentRoutes = concurrency,
-                staticOccurrences = occurrences,
-                resourceIdentities = occurrences.map { occurrence ->
-                    CanonicalIdentityRecord(
-                        occurrence.registration.resourceKey,
-                        occurrence.registration.canonicalBytes,
-                    )
-                },
-            ),
+            definition(concurrency, *occurrences.toTypedArray()),
         )
         assertNull(transition.outcome)
         assertEquals(
@@ -322,6 +486,20 @@ class ResourceOperationArbitrationTest {
         return transition
     }
 
+    private fun definition(
+        maximumConcurrentRoutes: Int,
+        vararg occurrences: ResourceOccurrence,
+    ): ResourceOperationDefinition = ResourceOperationDefinition(
+        maximumConcurrentRoutes = maximumConcurrentRoutes,
+        staticOccurrences = occurrences.toList(),
+        resourceIdentities = occurrences.map { occurrence ->
+            CanonicalIdentityRecord(
+                occurrence.registration.resourceKey,
+                occurrence.registration.canonicalBytes,
+            )
+        },
+    )
+
     private fun transition(
         previous: ResourceOperationTransition,
         event: ResourceOperationEvent,
@@ -330,12 +508,29 @@ class ResourceOperationArbitrationTest {
     private fun state(transition: ResourceOperationTransition): ResourceOperationState.Running =
         requireNotNull(transition.state)
 
-    private fun occurrence(index: Int): ResourceOccurrence {
+    private fun occurrence(
+        index: Int,
+        registration: ResourceRouteRegistration = registration(index + 1),
+        discoveryRequired: Boolean = false,
+    ): ResourceOccurrence {
         val marker = index + 1
+        return ResourceOccurrence(
+            id = ResourceOccurrenceId(marker.toLong()),
+            ownerId = ResourceOwnerId((marker + 1000).toLong()),
+            registration = registration,
+            discoveryRequired = discoveryRequired,
+            commitBinding = ResourceCommitBinding.Single,
+        )
+    }
+
+    private fun registration(
+        marker: Int,
+        privateKey: RentilePrivateKey = RentilePrivateKey("arbitration-private-$marker"),
+    ): ResourceRouteRegistration {
         val stableId = marker.toString(16).padStart(64, '0')
         val rawStableId = (marker + 100).toString(16).padStart(64, '0')
         val resourceClass = ResourceClass.STICKER_IMAGE
-        val registration = ResourceRouteRegistration(
+        return ResourceRouteRegistration(
             route = ResourceRouteKey(
                 accessMode = ResourceAccessMode.NORMAL,
                 locator = ResourceLocator("arbitration-locator-$marker"),
@@ -344,16 +539,16 @@ class ResourceOperationArbitrationTest {
             ),
             resourceKey = ResourceKey(ResourceKind.EXTERNAL, stableId, resourceClass),
             rawKey = RawResourceKey(rawStableId, resourceClass),
-            privateRentileKey = RentilePrivateKey("arbitration-private-$marker"),
+            privateRentileKey = privateKey,
             canonicalBytes = CanonicalBytes("arbitration-canonical-$marker".encodeToByteArray()),
         )
-        return ResourceOccurrence(
-            id = ResourceOccurrenceId(marker.toLong()),
-            ownerId = ResourceOwnerId((marker + 1000).toLong()),
-            registration = registration,
-            discoveryRequired = false,
-            commitBinding = ResourceCommitBinding.Single,
-        )
+    }
+
+    private fun routeRecord(
+        state: ResourceOperationState.Running,
+        occurrence: ResourceOccurrence,
+    ): RouteRecord = state.routeRecords.single {
+        it.registration.route == occurrence.registration.route
     }
 
     private fun cancellation(cause: CancellationCause, id: Long): CancellationSelection =

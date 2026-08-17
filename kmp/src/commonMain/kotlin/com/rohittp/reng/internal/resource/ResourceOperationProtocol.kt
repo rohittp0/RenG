@@ -441,7 +441,13 @@ internal sealed interface ResourceRouteOutcome {
 
     data class Cancelled(
         val cancellation: CancellationSelection,
-    ) : ResourceRouteOutcome
+    ) : ResourceRouteOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "route cancellation must originate from an adapter"
+            }
+        }
+    }
 }
 
 internal data class BufferedRouteOutcome(
@@ -460,6 +466,9 @@ internal sealed interface ResourceTerminalSelection {
     ) : ResourceTerminalSelection {
         init {
             require(ordinal >= 0L) { "route ordinal must be non-negative" }
+            require(outcome !is ResourceRouteOutcome.Success) {
+                "route terminal selection must be a failure or cancellation"
+            }
         }
     }
 
@@ -509,7 +518,14 @@ internal data class RouteCompleted(
 
 internal data class ExternalCancellationRequested(
     val cancellation: CancellationSelection,
-) : ResourceOperationEvent
+) : ResourceOperationEvent {
+    init {
+        require(
+            cancellation.cause == CancellationCause.CALLER ||
+                cancellation.cause == CancellationCause.CANCEL_PREPARATIONS,
+        ) { "external cancellation must originate from caller or cancelPreparations" }
+    }
+}
 
 internal data class CleanupCancellationObserved(
     val ordinal: Long,
@@ -710,6 +726,9 @@ internal sealed interface ResourceOperationState {
                     },
                 ) { "route status must agree with ordinal assignment" }
             }
+            require(assignedOrdinals.size.toLong() == nextRouteOrdinal) {
+                "assigned route ordinals must form the complete contiguous range"
+            }
 
             require(activeRouteOrdinalSnapshot.size <= definition.maximumConcurrentRoutes) {
                 "active routes must not exceed configured concurrency"
@@ -722,12 +741,16 @@ internal sealed interface ResourceOperationState {
                 "active route ordinals must correspond exactly to running routes"
             }
 
-            val bufferedOrdinals = mutableSetOf<Long>()
+            var previousBufferedOrdinal: Long? = null
             require(bufferedRouteOutcomeSnapshot.all { buffered ->
-                buffered.ordinal >= nextRetirementOrdinal &&
+                val previous = previousBufferedOrdinal
+                val valid = buffered.ordinal >= nextRetirementOrdinal &&
                     buffered.ordinal < nextRouteOrdinal &&
-                    bufferedOrdinals.add(buffered.ordinal)
-            }) { "buffered route outcomes must be distinct unretired assigned ordinals" }
+                    (previous == null || previous < buffered.ordinal)
+                previousBufferedOrdinal = buffered.ordinal
+                valid
+            }) { "buffered route outcomes must be strictly ascending unretired assigned ordinals" }
+            val bufferedOrdinals = bufferedRouteOutcomeSnapshot.mapTo(mutableSetOf()) { it.ordinal }
             require(activeOrdinalSet.none(bufferedOrdinals::contains)) {
                 "active routes cannot already have buffered outcomes"
             }
@@ -738,6 +761,9 @@ internal sealed interface ResourceOperationState {
                 }
             }
             if (terminalSelection is ResourceTerminalSelection.Route) {
+                require(terminalSelection.outcome !is ResourceRouteOutcome.Success) {
+                    "selected route terminal must be a failure or cancellation"
+                }
                 require(terminalSelection.ordinal < nextRetirementOrdinal) {
                     "selected route terminal must already be retired"
                 }

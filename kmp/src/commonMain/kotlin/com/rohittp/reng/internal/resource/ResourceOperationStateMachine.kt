@@ -258,6 +258,12 @@ internal object ResourceOperationStateMachine {
             require(record.status == ResourceRouteStatus.RUNNING) {
                 "route completion requires a running route"
             }
+            if (event.outcome is ResourceRouteOutcome.Success) {
+                val frontierParentId = frontierStack.lastOrNull()?.parentOccurrenceId
+                require(frontierParentId == null || frontierParentId !in record.joinedOccurrenceIds) {
+                    "successful discovery route must complete through discovery readiness"
+                }
+            }
             require(activeRouteOrdinals.remove(event.ordinal)) {
                 "route completion requires an active route"
             }
@@ -402,8 +408,9 @@ internal object ResourceOperationStateMachine {
             val claimIndex = claimIndex(occurrence.registration.privateRentileKey)
             if (claimIndex >= 0) {
                 val claim = privateRentileKeyClaims[claimIndex]
-                val invalidatedEligibleOrdinal = routeIndex(claim.firstRoute)
-                    .takeIf { it >= 0 }
+                val invalidatedEligibleOrdinal = claim.takeIf { it.usable }
+                    ?.let { routeIndex(it.firstRoute) }
+                    ?.takeIf { it >= 0 }
                     ?.let(routeRecords::get)
                     ?.takeIf { it.status == ResourceRouteStatus.ELIGIBLE }
                     ?.ordinal

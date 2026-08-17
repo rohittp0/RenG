@@ -8,6 +8,7 @@ import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
+import com.rohittp.reng.internal.requireUnicodeScalars
 import kotlin.jvm.JvmInline
 
 internal enum class CancellationCause {
@@ -156,6 +157,105 @@ internal data class ResourceOccurrence(
     val commitBinding: ResourceCommitBinding,
 )
 
+internal sealed interface ResourceChildTraversal {
+    data class BasemapSprite(val member: SpriteMember) : ResourceChildTraversal
+
+    class BasemapSource(
+        val sourceId: String,
+        val member: BasemapSourceMember,
+    ) : ResourceChildTraversal {
+        init {
+            requireUnicodeScalars(sourceId, "source ID", nonBlank = false)
+        }
+
+        override fun equals(other: Any?): Boolean =
+            other is BasemapSource && sourceId == other.sourceId && member == other.member
+
+        override fun hashCode(): Int = 31 * sourceId.hashCode() + member.hashCode()
+
+        override fun toString(): String =
+            when (member) {
+                BasemapSourceMember.Metadata -> "BasemapSource(member=Metadata)"
+                is BasemapSourceMember.Tile -> "BasemapSource(member=Tile)"
+            }
+    }
+
+    data class DeclaredArray(val index: Int) : ResourceChildTraversal {
+        init {
+            require(index >= 0) { "declared array index must be non-negative" }
+        }
+    }
+
+    class ObjectMember(
+        val exactKey: String,
+    ) : ResourceChildTraversal {
+        init {
+            requireUnicodeScalars(exactKey, "object member key", nonBlank = false)
+        }
+
+        override fun equals(other: Any?): Boolean = other is ObjectMember && exactKey == other.exactKey
+
+        override fun hashCode(): Int = exactKey.hashCode()
+
+        override fun toString(): String = "ObjectMember"
+    }
+}
+
+internal sealed interface BasemapSourceMember {
+    data object Metadata : BasemapSourceMember
+
+    data class Tile(
+        val lod: Int,
+        val tileY: Int,
+        val canonicalX: Int,
+    ) : BasemapSourceMember {
+        init {
+            require(lod >= 0) { "tile LOD must be non-negative" }
+            require(tileY >= 0) { "tile Y must be non-negative" }
+            require(canonicalX >= 0) { "canonical tile X must be non-negative" }
+        }
+    }
+}
+
+internal data class DiscoveredResourceChild(
+    val traversal: ResourceChildTraversal,
+    val occurrence: ResourceOccurrence,
+)
+
+internal class DiscoveryFrontier(
+    val parentOccurrenceId: ResourceOccurrenceId,
+    childOccurrenceIds: List<ResourceOccurrenceId>,
+    withheldContinuation: List<ResourceOccurrenceId>,
+) {
+    private val childOccurrenceIdSnapshot: List<ResourceOccurrenceId> = freshListCopy(childOccurrenceIds)
+    private val withheldContinuationSnapshot: List<ResourceOccurrenceId> = freshListCopy(withheldContinuation)
+
+    val childOccurrenceIds: List<ResourceOccurrenceId>
+        get() = freshListCopy(childOccurrenceIdSnapshot)
+
+    val withheldContinuation: List<ResourceOccurrenceId>
+        get() = freshListCopy(withheldContinuationSnapshot)
+}
+
+internal class TraversalState(
+    eligibleFifo: List<ResourceOccurrenceId>,
+    staticContinuation: List<ResourceOccurrenceId>,
+    frontierStack: List<DiscoveryFrontier>,
+) {
+    private val eligibleFifoSnapshot: List<ResourceOccurrenceId> = freshListCopy(eligibleFifo)
+    private val staticContinuationSnapshot: List<ResourceOccurrenceId> = freshListCopy(staticContinuation)
+    private val frontierStackSnapshot: List<DiscoveryFrontier> = freshListCopy(frontierStack)
+
+    val eligibleFifo: List<ResourceOccurrenceId>
+        get() = freshListCopy(eligibleFifoSnapshot)
+
+    val staticContinuation: List<ResourceOccurrenceId>
+        get() = freshListCopy(staticContinuationSnapshot)
+
+    val frontierStack: List<DiscoveryFrontier>
+        get() = freshListCopy(frontierStackSnapshot)
+}
+
 internal class ResourceOperationDefinition(
     val maximumConcurrentRoutes: Int,
     staticOccurrences: List<ResourceOccurrence>,
@@ -211,7 +311,141 @@ internal data class CanonicalIdentityRecord(
 
 internal sealed interface ResourceOperationEvent
 
+internal class ChildrenDiscovered(
+    val parentOccurrenceId: ResourceOccurrenceId,
+    children: List<DiscoveredResourceChild>,
+) : ResourceOperationEvent {
+    private val childSnapshot: List<DiscoveredResourceChild> =
+        freshListCopy(children).sortedWith(resourceChildComparator)
+
+    init {
+        for (index in 1 until childSnapshot.size) {
+            require(
+                resourceChildComparator.compare(childSnapshot[index - 1], childSnapshot[index]) != 0,
+            ) { "discovered child traversal descriptors must be distinguishable" }
+        }
+    }
+
+    val children: List<DiscoveredResourceChild>
+        get() = freshListCopy(childSnapshot)
+}
+
+internal data class RouteReadyForDiscovery(
+    val ordinal: Long,
+    val parentOccurrenceId: ResourceOccurrenceId,
+) : ResourceOperationEvent {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
 internal sealed interface ResourceOperationAction
+
+internal data class StartRoute(
+    val ordinal: Long,
+    val registration: ResourceRouteRegistration,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class DiscoverChildren(
+    val ordinal: Long,
+    val parentOccurrenceId: ResourceOccurrenceId,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+private val resourceChildComparator: Comparator<DiscoveredResourceChild> = Comparator { first, second ->
+    compareChildTraversal(first.traversal, second.traversal)
+}
+
+private fun compareChildTraversal(
+    first: ResourceChildTraversal,
+    second: ResourceChildTraversal,
+): Int {
+    val rankComparison = childTraversalRank(first).compareTo(childTraversalRank(second))
+    if (rankComparison != 0) return rankComparison
+
+    return when (first) {
+        is ResourceChildTraversal.BasemapSprite -> compareSpriteMembers(
+            first.member,
+            (second as ResourceChildTraversal.BasemapSprite).member,
+        )
+        is ResourceChildTraversal.BasemapSource -> compareBasemapSources(
+            first,
+            second as ResourceChildTraversal.BasemapSource,
+        )
+        is ResourceChildTraversal.DeclaredArray ->
+            first.index.compareTo((second as ResourceChildTraversal.DeclaredArray).index)
+        is ResourceChildTraversal.ObjectMember -> compareUnsignedUtf8(
+            first.exactKey,
+            (second as ResourceChildTraversal.ObjectMember).exactKey,
+        )
+    }
+}
+
+private fun childTraversalRank(traversal: ResourceChildTraversal): Int =
+    when (traversal) {
+        is ResourceChildTraversal.BasemapSprite -> 0
+        is ResourceChildTraversal.BasemapSource -> 1
+        is ResourceChildTraversal.DeclaredArray -> 2
+        is ResourceChildTraversal.ObjectMember -> 3
+    }
+
+private fun compareSpriteMembers(first: SpriteMember, second: SpriteMember): Int =
+    spriteMemberRank(first).compareTo(spriteMemberRank(second))
+
+private fun spriteMemberRank(member: SpriteMember): Int =
+    when (member) {
+        SpriteMember.JSON -> 0
+        SpriteMember.IMAGE -> 1
+    }
+
+private fun compareBasemapSources(
+    first: ResourceChildTraversal.BasemapSource,
+    second: ResourceChildTraversal.BasemapSource,
+): Int {
+    val sourceComparison = compareUnsignedUtf8(first.sourceId, second.sourceId)
+    if (sourceComparison != 0) return sourceComparison
+    return compareBasemapSourceMembers(first.member, second.member)
+}
+
+private fun compareBasemapSourceMembers(
+    first: BasemapSourceMember,
+    second: BasemapSourceMember,
+): Int {
+    val rankComparison = basemapSourceMemberRank(first).compareTo(basemapSourceMemberRank(second))
+    if (rankComparison != 0) return rankComparison
+    if (first is BasemapSourceMember.Metadata) return 0
+
+    first as BasemapSourceMember.Tile
+    second as BasemapSourceMember.Tile
+    return first.lod.compareTo(second.lod)
+        .takeIf { it != 0 }
+        ?: first.tileY.compareTo(second.tileY).takeIf { it != 0 }
+        ?: first.canonicalX.compareTo(second.canonicalX)
+}
+
+private fun basemapSourceMemberRank(member: BasemapSourceMember): Int =
+    when (member) {
+        BasemapSourceMember.Metadata -> 0
+        is BasemapSourceMember.Tile -> 1
+    }
+
+private fun compareUnsignedUtf8(first: String, second: String): Int {
+    val firstBytes = first.encodeToByteArray()
+    val secondBytes = second.encodeToByteArray()
+    val sharedSize = minOf(firstBytes.size, secondBytes.size)
+    for (index in 0 until sharedSize) {
+        val comparison = (firstBytes[index].toInt() and 0xff).compareTo(secondBytes[index].toInt() and 0xff)
+        if (comparison != 0) return comparison
+    }
+    return firstBytes.size.compareTo(secondBytes.size)
+}
 
 internal sealed interface ResourceOperationOutcome {
     data class Failure(val failure: FailureDescriptor) : ResourceOperationOutcome
@@ -228,12 +462,26 @@ internal sealed interface ResourceOperationState {
         routeRecords: List<RouteRecord>,
         privateRentileKeyClaims: List<PrivateRentileKeyClaim>,
         identityRecords: List<CanonicalIdentityRecord>,
+        val traversal: TraversalState = TraversalState(emptyList(), emptyList(), emptyList()),
+        val nextRouteOrdinal: Long = 0L,
+        activeRouteOrdinals: List<Long> = emptyList(),
     ) : ResourceOperationState {
         private val occurrenceSnapshot: List<ResourceOccurrence> = freshListCopy(occurrences)
         private val routeRecordSnapshot: List<RouteRecord> = freshListCopy(routeRecords)
         private val privateRentileKeyClaimSnapshot: List<PrivateRentileKeyClaim> =
             freshListCopy(privateRentileKeyClaims)
         private val identityRecordSnapshot: List<CanonicalIdentityRecord> = freshListCopy(identityRecords)
+        private val activeRouteOrdinalSnapshot: List<Long> = freshListCopy(activeRouteOrdinals)
+
+        init {
+            require(nextRouteOrdinal >= 0L) { "next route ordinal must be non-negative" }
+            require(activeRouteOrdinalSnapshot.all { it >= 0L && it < nextRouteOrdinal }) {
+                "active route ordinals must have been assigned"
+            }
+            require(activeRouteOrdinalSnapshot.distinct().size == activeRouteOrdinalSnapshot.size) {
+                "active route ordinals must be distinct"
+            }
+        }
 
         val occurrences: List<ResourceOccurrence>
             get() = freshListCopy(occurrenceSnapshot)
@@ -246,6 +494,9 @@ internal sealed interface ResourceOperationState {
 
         val identityRecords: List<CanonicalIdentityRecord>
             get() = freshListCopy(identityRecordSnapshot)
+
+        val activeRouteOrdinals: List<Long>
+            get() = freshListCopy(activeRouteOrdinalSnapshot)
     }
 }
 

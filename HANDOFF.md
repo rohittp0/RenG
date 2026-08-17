@@ -96,7 +96,24 @@ Verified on Linux with forced task re-execution at `b91dbbb`:
 - `:kmp:testAndroidHostTest` — 431 tests, 0 failures.
 - `:kmp:linuxX64Test` — 427 tests, 0 failures.
 - `:kmp:compileKotlinLinuxX64`, `:kmp:compileKotlinLinuxArm64`, `:kmp:bundleAndroidMainAar` — pass.
+- `:kmp:publishAllPublicationsToLocalTestRepository` — all seven publications at `0.1.0` under
+  `build/local-maven/com/rohittp/reng/`: the aggregate `kmp` plus `kmp-android`, `kmp-iosarm64`,
+  `kmp-iossimulatorarm64`, `kmp-macosarm64`, `kmp-linuxx64`, and `kmp-linuxarm64`, each with its POM,
+  Gradle module metadata, sources, javadoc, `maven-metadata.xml`, and md5/sha1/sha256/sha512 checksums.
+- `consumer-smoke` with a fresh Gradle home and `--refresh-dependencies` — resolves
+  `com.rohittp.reng:kmp-android`, `kmp-linuxx64`, and `kmp-linuxarm64` at `0.1.0` plus
+  `com.rohittp.rentile:kmp:0.1.5` with no credentials. Its three Apple targets were not attempted here.
 - 73 Python tests pass; `tools/check_repository_policy.py --root .` prints `Cycle B repository policy passed`.
+- `git diff --check 11d7a03..HEAD` is clean, and `kmp/api/kmp.klib.api` (772 lines) contains no match for
+  `com.rohittp.rentile`, `platform.`, `createRenderer`, or `RendererFactory`.
+
+Note when re-running the workflow parse: `CLAUDE.md` gives the macOS Ruby 2.6 positional form
+`YAML.safe_load(text, [], [], true)`, which modern Psych rejects with `wrong number of arguments`. On Ruby 3
+use the keyword form instead, which parses both workflow files:
+
+```bash
+ruby -e 'require "yaml"; ["ci","publish"].each { |w| YAML.safe_load(File.read(".github/workflows/#{w}.yml"), aliases: true) }'
+```
 
 The Apple gates cannot execute on Linux, so they were verified in GitHub Actions rather than claimed. CI run
 `32055118061` on source commit `9bdbeeb` passed both jobs: `Android and Linux` on `ubuntu-latest`, and

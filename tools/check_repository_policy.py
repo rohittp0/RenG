@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
 import re
@@ -226,11 +227,41 @@ _REPOSITORY_IDENTIFIERS = frozenset({
     "ivy", "maven", "mavenCentral", "mavenLocal", "pluginManagement", "publishing",
     "repositories", "repositoriesMode", "r2Bucket", "r2Endpoint", "subprojects",
 })
+_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
+    "build.gradle.kts": "dd287b9ac779dfeac3cbbacc1615df26c0d8c4a118a02a15f64a2b2e9872ebcd",
+    "gradle/libs.versions.toml": "35bfceee660cef966bffdcca954dbf501ea1acdd8a4f0c4e48069594bc80ab1f",
+    "kmp/build.gradle.kts": "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
+    "settings.gradle.kts": "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
+}
 _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES = frozenset({
-    ".aar", ".apk", ".asc", ".bin", ".bz2", ".class", ".dll", ".dylib", ".exe",
-    ".gz", ".jar", ".klib", ".md5", ".module", ".pom", ".sha1", ".sha256",
-    ".sha512", ".so", ".tar", ".tgz", ".war", ".wasm", ".xz", ".zip",
+    ".a", ".aar", ".apk", ".asc", ".bc", ".bin", ".bz2", ".class",
+    ".dll", ".dylib", ".exe", ".gz", ".jar", ".klib", ".md5", ".module",
+    ".o", ".obj", ".pom", ".sha1", ".sha256", ".sha512", ".so", ".tar",
+    ".tgz", ".war", ".wasm", ".xz", ".zip",
 })
+_FORBIDDEN_BUILD_PAYLOAD_MAGIC_PREFIXES = (
+    b"\x7fELF",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+    b"!<arch>\n",
+    b"\x00asm",
+    b"BC\xc0\xde",
+    b"\xde\xc0\x17\x0b",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"\x1f\x8b",
+    b"BZh",
+    b"\xfd7zXZ\x00",
+    b"7z\xbc\xaf\x27\x1c",
+    b"Rar!\x1a\x07",
+)
 _PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
 _COMPLETION_STEP_NAMES = (
     "Verify exact public artifacts and aggregate metadata",
@@ -298,14 +329,12 @@ def _belongs_to_root_gradle_build(root: Path, path: Path) -> bool:
 
 def _kmp_gradle_configuration_files(root: Path) -> tuple[Path, ...]:
     return tuple(
-        path for path in _files(
-            root,
-            lambda item: (
-                item.name.endswith((".gradle", ".gradle.kts"))
-                or item.name.endswith(".versions.toml")
-            ),
-        )
+        path for path in _checked_in_or_fixture_files(root)
         if _belongs_to_root_gradle_build(root, path)
+        and (
+            path.name.endswith((".gradle", ".gradle.kts"))
+            or path.name.endswith(".versions.toml")
+        )
     )
 
 
@@ -440,6 +469,227 @@ def _kotlin_tokens(text: str) -> tuple[_Token, ...]:
         tokens.append(_Token("symbol", character, index))
         index += 1
     return tuple(tokens)
+
+
+_KOTLIN_MULTI_CHARACTER_SYMBOLS = tuple(sorted(
+    (
+        "!==", "===", ">>>", "..<", "!!", "!=", "&&", "++", "+=", "--",
+        "-=", "->", "..", "::", "<=", "==", ">=", "?.", "?:", "*=", "/=",
+        "%=", "||", "<<", ">>",
+    ),
+    key=len,
+    reverse=True,
+))
+
+
+def _kotlin_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    index = start + 2
+    while index < len(text) and depth:
+        if text.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif text.startswith("*/", index):
+            depth -= 1
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def _kotlin_character_end(text: str, start: int) -> int:
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == "'":
+            return index + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _kotlin_template_expression_end(text: str, start: int) -> int:
+    depth = 1
+    index = start
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end == -1 else end
+            continue
+        if text.startswith("/*", index):
+            index = _kotlin_block_comment_end(text, index)
+            continue
+        if text.startswith('"""', index):
+            index = _kotlin_string_end(text, index, raw=True)
+            continue
+        if text[index] == '"':
+            index = _kotlin_string_end(text, index, raw=False)
+            continue
+        if text[index] == "'":
+            index = _kotlin_character_end(text, index)
+            continue
+        if text[index] == "`":
+            end = text.find("`", index + 1)
+            index = len(text) if end == -1 else end + 1
+            continue
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(text)
+
+
+def _kotlin_string_end(text: str, start: int, *, raw: bool) -> int:
+    index = start + (3 if raw else 1)
+    while index < len(text):
+        if raw and text.startswith('"""', index):
+            return index + 3
+        if not raw and text[index] == "\\":
+            index += 2
+            continue
+        if not raw and text[index] == '"':
+            return index + 1
+        if text.startswith("${", index):
+            index = _kotlin_template_expression_end(text, index + 2)
+            continue
+        index += 1
+    return len(text)
+
+
+def _kotlin_fingerprint_tokens(text: str) -> tuple[_Token, ...]:
+    source = text
+    tokens = []
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character.isspace():
+            index += 1
+            continue
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            index = len(source) if end == -1 else end
+            continue
+        if source.startswith("/*", index):
+            index = _kotlin_block_comment_end(source, index)
+            continue
+        if source.startswith('"""', index):
+            end = _kotlin_string_end(source, index, raw=True)
+            tokens.append(_Token("raw-string", source[index:end], index))
+            index = end
+            continue
+        if character == '"':
+            end = _kotlin_string_end(source, index, raw=False)
+            tokens.append(_Token("string", source[index:end], index))
+            index = end
+            continue
+        if character == "'":
+            end = _kotlin_character_end(source, index)
+            tokens.append(_Token("character", source[index:end], index))
+            index = end
+            continue
+        if character == "`":
+            end = source.find("`", index + 1)
+            end = len(source) if end == -1 else end + 1
+            tokens.append(_Token("quoted-identifier", source[index:end], index))
+            index = end
+            continue
+        if character.isalpha() or character == "_":
+            end = index + 1
+            while end < len(source) and (
+                source[end].isalnum() or source[end] == "_"
+            ):
+                end += 1
+            tokens.append(_Token("identifier", source[index:end], index))
+            index = end
+            continue
+        if character.isdigit():
+            end = index + 1
+            while end < len(source) and (
+                source[end].isalnum() or source[end] == "_"
+            ):
+                end += 1
+            tokens.append(_Token("number", source[index:end], index))
+            index = end
+            continue
+        symbol = next(
+            (
+                candidate for candidate in _KOTLIN_MULTI_CHARACTER_SYMBOLS
+                if source.startswith(candidate, index)
+            ),
+            character,
+        )
+        tokens.append(_Token("symbol", symbol, index))
+        index += len(symbol)
+    return tuple(tokens)
+
+
+def _toml_tokens(text: str) -> tuple[_Token, ...]:
+    tokens = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isspace():
+            index += 1
+            continue
+        if character == "#":
+            end = text.find("\n", index)
+            index = len(text) if end == -1 else end
+            continue
+        if text.startswith(('"""', "'''"), index):
+            quote = text[index:index + 3]
+            end = text.find(quote, index + 3)
+            end = len(text) if end == -1 else end + 3
+            tokens.append(_Token("multiline-string", text[index:end], index))
+            index = end
+            continue
+        if character in {'"', "'"}:
+            end = index + 1
+            while end < len(text):
+                if character == '"' and text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == character:
+                    end += 1
+                    break
+                end += 1
+            tokens.append(_Token("string", text[index:end], index))
+            index = end
+            continue
+        if character.isalnum() or character in {"_", "-"}:
+            end = index + 1
+            while end < len(text) and (
+                text[end].isalnum() or text[end] in {"_", "-"}
+            ):
+                end += 1
+            tokens.append(_Token("bare", text[index:end], index))
+            index = end
+            continue
+        tokens.append(_Token("symbol", character, index))
+        index += 1
+    return tuple(tokens)
+
+
+def _token_stream_fingerprint(tokens: Sequence[_Token]) -> str:
+    digest = hashlib.sha256()
+    for token in tokens:
+        for component in (token.kind, token.value):
+            encoded = component.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _build_configuration_fingerprint(path: Path, text: str) -> str:
+    tokens = (
+        _toml_tokens(text)
+        if path.name.endswith(".versions.toml")
+        else _kotlin_fingerprint_tokens(text)
+    )
+    return _token_stream_fingerprint(tokens)
 
 
 def _kotlin_template_offset(
@@ -974,6 +1224,62 @@ def _checked_in_or_fixture_files(root: Path) -> tuple[Path, ...]:
     ))
 
 
+def _build_semantics_violations(root: Path) -> list[Violation]:
+    actual = {
+        path.relative_to(root).as_posix(): path
+        for path in _kmp_gradle_configuration_files(root)
+    }
+    violations = []
+    for relative, expected_fingerprint in _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS.items():
+        path = actual.get(relative, root / relative)
+        if not path.is_file():
+            violations.append(_violation(
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
+                path,
+                1,
+                _CYCLE_B_DEPENDENCY_MESSAGE,
+            ))
+            continue
+        actual_fingerprint = _build_configuration_fingerprint(path, _read(path))
+        if actual_fingerprint != expected_fingerprint:
+            violations.append(_violation(
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
+                path,
+                1,
+                _CYCLE_B_DEPENDENCY_MESSAGE,
+            ))
+    for relative in sorted(actual.keys() - _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS.keys()):
+        violations.append(_violation(
+            "FORBIDDEN_CYCLE_B_DEPENDENCY",
+            actual[relative],
+            1,
+            _CYCLE_B_DEPENDENCY_MESSAGE,
+        ))
+    return violations
+
+
+def _has_forbidden_payload_magic(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(4096)
+    except OSError:
+        return True
+    if any(header.startswith(prefix) for prefix in _FORBIDDEN_BUILD_PAYLOAD_MAGIC_PREFIXES):
+        return True
+    if len(header) >= 0x40 and header.startswith(b"MZ"):
+        pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+        if pe_offset + 4 <= len(header) and header[pe_offset:pe_offset + 4] == b"PE\0\0":
+            return True
+    return len(header) >= 263 and header[257:263] in {b"ustar\0", b"ustar "}
+
+
+def _is_framework_layout(root: Path, path: Path) -> bool:
+    return any(
+        part.lower().endswith(".framework")
+        for part in path.relative_to(root).parts[:-1]
+    )
+
+
 def _unexpected_build_payload_file(root: Path) -> Path | None:
     approved_wrapper = root / "gradle/wrapper/gradle-wrapper.jar"
     for path in _checked_in_or_fixture_files(root):
@@ -982,6 +1288,8 @@ def _unexpected_build_payload_file(root: Path) -> Path | None:
         if (
             path.name.lower() == "maven-metadata.xml"
             or path.suffix.lower() in _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES
+            or _is_framework_layout(root, path)
+            or _has_forbidden_payload_magic(path)
         ):
             return path
     return None
@@ -1195,7 +1503,7 @@ def check_dependencies(root: Path) -> list[Violation]:
         + _dependency_marker_indices(tokens, "commonTest")
     )
 
-    violations = []
+    violations = _build_semantics_violations(root)
     kmp_template_offset = _kotlin_template_offset(
         text, _approved_template_ranges(root, path, text),
     )

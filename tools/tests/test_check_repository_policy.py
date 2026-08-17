@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 
 from tools.check_repository_policy import check_repository, main
@@ -121,6 +122,154 @@ KMP_PUBLISHING_REPOSITORY_BLOCK = """publishing {
 }
 """
 
+ROOT_BUILD = (
+    """import org.gradle.api.credentials.AwsCredentials
+import org.gradle.api.publish.PublishingExtension
+import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
+
+"""
+    + ROOT_PLUGIN_BLOCK
+    + "\n"
+    + ROOT_R2_SUPPORT
+    + """
+allprojects {
+    group = "com.rohittp.reng"
+    version = providers.gradleProperty("VERSION_NAME").get()
+}
+
+"""
+    + ROOT_PUBLISHING_REPOSITORY_BLOCK
+)
+
+SETTINGS_BUILD = (
+    PLUGIN_MANAGEMENT_BLOCK
+    + SETTINGS_PLUGIN_BLOCK
+    + DEPENDENCY_RESOLUTION_BLOCK
+    + """
+rootProject.name = "RenG"
+include(":kmp")
+"""
+)
+
+KMP_BUILD = """import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.android.kotlin.multiplatform.library)
+    alias(libs.plugins.maven.publish)
+}
+
+kotlin {
+    explicitApi()
+
+    @OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
+    abiValidation {
+        enabled.set(true)
+        klib {
+            keepUnsupportedTargets = false
+        }
+    }
+
+    android {
+        namespace = "com.rohittp.reng"
+        compileSdk = 37
+        minSdk = 30
+        withHostTest {}
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_21)
+        }
+    }
+
+    iosArm64()
+    iosSimulatorArm64()
+    macosArm64()
+    linuxX64()
+    linuxArm64()
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation(libs.rentile.kmp)
+        }
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+        }
+    }
+}
+
+mavenPublishing {
+    pom {
+        name.set("RenG KMP")
+        description.set(
+            "Kotlin Multiplatform 3D renderer built on Rentile basemap tiles.",
+        )
+        inceptionYear.set("2026")
+        url.set("https://rohittp.com/reng/")
+        licenses {
+            license {
+                name.set("The Apache License, Version 2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("rohittp0")
+                name.set("Rohit T P")
+                email.set("tprohit9@gmail.com")
+                organization.set("rohittp.com")
+                organizationUrl.set("https://rohittp.com")
+                url.set("https://rohittp.com")
+            }
+        }
+        scm {
+            url.set("https://github.com/rohittp0/RenG")
+            connection.set("scm:git:git://github.com/rohittp0/RenG.git")
+            developerConnection.set("scm:git:ssh://git@github.com/rohittp0/RenG.git")
+        }
+    }
+}
+
+publishing {
+    repositories {
+        maven {
+            name = "LocalTest"
+            url = uri(rootProject.layout.buildDirectory.dir("local-maven"))
+        }
+    }
+}
+
+val targetR2PublicationTasks = listOf(
+    "publishAndroidPublicationToR2Repository",
+    "publishIosArm64PublicationToR2Repository",
+    "publishIosSimulatorArm64PublicationToR2Repository",
+    "publishMacosArm64PublicationToR2Repository",
+    "publishLinuxX64PublicationToR2Repository",
+    "publishLinuxArm64PublicationToR2Repository",
+)
+
+tasks.withType<PublishToMavenRepository>()
+    .matching { it.name == "publishKotlinMultiplatformPublicationToR2Repository" }
+    .configureEach {
+        dependsOn(targetR2PublicationTasks)
+    }
+"""
+
+VERSION_CATALOG = """[versions]
+agp = "9.3.1"
+kotlin = "2.3.21"
+mavenPublish = "0.36.0"
+rentile = "0.1.5"
+
+[libraries]
+rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }
+"""
+
 PUBLIC_SMOKE_STEP = """      - name: Resolve six targets from the public repository without credentials
         run: >-
           ./gradlew --gradle-user-home "$PUBLIC_HOME" --refresh-dependencies
@@ -180,36 +329,26 @@ def write(root: Path, relative: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def write_bytes(root: Path, relative: str, contents: bytes) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+
+
+def force_track_fixture(root: Path) -> None:
+    subprocess.run(("git", "init", "--quiet", str(root)), check=True)
+    subprocess.run(
+        ("git", "-C", str(root), "add", "--force", "."),
+        check=True,
+    )
+
+
 def create_clean_fixture(root: Path) -> None:
     write(root, "gradle.properties", "VERSION_NAME=0.1.0\n")
-    write(
-        root,
-        "settings.gradle.kts",
-        PLUGIN_MANAGEMENT_BLOCK + SETTINGS_PLUGIN_BLOCK + DEPENDENCY_RESOLUTION_BLOCK,
-    )
-    write(root, "build.gradle.kts", ROOT_PLUGIN_BLOCK + ROOT_R2_SUPPORT + """
-url.set("https://rohittp.com/reng/")
-name.set("The Apache License, Version 2.0")
-url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-scm { url.set("https://github.com/rohittp0/RenG") }
-""" + ROOT_PUBLISHING_REPOSITORY_BLOCK)
-    write(root, "gradle/libs.versions.toml", """
-[versions]
-kotlin = "2.3.21"
-agp = "9.3.1"
-mavenPublish = "0.36.0"
-rentile = "0.1.5"
-[libraries]
-rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
-[plugins]
-kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
-android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
-maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }
-""")
-    write(root, "kmp/build.gradle.kts", KMP_PLUGIN_BLOCK + TARGETS + "\n" +
-          "commonMain.dependencies { implementation(libs.rentile.kmp) }\n" +
-          "commonTest.dependencies { implementation(kotlin(\"test\")) }\n" +
-          KMP_PUBLISHING_REPOSITORY_BLOCK)
+    write(root, "settings.gradle.kts", SETTINGS_BUILD)
+    write(root, "build.gradle.kts", ROOT_BUILD)
+    write(root, "gradle/libs.versions.toml", VERSION_CATALOG)
+    write(root, "kmp/build.gradle.kts", KMP_BUILD)
     write(root, "consumer-smoke/build.gradle.kts", TARGETS + "\n" +
           "implementation(\"com.rohittp.reng:kmp:$rengVersion\")\n")
     write(root, "consumer-smoke/settings.gradle.kts", "rootProject.name = \"consumer-smoke\"\n")
@@ -465,11 +604,11 @@ class RepositoryPolicyTests(unittest.TestCase):
                     root = Path(directory)
                     create_clean_fixture(root)
                     build = root / "kmp/build.gradle.kts"
-                    marker = f"{source_set}.dependencies {{ "
+                    marker = f"        {source_set}.dependencies {{\n"
                     build.write_text(
                         build.read_text(encoding="utf-8").replace(
                             marker,
-                            marker + mutation + " ",
+                            marker + "            " + mutation + "\n",
                         ),
                         encoding="utf-8",
                     )
@@ -483,8 +622,8 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_cycle_b_dependency_allowlist_requires_both_exact_entries(self) -> None:
         removals = (
-            "commonMain.dependencies { implementation(libs.rentile.kmp) }\n",
-            'commonTest.dependencies { implementation(kotlin("test")) }\n',
+            "            implementation(libs.rentile.kmp)\n",
+            '            implementation(kotlin("test"))\n',
         )
         for removal in removals:
             with self.subTest(removal=removal):
@@ -627,23 +766,29 @@ fun Any.kotlin(): String = "com.example:unknown-runtime:1"
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
-    def test_dependency_policy_allows_non_interpolated_string_and_comment_controls(self) -> None:
+    def test_build_token_freeze_ignores_comments_whitespace_and_standalone_consumer(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             create_clean_fixture(root)
-            build = root / "kmp/build.gradle.kts"
-            build.write_text(
-                build.read_text(encoding="utf-8")
-                + '\nval literal = "implementation(unknown) jvm() includeBuild"\n'
-                + '\nval escaped = "\\$implementation"\n'
-                + '\nval rawLiteral = """pluginManager.apply(unknown)"""\n'
-                + '\n// "${implementation("com.example:unknown-runtime:1")}"\n',
-                encoding="utf-8",
-            )
-            root_build = root / "build.gradle.kts"
-            root_build.write_text(
-                root_build.read_text(encoding="utf-8")
-                + '\n// url = uri("s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}")\n',
+            comment_mutations = {
+                "build.gradle.kts": (
+                    '\n// val hidden = "${System.setProperty("org.gradle.s3.endpoint", "bad")}"\n'
+                    "/* nested /* System.setProperty(\"x\", \"y\") */ if (false) { } */\n"
+                ),
+                "settings.gradle.kts": "\n// fun uri(value: Any) = value\n",
+                "kmp/build.gradle.kts": "\n/* cinterops.create(\"injected\") */\n",
+                "gradle/libs.versions.toml": "\n# injected = { module = \"bad:bad\" }\n",
+            }
+            for relative, mutation in comment_mutations.items():
+                path = root / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8") + mutation,
+                    encoding="utf-8",
+                )
+            consumer = root / "consumer-smoke/build.gradle.kts"
+            consumer.write_text(
+                consumer.read_text(encoding="utf-8")
+                + '\nval consumerOnly = "implementation(unknown)"\n',
                 encoding="utf-8",
             )
             self.assertEqual([], check_repository(root))
@@ -830,6 +975,84 @@ class InjectedPlugin : Plugin<Project> {
             codes = {violation.code for violation in check_repository(root)}
             self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
+    def test_build_token_freeze_rejects_reviewer_bypasses(self) -> None:
+        mutations = (
+            (
+                "build.gradle.kts",
+                lambda text: text
+                + '\nSystem.setProperty("org.gradle.s3.endpoint", "replacement.invalid")\n',
+            ),
+            (
+                "settings.gradle.kts",
+                lambda text: (
+                    "val uri: (Any) -> java.net.URI = {\n"
+                    '    java.io.File("replacement-repo").toURI()\n'
+                    "}\n"
+                    + text
+                ),
+            ),
+            (
+                "build.gradle.kts",
+                lambda text: text.replace(
+                    "subprojects {\n",
+                    "if (false) {\nsubprojects {\n",
+                    1,
+                )
+                + "}\n",
+            ),
+        )
+        for relative, mutate in mutations:
+            with self.subTest(relative=relative, mutate=mutate):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    path = root / relative
+                    path.write_text(
+                        mutate(path.read_text(encoding="utf-8")),
+                        encoding="utf-8",
+                    )
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "gradle/injected.gradle.kts", 'println("injected")\n')
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_build_token_freeze_rejects_cinterop_and_native_link_configuration(self) -> None:
+        native_mutations = (
+            """
+    targets.withType<org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget>()
+        .configureEach {
+            compilations.getByName("main").cinterops.create("injected")
+        }
+""",
+            """
+    targets.withType<org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget>()
+        .configureEach {
+            binaries.all { linkerOpts(file("libInjected.a").absolutePath) }
+        }
+""",
+        )
+        for mutation in native_mutations:
+            with self.subTest(mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "kmp/build.gradle.kts"
+                    build.write_text(
+                        build.read_text(encoding="utf-8").replace(
+                            "\n}\n\nmavenPublishing {",
+                            mutation + "\n}\n\nmavenPublishing {",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
     def test_repository_grammar_rejects_repointing_additions_and_filter_changes(self) -> None:
         mutations = (
             (
@@ -967,7 +1190,14 @@ class InjectedPlugin : Plugin<Project> {
         forbidden_payloads = (
             "payload/module.module",
             "payload/library.aar",
+            "payload/libInjected.a",
+            "payload/library.so",
+            "payload/library.dylib",
+            "payload/object.o",
+            "payload/object.obj",
+            "payload/bitcode.bc",
             "payload/native.klib",
+            "payload/module.wasm",
             "payload/archive.zip",
             "payload/maven-metadata.xml",
             "build/replacement/forced-library.jar",
@@ -978,6 +1208,42 @@ class InjectedPlugin : Plugin<Project> {
                     root = Path(directory)
                     create_clean_fixture(root)
                     write(root, relative, "replacement payload")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        with self.subTest(relative="build/native/libInjected.a (force-added)"):
+            with TemporaryDirectory() as directory:
+                root = Path(directory)
+                create_clean_fixture(root)
+                write(root, ".gitignore", "build/\n")
+                write_bytes(root, "build/native/libInjected.a", b"injected static library")
+                force_track_fixture(root)
+                codes = {violation.code for violation in check_repository(root)}
+                self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        pe_payload = bytearray(128)
+        pe_payload[:2] = b"MZ"
+        pe_payload[0x3C:0x40] = (0x40).to_bytes(4, "little")
+        pe_payload[0x40:0x44] = b"PE\0\0"
+        magic_payloads = (
+            ("payload/elf", b"\x7fELF\x02\x01\x01\0"),
+            ("payload/mach-o", b"\xcf\xfa\xed\xfe\x0c\0\0\x01"),
+            ("payload/static-archive", b"!<arch>\n"),
+            ("payload/windows", bytes(pe_payload)),
+            ("payload/webassembly", b"\0asm\x01\0\0\0"),
+            ("payload/archive", b"PK\x03\x04injected"),
+            ("payload/Layout.framework/Layout", b"framework executable"),
+            (
+                "payload/Injected.framework/Injected",
+                b"\xcf\xfa\xed\xfe\x0c\0\0\x01",
+            ),
+        )
+        for relative, contents in magic_payloads:
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    write_bytes(root, relative, contents)
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
@@ -1086,7 +1352,7 @@ class InjectedPlugin : Plugin<Project> {
             build = root / "kmp/build.gradle.kts"
             build.write_text(
                 build.read_text(encoding="utf-8") +
-                "\n// androidNativeArm64()\nval example = \"jvm()\"\n",
+                '\n// androidNativeArm64() and val example = "jvm()"\n',
                 encoding="utf-8",
             )
             self.assertEqual([], check_repository(root))
@@ -1231,8 +1497,7 @@ class InjectedPlugin : Plugin<Project> {
             ("docs/kmp.html", "\nMIT\n"),
             (
                 "build.gradle.kts",
-                "// name.set(\"The Apache License, Version 2.0\")\n"
-                "// url.set(\"https://www.apache.org/licenses/LICENSE-2.0.txt\")\n",
+                '\nval injectedLicense = "MIT"\n',
             ),
         )
         for relative, mutation in cases:
@@ -1241,10 +1506,10 @@ class InjectedPlugin : Plugin<Project> {
                     root = Path(directory)
                     create_clean_fixture(root)
                     path = root / relative
-                    if relative == "build.gradle.kts":
-                        path.write_text(mutation, encoding="utf-8")
-                    else:
-                        path.write_text(path.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    path.write_text(
+                        path.read_text(encoding="utf-8") + mutation,
+                        encoding="utf-8",
+                    )
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("LICENSE_MISMATCH", codes)
 

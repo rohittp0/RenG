@@ -11,9 +11,15 @@ internal object ResourceOperationStateMachine {
         definition: ResourceOperationDefinition,
     ): ResourceOperationTransition {
         val occurrences = definition.staticOccurrences
+        val occurrenceIds = mutableSetOf<ResourceOccurrenceId>()
+        require(occurrences.all { occurrenceIds.add(it.id) }) {
+            "static resource occurrence IDs must be unique"
+        }
+
         val identityRecords = mutableListOf<CanonicalIdentityRecord>()
         val identityByStableId = mutableMapOf<String, CanonicalIdentityRecord>()
         val routeRecords = mutableListOf<RouteRecord>()
+        val joinedOccurrenceIdsByRoute = mutableListOf<MutableList<ResourceOccurrenceId>>()
         val routeRecordIndexByRoute = mutableMapOf<ResourceRouteKey, Int>()
         val privateRentileKeyClaims = mutableListOf<PrivateRentileKeyClaim>()
         val claimIndexByPrivateKey = mutableMapOf<RentilePrivateKey, Int>()
@@ -29,7 +35,7 @@ internal object ResourceOperationStateMachine {
                     return failed(
                         definition = definition,
                         occurrences = occurrences,
-                        routeRecords = routeRecords,
+                        routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRoute),
                         privateRentileKeyClaims = privateRentileKeyClaims,
                         identityRecords = identityRecords,
                         failure = identityCollisionFailure(established),
@@ -42,10 +48,7 @@ internal object ResourceOperationStateMachine {
             val registration = occurrence.registration
             val joinedRouteIndex = routeRecordIndexByRoute[registration.route] ?: -1
             if (joinedRouteIndex >= 0) {
-                val joined = routeRecords[joinedRouteIndex]
-                routeRecords[joinedRouteIndex] = joined.copyWith(
-                    joinedOccurrenceIds = joined.joinedOccurrenceIds + occurrence.id,
-                )
+                joinedOccurrenceIdsByRoute[joinedRouteIndex] += occurrence.id
                 return@forEach
             }
 
@@ -59,6 +62,7 @@ internal object ResourceOperationStateMachine {
                 )
                 routeRecordIndexByRoute[registration.route] = routeRecords.size
                 routeRecords += preregisteredRouteRecord(occurrence)
+                joinedOccurrenceIdsByRoute += mutableListOf(occurrence.id)
                 return@forEach
             }
 
@@ -71,10 +75,11 @@ internal object ResourceOperationStateMachine {
                 cursor = null,
                 status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
             )
+            joinedOccurrenceIdsByRoute += mutableListOf(occurrence.id)
             return failed(
                 definition = definition,
                 occurrences = occurrences,
-                routeRecords = routeRecords,
+                routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRoute),
                 privateRentileKeyClaims = privateRentileKeyClaims,
                 identityRecords = identityRecords,
                 failure = ambiguousRouteFailure(),
@@ -85,7 +90,7 @@ internal object ResourceOperationStateMachine {
             state = runningState(
                 definition = definition,
                 occurrences = occurrences,
-                routeRecords = routeRecords,
+                routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRoute),
                 privateRentileKeyClaims = privateRentileKeyClaims,
                 identityRecords = identityRecords,
             ),
@@ -101,7 +106,7 @@ internal object ResourceOperationStateMachine {
         if (preRegistered.outcome != null) return preRegistered
 
         val work = SchedulerWork(requireNotNull(preRegistered.state))
-        work.staticContinuation += definition.staticOccurrences.map(ResourceOccurrence::id)
+        work.setStaticContinuation(definition.staticOccurrences.map(ResourceOccurrence::id))
         work.releaseKnownTraversal()
         work.scheduleEligibleOccurrences()
         return work.toTransition()
@@ -122,20 +127,99 @@ internal object ResourceOperationStateMachine {
     private class SchedulerWork(
         private val initial: ResourceOperationState.Running,
     ) {
-        val occurrences: MutableList<ResourceOccurrence> = initial.occurrences.toMutableList()
-        val routeRecords: MutableList<RouteRecord> = initial.routeRecords.toMutableList()
-        val privateRentileKeyClaims: MutableList<PrivateRentileKeyClaim> =
+        private val occurrences: MutableList<ResourceOccurrence> = initial.occurrences.toMutableList()
+        private val occurrenceById: MutableMap<ResourceOccurrenceId, ResourceOccurrence> = mutableMapOf()
+        private val routeRecords: MutableList<RouteRecord> = initial.routeRecords.toMutableList()
+        private val joinedOccurrenceIdsByRouteIndex: MutableList<MutableList<ResourceOccurrenceId>> =
+            mutableListOf()
+        private val joinedOccurrenceIdSetsByRouteIndex: MutableList<MutableSet<ResourceOccurrenceId>> =
+            mutableListOf()
+        private val routeIndexByRoute: MutableMap<ResourceRouteKey, Int> = mutableMapOf()
+        private val routeIndexByOrdinal: MutableMap<Long, Int> = mutableMapOf()
+        private val privateRentileKeyClaims: MutableList<PrivateRentileKeyClaim> =
             initial.privateRentileKeyClaims.toMutableList()
-        val identityRecords: MutableList<CanonicalIdentityRecord> = initial.identityRecords.toMutableList()
-        val eligibleFifo: MutableList<ResourceOccurrenceId> = initial.traversal.eligibleFifo.toMutableList()
-        val staticContinuation: MutableList<ResourceOccurrenceId> =
-            initial.traversal.staticContinuation.toMutableList()
-        val frontierStack: MutableList<DiscoveryFrontier> = initial.traversal.frontierStack.toMutableList()
-        val activeRouteOrdinals: MutableList<Long> = initial.activeRouteOrdinals.toMutableList()
-        val actions: MutableList<ResourceOperationAction> = mutableListOf()
-        var nextRouteOrdinal: Long = initial.nextRouteOrdinal
-        var failure: FailureDescriptor? = null
-        var failureOrdinal: Long? = null
+        private val claimIndexByPrivateKey: MutableMap<RentilePrivateKey, Int> = mutableMapOf()
+        private val identityRecords: MutableList<CanonicalIdentityRecord> = initial.identityRecords.toMutableList()
+        private val identityByStableId: MutableMap<String, CanonicalIdentityRecord> = mutableMapOf()
+        private val eligibleFifo: ArrayDeque<ResourceOccurrenceId> = ArrayDeque()
+        private var staticContinuation: ResourceOccurrenceIdSlice = initial.traversal.staticSlice()
+        private val frontierStack: MutableList<DiscoveryFrontier> =
+            initial.traversal.frontierStack.toMutableList()
+        private val activeRouteOrdinals: MutableList<Long> = initial.activeRouteOrdinals.toMutableList()
+        private val actions: MutableList<ResourceOperationAction> = mutableListOf()
+        private var nextRouteOrdinal: Long = initial.nextRouteOrdinal
+        private var failure: FailureDescriptor? = null
+        private var failureOrdinal: Long? = null
+
+        init {
+            initial.traversal.eligibleFifo.forEach(eligibleFifo::addLast)
+            occurrences.forEach { occurrence ->
+                require(occurrenceById.put(occurrence.id, occurrence) == null) {
+                    "resource occurrence IDs must be unique"
+                }
+            }
+            identityRecords.forEach { identity ->
+                require(identityByStableId.put(identity.resourceKey.stableId, identity) == null) {
+                    "canonical identity stable IDs must be unique"
+                }
+            }
+            privateRentileKeyClaims.forEachIndexed { index, claim ->
+                require(claimIndexByPrivateKey.put(claim.privateKey, index) == null) {
+                    "private Rentile key claims must be unique"
+                }
+            }
+            routeRecords.forEachIndexed { index, record ->
+                if (record.registration.route !in routeIndexByRoute) {
+                    routeIndexByRoute[record.registration.route] = index
+                }
+                val joinedIds = record.joinedOccurrenceIds.toMutableList()
+                val joinedIdSet = joinedIds.toMutableSet()
+                require(joinedIds.size == joinedIdSet.size) {
+                    "joined resource occurrence IDs must be unique"
+                }
+                require(joinedIds.all(occurrenceById::containsKey)) {
+                    "joined resource occurrences must be registered"
+                }
+                joinedOccurrenceIdsByRouteIndex += joinedIds
+                joinedOccurrenceIdSetsByRouteIndex += joinedIdSet
+                record.ordinal?.let { ordinal ->
+                    require(ordinal >= 0L && ordinal < nextRouteOrdinal) {
+                        "route ordinals must have been assigned"
+                    }
+                    require(routeIndexByOrdinal.put(ordinal, index) == null) {
+                        "route ordinals must be unique"
+                    }
+                }
+                require(
+                    when (record.status) {
+                        ResourceRouteStatus.PREREGISTERED -> record.ordinal == null
+                        ResourceRouteStatus.ELIGIBLE,
+                        ResourceRouteStatus.RUNNING,
+                        ResourceRouteStatus.RESOLVED,
+                        -> record.ordinal != null
+                        ResourceRouteStatus.BLOCKED_BY_COLLISION -> true
+                    },
+                ) { "route status must agree with ordinal assignment" }
+            }
+
+            require(activeRouteOrdinals.size <= initial.definition.maximumConcurrentRoutes) {
+                "active routes must not exceed configured concurrency"
+            }
+            require(activeRouteOrdinals.toSet().size == activeRouteOrdinals.size) {
+                "active route ordinals must be distinct"
+            }
+            val runningOrdinals = routeRecords.mapNotNull { record ->
+                record.ordinal?.takeIf { record.status == ResourceRouteStatus.RUNNING }
+            }.toSet()
+            require(activeRouteOrdinals.toSet() == runningOrdinals) {
+                "active route ordinals must correspond exactly to running routes"
+            }
+        }
+
+        fun setStaticContinuation(ids: List<ResourceOccurrenceId>) {
+            require(staticContinuation.isEmpty) { "static traversal continuation must be initialized once" }
+            staticContinuation = ResourceOccurrenceIdSlice.snapshot(ids)
+        }
 
         fun routeReadyForDiscovery(event: RouteReadyForDiscovery) {
             val parent = occurrence(event.parentOccurrenceId)
@@ -153,7 +237,7 @@ internal object ResourceOperationStateMachine {
             require(activeRouteOrdinals.remove(event.ordinal)) {
                 "route discovery readiness requires an active route"
             }
-            routeRecords[routeIndex] = record.copyWith(status = ResourceRouteStatus.RESOLVED)
+            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
             actions += DiscoverChildren(event.ordinal, parent.id)
             startEligibleRoutes()
         }
@@ -172,17 +256,17 @@ internal object ResourceOperationStateMachine {
             }
 
             val children = event.children
-            val existingIds = occurrences.mapTo(mutableSetOf(), ResourceOccurrence::id)
             val dynamicIds = mutableSetOf<ResourceOccurrenceId>()
             require(children.all { child ->
-                child.occurrence.id !in existingIds && dynamicIds.add(child.occurrence.id)
+                child.occurrence.id !in occurrenceById && dynamicIds.add(child.occurrence.id)
             }) { "discovered resource occurrence IDs must be unique" }
 
-            occurrences += children.map(DiscoveredResourceChild::occurrence)
-            frontierStack[frontierStack.lastIndex] = DiscoveryFrontier(
-                parentOccurrenceId = frontier.parentOccurrenceId,
-                childOccurrenceIds = children.map { it.occurrence.id },
-                withheldContinuation = frontier.withheldContinuation,
+            children.forEach { child ->
+                occurrences += child.occurrence
+                occurrenceById[child.occurrence.id] = child.occurrence
+            }
+            frontierStack[frontierStack.lastIndex] = frontier.withChildren(
+                children.map { it.occurrence.id },
             )
             releaseKnownTraversal()
             scheduleEligibleOccurrences()
@@ -193,75 +277,53 @@ internal object ResourceOperationStateMachine {
                 if (frontierStack.isNotEmpty()) {
                     val frontierIndex = frontierStack.lastIndex
                     val frontier = frontierStack[frontierIndex]
-                    val children = frontier.childOccurrenceIds
-                    if (children.isNotEmpty()) {
-                        val childId = children.first()
-                        val remainingChildren = children.drop(1)
-                        eligibleFifo += childId
+                    if (frontier.hasChildren) {
+                        val childId = frontier.firstChild()
+                        val remaining = frontier.afterFirstChild()
+                        eligibleFifo.addLast(childId)
                         val child = occurrence(childId)
                         if (child.discoveryRequired) {
-                            frontierStack[frontierIndex] = DiscoveryFrontier(
-                                parentOccurrenceId = frontier.parentOccurrenceId,
-                                childOccurrenceIds = emptyList(),
-                                withheldContinuation = frontier.withheldContinuation,
-                            )
-                            frontierStack += DiscoveryFrontier(
-                                parentOccurrenceId = child.id,
-                                childOccurrenceIds = emptyList(),
-                                withheldContinuation = remainingChildren,
-                            )
+                            frontierStack[frontierIndex] = frontier.withoutChildren()
+                            frontierStack += remaining.remainingChildrenAsWithheld(child.id)
                             return
                         }
-                        frontierStack[frontierIndex] = DiscoveryFrontier(
-                            parentOccurrenceId = frontier.parentOccurrenceId,
-                            childOccurrenceIds = remainingChildren,
-                            withheldContinuation = frontier.withheldContinuation,
-                        )
+                        frontierStack[frontierIndex] = remaining
                         continue
                     }
 
                     frontierStack.removeAt(frontierIndex)
-                    restoreContinuation(frontier.withheldContinuation)
+                    restoreContinuation(frontier)
                     continue
                 }
 
-                if (staticContinuation.isEmpty()) return
-                val occurrenceId = staticContinuation.removeAt(0)
-                eligibleFifo += occurrenceId
+                if (staticContinuation.isEmpty) return
+                val occurrenceId = staticContinuation.first()
+                staticContinuation = staticContinuation.advance()
+                eligibleFifo.addLast(occurrenceId)
                 val occurrence = occurrence(occurrenceId)
                 if (occurrence.discoveryRequired) {
-                    val withheld = staticContinuation.toList()
-                    staticContinuation.clear()
-                    frontierStack += DiscoveryFrontier(
-                        parentOccurrenceId = occurrence.id,
-                        childOccurrenceIds = emptyList(),
-                        withheldContinuation = withheld,
-                    )
+                    val withheld = staticContinuation
+                    staticContinuation = ResourceOccurrenceIdSlice.empty()
+                    frontierStack += DiscoveryFrontier.unresolved(occurrence.id, withheld)
                     return
                 }
             }
         }
 
-        private fun restoreContinuation(withheld: List<ResourceOccurrenceId>) {
+        private fun restoreContinuation(frontier: DiscoveryFrontier) {
             if (frontierStack.isEmpty()) {
-                require(staticContinuation.isEmpty()) { "static traversal continuation must be singular" }
-                staticContinuation += withheld
+                require(staticContinuation.isEmpty) { "static traversal continuation must be singular" }
+                staticContinuation = frontier.withheldSlice()
                 return
             }
 
             val parentIndex = frontierStack.lastIndex
-            val parent = frontierStack[parentIndex]
-            require(parent.childOccurrenceIds.isEmpty()) { "frontier continuation must be singular" }
-            frontierStack[parentIndex] = DiscoveryFrontier(
-                parentOccurrenceId = parent.parentOccurrenceId,
-                childOccurrenceIds = withheld,
-                withheldContinuation = parent.withheldContinuation,
-            )
+            frontierStack[parentIndex] = frontier.restoreWithheldInto(frontierStack[parentIndex])
         }
 
         fun scheduleEligibleOccurrences() {
             while (eligibleFifo.isNotEmpty() && failure == null) {
-                val occurrenceId = eligibleFifo.removeAt(0)
+                val occurrenceId = eligibleFifo.removeFirst()
                 makeOccurrenceEligible(occurrence(occurrenceId))
             }
             startEligibleRoutes()
@@ -281,42 +343,47 @@ internal object ResourceOperationStateMachine {
             }
 
             val ordinal = takeNextOrdinal()
-            val identityAlreadyRegistered = identityRecords.any {
-                it.resourceKey.stableId == occurrence.registration.resourceKey.stableId
-            }
-            if (!identityAlreadyRegistered) {
-                identityRecords += CanonicalIdentityRecord(
+            if (occurrence.registration.resourceKey.stableId !in identityByStableId) {
+                val identity = CanonicalIdentityRecord(
                     occurrence.registration.resourceKey,
                     occurrence.registration.canonicalBytes,
                 )
+                identityRecords += identity
+                identityByStableId[identity.resourceKey.stableId] = identity
             }
             val claimIndex = claimIndex(occurrence.registration.privateRentileKey)
             if (claimIndex >= 0) {
                 val claim = privateRentileKeyClaims[claimIndex]
                 privateRentileKeyClaims[claimIndex] = claim.copy(usable = false)
-                routeRecords += RouteRecord(
-                    registration = occurrence.registration,
-                    joinedOccurrenceIds = listOf(occurrence.id),
-                    ordinal = ordinal,
-                    cursor = null,
-                    status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
+                addRouteRecord(
+                    RouteRecord(
+                        registration = occurrence.registration,
+                        joinedOccurrenceIds = listOf(occurrence.id),
+                        ordinal = ordinal,
+                        cursor = null,
+                        status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
+                    ),
                 )
                 failure = ambiguousRouteFailure()
                 failureOrdinal = ordinal
                 return
             }
 
+            claimIndexByPrivateKey[occurrence.registration.privateRentileKey] =
+                privateRentileKeyClaims.size
             privateRentileKeyClaims += PrivateRentileKeyClaim(
                 privateKey = occurrence.registration.privateRentileKey,
                 firstRoute = occurrence.registration.route,
                 usable = true,
             )
-            routeRecords += RouteRecord(
-                registration = occurrence.registration,
-                joinedOccurrenceIds = listOf(occurrence.id),
-                ordinal = ordinal,
-                cursor = null,
-                status = ResourceRouteStatus.ELIGIBLE,
+            addRouteRecord(
+                RouteRecord(
+                    registration = occurrence.registration,
+                    joinedOccurrenceIds = listOf(occurrence.id),
+                    ordinal = ordinal,
+                    cursor = null,
+                    status = ResourceRouteStatus.ELIGIBLE,
+                ),
             )
         }
 
@@ -324,31 +391,26 @@ internal object ResourceOperationStateMachine {
             routeIndex: Int,
             occurrence: ResourceOccurrence,
         ) {
-            val record = routeRecords[routeIndex]
-            val joinedIds = if (occurrence.id in record.joinedOccurrenceIds) {
-                record.joinedOccurrenceIds
-            } else {
-                record.joinedOccurrenceIds + occurrence.id
+            if (joinedOccurrenceIdSetsByRouteIndex[routeIndex].add(occurrence.id)) {
+                joinedOccurrenceIdsByRouteIndex[routeIndex] += occurrence.id
             }
+            val record = routeRecords[routeIndex]
             if (record.ordinal == null) {
-                routeRecords[routeIndex] = record.copyWith(
-                    joinedOccurrenceIds = joinedIds,
+                updateRouteRecord(
+                    routeIndex,
                     ordinal = takeNextOrdinal(),
                     status = ResourceRouteStatus.ELIGIBLE,
                 )
                 return
             }
 
-            routeRecords[routeIndex] = record.copyWith(joinedOccurrenceIds = joinedIds)
             if (occurrence.discoveryRequired && record.status == ResourceRouteStatus.RESOLVED) {
                 actions += DiscoverChildren(record.ordinal, occurrence.id)
             }
         }
 
         private fun identityCollision(registration: ResourceRouteRegistration): CanonicalIdentityRecord? {
-            val established = identityRecords.firstOrNull {
-                it.resourceKey.stableId == registration.resourceKey.stableId
-            } ?: return null
+            val established = identityByStableId[registration.resourceKey.stableId] ?: return null
             return established.takeIf { it.canonicalBytes != registration.canonicalBytes }
         }
 
@@ -357,12 +419,14 @@ internal object ResourceOperationStateMachine {
             established: CanonicalIdentityRecord,
         ) {
             val ordinal = takeNextOrdinal()
-            routeRecords += RouteRecord(
-                registration = occurrence.registration,
-                joinedOccurrenceIds = listOf(occurrence.id),
-                ordinal = ordinal,
-                cursor = null,
-                status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
+            addRouteRecord(
+                RouteRecord(
+                    registration = occurrence.registration,
+                    joinedOccurrenceIds = listOf(occurrence.id),
+                    ordinal = ordinal,
+                    cursor = null,
+                    status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
+                ),
             )
             failure = identityCollisionFailure(established)
             failureOrdinal = ordinal
@@ -372,11 +436,11 @@ internal object ResourceOperationStateMachine {
             val ceiling = failureOrdinal
             val candidates = routeRecords.withIndex()
                 .filter { (_, record) ->
+                    val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
                     record.status == ResourceRouteStatus.ELIGIBLE &&
                         record.ordinal != null &&
-                        privateRentileKeyClaims.any {
-                            it.privateKey == record.registration.privateRentileKey && it.usable
-                        } &&
+                        claimIndex != null &&
+                        privateRentileKeyClaims[claimIndex].usable &&
                         (ceiling == null || record.ordinal < ceiling)
                 }
                 .sortedBy { it.value.ordinal }
@@ -384,10 +448,51 @@ internal object ResourceOperationStateMachine {
             for ((index, record) in candidates) {
                 if (activeRouteOrdinals.size >= initial.definition.maximumConcurrentRoutes) break
                 val ordinal = requireNotNull(record.ordinal)
-                routeRecords[index] = record.copyWith(status = ResourceRouteStatus.RUNNING)
+                updateRouteRecord(index, status = ResourceRouteStatus.RUNNING)
                 activeRouteOrdinals += ordinal
                 actions += StartRoute(ordinal, record.registration)
             }
+        }
+
+        private fun addRouteRecord(record: RouteRecord): Int {
+            val index = routeRecords.size
+            routeRecords += record
+            val joinedIds = record.joinedOccurrenceIds.toMutableList()
+            joinedOccurrenceIdsByRouteIndex += joinedIds
+            joinedOccurrenceIdSetsByRouteIndex += joinedIds.toMutableSet()
+            if (record.registration.route !in routeIndexByRoute) {
+                routeIndexByRoute[record.registration.route] = index
+            }
+            record.ordinal?.let { ordinal ->
+                require(routeIndexByOrdinal.put(ordinal, index) == null) {
+                    "route ordinals must be unique"
+                }
+            }
+            return index
+        }
+
+        private fun updateRouteRecord(
+            index: Int,
+            ordinal: Long? = routeRecords[index].ordinal,
+            cursor: ResourceRouteCursor? = routeRecords[index].cursor,
+            status: ResourceRouteStatus = routeRecords[index].status,
+        ) {
+            val previous = routeRecords[index]
+            if (previous.ordinal != ordinal) {
+                previous.ordinal?.let(routeIndexByOrdinal::remove)
+                ordinal?.let { assigned ->
+                    require(routeIndexByOrdinal.put(assigned, index) == null) {
+                        "route ordinals must be unique"
+                    }
+                }
+            }
+            routeRecords[index] = RouteRecord(
+                registration = previous.registration,
+                joinedOccurrenceIds = joinedOccurrenceIdsByRouteIndex[index],
+                ordinal = ordinal,
+                cursor = cursor,
+                status = status,
+            )
         }
 
         private fun takeNextOrdinal(): Long {
@@ -398,24 +503,25 @@ internal object ResourceOperationStateMachine {
         }
 
         private fun occurrence(id: ResourceOccurrenceId): ResourceOccurrence =
-            requireNotNull(occurrences.singleOrNull { it.id == id }) {
-                "resource occurrence must be registered exactly once"
-            }
+            requireNotNull(occurrenceById[id]) { "resource occurrence must be registered exactly once" }
 
-        private fun routeIndex(route: ResourceRouteKey): Int =
-            routeRecords.indexOfFirst { it.registration.route == route }
+        private fun routeIndex(route: ResourceRouteKey): Int = routeIndexByRoute[route] ?: -1
 
         private fun claimIndex(privateKey: RentilePrivateKey): Int =
-            privateRentileKeyClaims.indexOfFirst { it.privateKey == privateKey }
+            claimIndexByPrivateKey[privateKey] ?: -1
 
         fun toTransition(): ResourceOperationTransition = ResourceOperationTransition(
             state = runningState(
                 definition = initial.definition,
                 occurrences = occurrences,
-                routeRecords = routeRecords,
+                routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRouteIndex),
                 privateRentileKeyClaims = privateRentileKeyClaims,
                 identityRecords = identityRecords,
-                traversal = TraversalState(eligibleFifo, staticContinuation, frontierStack),
+                traversal = TraversalState.fromSlices(
+                    eligibleFifo = eligibleFifo.toList(),
+                    staticContinuation = staticContinuation,
+                    frontierStack = frontierStack,
+                ),
                 nextRouteOrdinal = nextRouteOrdinal,
                 activeRouteOrdinals = activeRouteOrdinals,
             ),
@@ -432,19 +538,23 @@ internal object ResourceOperationStateMachine {
         status = ResourceRouteStatus.PREREGISTERED,
     )
 
-    private fun RouteRecord.copyWith(
-        registration: ResourceRouteRegistration = this.registration,
-        joinedOccurrenceIds: List<ResourceOccurrenceId> = this.joinedOccurrenceIds,
-        ordinal: Long? = this.ordinal,
-        cursor: ResourceRouteCursor? = this.cursor,
-        status: ResourceRouteStatus = this.status,
-    ): RouteRecord = RouteRecord(
-        registration = registration,
-        joinedOccurrenceIds = joinedOccurrenceIds,
-        ordinal = ordinal,
-        cursor = cursor,
-        status = status,
-    )
+    private fun freezeRouteRecords(
+        routeRecords: List<RouteRecord>,
+        joinedOccurrenceIdsByRoute: List<List<ResourceOccurrenceId>>,
+    ): List<RouteRecord> {
+        require(routeRecords.size == joinedOccurrenceIdsByRoute.size) {
+            "route records and joined occurrences must stay synchronized"
+        }
+        return routeRecords.mapIndexed { index, record ->
+            RouteRecord(
+                registration = record.registration,
+                joinedOccurrenceIds = joinedOccurrenceIdsByRoute[index],
+                ordinal = record.ordinal,
+                cursor = record.cursor,
+                status = record.status,
+            )
+        }
+    }
 
     private fun failed(
         definition: ResourceOperationDefinition,

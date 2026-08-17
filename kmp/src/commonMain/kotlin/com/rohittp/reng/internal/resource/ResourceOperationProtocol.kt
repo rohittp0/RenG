@@ -222,38 +222,163 @@ internal data class DiscoveredResourceChild(
     val occurrence: ResourceOccurrence,
 )
 
-internal class DiscoveryFrontier(
-    val parentOccurrenceId: ResourceOccurrenceId,
-    childOccurrenceIds: List<ResourceOccurrenceId>,
-    withheldContinuation: List<ResourceOccurrenceId>,
+internal class ResourceOccurrenceIdSlice private constructor(
+    private val backing: List<ResourceOccurrenceId>,
+    internal val startIndex: Int,
 ) {
-    private val childOccurrenceIdSnapshot: List<ResourceOccurrenceId> = freshListCopy(childOccurrenceIds)
-    private val withheldContinuationSnapshot: List<ResourceOccurrenceId> = freshListCopy(withheldContinuation)
+    init {
+        require(startIndex in 0..backing.size) { "resource occurrence slice start must be in bounds" }
+    }
 
-    val childOccurrenceIds: List<ResourceOccurrenceId>
-        get() = freshListCopy(childOccurrenceIdSnapshot)
+    internal val backingSize: Int
+        get() = backing.size
 
-    val withheldContinuation: List<ResourceOccurrenceId>
-        get() = freshListCopy(withheldContinuationSnapshot)
+    internal val isEmpty: Boolean
+        get() = startIndex == backing.size
+
+    internal fun first(): ResourceOccurrenceId {
+        check(!isEmpty) { "resource occurrence slice must not be empty" }
+        return backing[startIndex]
+    }
+
+    internal fun advance(): ResourceOccurrenceIdSlice {
+        check(!isEmpty) { "resource occurrence slice must not be empty" }
+        return ResourceOccurrenceIdSlice(backing, startIndex + 1)
+    }
+
+    internal fun freshValues(): List<ResourceOccurrenceId> =
+        ArrayList(backing.subList(startIndex, backing.size))
+
+    internal companion object {
+        internal fun snapshot(values: List<ResourceOccurrenceId>): ResourceOccurrenceIdSlice =
+            ResourceOccurrenceIdSlice(freshListCopy(values), 0)
+
+        internal fun empty(): ResourceOccurrenceIdSlice = ResourceOccurrenceIdSlice(emptyList(), 0)
+    }
 }
 
-internal class TraversalState(
+internal class DiscoveryFrontier private constructor(
+    val parentOccurrenceId: ResourceOccurrenceId,
+    private val childOccurrenceIdSlice: ResourceOccurrenceIdSlice,
+    private val withheldContinuationSlice: ResourceOccurrenceIdSlice,
+) {
+    internal constructor(
+        parentOccurrenceId: ResourceOccurrenceId,
+        childOccurrenceIds: List<ResourceOccurrenceId>,
+        withheldContinuation: List<ResourceOccurrenceId>,
+    ) : this(
+        parentOccurrenceId = parentOccurrenceId,
+        childOccurrenceIdSlice = ResourceOccurrenceIdSlice.snapshot(childOccurrenceIds),
+        withheldContinuationSlice = ResourceOccurrenceIdSlice.snapshot(withheldContinuation),
+    )
+
+    val childOccurrenceIds: List<ResourceOccurrenceId>
+        get() = childOccurrenceIdSlice.freshValues()
+
+    val withheldContinuation: List<ResourceOccurrenceId>
+        get() = withheldContinuationSlice.freshValues()
+
+    internal val withheldBackingSize: Int
+        get() = withheldContinuationSlice.backingSize
+
+    internal val withheldStartIndex: Int
+        get() = withheldContinuationSlice.startIndex
+
+    internal val hasChildren: Boolean
+        get() = !childOccurrenceIdSlice.isEmpty
+
+    internal fun firstChild(): ResourceOccurrenceId = childOccurrenceIdSlice.first()
+
+    internal fun afterFirstChild(): DiscoveryFrontier = DiscoveryFrontier(
+        parentOccurrenceId = parentOccurrenceId,
+        childOccurrenceIdSlice = childOccurrenceIdSlice.advance(),
+        withheldContinuationSlice = withheldContinuationSlice,
+    )
+
+    internal fun withoutChildren(): DiscoveryFrontier = DiscoveryFrontier(
+        parentOccurrenceId = parentOccurrenceId,
+        childOccurrenceIdSlice = ResourceOccurrenceIdSlice.empty(),
+        withheldContinuationSlice = withheldContinuationSlice,
+    )
+
+    internal fun withChildren(childOccurrenceIds: List<ResourceOccurrenceId>): DiscoveryFrontier =
+        DiscoveryFrontier(
+            parentOccurrenceId = parentOccurrenceId,
+            childOccurrenceIdSlice = ResourceOccurrenceIdSlice.snapshot(childOccurrenceIds),
+            withheldContinuationSlice = withheldContinuationSlice,
+        )
+
+    internal fun remainingChildrenAsWithheld(
+        nestedParentOccurrenceId: ResourceOccurrenceId,
+    ): DiscoveryFrontier = DiscoveryFrontier(
+        parentOccurrenceId = nestedParentOccurrenceId,
+        childOccurrenceIdSlice = ResourceOccurrenceIdSlice.empty(),
+        withheldContinuationSlice = childOccurrenceIdSlice,
+    )
+
+    internal fun restoreWithheldInto(parent: DiscoveryFrontier): DiscoveryFrontier {
+        require(!parent.hasChildren) { "frontier continuation must be singular" }
+        return DiscoveryFrontier(
+            parentOccurrenceId = parent.parentOccurrenceId,
+            childOccurrenceIdSlice = withheldContinuationSlice,
+            withheldContinuationSlice = parent.withheldContinuationSlice,
+        )
+    }
+
+    internal fun withheldSlice(): ResourceOccurrenceIdSlice = withheldContinuationSlice
+
+    internal companion object {
+        internal fun unresolved(
+            parentOccurrenceId: ResourceOccurrenceId,
+            withheldContinuation: ResourceOccurrenceIdSlice,
+        ): DiscoveryFrontier = DiscoveryFrontier(
+            parentOccurrenceId = parentOccurrenceId,
+            childOccurrenceIdSlice = ResourceOccurrenceIdSlice.empty(),
+            withheldContinuationSlice = withheldContinuation,
+        )
+    }
+}
+
+internal class TraversalState private constructor(
     eligibleFifo: List<ResourceOccurrenceId>,
-    staticContinuation: List<ResourceOccurrenceId>,
+    private val staticContinuationSlice: ResourceOccurrenceIdSlice,
     frontierStack: List<DiscoveryFrontier>,
 ) {
+    internal constructor(
+        eligibleFifo: List<ResourceOccurrenceId>,
+        staticContinuation: List<ResourceOccurrenceId>,
+        frontierStack: List<DiscoveryFrontier>,
+    ) : this(
+        eligibleFifo = eligibleFifo,
+        staticContinuationSlice = ResourceOccurrenceIdSlice.snapshot(staticContinuation),
+        frontierStack = frontierStack,
+    )
+
     private val eligibleFifoSnapshot: List<ResourceOccurrenceId> = freshListCopy(eligibleFifo)
-    private val staticContinuationSnapshot: List<ResourceOccurrenceId> = freshListCopy(staticContinuation)
     private val frontierStackSnapshot: List<DiscoveryFrontier> = freshListCopy(frontierStack)
 
     val eligibleFifo: List<ResourceOccurrenceId>
         get() = freshListCopy(eligibleFifoSnapshot)
 
     val staticContinuation: List<ResourceOccurrenceId>
-        get() = freshListCopy(staticContinuationSnapshot)
+        get() = staticContinuationSlice.freshValues()
 
     val frontierStack: List<DiscoveryFrontier>
         get() = freshListCopy(frontierStackSnapshot)
+
+    internal fun staticSlice(): ResourceOccurrenceIdSlice = staticContinuationSlice
+
+    internal companion object {
+        internal fun fromSlices(
+            eligibleFifo: List<ResourceOccurrenceId>,
+            staticContinuation: ResourceOccurrenceIdSlice,
+            frontierStack: List<DiscoveryFrontier>,
+        ): TraversalState = TraversalState(
+            eligibleFifo = eligibleFifo,
+            staticContinuationSlice = staticContinuation,
+            frontierStack = frontierStack,
+        )
+    }
 }
 
 internal class ResourceOperationDefinition(
@@ -475,11 +600,54 @@ internal sealed interface ResourceOperationState {
 
         init {
             require(nextRouteOrdinal >= 0L) { "next route ordinal must be non-negative" }
-            require(activeRouteOrdinalSnapshot.all { it >= 0L && it < nextRouteOrdinal }) {
-                "active route ordinals must have been assigned"
+
+            val occurrenceIds = mutableSetOf<ResourceOccurrenceId>()
+            require(occurrenceSnapshot.all { occurrenceIds.add(it.id) }) {
+                "resource occurrence IDs must be unique"
             }
-            require(activeRouteOrdinalSnapshot.distinct().size == activeRouteOrdinalSnapshot.size) {
+            val identityStableIds = mutableSetOf<String>()
+            require(identityRecordSnapshot.all { identityStableIds.add(it.resourceKey.stableId) }) {
+                "canonical identity stable IDs must be unique"
+            }
+            val privateKeys = mutableSetOf<RentilePrivateKey>()
+            require(privateRentileKeyClaimSnapshot.all { privateKeys.add(it.privateKey) }) {
+                "private Rentile key claims must be unique"
+            }
+
+            val assignedOrdinals = mutableSetOf<Long>()
+            val runningOrdinals = mutableSetOf<Long>()
+            routeRecordSnapshot.forEach { record ->
+                val joinedIds = record.joinedOccurrenceIds
+                require(joinedIds.toSet().size == joinedIds.size && joinedIds.all(occurrenceIds::contains)) {
+                    "joined resource occurrence IDs must be unique and registered"
+                }
+                record.ordinal?.let { ordinal ->
+                    require(ordinal >= 0L && ordinal < nextRouteOrdinal && assignedOrdinals.add(ordinal)) {
+                        "route ordinals must be unique and assigned below the next ordinal"
+                    }
+                    if (record.status == ResourceRouteStatus.RUNNING) runningOrdinals += ordinal
+                }
+                require(
+                    when (record.status) {
+                        ResourceRouteStatus.PREREGISTERED -> record.ordinal == null
+                        ResourceRouteStatus.ELIGIBLE,
+                        ResourceRouteStatus.RUNNING,
+                        ResourceRouteStatus.RESOLVED,
+                        -> record.ordinal != null
+                        ResourceRouteStatus.BLOCKED_BY_COLLISION -> true
+                    },
+                ) { "route status must agree with ordinal assignment" }
+            }
+
+            require(activeRouteOrdinalSnapshot.size <= definition.maximumConcurrentRoutes) {
+                "active routes must not exceed configured concurrency"
+            }
+            val activeOrdinalSet = activeRouteOrdinalSnapshot.toSet()
+            require(activeOrdinalSet.size == activeRouteOrdinalSnapshot.size) {
                 "active route ordinals must be distinct"
+            }
+            require(activeOrdinalSet == runningOrdinals) {
+                "active route ordinals must correspond exactly to running routes"
             }
         }
 

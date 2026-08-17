@@ -175,6 +175,251 @@ class ResourceOperationSchedulingTest {
     }
 
     @Test
+    fun concurrencyOneAssignsAllEligibleOrdinalsButStartsOneDistinctRoute() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val first = occurrence(2L, registration("b"))
+        val eligibleJoin = occurrence(3L, registration("c"))
+        val secondEligibleJoin = occurrence(4L, eligibleJoin.registration)
+        val last = occurrence(5L, registration("d"))
+        val start = ResourceOperationStateMachine.start(definition(1, root))
+        val ready = ResourceOperationStateMachine.transition(
+            requireNotNull(start.state),
+            RouteReadyForDiscovery(0L, root.id),
+        )
+
+        val discovered = ResourceOperationStateMachine.transition(
+            requireNotNull(ready.state),
+            ChildrenDiscovered(
+                root.id,
+                listOf(
+                    child(ResourceChildTraversal.DeclaredArray(3), last),
+                    child(ResourceChildTraversal.DeclaredArray(2), secondEligibleJoin),
+                    child(ResourceChildTraversal.DeclaredArray(1), eligibleJoin),
+                    child(ResourceChildTraversal.DeclaredArray(0), first),
+                ),
+            ),
+        )
+
+        assertEquals(listOf(StartRoute(1L, first.registration)), discovered.actions)
+        val state = requireNotNull(discovered.state)
+        assertEquals(listOf(1L), state.activeRouteOrdinals)
+        assertEquals(2L, routeRecord(state, eligibleJoin).ordinal)
+        assertEquals(ResourceRouteStatus.ELIGIBLE, routeRecord(state, eligibleJoin).status)
+        assertEquals(
+            listOf(eligibleJoin.id, secondEligibleJoin.id),
+            routeRecord(state, eligibleJoin).joinedOccurrenceIds,
+        )
+        assertEquals(3L, routeRecord(state, last).ordinal)
+        assertEquals(ResourceRouteStatus.ELIGIBLE, routeRecord(state, last).status)
+        assertEquals(4L, state.nextRouteOrdinal)
+    }
+
+    @Test
+    fun nestedFrontierRestoresLaterSiblingsBeforeTheStaticContinuation() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val laterStatic = occurrence(2L, registration("b"))
+        val nested = occurrence(3L, registration("c"), discoveryRequired = true)
+        val sibling = occurrence(4L, registration("d"))
+        val nestedChild = occurrence(5L, registration("e"))
+        val start = ResourceOperationStateMachine.start(definition(8, root, laterStatic))
+        val rootReady = ResourceOperationStateMachine.transition(
+            requireNotNull(start.state),
+            RouteReadyForDiscovery(0L, root.id),
+        )
+        val rootChildren = ResourceOperationStateMachine.transition(
+            requireNotNull(rootReady.state),
+            ChildrenDiscovered(
+                root.id,
+                listOf(
+                    child(ResourceChildTraversal.DeclaredArray(1), sibling),
+                    child(ResourceChildTraversal.DeclaredArray(0), nested),
+                ),
+            ),
+        )
+        assertEquals(listOf(StartRoute(1L, nested.registration)), rootChildren.actions)
+        val nestedReady = ResourceOperationStateMachine.transition(
+            requireNotNull(rootChildren.state),
+            RouteReadyForDiscovery(1L, nested.id),
+        )
+
+        val closed = ResourceOperationStateMachine.transition(
+            requireNotNull(nestedReady.state),
+            ChildrenDiscovered(
+                nested.id,
+                listOf(child(ResourceChildTraversal.DeclaredArray(0), nestedChild)),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                StartRoute(2L, nestedChild.registration),
+                StartRoute(3L, sibling.registration),
+                StartRoute(4L, laterStatic.registration),
+            ),
+            closed.actions,
+        )
+        assertEquals(
+            listOf(0L, 4L, 1L, 2L, 3L),
+            requireNotNull(closed.state).routeRecords.map { requireNotNull(it.ordinal) },
+        )
+    }
+
+    @Test
+    fun discoveryOccurrenceCanJoinARunningRouteAndUsesThatRoutesReadiness() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val runningLeaf = occurrence(2L, registration("b"))
+        val nested = occurrence(3L, registration("c"), discoveryRequired = true)
+        val runningJoin = occurrence(4L, runningLeaf.registration, discoveryRequired = true)
+        val start = ResourceOperationStateMachine.start(definition(2, root))
+        val rootReady = ResourceOperationStateMachine.transition(
+            requireNotNull(start.state),
+            RouteReadyForDiscovery(0L, root.id),
+        )
+        val rootChildren = ResourceOperationStateMachine.transition(
+            requireNotNull(rootReady.state),
+            ChildrenDiscovered(
+                root.id,
+                listOf(
+                    child(ResourceChildTraversal.DeclaredArray(1), nested),
+                    child(ResourceChildTraversal.DeclaredArray(0), runningLeaf),
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(StartRoute(1L, runningLeaf.registration), StartRoute(2L, nested.registration)),
+            rootChildren.actions,
+        )
+        val nestedReady = ResourceOperationStateMachine.transition(
+            requireNotNull(rootChildren.state),
+            RouteReadyForDiscovery(2L, nested.id),
+        )
+
+        val joined = ResourceOperationStateMachine.transition(
+            requireNotNull(nestedReady.state),
+            ChildrenDiscovered(
+                nested.id,
+                listOf(child(ResourceChildTraversal.DeclaredArray(0), runningJoin)),
+            ),
+        )
+
+        assertTrue(joined.actions.isEmpty())
+        val joinedState = requireNotNull(joined.state)
+        assertEquals(ResourceRouteStatus.RUNNING, routeRecord(joinedState, runningJoin).status)
+        assertEquals(listOf(runningLeaf.id, runningJoin.id), routeRecord(joinedState, runningJoin).joinedOccurrenceIds)
+        assertEquals(listOf(1L), joinedState.activeRouteOrdinals)
+
+        val ready = ResourceOperationStateMachine.transition(
+            joinedState,
+            RouteReadyForDiscovery(1L, runningJoin.id),
+        )
+        assertEquals(listOf(DiscoverChildren(1L, runningJoin.id)), ready.actions)
+    }
+
+    @Test
+    fun malformedDiscoveryEventsFailWithoutMutatingTheSuppliedState() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val later = occurrence(2L, registration("b"))
+        val startState = requireNotNull(ResourceOperationStateMachine.start(definition(2, root, later)).state)
+        val originalRecords = startState.routeRecords
+        val originalTraversal = startState.traversal.frontierStack.map(DiscoveryFrontier::parentOccurrenceId)
+
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationStateMachine.transition(startState, ChildrenDiscovered(root.id, emptyList()))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationStateMachine.transition(startState, RouteReadyForDiscovery(1L, root.id))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationStateMachine.transition(startState, RouteReadyForDiscovery(0L, later.id))
+        }
+        assertEquals(originalRecords, startState.routeRecords)
+        assertEquals(originalTraversal, startState.traversal.frontierStack.map(DiscoveryFrontier::parentOccurrenceId))
+
+        val readyState = requireNotNull(
+            ResourceOperationStateMachine.transition(
+                startState,
+                RouteReadyForDiscovery(0L, root.id),
+            ).state,
+        )
+        val duplicated = occurrence(3L, registration("c"))
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationStateMachine.transition(
+                readyState,
+                ChildrenDiscovered(
+                    root.id,
+                    listOf(
+                        child(ResourceChildTraversal.DeclaredArray(0), duplicated),
+                        child(ResourceChildTraversal.DeclaredArray(1), duplicated),
+                    ),
+                ),
+            )
+        }
+        assertEquals(listOf(root, later), readyState.occurrences)
+    }
+
+    @Test
+    fun runningStateRejectsDuplicateOccurrencesOrdinalsAndInvalidActiveSets() {
+        val first = occurrence(1L, registration("a"))
+        val second = occurrence(2L, registration("b"))
+        val firstRunning = RouteRecord(first.registration, listOf(first.id), 0L, null, ResourceRouteStatus.RUNNING)
+        val secondRunning = RouteRecord(second.registration, listOf(second.id), 1L, null, ResourceRouteStatus.RUNNING)
+        val definition = definition(1, first, second)
+        val identities = listOf(
+            CanonicalIdentityRecord(first.registration.resourceKey, first.registration.canonicalBytes),
+            CanonicalIdentityRecord(second.registration.resourceKey, second.registration.canonicalBytes),
+        )
+        val claims = listOf(
+            PrivateRentileKeyClaim(first.registration.privateRentileKey, first.registration.route, true),
+            PrivateRentileKeyClaim(second.registration.privateRentileKey, second.registration.route, true),
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition,
+                listOf(first, first),
+                listOf(firstRunning),
+                listOf(claims.first()),
+                listOf(identities.first()),
+                nextRouteOrdinal = 1L,
+                activeRouteOrdinals = listOf(0L),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition,
+                listOf(first, second),
+                listOf(firstRunning, secondRunning.copyRecord(ordinal = 0L)),
+                claims,
+                identities,
+                nextRouteOrdinal = 2L,
+                activeRouteOrdinals = listOf(0L),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition,
+                listOf(first, second),
+                listOf(firstRunning, secondRunning),
+                claims,
+                identities,
+                nextRouteOrdinal = 2L,
+                activeRouteOrdinals = listOf(0L, 1L),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceOperationState.Running(
+                definition,
+                listOf(first),
+                listOf(firstRunning.copyRecord(status = ResourceRouteStatus.ELIGIBLE)),
+                listOf(claims.first()),
+                listOf(identities.first()),
+                nextRouteOrdinal = 1L,
+                activeRouteOrdinals = listOf(0L),
+            )
+        }
+    }
+
+    @Test
     fun joinedOccurrencesDoNotConsumeDistinctRouteCapacityAndRawKeysNeverCauseAmbiguity() {
         val root = occurrence(1L, registration("a"), discoveryRequired = true)
         val sharedRawKey = rawKey('f', ResourceClass.STICKER_IMAGE)
@@ -216,6 +461,56 @@ class ResourceOperationSchedulingTest {
         assertEquals(2, state.routeRecords.count { it.status == ResourceRouteStatus.RUNNING })
         assertEquals(listOf(firstX.id, joinedX.id), routeRecord(state, firstX).joinedOccurrenceIds)
         assertTrue(state.privateRentileKeyClaims.all(PrivateRentileKeyClaim::usable))
+    }
+
+    @Test
+    fun maximumFrontierSharesRemainingSlicesAndAssignsEveryOrdinalInCanonicalOrder() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val nested = occurrence(2L, indexedRegistration(0), discoveryRequired = true)
+        val laterChildren = (1 until 4096).map { index ->
+            occurrence(index.toLong() + 2L, indexedRegistration(index))
+        }
+        val canonicalChildren = listOf(nested) + laterChildren
+        val start = ResourceOperationStateMachine.start(definition(64, root))
+        val ready = ResourceOperationStateMachine.transition(
+            requireNotNull(start.state),
+            RouteReadyForDiscovery(0L, root.id),
+        )
+
+        val discovered = ResourceOperationStateMachine.transition(
+            requireNotNull(ready.state),
+            ChildrenDiscovered(
+                root.id,
+                canonicalChildren.mapIndexed { index, child ->
+                    DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(index), child)
+                }.reversed(),
+            ),
+        )
+
+        assertEquals(listOf(StartRoute(1L, nested.registration)), discovered.actions)
+        val withheldFrontier = requireNotNull(discovered.state).traversal.frontierStack.last()
+        assertEquals(4096, withheldFrontier.withheldBackingSize)
+        assertEquals(1, withheldFrontier.withheldStartIndex)
+        assertEquals(laterChildren.map(ResourceOccurrence::id), withheldFrontier.withheldContinuation)
+
+        val nestedReady = ResourceOperationStateMachine.transition(
+            requireNotNull(discovered.state),
+            RouteReadyForDiscovery(1L, nested.id),
+        )
+        val completed = ResourceOperationStateMachine.transition(
+            requireNotNull(nestedReady.state),
+            ChildrenDiscovered(nested.id, emptyList()),
+        )
+
+        assertEquals((2L..65L).toList(), completed.actions.map { assertIs<StartRoute>(it).ordinal })
+        val state = requireNotNull(completed.state)
+        assertEquals((0L..4096L).toList(), state.routeRecords.map { requireNotNull(it.ordinal) })
+        assertEquals(listOf(root) + canonicalChildren, state.occurrences)
+        assertEquals(4097L, state.nextRouteOrdinal)
+        assertEquals((2L..65L).toList(), state.activeRouteOrdinals)
+        assertTrue(state.traversal.eligibleFifo.isEmpty())
+        assertTrue(state.traversal.staticContinuation.isEmpty())
+        assertTrue(state.traversal.frontierStack.isEmpty())
     }
 
     @Test
@@ -336,13 +631,30 @@ class ResourceOperationSchedulingTest {
         assertFreshCopy(traversal.staticContinuation, traversal.staticContinuation, listOf(secondId))
         assertFreshCopy(traversal.frontierStack, traversal.frontierStack, listOf(frontier))
 
+        val activeOccurrence = occurrence(4L, registration("a"))
+        val activeIdentity = CanonicalIdentityRecord(
+            activeOccurrence.registration.resourceKey,
+            activeOccurrence.registration.canonicalBytes,
+        )
+        val activeClaim = PrivateRentileKeyClaim(
+            activeOccurrence.registration.privateRentileKey,
+            activeOccurrence.registration.route,
+            usable = true,
+        )
+        val activeRecord = RouteRecord(
+            activeOccurrence.registration,
+            listOf(activeOccurrence.id),
+            0L,
+            null,
+            ResourceRouteStatus.RUNNING,
+        )
         val activeInput = mutableListOf(0L)
         val running = ResourceOperationState.Running(
-            definition = ResourceOperationDefinition(1, emptyList(), emptyList()),
-            occurrences = emptyList(),
-            routeRecords = emptyList(),
-            privateRentileKeyClaims = emptyList(),
-            identityRecords = emptyList(),
+            definition = definition(1, activeOccurrence),
+            occurrences = listOf(activeOccurrence),
+            routeRecords = listOf(activeRecord),
+            privateRentileKeyClaims = listOf(activeClaim),
+            identityRecords = listOf(activeIdentity),
             traversal = traversal,
             nextRouteOrdinal = 1L,
             activeRouteOrdinals = activeInput,
@@ -519,6 +831,54 @@ class ResourceOperationSchedulingTest {
     }
 
     @Test
+    fun dynamicIdentityCollisionTakesPrecedenceOverPrivateKeyAmbiguity() {
+        val root = occurrence(1L, registration("a"), discoveryRequired = true)
+        val sharedPrivateKey = RentilePrivateKey("combined-collision-private")
+        val stableId = "d".repeat(64)
+        val established = occurrence(
+            2L,
+            registration(
+                marker = "b",
+                resourceKey = ResourceKey(ResourceKind.EXTERNAL, stableId, ResourceClass.MODEL_GLB),
+                resourceClass = ResourceClass.MODEL_GLB,
+                privateKey = sharedPrivateKey,
+                canonicalText = "established-combined-canonical",
+            ),
+        )
+        val collision = occurrence(
+            3L,
+            registration(
+                marker = "c",
+                resourceKey = ResourceKey(ResourceKind.EXTERNAL, stableId, ResourceClass.MODEL_TEXTURE),
+                resourceClass = ResourceClass.MODEL_TEXTURE,
+                privateKey = sharedPrivateKey,
+                canonicalText = "different-combined-canonical",
+            ),
+        )
+        val start = ResourceOperationStateMachine.start(definition(2, root, established))
+        val ready = ResourceOperationStateMachine.transition(
+            requireNotNull(start.state),
+            RouteReadyForDiscovery(0L, root.id),
+        )
+
+        val failed = ResourceOperationStateMachine.transition(
+            requireNotNull(ready.state),
+            ChildrenDiscovered(
+                root.id,
+                listOf(child(ResourceChildTraversal.DeclaredArray(0), collision)),
+            ),
+        )
+
+        val failure = assertIs<ResourceOperationOutcome.Failure>(failed.outcome).failure
+        assertEquals(RenGErrorCode.IDENTITY_COLLISION, failure.code)
+        assertTrue(failed.actions.isEmpty())
+        val state = requireNotNull(failed.state)
+        assertTrue(state.privateRentileKeyClaims.single { it.privateKey == sharedPrivateKey }.usable)
+        assertEquals(ResourceRouteStatus.BLOCKED_BY_COLLISION, routeRecord(state, collision).status)
+        assertEquals(1L, routeRecord(state, collision).ordinal)
+    }
+
+    @Test
     fun dynamicIdentityCollisionRetainsEstablishedIdentityAndFullBlockedOccurrence() {
         val root = occurrence(1L, registration("a"), discoveryRequired = true)
         val stableId = "d".repeat(64)
@@ -594,6 +954,23 @@ class ResourceOperationSchedulingTest {
         commitBinding = ResourceCommitBinding.Single,
     )
 
+    private fun indexedRegistration(index: Int): ResourceRouteRegistration {
+        val stableId = (index + 1).toString(16).padStart(64, '0')
+        val rawStableId = (index + 5000).toString(16).padStart(64, '0')
+        return ResourceRouteRegistration(
+            route = ResourceRouteKey(
+                accessMode = ResourceAccessMode.NORMAL,
+                locator = ResourceLocator("indexed-locator-$index"),
+                resourceClass = ResourceClass.STICKER_IMAGE,
+                maximumResponseBytes = 4096L,
+            ),
+            resourceKey = ResourceKey(ResourceKind.EXTERNAL, stableId, ResourceClass.STICKER_IMAGE),
+            rawKey = RawResourceKey(rawStableId, ResourceClass.STICKER_IMAGE),
+            privateRentileKey = RentilePrivateKey("indexed-private-$index"),
+            canonicalBytes = CanonicalBytes("indexed-canonical-$index".encodeToByteArray()),
+        )
+    }
+
     private fun registration(
         marker: String,
         resourceClass: ResourceClass = ResourceClass.STICKER_IMAGE,
@@ -624,6 +1001,17 @@ class ResourceOperationSchedulingTest {
         traversal: ResourceChildTraversal,
         occurrence: ResourceOccurrence,
     ): DiscoveredResourceChild = DiscoveredResourceChild(traversal, occurrence)
+
+    private fun RouteRecord.copyRecord(
+        ordinal: Long? = this.ordinal,
+        status: ResourceRouteStatus = this.status,
+    ): RouteRecord = RouteRecord(
+        registration = registration,
+        joinedOccurrenceIds = joinedOccurrenceIds,
+        ordinal = ordinal,
+        cursor = cursor,
+        status = status,
+    )
 
     private fun routeRecord(
         state: ResourceOperationState.Running,

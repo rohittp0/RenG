@@ -1,0 +1,261 @@
+package com.rohittp.reng.internal.identity
+
+import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.AnimationSelector
+import com.rohittp.reng.AnimationTrack
+import com.rohittp.reng.Camera
+import com.rohittp.reng.FramePlan
+import com.rohittp.reng.Geometry
+import com.rohittp.reng.Model
+import com.rohittp.reng.Placement
+import com.rohittp.reng.ProjectionMode
+import com.rohittp.reng.ResourceLocator
+import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.Sticker
+import com.rohittp.reng.Vector3
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+
+class FramePlanCanonicalEncodingTest {
+    private val encoder = FramePlanCanonicalEncoder()
+
+    @Test
+    fun minimalFrameHasExactCanonicalLengthAndIdentity() {
+        val encoded = encoder.encode(canonicalV1MinimalFramePlan())
+
+        assertEquals(141, encoded.identity.canonicalBytes.size)
+        assertEquals(
+            "524e474301010001000000080000000000000000000200000046" +
+                "00010000000800000000000000000002000000080000000000000000" +
+                "00030000000800000000000000000004000000080000000000000000" +
+                "0005000000080000000000000000000300000002000100040000000101" +
+                "000500000004000000000006000000040000000000070000000400000000",
+            encoded.identity.canonicalBytes.fixtureLowercaseHex(),
+        )
+        assertEquals(
+            "reng-frame-v1:a143c83e1d2d0d0c2852e0cc58451491985688105e8b8f73e8ff38a8aab30d85",
+            encoded.frameIdentityText(),
+        )
+        assertEquals(allSegments.size, encoded.segmentPayloads.size)
+    }
+
+    @Test
+    fun representativeFrameMatchesTrackedCanonicalBytesAndIdentityExactly() {
+        val encoded = encoder.encode(canonicalV1RepresentativeFramePlan())
+        val expectedBytes = CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray()
+
+        assertEquals(1_431, expectedBytes.size)
+        assertEquals(1_431, encoded.identity.canonicalBytes.size)
+        assertContentEquals(expectedBytes, encoded.identity.canonicalBytes.bytes)
+        assertEquals(
+            "reng-frame-v1:447341d0410d7aea75e07153528b87609e7d408f1b7657e231e0381fb0a40599",
+            encoded.frameIdentityText(),
+        )
+    }
+
+    @Test
+    fun eachTopLevelFieldChangesOnlyItsOwnCanonicalSegment() {
+        val base = representativeFieldsPlan()
+        val variants = listOf(
+            FramePlanSegment.FRAME_INDEX to representativeFieldsPlan(frameIndex = 8),
+            FramePlanSegment.CAMERA to representativeFieldsPlan(camera = Camera(1.0, 2.0, 3.5, 4.0, 5.0)),
+            FramePlanSegment.PROJECTION_MODE to representativeFieldsPlan(projectionMode = ProjectionMode.GLOBE),
+            FramePlanSegment.DRAW_BASEMAP to representativeFieldsPlan(drawBasemap = false),
+            FramePlanSegment.STICKERS to representativeFieldsPlan(stickers = listOf(sticker("sticker-b"))),
+            FramePlanSegment.MODELS to representativeFieldsPlan(models = listOf(model("model-b", null))),
+            FramePlanSegment.GEOMETRIES to representativeFieldsPlan(geometries = listOf(geometry("vertex-b"))),
+        )
+        val baseEncoded = encoder.encode(base)
+
+        variants.forEach { (expectedChanged, variant) ->
+            val encoded = encoder.encode(variant)
+            val changed = allSegments.filterIndexed { index, _ ->
+                baseEncoded.segmentPayloads[index] != encoded.segmentPayloads[index]
+            }
+            assertEquals(listOf(expectedChanged), changed)
+            assertNotEquals(baseEncoded.identity, encoded.identity)
+        }
+    }
+
+    @Test
+    fun orderedListsPreserveOrderAndDuplicateOccurrences() {
+        val first = sticker("a")
+        val second = sticker("b")
+        val orderedWithDuplicate = encoder.encode(simplePlan(stickers = listOf(first, second, first)))
+        val reorderedWithDuplicate = encoder.encode(simplePlan(stickers = listOf(first, first, second)))
+        val duplicateRemoved = encoder.encode(simplePlan(stickers = listOf(first, second)))
+
+        assertNotEquals(orderedWithDuplicate.identity, reorderedWithDuplicate.identity)
+        assertNotEquals(orderedWithDuplicate.identity, duplicateRemoved.identity)
+        assertNotEquals(
+            orderedWithDuplicate.segmentPayloads[FramePlanSegment.STICKERS.index],
+            reorderedWithDuplicate.segmentPayloads[FramePlanSegment.STICKERS.index],
+        )
+        assertNotEquals(
+            orderedWithDuplicate.segmentPayloads[FramePlanSegment.STICKERS.index],
+            duplicateRemoved.segmentPayloads[FramePlanSegment.STICKERS.index],
+        )
+    }
+
+    @Test
+    fun selectorKindsAndOptionalLocatorUseExactNestedPayloadRules() {
+        val tracks = listOf(
+            AnimationTrack(AnimationSelector.Index(7), 1.0),
+            AnimationTrack(AnimationSelector.Name("7"), 2.0),
+        )
+        val present = encoder.encode(
+            simplePlan(models = listOf(model("model", ResourceLocator("é"), tracks))),
+        ).segmentPayloads[FramePlanSegment.MODELS.index].fixtureLowercaseHex()
+        val absent = encoder.encode(
+            simplePlan(models = listOf(model("model", null))),
+        ).segmentPayloads[FramePlanSegment.MODELS.index].fixtureLowercaseHex()
+
+        assertTrue(present.contains("00030000000301c3a9"))
+        assertFalse(present.contains("0003000000070100000002c3a9"))
+        assertTrue(absent.contains("00030000000100"))
+        assertTrue(present.contains("00010000000200010002000000080000000000000007"))
+        assertTrue(present.contains("000100000002000200020000000137"))
+    }
+
+    @Test
+    fun negativeZeroCanonicalizesWhileNfcAndNfdRemainDistinct() {
+        val negativeZero = encoder.encode(
+            simplePlan(
+                camera = Camera(-0.0, -0.0, -0.0, -0.0, -0.0),
+                stickers = listOf(sticker("é")),
+            ),
+        )
+        val positiveZero = encoder.encode(
+            simplePlan(
+                camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
+                stickers = listOf(sticker("é")),
+            ),
+        )
+        val nfd = encoder.encode(
+            simplePlan(stickers = listOf(sticker("é"))),
+        )
+
+        assertEquals(positiveZero, negativeZero)
+        assertNotEquals(positiveZero.identity, nfd.identity)
+        assertTrue(
+            positiveZero.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex().contains("c3a9"),
+        )
+        assertTrue(nfd.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex().contains("65cc81"))
+    }
+
+    @Test
+    fun publicGetterMutationCannotChangePlanIdentityOrEncodedSnapshots() {
+        val plan = canonicalV1RepresentativeFramePlan()
+        val before = encoder.encode(plan)
+        val returnedSegments = before.segmentPayloads as MutableList<CanonicalBytes>
+
+        (plan.stickers as MutableList<Sticker>).clear()
+        val returnedModels = plan.models as MutableList<Model>
+        val firstModel = returnedModels.first()
+        (firstModel.animationTracks as MutableList<AnimationTrack>).clear()
+        returnedModels.clear()
+        (plan.geometries as MutableList<Geometry>).clear()
+        returnedSegments.clear()
+        val returnedBytes = before.identity.canonicalBytes.bytes
+        returnedBytes.fill(0)
+
+        val after = encoder.encode(plan)
+        assertEquals(before, after)
+        assertEquals(7, before.segmentPayloads.size)
+        assertContentEquals(CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray(), before.identity.canonicalBytes.bytes)
+    }
+
+    @Test
+    fun encodedFrameUsesStructuralEqualityHashingAndFreshSegmentLists() {
+        val first = encoder.encode(canonicalV1RepresentativeFramePlan())
+        val equal = encoder.encode(canonicalV1RepresentativeFramePlan())
+        val different = encoder.encode(canonicalV1MinimalFramePlan())
+
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertNotEquals(first, different)
+        assertFalse(first.segmentPayloads === first.segmentPayloads)
+    }
+
+    private fun EncodedFramePlan.frameIdentityText(): String =
+        "reng-frame-v1:${identity.digest.lowercaseHex}"
+
+    private fun simplePlan(
+        camera: Camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
+        stickers: List<Sticker> = emptyList(),
+        models: List<Model> = emptyList(),
+    ): FramePlan = FramePlan(
+        frameIndex = 0,
+        camera = camera,
+        stickers = stickers,
+        models = models,
+    )
+
+    private fun representativeFieldsPlan(
+        frameIndex: Long = 7,
+        camera: Camera = Camera(1.0, 2.0, 3.0, 4.0, 5.0),
+        projectionMode: ProjectionMode = ProjectionMode.MERCATOR,
+        drawBasemap: Boolean = true,
+        stickers: List<Sticker> = listOf(sticker("sticker-a")),
+        models: List<Model> = listOf(model("model-a", null)),
+        geometries: List<Geometry> = listOf(geometry("vertex-a")),
+    ): FramePlan = FramePlan(
+        frameIndex = frameIndex,
+        camera = camera,
+        projectionMode = projectionMode,
+        drawBasemap = drawBasemap,
+        stickers = stickers,
+        models = models,
+        geometries = geometries,
+    )
+
+    private fun sticker(locator: String): Sticker = Sticker(
+        placement = placement(),
+        image = ResourceLocator(locator),
+    )
+
+    private fun model(
+        locator: String,
+        texture: ResourceLocator?,
+        tracks: List<AnimationTrack> = emptyList(),
+    ): Model = Model(
+        placement = placement(),
+        glb = ResourceLocator(locator),
+        texture = texture,
+        animationTracks = tracks,
+    )
+
+    private fun geometry(vertexSource: String): Geometry = Geometry(
+        topLeft = Vector3(1.0, 0.0, 0.0),
+        bottomRight = Vector3(0.0, 1.0, 0.0),
+        shaderPair = ShaderPair(vertexSource, "fragment"),
+    )
+
+    private fun placement(): Placement = Placement(
+        positionMode = AnchoringMode.MAP,
+        position = Vector3(0.0, 0.0, 0.0),
+        rotationMode = AnchoringMode.MAP,
+        rotation = Vector3(0.0, 0.0, 0.0),
+        scaleMode = AnchoringMode.MAP,
+        scale = 1.0,
+    )
+
+    private companion object {
+        val allSegments: List<FramePlanSegment> = listOf(
+            FramePlanSegment.FRAME_INDEX,
+            FramePlanSegment.CAMERA,
+            FramePlanSegment.PROJECTION_MODE,
+            FramePlanSegment.DRAW_BASEMAP,
+            FramePlanSegment.STICKERS,
+            FramePlanSegment.MODELS,
+            FramePlanSegment.GEOMETRIES,
+        )
+    }
+}
+
+private val FramePlanSegment.index: Int
+    get() = tag - 1

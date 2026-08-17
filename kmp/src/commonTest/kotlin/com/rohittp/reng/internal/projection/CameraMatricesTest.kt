@@ -62,6 +62,24 @@ class CameraMatricesTest {
     }
 
     @Test
+    fun nontrivialBearingAndPitchKeepViewBasisInMathematicalRows() {
+        val resolved = resolve(
+            camera = camera(bearing = 30.0, pitch = 60.0),
+            outputPixelSize = OutputPixelSize(width = 7, height = 4),
+        )
+
+        assertMatrixClose(
+            listOf(
+                listOf(0.8660254037844386, -0.5, 0.0, 0.0),
+                listOf(0.25, 0.4330127018922193, 0.8660254037844386, 0.0),
+                listOf(-0.4330127018922193, -0.75, 0.5, -4.82842712474619),
+                listOf(0.0, 0.0, 0.0, 1.0),
+            ),
+            resolved.viewMatrix,
+        )
+    }
+
+    @Test
     fun nonSquareProjectionUsesFortyFiveDegreeVerticalFovAndInfiniteFarReverseZ() {
         val resolved = resolve(
             camera = camera(),
@@ -105,6 +123,46 @@ class CameraMatricesTest {
         assertTrue(topLeft.point.y.isFinite())
         assertTrue(bottomRight.point.x.isFinite())
         assertTrue(bottomRight.point.y.isFinite())
+    }
+
+    @Test
+    fun ninetyDegreeBearingRotatesAsymmetricRayIntoEastAndNorth() {
+        val resolved = resolve(
+            camera = camera(bearing = 90.0),
+            outputPixelSize = OutputPixelSize(width = 4, height = 2),
+        )
+        val hit = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(resolved, 3, 0))
+
+        assertClose(1.0, hit.q)
+        assertClose(2.414213562373095, hit.t)
+        assertClose(0.5009765625, hit.point.x)
+        assertClose(0.5029296875, hit.point.y)
+    }
+
+    @Test
+    fun fractionalZoomScalesRayHitByTheResolvedLogicalWorldSize() {
+        val resolved = resolve(
+            camera = camera(zoom = 1.5),
+            outputPixelSize = OutputPixelSize(width = 4, height = 2),
+        )
+        val hit = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(resolved, 3, 0))
+
+        assertClose(1448.1546878700494, resolved.worldSizeLogicalPixels)
+        assertClose(0.5010358009490037, hit.point.x)
+        assertClose(0.49965473301699875, hit.point.y)
+    }
+
+    @Test
+    fun nonzeroWorldCopyRayHitRetainsUnwrappedMercatorX() {
+        val resolved = resolve(
+            camera = camera(unwrappedLongitude = 360.0),
+            outputPixelSize = OutputPixelSize(width = 2, height = 2),
+        )
+        val hit = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(resolved, 0, 0))
+
+        assertClose(1.5, resolved.mercatorAnchor.x)
+        assertClose(1.4990234375, hit.point.x)
+        assertClose(0.4990234375, hit.point.y)
     }
 
     @Test

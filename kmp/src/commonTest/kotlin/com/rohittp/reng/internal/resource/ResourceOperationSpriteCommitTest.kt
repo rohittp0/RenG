@@ -21,6 +21,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -1491,6 +1492,131 @@ class ResourceOperationSpriteCommitTest {
             )
         }
     }
+
+    @Test
+    fun aCeilingProhibitedSpriteMemberStagesNoValidatedCandidate() {
+        val driver = spriteGroupWithHigherOrdinaryRoute()
+        driver.driveToPendingCandidate(JSON_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.driveToPendingCandidate(IMAGE_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(JSON_ORDINAL)
+        val json = driver.candidate(JSON_ORDINAL)
+        assertEquals(json, driver.group().jsonCandidate)
+        val blocking = failure(RenGErrorCode.RESOURCE_UNAVAILABLE)
+
+        driver.event(RouteCompleted(2L, ResourceRouteOutcome.Failure(blocking)))
+        assertEquals(2L, driver.state.startCeilingOrdinal)
+
+        driver.advanceSpriteCommit(IMAGE_ORDINAL)
+
+        assertNull(driver.group().imageCandidate)
+        assertEquals(SpriteJointValidationStatus.WAITING, driver.group().jointValidationStatus)
+        assertEquals(ResourceRouteStatus.RESOLVED, driver.record(IMAGE_ORDINAL).status)
+        assertNull(driver.record(IMAGE_ORDINAL).cursor)
+        assertFalse(driver.group().visible)
+        assertEquals(ResourceOperationOutcome.Failure(blocking), driver.outcome)
+        driver.assertNoSpriteCommitWork("ceiling-prohibited member")
+        driver.assertNoRecoveryActions("ceiling-prohibited member")
+    }
+
+    @Test
+    fun aSpriteCommitGroupMustNameItsOwnBoundMemberRoutes() {
+        val driver = spriteGroupWithHigherOrdinaryRoute()
+        driver.driveToPendingCandidate(JSON_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(JSON_ORDINAL)
+        val parkedState = driver.state
+        val json = driver.candidate(JSON_ORDINAL)
+
+        assertEquals(
+            "a sprite member ordinal must name its own bound member route",
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    parkedState,
+                    spriteCommitStates = listOf(
+                        SpriteCommitState(
+                            groupId = GROUP_ONE,
+                            jsonOrdinal = JSON_ORDINAL,
+                            imageOrdinal = 2L,
+                            jsonCandidate = json,
+                            imageCandidate = null,
+                            jointValidationStatus = SpriteJointValidationStatus.WAITING,
+                            acknowledgedWrites = emptyList(),
+                            visible = false,
+                        ),
+                    ),
+                )
+            }.message,
+        )
+    }
+
+    @Test
+    fun spriteCommitOrderIsNeverTheSpriteMemberEnumOrdinalOrder() {
+        assertEquals(listOf(SpriteMember.JSON, SpriteMember.IMAGE), spriteMemberOrder())
+        assertEquals(listOf(SpriteMember.IMAGE, SpriteMember.JSON), SpriteMember.entries.toList())
+        assertNotEquals(SpriteMember.entries.toList(), spriteMemberOrder())
+
+        val driver = SpriteDriver(spriteGroupDefinition(concurrency = 2))
+        driver.driveValidatedPair()
+        assertEquals(listOf(SpriteMember.JSON, SpriteMember.IMAGE), driver.group().requiredMemberWrites)
+    }
+
+    @Test
+    fun aReadyParkedBarrierAtTheStartCeilingIsNotResumed() {
+        val driver = spriteGroupWithHigherOrdinaryRoute()
+        driver.driveToPendingCandidate(JSON_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(JSON_ORDINAL)
+        driver.driveToPendingCandidate(IMAGE_ORDINAL, ContentProvenance.TRANSPORT_200)
+        val ceilinged = copyState(driver.state, startCeilingOrdinal = JSON_ORDINAL)
+
+        val transition = ResourceOperationStateMachine.transition(
+            ceilinged,
+            AdvancePendingSpriteCommit(IMAGE_ORDINAL),
+        )
+
+        val state = requireNotNull(transition.state)
+        assertTrue(transition.actions.isEmpty())
+        assertNull(transition.outcome)
+        assertEquals(
+            listOf(
+                ParkedRoute(JSON_ORDINAL, ParkedRouteBarrier.SpritePair(GROUP_ONE)),
+                ParkedRoute(IMAGE_ORDINAL, ParkedRouteBarrier.SpritePair(GROUP_ONE)),
+            ),
+            state.parkedRoutes,
+        )
+        val group = state.spriteCommitStates.single()
+        assertEquals(SpriteJointValidationStatus.WAITING, group.jointValidationStatus)
+        assertTrue(state.bufferedRouteOutcomes.isEmpty())
+        assertEquals(
+            listOf(ResourceRouteStatus.RUNNING, ResourceRouteStatus.RUNNING),
+            listOf(JSON_ORDINAL, IMAGE_ORDINAL).map { ordinal ->
+                state.routeRecords.single { it.ordinal == ordinal }.status
+            },
+        )
+    }
+
+    @Test
+    fun aParkedRouteExactlyAtTheStartCeilingStaysParked() {
+        val driver = spriteGroupWithHigherOrdinaryRoute()
+        driver.driveToPendingCandidate(JSON_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(JSON_ORDINAL)
+        val ceilinged = copyState(driver.state, startCeilingOrdinal = JSON_ORDINAL)
+        val blocking = failure(RenGErrorCode.STORE_READ_FAILED)
+
+        val transition = ResourceOperationStateMachine.transition(
+            ceilinged,
+            RouteCompleted(2L, ResourceRouteOutcome.Failure(blocking)),
+        )
+
+        val state = requireNotNull(transition.state)
+        assertEquals(
+            listOf(ParkedRoute(JSON_ORDINAL, ParkedRouteBarrier.SpritePair(GROUP_ONE))),
+            state.parkedRoutes,
+        )
+        assertEquals(ResourceRouteStatus.RUNNING, state.routeRecords.single { it.ordinal == JSON_ORDINAL }.status)
+        assertEquals(0L, state.nextRetirementOrdinal)
+        assertEquals(listOf(2L), state.bufferedRouteOutcomes.map(BufferedRouteOutcome::ordinal))
+        assertNull(state.terminalSelection)
+        assertNull(transition.outcome)
+    }
 }
 
 private const val FIRST_OWNER_ID: Long = 1L
@@ -1681,6 +1807,21 @@ private fun spriteWorkUnderLowerOrdinaryRoute(): SpriteDriver {
     return driver
 }
 
+private fun spriteGroupWithHigherOrdinaryRoute(): SpriteDriver = SpriteDriver(
+    definitionOf(
+        concurrency = 2,
+        occurrences = spriteOccurrences(
+            groupId = GROUP_ONE,
+            ownerId = FIRST_OWNER_ID,
+            firstOccurrenceId = 1L,
+            jsonMarker = 'a',
+            imageMarker = 'b',
+            jsonProvenance = ContentProvenance.TRANSPORT_200,
+            imageProvenance = ContentProvenance.TRANSPORT_200,
+        ) + ordinaryOccurrence(3L, SECOND_OWNER_ID, 'c'),
+    ),
+)
+
 private fun spriteGroupDefinition(
     concurrency: Int,
     jsonProvenance: ContentProvenance = ContentProvenance.TRANSPORT_200,
@@ -1829,6 +1970,7 @@ private fun copyState(
     routeRecords: List<RouteRecord> = state.routeRecords,
     spriteCommitStates: List<SpriteCommitState> = state.spriteCommitStates,
     parkedRoutes: List<ParkedRoute> = state.parkedRoutes,
+    startCeilingOrdinal: Long? = state.startCeilingOrdinal,
 ): ResourceOperationState.Running = ResourceOperationState.Running(
     definition = state.definition,
     occurrences = state.occurrences,
@@ -1842,7 +1984,7 @@ private fun copyState(
     activeRouteOrdinals = state.activeRouteOrdinals,
     nextRetirementOrdinal = state.nextRetirementOrdinal,
     bufferedRouteOutcomes = state.bufferedRouteOutcomes,
-    startCeilingOrdinal = state.startCeilingOrdinal,
+    startCeilingOrdinal = startCeilingOrdinal,
     terminalSelection = state.terminalSelection,
     spriteCommitStates = spriteCommitStates,
     parkedRoutes = parkedRoutes,

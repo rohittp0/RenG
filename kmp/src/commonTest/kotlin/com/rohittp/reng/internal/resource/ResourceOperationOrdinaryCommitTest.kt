@@ -50,7 +50,7 @@ class ResourceOperationOrdinaryCommitTest {
                 resourceClass.name,
             )
             assertEquals(
-                AwaitingClassGate(expectedActionId, 0L, content, gates.first()),
+                AwaitingClassGate(expectedActionId, 0L, content, 0, gates.first()),
                 driver.record(0L).cursor,
                 resourceClass.name,
             )
@@ -467,7 +467,7 @@ class ResourceOperationOrdinaryCommitTest {
             copyState(
                 gateState,
                 routeRecords = listOf(
-                    routeRecord(record, AwaitingClassGate(gateAction.actionId, 0L, content, WRONG_GATE)),
+                    routeRecord(record, AwaitingClassGate(gateAction.actionId, 0L, content, 0, WRONG_GATE)),
                 ),
             )
         }
@@ -580,6 +580,381 @@ class ResourceOperationOrdinaryCommitTest {
         assertTrue(driver.state.traversal.frontierStack.isEmpty())
         assertEquals(2L, driver.state.nextRetirementOrdinal)
         driver.assertNoRecoveryActions("discovery parent")
+    }
+
+    @Test
+    fun aVisibilityInstallCursorRequiresItsAcknowledgedStoreWrite() {
+        val driver = CommitDriver(
+            singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.TRANSPORT_200),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "acknowledged write")
+        val write = assertIs<WriteStore>(driver.actions.single())
+        val writeState = driver.state
+        val writeRecord = writeState.routeRecords.single()
+        assertFalse(writeRecord.storeWriteAcknowledged)
+
+        assertEquals(
+            "visibility install cursor requires matching content after its required write",
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    writeState,
+                    routeRecords = listOf(
+                        routeRecord(writeRecord, AwaitingVisibilityInstall(write.actionId, 0L, content)),
+                    ),
+                )
+            }.message,
+        )
+
+        driver.event(StoreWriteCompleted(write.actionId, SuppliedCallOutcome.Success(Unit)))
+        val install = assertIs<InstallVisibility>(driver.actions.single())
+        val acknowledged = driver.record(0L)
+        assertTrue(acknowledged.storeWriteAcknowledged)
+        assertEquals(AwaitingVisibilityInstall(install.actionId, 0L, content), acknowledged.cursor)
+        assertEquals(
+            "Store write cursor requires matching content that must still be written",
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    driver.state,
+                    routeRecords = listOf(
+                        routeRecord(acknowledged, AwaitingStoreWrite(install.actionId, 0L, content)),
+                    ),
+                )
+            }.message,
+        )
+        assertEquals(
+            "class gate cursor requires matching unwritten content at its gate index",
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    driver.state,
+                    routeRecords = listOf(
+                        routeRecord(
+                            acknowledged,
+                            AwaitingClassGate(install.actionId, 0L, content, 0, ResourceClassGate.DECODE_PNG),
+                        ),
+                    ),
+                )
+            }.message,
+        )
+
+        driver.event(VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded))
+        assertIs<ResourceOperationOutcome.Success>(driver.outcome)
+        assertTrue(driver.record(0L).storeWriteAcknowledged)
+        assertEquals(1, driver.emitted.filterIsInstance<WriteStore>().size)
+
+        val residentDriver = CommitDriver(
+            singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.RESIDENT),
+        )
+        residentDriver.driveToPendingClassGates(0L, ContentProvenance.RESIDENT)
+        val residentContent = residentDriver.passGates(
+            0L,
+            listOf(ResourceClassGate.DECODE_PNG),
+            "resident install",
+        )
+        val residentInstall = assertIs<InstallVisibility>(residentDriver.actions.single())
+        assertEquals(
+            AwaitingVisibilityInstall(residentInstall.actionId, 0L, residentContent),
+            residentDriver.record(0L).cursor,
+        )
+        assertFalse(residentDriver.record(0L).storeWriteAcknowledged)
+        assertEquals(
+            "an acknowledged Store write requires selected content that must be written",
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    residentDriver.state,
+                    routeRecords = listOf(
+                        routeRecord(
+                            residentDriver.record(0L),
+                            requireNotNull(residentDriver.record(0L).cursor),
+                            storeWriteAcknowledged = true,
+                        ),
+                    ),
+                )
+            }.message,
+        )
+    }
+
+    @Test
+    fun installedVisibilityAdmitsOnlyAPendingChildDiscoveryCursor() {
+        val driver = CommitDriver(
+            singleRouteDefinition(ResourceClass.BASEMAP_DEM_TILE, ContentProvenance.TRANSPORT_200),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val inFlightStates = mutableListOf(driver.state)
+        driver.event(AdvancePendingClassGates(0L))
+        val firstGate = assertIs<ValidateResourceClass>(driver.actions.single())
+        inFlightStates += driver.state
+        driver.event(ResourceClassValidationCompleted(firstGate.actionId, SuppliedValidationOutcome.Valid))
+        val secondGate = assertIs<ValidateResourceClass>(driver.actions.single())
+        driver.event(ResourceClassValidationCompleted(secondGate.actionId, SuppliedValidationOutcome.Valid))
+        val write = assertIs<WriteStore>(driver.actions.single())
+        inFlightStates += driver.state
+        driver.event(StoreWriteCompleted(write.actionId, SuppliedCallOutcome.Success(Unit)))
+        val install = assertIs<InstallVisibility>(driver.actions.single())
+        inFlightStates += driver.state
+
+        inFlightStates.forEach { inFlight ->
+            val record = inFlight.routeRecords.single()
+            val cursor = requireNotNull(record.cursor)
+            assertEquals(
+                "installed visibility leaves only a child-discovery cursor in flight",
+                assertFailsWith<IllegalArgumentException>(cursor::class.simpleName) {
+                    copyState(
+                        inFlight,
+                        routeRecords = listOf(routeRecord(record, cursor, visibilityInstalled = true)),
+                    )
+                }.message,
+                cursor::class.simpleName,
+            )
+        }
+
+        driver.event(VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded))
+        assertTrue(driver.record(0L).visibilityInstalled)
+        assertNull(driver.record(0L).cursor)
+
+        val parent = discoveryOccurrence()
+        val discoveryDriver = CommitDriver(definitionOf(concurrency = 1, occurrences = listOf(parent)))
+        discoveryDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val parentContent = discoveryDriver.passGates(
+            0L,
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_TILE_JSON),
+            "discovery parent",
+        )
+        val parentWrite = assertIs<WriteStore>(discoveryDriver.actions.single())
+        discoveryDriver.event(StoreWriteCompleted(parentWrite.actionId, SuppliedCallOutcome.Success(Unit)))
+        val parentInstall = assertIs<InstallVisibility>(discoveryDriver.actions.single())
+        discoveryDriver.event(
+            VisibilityInstallCompleted(parentInstall.actionId, SuppliedInstallOutcome.Succeeded),
+        )
+
+        val installedParent = discoveryDriver.record(0L)
+        assertTrue(installedParent.visibilityInstalled)
+        assertEquals(ResourceRouteStatus.RUNNING, installedParent.status)
+        assertEquals(PendingChildDiscovery(0L, parentContent), installedParent.cursor)
+        val readmitted = copyState(discoveryDriver.state).routeRecords.single()
+        assertTrue(readmitted.visibilityInstalled)
+        assertEquals(ResourceRouteStatus.RUNNING, readmitted.status)
+        assertEquals(PendingChildDiscovery(0L, parentContent), readmitted.cursor)
+    }
+
+    @Test
+    fun classGateCursorsMustNameTheirGateAtTheirOwnGateIndex() {
+        val driver = CommitDriver(
+            singleRouteDefinition(ResourceClass.BASEMAP_DEM_TILE, ContentProvenance.TRANSPORT_200),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val content = assertIs<PendingClassGates>(driver.record(0L).cursor).content
+        val actionId = ResourceActionId(90L)
+        val message = "a class gate cursor must name its class gate at its own gate index"
+
+        listOf(
+            0 to ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
+            1 to ResourceClassGate.DECODE_PNG,
+            2 to ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
+            -1 to ResourceClassGate.DECODE_PNG,
+        ).forEach { (gateIndex, gate) ->
+            assertEquals(
+                message,
+                assertFailsWith<IllegalArgumentException>("$gateIndex/$gate") {
+                    AwaitingClassGate(actionId, 0L, content, gateIndex, gate)
+                }.message,
+                "$gateIndex/$gate",
+            )
+        }
+
+        driver.event(AdvancePendingClassGates(0L))
+        val first = assertIs<ValidateResourceClass>(driver.actions.single())
+        assertEquals(
+            AwaitingClassGate(first.actionId, 0L, content, 0, ResourceClassGate.DECODE_PNG),
+            driver.record(0L).cursor,
+        )
+        driver.event(ResourceClassValidationCompleted(first.actionId, SuppliedValidationOutcome.Valid))
+        val second = assertIs<ValidateResourceClass>(driver.actions.single())
+        assertEquals(
+            AwaitingClassGate(
+                second.actionId,
+                0L,
+                content,
+                1,
+                ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
+            ),
+            driver.record(0L).cursor,
+        )
+        driver.event(ResourceClassValidationCompleted(second.actionId, SuppliedValidationOutcome.Valid))
+        assertIs<WriteStore>(driver.actions.single())
+        assertEquals(2, driver.emitted.filterIsInstance<ValidateResourceClass>().size)
+    }
+
+    @Test
+    fun aStoreWriteActionCarriesItsOwnCopyOfTheSelectedResource() {
+        val driver = CommitDriver(
+            singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.TRANSPORT_200),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "write copy")
+        val write = assertIs<WriteStore>(driver.actions.single())
+
+        assertEquals(content.stored, write.resource)
+        assertNotSame(content.stored, write.resource)
+        assertNotSame(
+            requireNotNull(driver.record(0L).lookup?.selectedContent).stored,
+            write.resource,
+        )
+    }
+
+    @Test
+    fun classGatesCannotAdvanceAfterATerminalSelection() {
+        val driver = CommitDriver(
+            twoRouteDefinition(
+                first = ResourceClass.MODEL_GLB,
+                second = ResourceClass.STICKER_IMAGE,
+                concurrency = 2,
+            ),
+        )
+        driver.driveToPendingClassGates(1L, ContentProvenance.TRANSPORT_200)
+        val content = assertIs<PendingClassGates>(driver.record(1L).cursor).content
+        driver.event(RouteCompleted(0L, ResourceRouteOutcome.Failure(storeReadFailure(content))))
+
+        assertEquals(listOf(CancelRoute(1L)), driver.actions)
+        assertEquals(ResourceRouteStatus.RUNNING, driver.record(1L).status)
+        assertIs<PendingClassGates>(driver.record(1L).cursor)
+        val terminalState = driver.state
+
+        assertEquals(
+            "class gates cannot advance after terminal selection",
+            assertFailsWith<IllegalArgumentException> {
+                ResourceOperationStateMachine.transition(terminalState, AdvancePendingClassGates(1L))
+            }.message,
+        )
+        assertTrue(driver.emitted.filterIsInstance<ValidateResourceClass>().isEmpty())
+    }
+
+    @Test
+    fun successRequiresEveryOrdinalRetiredAndEveryRouteResolved() {
+        val driver = CommitDriver(
+            singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.RESIDENT),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.RESIDENT)
+        driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "success guards")
+        val install = assertIs<InstallVisibility>(driver.actions.single())
+        val installState = driver.state
+        val record = installState.routeRecords.single()
+
+        val unretired = copyState(
+            installState,
+            routeRecords = installState.routeRecords + RouteRecord(
+                registration = record.registration,
+                joinedOccurrenceIds = emptyList(),
+                ordinal = 1L,
+                cursor = null,
+                status = ResourceRouteStatus.RESOLVED,
+            ),
+            nextRouteOrdinal = 2L,
+        )
+        val unretiredTransition = ResourceOperationStateMachine.transition(
+            unretired,
+            VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded),
+        )
+        val unretiredState = requireNotNull(unretiredTransition.state)
+        assertNull(unretiredTransition.outcome)
+        assertEquals(1L, unretiredState.nextRetirementOrdinal)
+        assertEquals(2L, unretiredState.nextRouteOrdinal)
+        assertTrue(unretiredState.bufferedRouteOutcomes.isEmpty())
+        assertTrue(unretiredState.activeRouteOrdinals.isEmpty())
+        assertTrue(unretiredState.routeRecords.all { it.status == ResourceRouteStatus.RESOLVED })
+
+        val unresolved = copyState(
+            installState,
+            routeRecords = installState.routeRecords + RouteRecord(
+                registration = record.registration,
+                joinedOccurrenceIds = emptyList(),
+                ordinal = null,
+                cursor = null,
+                status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
+            ),
+        )
+        val unresolvedTransition = ResourceOperationStateMachine.transition(
+            unresolved,
+            VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded),
+        )
+        val unresolvedState = requireNotNull(unresolvedTransition.state)
+        assertNull(unresolvedTransition.outcome)
+        assertEquals(unresolvedState.nextRouteOrdinal, unresolvedState.nextRetirementOrdinal)
+        assertTrue(unresolvedState.bufferedRouteOutcomes.isEmpty())
+        assertTrue(unresolvedState.activeRouteOrdinals.isEmpty())
+        assertEquals(
+            listOf(ResourceRouteStatus.RESOLVED, ResourceRouteStatus.BLOCKED_BY_COLLISION),
+            unresolvedState.routeRecords.map(RouteRecord::status),
+        )
+
+        val settled = ResourceOperationStateMachine.transition(
+            installState,
+            VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded),
+        )
+        assertIs<ResourceOperationOutcome.Success>(settled.outcome)
+    }
+
+    @Test
+    fun ownerResourceSetsKeepEveryDistinctVisibleResourceOfOneKey() {
+        val driver = CommitDriver(sharedIdentityDefinition())
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val transported = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "transported")
+        val write = assertIs<WriteStore>(driver.actions.single())
+        driver.event(StoreWriteCompleted(write.actionId, SuppliedCallOutcome.Success(Unit)))
+        val transportedInstall = assertIs<InstallVisibility>(driver.actions.single())
+        driver.event(VisibilityInstallCompleted(transportedInstall.actionId, SuppliedInstallOutcome.Succeeded))
+
+        driver.driveToPendingClassGates(1L, ContentProvenance.RESIDENT)
+        val resident = driver.passGates(1L, listOf(ResourceClassGate.DECODE_PNG), "resident")
+        val residentInstall = assertIs<InstallVisibility>(driver.actions.single())
+        driver.event(VisibilityInstallCompleted(residentInstall.actionId, SuppliedInstallOutcome.Succeeded))
+
+        assertEquals(transported.resourceKey, resident.resourceKey)
+        val success = assertIs<ResourceOperationOutcome.Success>(driver.outcome)
+        val ownerSet = success.resourceSets.single()
+        assertEquals(ResourceOwnerId(FIRST_OWNER_ID), ownerSet.ownerId)
+        assertEquals(
+            listOf(
+                VisibleResource(transported.resourceKey, transported),
+                VisibleResource(resident.resourceKey, resident),
+            ),
+            ownerSet.resources,
+        )
+        assertEquals(
+            listOf(ContentProvenance.TRANSPORT_200, ContentProvenance.RESIDENT),
+            ownerSet.resources.map { it.content.provenance },
+        )
+    }
+
+    @Test
+    fun ownerResourceSetsAndSuccessRejectRepetitionAndStayShapeOnly() {
+        val content = resolvedContent(registration("a", ResourceClass.STICKER_IMAGE, ResourceAccessMode.NORMAL))
+        val other = resolvedContent(registration("b", ResourceClass.MODEL_GLB, ResourceAccessMode.NORMAL))
+        val first = VisibleResource(content.resourceKey, content)
+        val second = VisibleResource(other.resourceKey, other)
+        val ownerId = ResourceOwnerId(3L)
+
+        assertEquals(
+            "an owner resource set must not repeat a visible resource",
+            assertFailsWith<IllegalArgumentException> {
+                OwnerResourceSet(ownerId, listOf(first, second, first))
+            }.message,
+        )
+        val ownerSet = OwnerResourceSet(ownerId, listOf(first, second))
+        assertEquals(
+            "a successful outcome must carry one resource set per owner",
+            assertFailsWith<IllegalArgumentException> {
+                ResourceOperationOutcome.Success(listOf(ownerSet, OwnerResourceSet(ownerId, listOf(first))))
+            }.message,
+        )
+
+        assertEquals("OwnerResourceSet(ownerId=$ownerId, resourceCount=2)", ownerSet.toString())
+        assertEquals("Success(resourceSetCount=1)", ResourceOperationOutcome.Success(listOf(ownerSet)).toString())
+        assertFalse(ownerSet.toString().contains(content.resourceKey.stableId))
+        assertFalse(
+            ResourceOperationOutcome.Success(listOf(ownerSet)).toString()
+                .contains(other.resourceKey.stableId),
+        )
     }
 }
 
@@ -746,7 +1121,7 @@ private fun CommitDriver.passGates(
         assertEquals(ordinal, action.ordinal, label)
         assertEquals(content, action.content, label)
         assertEquals(
-            AwaitingClassGate(action.actionId, ordinal, content, gate),
+            AwaitingClassGate(action.actionId, ordinal, content, gates.indexOf(gate), gate),
             record(ordinal).cursor,
             "$label/$gate",
         )
@@ -896,9 +1271,34 @@ private fun storeReadFailure(content: ResolvedResourceContent): FailureDescripto
     ),
 )
 
+private fun sharedIdentityDefinition(): ResourceOperationDefinition {
+    val transported = registration("a", ResourceClass.STICKER_IMAGE, ResourceAccessMode.RELOAD)
+    val resident = ResourceRouteRegistration(
+        route = ResourceRouteKey(
+            accessMode = ResourceAccessMode.NORMAL,
+            locator = transported.route.locator,
+            resourceClass = transported.route.resourceClass,
+            maximumResponseBytes = transported.route.maximumResponseBytes,
+        ),
+        resourceKey = transported.resourceKey,
+        rawKey = transported.rawKey,
+        privateRentileKey = RentilePrivateKey("private-a-STICKER_IMAGE-resident"),
+        canonicalBytes = transported.canonicalBytes,
+    )
+    return definitionOf(
+        concurrency = 2,
+        occurrences = listOf(
+            occurrence(1L, FIRST_OWNER_ID, transported),
+            occurrence(2L, FIRST_OWNER_ID, resident),
+        ),
+    )
+}
+
 private fun routeRecord(
     record: RouteRecord,
     cursor: ResourceRouteCursor,
+    storeWriteAcknowledged: Boolean = record.storeWriteAcknowledged,
+    visibilityInstalled: Boolean = record.visibilityInstalled,
 ): RouteRecord = RouteRecord(
     registration = record.registration,
     joinedOccurrenceIds = record.joinedOccurrenceIds,
@@ -906,12 +1306,14 @@ private fun routeRecord(
     cursor = cursor,
     status = record.status,
     lookup = record.lookup,
-    visibilityInstalled = record.visibilityInstalled,
+    storeWriteAcknowledged = storeWriteAcknowledged,
+    visibilityInstalled = visibilityInstalled,
 )
 
 private fun copyState(
     state: ResourceOperationState.Running,
     routeRecords: List<RouteRecord> = state.routeRecords,
+    nextRouteOrdinal: Long = state.nextRouteOrdinal,
 ): ResourceOperationState.Running = ResourceOperationState.Running(
     definition = state.definition,
     occurrences = state.occurrences,
@@ -921,7 +1323,7 @@ private fun copyState(
     transportLatches = state.transportLatches,
     nextActionId = state.nextActionId,
     traversal = state.traversal,
-    nextRouteOrdinal = state.nextRouteOrdinal,
+    nextRouteOrdinal = nextRouteOrdinal,
     activeRouteOrdinals = state.activeRouteOrdinals,
     nextRetirementOrdinal = state.nextRetirementOrdinal,
     bufferedRouteOutcomes = state.bufferedRouteOutcomes,

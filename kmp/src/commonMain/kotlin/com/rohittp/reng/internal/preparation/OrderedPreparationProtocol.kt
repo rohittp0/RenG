@@ -46,7 +46,14 @@ internal data class CommittedFrameHistory(
 ) {
     init {
         require(frameIndex >= 0L) { "committed frame index must be non-negative" }
-        require(selectedLod >= 0) { "committed selected LOD must be non-negative" }
+        require(selectedLod in MINIMUM_MERCATOR_LOD..MAXIMUM_MERCATOR_LOD) {
+            "committed selected LOD must be within the Mercator LOD range"
+        }
+    }
+
+    private companion object {
+        const val MINIMUM_MERCATOR_LOD: Int = 0
+        const val MAXIMUM_MERCATOR_LOD: Int = 22
     }
 }
 

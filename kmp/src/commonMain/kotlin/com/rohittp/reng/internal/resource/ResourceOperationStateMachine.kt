@@ -570,7 +570,7 @@ internal object ResourceOperationStateMachine {
             when (val outcome = event.outcome) {
                 SuppliedValidationOutcome.Valid -> {
                     val gates = ordinaryClassGates(cursor.content)
-                    val nextGateIndex = gates.indexOf(cursor.gate) + 1
+                    val nextGateIndex = cursor.gateIndex + 1
                     if (nextGateIndex < gates.size) {
                         requestClassGate(routeIndex, cursor.ordinal, cursor.content, nextGateIndex)
                     } else {
@@ -594,11 +594,10 @@ internal object ResourceOperationStateMachine {
             val cursor = routeRecords[routeIndex].cursor as AwaitingStoreWrite
 
             when (val outcome = event.outcome) {
-                is SuppliedCallOutcome.Success -> requestVisibilityInstall(
-                    routeIndex,
-                    cursor.ordinal,
-                    cursor.content,
-                )
+                is SuppliedCallOutcome.Success -> {
+                    updateRouteRecord(routeIndex, storeWriteAcknowledged = true)
+                    requestVisibilityInstall(routeIndex, cursor.ordinal, cursor.content)
+                }
                 SuppliedCallOutcome.Failed -> completeLookupRoute(
                     routeIndex,
                     ResourceRouteOutcome.Failure(storeWriteFailure(cursor.content)),
@@ -655,6 +654,14 @@ internal object ResourceOperationStateMachine {
             require(cursor is PendingClassGates && cursor.ordinal == event.ordinal) {
                 "sprite commit advancement requires pending selected content at the same ordinal"
             }
+            val ceiling = startCeilingOrdinal
+            if (ceiling != null && event.ordinal < ceiling) {
+                // A ceiling-prohibited member has no remaining commit work, so it stages no candidate:
+                // its group must not host a validated candidate for a route that closes here.
+                closeRouteWithoutRemainingWork(routeIndex, event.ordinal)
+                return
+            }
+
             val binding = spriteCommitBinding(routeIndex)
             val group = spriteCommitStateFor(binding.groupId, binding.member, event.ordinal)
             require(group.candidate(binding.member) == null) {
@@ -666,11 +673,6 @@ internal object ResourceOperationStateMachine {
             val staged = group.withCandidate(binding.member, cursor.content)
             putSpriteCommitState(staged)
 
-            val ceiling = startCeilingOrdinal
-            if (ceiling != null && event.ordinal < ceiling) {
-                closeRouteWithoutRemainingWork(routeIndex, event.ordinal)
-                return
-            }
             if (
                 staged.jsonCandidate != null &&
                 staged.imageCandidate != null &&
@@ -1124,6 +1126,7 @@ internal object ResourceOperationStateMachine {
         private fun refreshStyleCommitStates() {
             if (styleCommitStates.isEmpty()) return
             styleCommitStates.forEachIndexed { index, style ->
+                if (style.visible) return@forEachIndexed
                 val routeIndex = routeIndexByOrdinal[style.ordinal] ?: return@forEachIndexed
                 val referencingOwnerIds = styleReferencingOwnerIds(routeIndex)
                 styleCommitStates[index] = style.withOwners(
@@ -1255,9 +1258,7 @@ internal object ResourceOperationStateMachine {
                 visibilityInstalled = true,
             )
             bufferRouteOutcome(group.jsonOrdinal, ResourceRouteOutcome.Success)
-            if (terminalSelection == null) {
-                bufferRouteOutcome(group.imageOrdinal, ResourceRouteOutcome.Success)
-            }
+            bufferRouteOutcome(group.imageOrdinal, ResourceRouteOutcome.Success)
             if (terminalSelection == null) startEligibleRoutes()
         }
 
@@ -1286,9 +1287,7 @@ internal object ResourceOperationStateMachine {
                 }
                 updateRouteRecord(reportedRouteIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
                 bufferRouteOutcome(reportedOrdinal, outcome)
-                if (terminalSelection == null) {
-                    bufferRouteOutcome(group.jsonOrdinal, ResourceRouteOutcome.Success)
-                }
+                bufferRouteOutcome(group.jsonOrdinal, ResourceRouteOutcome.Success)
             }
             if (terminalSelection == null) startEligibleRoutes()
         }
@@ -1516,7 +1515,7 @@ internal object ResourceOperationStateMachine {
             val actionId = takeNextActionId()
             updateRouteRecord(
                 routeIndex,
-                cursor = AwaitingClassGate(actionId, ordinal, content, gate),
+                cursor = AwaitingClassGate(actionId, ordinal, content, gateIndex, gate),
             )
             actions += ValidateResourceClass(actionId, ordinal, content, gate)
         }
@@ -1964,6 +1963,9 @@ internal object ResourceOperationStateMachine {
         ) {
             if (joinedOccurrenceIdSetsByRouteIndex[routeIndex].add(occurrence.id)) {
                 joinedOccurrenceIdsByRouteIndex[routeIndex] += occurrence.id
+                // A style commit's referencing owners are derived from its route's joined occurrences,
+                // so a new join redefines them here, not only when the scheduler next runs.
+                refreshStyleCommitStates()
             }
             val record = routeRecords[routeIndex]
             if (record.ordinal == null) {
@@ -2190,6 +2192,7 @@ internal object ResourceOperationStateMachine {
             cursor: ResourceRouteCursor? = routeRecords[index].cursor,
             status: ResourceRouteStatus = routeRecords[index].status,
             lookup: LookupProgress? = routeRecords[index].lookup,
+            storeWriteAcknowledged: Boolean = routeRecords[index].storeWriteAcknowledged,
             visibilityInstalled: Boolean = routeRecords[index].visibilityInstalled,
         ) {
             val previous = routeRecords[index]
@@ -2218,6 +2221,7 @@ internal object ResourceOperationStateMachine {
                 cursor = cursor,
                 status = status,
                 lookup = lookup,
+                storeWriteAcknowledged = storeWriteAcknowledged,
                 visibilityInstalled = visibilityInstalled,
             )
         }
@@ -2326,6 +2330,7 @@ internal object ResourceOperationStateMachine {
                 cursor = record.cursor,
                 status = record.status,
                 lookup = record.lookup,
+                storeWriteAcknowledged = record.storeWriteAcknowledged,
                 visibilityInstalled = record.visibilityInstalled,
             )
         }

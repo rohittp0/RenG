@@ -964,6 +964,218 @@ class ResourceOperationStyleCommitTest {
             StyleCompilationStatus.entries.map(StyleCompilationStatus::name),
         )
     }
+
+    @Test
+    fun styleVisibilityAndOwnerSetsCannotContradictTheirRouteOccurrences() {
+        val driver = StyleDriver(styleDefinition(concurrency = 1))
+        driver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
+        val content = driver.candidate(STYLE_ORDINAL)
+        val owners = listOf(ResourceOwnerId(OWNER_A), ResourceOwnerId(OWNER_B))
+        val visibilityMessage = "style visibility requires every referencing owner's completed non-style work"
+
+        assertEquals(
+            visibilityMessage,
+            assertFailsWith<IllegalArgumentException> {
+                styleCommitState(
+                    content,
+                    StyleCompilationStatus.SUCCEEDED,
+                    owners,
+                    emptyList(),
+                    writeAcknowledged = true,
+                    visible = true,
+                )
+            }.message,
+        )
+        assertEquals(
+            visibilityMessage,
+            assertFailsWith<IllegalArgumentException> {
+                styleCommitState(
+                    content,
+                    StyleCompilationStatus.SUCCEEDED,
+                    owners,
+                    listOf(ResourceOwnerId(OWNER_A)),
+                    writeAcknowledged = true,
+                    visible = true,
+                )
+            }.message,
+        )
+
+        val ownerMessage = "a style commit's referencing owners must be its route's bound occurrence owners"
+        assertEquals(
+            ownerMessage,
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    driver.state,
+                    styleCommitStates = listOf(
+                        styleCommitState(
+                            content,
+                            StyleCompilationStatus.WAITING,
+                            listOf(ResourceOwnerId(OWNER_A)),
+                            emptyList(),
+                        ),
+                    ),
+                )
+            }.message,
+        )
+        assertEquals(
+            ownerMessage,
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    driver.state,
+                    styleCommitStates = listOf(
+                        styleCommitState(
+                            content,
+                            StyleCompilationStatus.WAITING,
+                            owners + ResourceOwnerId(9L),
+                            emptyList(),
+                        ),
+                    ),
+                )
+            }.message,
+        )
+        assertEquals(
+            ownerMessage,
+            assertFailsWith<IllegalArgumentException> {
+                copyState(
+                    driver.state,
+                    styleCommitStates = listOf(
+                        styleCommitState(
+                            content,
+                            StyleCompilationStatus.WAITING,
+                            owners.reversed(),
+                            emptyList(),
+                        ),
+                    ),
+                )
+            }.message,
+        )
+        assertEquals(owners, driver.style().referencingOwnerIds)
+    }
+
+    @Test
+    fun aStyleOwnerBarrierWaitsForInstalledVisibilityNotMereRouteResolution() {
+        val driver = StyleDriver(styleDefinition(concurrency = 1))
+        driver.driveStyleChildren(listOf(firstChild(), secondChild()))
+        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
+        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
+        driver.completeStyleCommit()
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))), driver.parked)
+
+        driver.state = copyState(
+            driver.state,
+            routeRecords = driver.state.routeRecords.map { record ->
+                if (record.ordinal == STICKER_B_ORDINAL) {
+                    RouteRecord(
+                        registration = record.registration,
+                        joinedOccurrenceIds = record.joinedOccurrenceIds,
+                        ordinal = record.ordinal,
+                        cursor = null,
+                        status = ResourceRouteStatus.RESOLVED,
+                        lookup = record.lookup,
+                    )
+                } else {
+                    record
+                }
+            },
+        )
+        assertFalse(driver.record(STICKER_B_ORDINAL).visibilityInstalled)
+
+        driver.driveOrdinaryRoute(STICKER_A_ORDINAL)
+
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))), driver.parked)
+        assertEquals(listOf(ResourceOwnerId(OWNER_A)), driver.style().ownersWithCompletedNonStyleWork)
+        assertFalse(driver.style().visible)
+        assertFalse(driver.record(STYLE_ORDINAL).visibilityInstalled)
+        assertTrue(driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty())
+        assertTrue(driver.emitted.filterIsInstance<InstallBasemapStyleVisibility>().isEmpty())
+        assertNull(driver.outcome)
+        driver.assertNoRecoveryActions("uninstalled owner work")
+    }
+
+    @Test
+    fun aStyleWaitsForADiscoveringChildToAnnounceItsOwnChildrenBeforeCompiling() {
+        val driver = StyleDriver(styleDefinition(concurrency = 1))
+        val discovering = discoveringFirstChild()
+        driver.driveStyleChildren(listOf(discovering))
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
+
+        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
+        assertEquals(
+            PendingChildDiscovery(FIRST_CHILD_ORDINAL, driver.candidate(FIRST_CHILD_ORDINAL)),
+            driver.record(FIRST_CHILD_ORDINAL).cursor,
+        )
+
+        driver.event(RouteReadyForDiscovery(FIRST_CHILD_ORDINAL, discovering.occurrence.id))
+
+        assertEquals(
+            listOf(DiscoverChildren(FIRST_CHILD_ORDINAL, discovering.occurrence.id)),
+            driver.actions,
+        )
+        assertTrue(driver.state.traversal.frontierStack.isNotEmpty())
+        assertTrue(driver.state.traversal.eligibleFifo.isEmpty())
+        assertEquals(ResourceRouteStatus.RESOLVED, driver.record(FIRST_CHILD_ORDINAL).status)
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
+        assertEquals(StyleCompilationStatus.WAITING, driver.style().compilationStatus)
+        assertTrue(driver.emitted.filterIsInstance<CompileBasemapStyle>().isEmpty())
+
+        driver.event(ChildrenDiscovered(discovering.occurrence.id, emptyList()))
+
+        assertIs<CompileBasemapStyle>(driver.actions.single())
+        assertTrue(driver.state.traversal.frontierStack.isEmpty())
+        assertTrue(driver.parked.isEmpty())
+        assertEquals(StyleCompilationStatus.REQUESTED, driver.style().compilationStatus)
+    }
+
+    @Test
+    fun aStyleBelowTheStartCeilingStagesNoValidationAndNoChildren() {
+        val advanceDriver = StyleDriver(nonDiscoveryStyleDefinition())
+        advanceDriver.driveToPendingContent(STYLE_ORDINAL, ContentProvenance.TRANSPORT_200)
+        val advanceCeilinged = copyState(advanceDriver.state, startCeilingOrdinal = OTHER_OWNER_ORDINAL)
+
+        val closedAdvance = ResourceOperationStateMachine.transition(
+            advanceCeilinged,
+            AdvancePendingStyleCommit(STYLE_ORDINAL),
+        )
+
+        val closedAdvanceState = requireNotNull(closedAdvance.state)
+        assertTrue(closedAdvance.actions.isEmpty())
+        assertTrue(closedAdvanceState.styleCommitStates.isEmpty())
+        assertTrue(closedAdvanceState.parkedRoutes.isEmpty())
+        assertEquals(
+            ResourceRouteStatus.RESOLVED,
+            closedAdvanceState.routeRecords.single { it.ordinal == STYLE_ORDINAL }.status,
+        )
+        assertFalse(closedAdvanceState.routeRecords.single { it.ordinal == STYLE_ORDINAL }.visibilityInstalled)
+        assertNull(closedAdvance.outcome)
+
+        val validationDriver = StyleDriver(nonDiscoveryStyleDefinition())
+        val validation = validationDriver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
+        val validationCeilinged = copyState(
+            validationDriver.state,
+            startCeilingOrdinal = OTHER_OWNER_ORDINAL,
+        )
+
+        val closedValidation = ResourceOperationStateMachine.transition(
+            validationCeilinged,
+            BasemapStyleValidationCompleted(
+                validation.actionId,
+                BasemapStyleValidationOutcome.Valid(emptyList()),
+            ),
+        )
+
+        val closedValidationState = requireNotNull(closedValidation.state)
+        assertTrue(closedValidation.actions.isEmpty())
+        assertTrue(closedValidationState.parkedRoutes.isEmpty())
+        assertEquals(
+            ResourceRouteStatus.RESOLVED,
+            closedValidationState.routeRecords.single { it.ordinal == STYLE_ORDINAL }.status,
+        )
+        val style = closedValidationState.styleCommitStates.single()
+        assertEquals(StyleCompilationStatus.WAITING, style.compilationStatus)
+        assertFalse(style.visible)
+        assertFalse(style.writeAcknowledged)
+        assertNull(closedValidation.outcome)
+    }
 }
 
 private const val OWNER_A: Long = 1L
@@ -974,6 +1186,7 @@ private const val FIRST_CHILD_ORDINAL: Long = 1L
 private const val SECOND_CHILD_ORDINAL: Long = 2L
 private const val STICKER_A_ORDINAL: Long = 3L
 private const val STICKER_B_ORDINAL: Long = 4L
+private const val OTHER_OWNER_ORDINAL: Long = 1L
 private const val STYLE_LOCATOR: String = "locator-a-BASEMAP_STYLE"
 private const val FIRST_CHILD_LOCATOR: String = "locator-d-BASEMAP_TILE_JSON"
 private const val SECOND_CHILD_LOCATOR: String = "locator-e-BASEMAP_TILE_JSON"
@@ -1236,6 +1449,13 @@ private fun StyleDriver.finishStyleWriteAndInstall() {
     event(BasemapStyleVisibilityInstallCompleted(install.actionId, STYLE_GROUP, SuppliedInstallOutcome.Succeeded))
 }
 
+private fun nonDiscoveryStyleDefinition(): ResourceOperationDefinition = definitionOf(
+    concurrency = 2,
+    occurrences = listOf(
+        styleOccurrence(1L, OWNER_A, ContentProvenance.TRANSPORT_200, discoveryRequired = false),
+    ) + ordinaryOccurrences(3L, OWNER_A, 'b'),
+)
+
 private fun styleDefinition(
     concurrency: Int,
     styleProvenance: ContentProvenance = ContentProvenance.TRANSPORT_200,
@@ -1407,6 +1627,7 @@ private fun copyState(
     styleCommitStates: List<StyleCommitState> = state.styleCommitStates,
     parkedRoutes: List<ParkedRoute> = state.parkedRoutes,
     visibleResourcesByOwner: List<OwnerResourceSet> = state.visibleResourcesByOwner,
+    startCeilingOrdinal: Long? = state.startCeilingOrdinal,
 ): ResourceOperationState.Running = ResourceOperationState.Running(
     definition = state.definition,
     occurrences = state.occurrences,
@@ -1420,7 +1641,7 @@ private fun copyState(
     activeRouteOrdinals = state.activeRouteOrdinals,
     nextRetirementOrdinal = state.nextRetirementOrdinal,
     bufferedRouteOutcomes = state.bufferedRouteOutcomes,
-    startCeilingOrdinal = state.startCeilingOrdinal,
+    startCeilingOrdinal = startCeilingOrdinal,
     terminalSelection = state.terminalSelection,
     spriteCommitStates = state.spriteCommitStates,
     parkedRoutes = parkedRoutes,

@@ -249,9 +249,13 @@ internal data class ResourceRouteRegistration(
     val canonicalBytes: CanonicalBytes,
 )
 
+/**
+ * Sprite atlas members. The declaration order is deliberately not the commit order: commit order comes
+ * only from [spriteMemberRank], so an enum ordinal can never stand in for it.
+ */
 internal enum class SpriteMember {
-    JSON,
     IMAGE,
+    JSON,
 }
 
 internal sealed interface ResourceCommitBinding {
@@ -643,10 +647,14 @@ internal data class AwaitingClassGate(
     val actionId: ResourceActionId,
     val ordinal: Long,
     val content: ResolvedResourceContent,
+    val gateIndex: Int,
     val gate: ResourceClassGate,
 ) : ResourceRouteCursor {
     init {
         require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        require(
+            ordinaryResourceClassGates(content.route.resourceClass)?.getOrNull(gateIndex) == gate,
+        ) { "a class gate cursor must name its class gate at its own gate index" }
     }
 }
 
@@ -956,6 +964,9 @@ internal class StyleCommitState(
         require(!visible || (compilationSettled && writeAcknowledged == requiresWrite)) {
             "style visibility requires settled compilation and its required write"
         }
+        require(!visible || completedOwnerIdSnapshot.size == referencingOwnerIdSnapshot.size) {
+            "style visibility requires every referencing owner's completed non-style work"
+        }
     }
 
     val referencingOwnerIds: List<ResourceOwnerId>
@@ -1160,6 +1171,7 @@ internal class RouteRecord(
     val cursor: ResourceRouteCursor?,
     val status: ResourceRouteStatus,
     val lookup: LookupProgress? = null,
+    val storeWriteAcknowledged: Boolean = false,
     val visibilityInstalled: Boolean = false,
 ) {
     private val joinedOccurrenceIdSnapshot: List<ResourceOccurrenceId> = freshListCopy(joinedOccurrenceIds)
@@ -1839,6 +1851,12 @@ internal class OwnerResourceSet(
 ) {
     private val resourceSnapshot: List<VisibleResource> = freshListCopy(resources)
 
+    init {
+        require(resourceSnapshot.toSet().size == resourceSnapshot.size) {
+            "an owner resource set must not repeat a visible resource"
+        }
+    }
+
     val resources: List<VisibleResource>
         get() = freshListCopy(resourceSnapshot)
 
@@ -1856,6 +1874,13 @@ internal sealed interface ResourceOperationOutcome {
         resourceSets: List<OwnerResourceSet>,
     ) : ResourceOperationOutcome {
         private val resourceSetSnapshot: List<OwnerResourceSet> = freshListCopy(resourceSets)
+
+        init {
+            require(
+                resourceSetSnapshot.mapTo(mutableSetOf(), OwnerResourceSet::ownerId).size ==
+                    resourceSetSnapshot.size,
+            ) { "a successful outcome must carry one resource set per owner" }
+        }
 
         val resourceSets: List<OwnerResourceSet>
             get() = freshListCopy(resourceSetSnapshot)
@@ -1960,6 +1985,7 @@ internal sealed interface ResourceOperationState {
             val selectedContentByOrdinal = mutableMapOf<Long, ResolvedResourceContent>()
             val visibleOrdinals = mutableSetOf<Long>()
             val cursorByOrdinal = mutableMapOf<Long, ResourceRouteCursor>()
+            val joinedOccurrenceIdsByOrdinal = mutableMapOf<Long, List<ResourceOccurrenceId>>()
             routeRecordSnapshot.forEach { record ->
                 registeredRoutes += record.registration.route
                 val joinedIds = record.joinedOccurrenceIds
@@ -1974,6 +2000,7 @@ internal sealed interface ResourceOperationState {
                     record.lookup?.selectedContent?.let { selectedContentByOrdinal[ordinal] = it }
                     if (record.visibilityInstalled) visibleOrdinals += ordinal
                     record.cursor?.let { cursorByOrdinal[ordinal] = it }
+                    joinedOccurrenceIdsByOrdinal[ordinal] = joinedIds
                 }
                 require(
                     when (record.status) {
@@ -2001,6 +2028,15 @@ internal sealed interface ResourceOperationState {
                 require(!record.visibilityInstalled || lookup?.selectedContent != null) {
                     "installed visibility requires selected content"
                 }
+                require(
+                    !record.storeWriteAcknowledged ||
+                        lookup?.selectedContent?.provenance?.let(::requiresStoreWrite) == true,
+                ) { "an acknowledged Store write requires selected content that must be written" }
+                require(
+                    !record.visibilityInstalled ||
+                        record.cursor == null ||
+                        record.cursor is PendingChildDiscovery,
+                ) { "installed visibility leaves only a child-discovery cursor in flight" }
 
                 record.cursor?.let { cursor ->
                     val ordinal = requireNotNull(record.ordinal) {
@@ -2049,15 +2085,21 @@ internal sealed interface ResourceOperationState {
                         is AwaitingClassGate -> require(
                             lookup?.selectedContent == cursor.content &&
                                 ordinaryResourceClassGates(cursor.content.route.resourceClass)
-                                    ?.contains(cursor.gate) == true,
-                        ) { "class gate cursor requires matching content and an ordinary class gate" }
+                                    ?.getOrNull(cursor.gateIndex) == cursor.gate &&
+                                !record.storeWriteAcknowledged,
+                        ) { "class gate cursor requires matching unwritten content at its gate index" }
                         is AwaitingStoreWrite -> require(
                             lookup?.selectedContent == cursor.content &&
-                                requiresStoreWrite(cursor.content.provenance),
-                        ) { "Store write cursor requires matching content that must be written" }
+                                requiresStoreWrite(cursor.content.provenance) &&
+                                !record.storeWriteAcknowledged,
+                        ) { "Store write cursor requires matching content that must still be written" }
                         is AwaitingVisibilityInstall -> require(
-                            lookup?.selectedContent == cursor.content,
-                        ) { "visibility install cursor requires matching selected content" }
+                            lookup?.selectedContent == cursor.content &&
+                                (
+                                    !requiresStoreWrite(cursor.content.provenance) ||
+                                        record.storeWriteAcknowledged
+                                    ),
+                        ) { "visibility install cursor requires matching content after its required write" }
                         is AwaitingSpritePairValidation -> {
                             val group = spriteGroupForCursor(spriteStateByGroup, cursor.groupId, ordinal)
                             require(
@@ -2162,6 +2204,11 @@ internal sealed interface ResourceOperationState {
                         parkedOrdinals.add(parked.ordinal)
                 },
             ) { "parked route ordinals must be distinct unretired assigned ordinals" }
+            require(
+                parkedRouteSnapshot.zipWithNext().all { (lower, higher) ->
+                    lower.ordinal < higher.ordinal
+                },
+            ) { "parked routes must be ordered by ascending ordinal" }
             require(parkedOrdinals.none(activeOrdinalSet::contains)) {
                 "a parked route must not occupy active capacity"
             }
@@ -2237,6 +2284,20 @@ internal sealed interface ResourceOperationState {
                 require(group.visible == (group.ordinal in visibleOrdinals)) {
                     "style visibility must match its route"
                 }
+                val joinedIds = joinedOccurrenceIdsByOrdinal[group.ordinal].orEmpty()
+                require(
+                    joinedIds.all { joinedId ->
+                        occurrenceById[joinedId]?.commitBinding ==
+                            ResourceCommitBinding.BasemapStyle(group.groupId)
+                    },
+                ) { "a style commit must be bound by every occurrence of its route" }
+                // An installed style keeps the owner set its install carried; only a still-deciding
+                // commit must agree with its route's current occurrences.
+                require(
+                    group.visible ||
+                        group.referencingOwnerIds ==
+                        joinedIds.mapNotNull { occurrenceById[it]?.ownerId }.distinct(),
+                ) { "a style commit's referencing owners must be its route's bound occurrence owners" }
             }
 
             spriteCommitStateSnapshot.forEach { group ->
@@ -2245,6 +2306,12 @@ internal sealed interface ResourceOperationState {
                     require(ordinal in assignedOrdinals) {
                         "sprite member ordinals must name assigned routes"
                     }
+                    require(
+                        joinedOccurrenceIdsByOrdinal[ordinal].orEmpty().any { joinedId ->
+                            occurrenceById[joinedId]?.commitBinding ==
+                                ResourceCommitBinding.Sprite(group.groupId, member)
+                        },
+                    ) { "a sprite member ordinal must name its own bound member route" }
                     val candidate = group.candidate(member)
                     require(candidate == null || selectedContentByOrdinal[ordinal] == candidate) {
                         "a sprite candidate must be its route's selected content"

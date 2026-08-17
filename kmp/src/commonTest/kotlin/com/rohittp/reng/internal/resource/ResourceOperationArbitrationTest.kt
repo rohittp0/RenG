@@ -282,6 +282,21 @@ class ResourceOperationArbitrationTest {
     }
 
     @Test
+    fun externalTerminalSelectionAcceptsOnlyExternalCancellationOrigins() {
+        val caller = cancellation(CancellationCause.CALLER, 406L)
+        val cancelPreparations = cancellation(CancellationCause.CANCEL_PREPARATIONS, 407L)
+
+        assertEquals(caller, ResourceTerminalSelection.External(caller).cancellation)
+        assertEquals(
+            cancelPreparations,
+            ResourceTerminalSelection.External(cancelPreparations).cancellation,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            ResourceTerminalSelection.External(cancellation(CancellationCause.ADAPTER, 408L))
+        }
+    }
+
+    @Test
     fun repeatedPrivateKeyCollidersAttributeTheInvalidatedRouteOnlyOnce() {
         val sharedPrivateKey = RentilePrivateKey("review-shared-private-key")
         val root = occurrence(index = 0, discoveryRequired = true)

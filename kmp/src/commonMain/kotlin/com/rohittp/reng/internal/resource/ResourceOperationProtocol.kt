@@ -474,7 +474,14 @@ internal sealed interface ResourceTerminalSelection {
 
     data class External(
         val cancellation: CancellationSelection,
-    ) : ResourceTerminalSelection
+    ) : ResourceTerminalSelection {
+        init {
+            require(
+                cancellation.cause == CancellationCause.CALLER ||
+                    cancellation.cause == CancellationCause.CANCEL_PREPARATIONS,
+            ) { "external terminal must originate from caller or cancelPreparations" }
+        }
+    }
 }
 
 internal sealed interface ResourceOperationEvent

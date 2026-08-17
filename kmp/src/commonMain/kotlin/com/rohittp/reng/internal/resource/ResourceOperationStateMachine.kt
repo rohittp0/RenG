@@ -613,9 +613,21 @@ internal object ResourceOperationStateMachine {
         fun visibilityInstallCompleted(event: VisibilityInstallCompleted) {
             val routeIndex = routeIndexForAction<AwaitingVisibilityInstall>(event.actionId)
             if (finishActionAfterTerminal(routeIndex)) return
+            val cursor = routeRecords[routeIndex].cursor as AwaitingVisibilityInstall
 
             when (val outcome = event.outcome) {
                 SuppliedInstallOutcome.Succeeded -> {
+                    if (ownsActiveDiscoveryFrontier(routeIndex)) {
+                        // A discovery parent commits its own bytes first and only then announces its
+                        // children: it stays running and active, holding its slot until
+                        // RouteReadyForDiscovery retires it and emits DiscoverChildren.
+                        updateRouteRecord(
+                            routeIndex,
+                            cursor = PendingChildDiscovery(cursor.ordinal, cursor.content),
+                            visibilityInstalled = true,
+                        )
+                        return
+                    }
                     updateRouteRecord(routeIndex, cursor = null, visibilityInstalled = true)
                     completeLookupRoute(routeIndex, ResourceRouteOutcome.Success)
                 }
@@ -1369,9 +1381,12 @@ internal object ResourceOperationStateMachine {
             }
 
         private fun closeParkedRoutesBelow(ceiling: Long) {
-            val closable = parkedRoutes.map(ParkedRoute::ordinal).filter { it < ceiling }.sorted()
+            val closable = parkedRoutes
+                .filter { it.ordinal < ceiling && !parkedRouteRetainedByGroupWork(it) }
+                .map(ParkedRoute::ordinal)
+                .sorted()
             if (closable.isEmpty()) return
-            parkedRoutes.removeAll { it.ordinal < ceiling }
+            parkedRoutes.removeAll { it.ordinal in closable }
             closable.forEach { ordinal ->
                 val routeIndex = requireNotNull(routeIndexByOrdinal[ordinal]) {
                     "a parked route must name an assigned route"
@@ -1380,6 +1395,33 @@ internal object ResourceOperationStateMachine {
                 insertBufferedOutcome(ordinal, ResourceRouteOutcome.Success)
             }
         }
+
+        /**
+         * A parked route below a new start ceiling normally closes as arbitration success because it has
+         * no remaining work. A parked group member is the exception: while its group's shared work owner
+         * is still active with an in-flight adapter action, that owner will resolve this member itself —
+         * through install, member failure, or owner cancellation — and its own outcome slot must stay
+         * open, because that in-flight action can still report a lower-ordinal non-success that wins
+         * arbitration. Style barriers park their group's only work owner, so they never qualify.
+         */
+        private fun parkedRouteRetainedByGroupWork(parked: ParkedRoute): Boolean =
+            when (val barrier = parked.barrier) {
+                is ParkedRouteBarrier.SpritePair -> {
+                    val group = spriteCommitState(barrier.groupId)
+                    parked.ordinal != group.jsonOrdinal &&
+                        when (group.jointValidationStatus) {
+                            SpriteJointValidationStatus.REQUESTED,
+                            SpriteJointValidationStatus.VALID,
+                            -> true
+                            SpriteJointValidationStatus.WAITING,
+                            SpriteJointValidationStatus.FAILED,
+                            -> false
+                        }
+                }
+                is ParkedRouteBarrier.StyleChildren,
+                is ParkedRouteBarrier.StyleOwners,
+                -> false
+            }
 
         private fun discardParkedRoutes() {
             parkedRoutes.map(ParkedRoute::ordinal).forEach { ordinal ->
@@ -1680,6 +1722,12 @@ internal object ResourceOperationStateMachine {
             return true
         }
 
+        private fun ownsActiveDiscoveryFrontier(routeIndex: Int): Boolean {
+            val parentId = frontierStack.lastOrNull()?.parentOccurrenceId ?: return false
+            return parentId in joinedOccurrenceIdSetsByRouteIndex[routeIndex] &&
+                occurrence(parentId).discoveryRequired
+        }
+
         fun routeReadyForDiscovery(event: RouteReadyForDiscovery) {
             val parent = occurrence(event.parentOccurrenceId)
             require(parent.discoveryRequired) { "route discovery readiness requires a discovery occurrence" }
@@ -1695,6 +1743,9 @@ internal object ResourceOperationStateMachine {
             }
             require(cursorActionId(record.cursor) == null) {
                 "route discovery readiness requires no in-flight adapter action"
+            }
+            require(record.lookup == null || record.visibilityInstalled) {
+                "route discovery readiness requires its own installed visibility"
             }
             require(activeRouteOrdinals.remove(event.ordinal)) {
                 "route discovery readiness requires an active route"
@@ -2519,6 +2570,7 @@ internal object ResourceOperationStateMachine {
     private fun cursorActionId(cursor: ResourceRouteCursor?): ResourceActionId? = when (cursor) {
         null,
         is PendingClassGates,
+        is PendingChildDiscovery,
         -> null
         is AwaitingClockSample -> cursor.actionId
         is AwaitingResident -> cursor.actionId

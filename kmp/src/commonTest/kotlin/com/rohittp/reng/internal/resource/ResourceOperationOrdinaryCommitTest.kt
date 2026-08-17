@@ -511,6 +511,76 @@ class ResourceOperationOrdinaryCommitTest {
             )
         }
     }
+
+    @Test
+    fun aDiscoveryParentInstallsItsOwnContentAndThenItsChildBeforeSucceeding() {
+        val parent = discoveryOccurrence()
+        val driver = CommitDriver(
+            definitionOf(concurrency = 1, occurrences = listOf(parent)),
+        )
+        driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+        val parentContent = driver.passGates(
+            0L,
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_TILE_JSON),
+            "parent",
+        )
+        val parentWrite = assertIs<WriteStore>(driver.actions.single())
+        driver.event(StoreWriteCompleted(parentWrite.actionId, SuppliedCallOutcome.Success(Unit)))
+        val parentInstall = assertIs<InstallVisibility>(driver.actions.single())
+
+        driver.event(VisibilityInstallCompleted(parentInstall.actionId, SuppliedInstallOutcome.Succeeded))
+
+        assertTrue(driver.actions.isEmpty())
+        assertNull(driver.outcome)
+        assertTrue(driver.record(0L).visibilityInstalled)
+        assertEquals(PendingChildDiscovery(0L, parentContent), driver.record(0L).cursor)
+        assertEquals(ResourceRouteStatus.RUNNING, driver.record(0L).status)
+        assertEquals(listOf(0L), driver.state.activeRouteOrdinals)
+
+        driver.event(RouteReadyForDiscovery(0L, parent.id))
+
+        assertEquals(listOf(DiscoverChildren(0L, parent.id)), driver.actions)
+        assertNull(driver.outcome)
+        assertEquals(1L, driver.state.nextRetirementOrdinal)
+
+        val child = discoveredChild()
+        driver.event(
+            ChildrenDiscovered(
+                parent.id,
+                listOf(DiscoveredResourceChild(ResourceChildTraversal.DeclaredArray(0), child)),
+            ),
+        )
+
+        assertEquals(listOf(StartRoute(1L, child.registration)), driver.actions)
+        driver.driveToPendingClassGates(1L, ContentProvenance.TRANSPORT_200)
+        val childContent = driver.passGates(
+            1L,
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_VECTOR_TILE),
+            "child",
+        )
+        val childWrite = assertIs<WriteStore>(driver.actions.single())
+        driver.event(StoreWriteCompleted(childWrite.actionId, SuppliedCallOutcome.Success(Unit)))
+        val childInstall = assertIs<InstallVisibility>(driver.actions.single())
+
+        driver.event(VisibilityInstallCompleted(childInstall.actionId, SuppliedInstallOutcome.Succeeded))
+
+        val success = assertIs<ResourceOperationOutcome.Success>(driver.outcome)
+        assertEquals(
+            listOf(
+                OwnerResourceSet(
+                    ResourceOwnerId(FIRST_OWNER_ID),
+                    listOf(
+                        VisibleResource(parentContent.resourceKey, parentContent),
+                        VisibleResource(childContent.resourceKey, childContent),
+                    ),
+                ),
+            ),
+            success.resourceSets,
+        )
+        assertTrue(driver.state.traversal.frontierStack.isEmpty())
+        assertEquals(2L, driver.state.nextRetirementOrdinal)
+        driver.assertNoRecoveryActions("discovery parent")
+    }
 }
 
 private const val FIRST_OWNER_ID: Long = 1L
@@ -717,6 +787,22 @@ private fun singleRouteDefinition(
         occurrences = listOf(occurrence(1L, FIRST_OWNER_ID, registration)),
     )
 }
+
+private fun discoveryOccurrence(): ResourceOccurrence = ResourceOccurrence(
+    id = ResourceOccurrenceId(1L),
+    ownerId = ResourceOwnerId(FIRST_OWNER_ID),
+    registration = registration("a", ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+    discoveryRequired = true,
+    commitBinding = ResourceCommitBinding.Single,
+)
+
+private fun discoveredChild(): ResourceOccurrence = ResourceOccurrence(
+    id = ResourceOccurrenceId(2L),
+    ownerId = ResourceOwnerId(FIRST_OWNER_ID),
+    registration = registration("b", ResourceClass.BASEMAP_VECTOR_TILE, ResourceAccessMode.RELOAD),
+    discoveryRequired = false,
+    commitBinding = ResourceCommitBinding.Single,
+)
 
 private fun twoRouteDefinition(
     first: ResourceClass,

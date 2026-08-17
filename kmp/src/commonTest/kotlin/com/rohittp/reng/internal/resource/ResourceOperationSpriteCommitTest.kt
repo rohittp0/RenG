@@ -956,6 +956,87 @@ class ResourceOperationSpriteCommitTest {
     }
 
     @Test
+    fun aBufferedFailureLeavesAParkedMemberWhoseGroupOwnerStillHasWorkInFlight() {
+        val driver = SpriteDriver(
+            definitionOf(
+                concurrency = 2,
+                occurrences = spriteOccurrences(
+                    groupId = GROUP_ONE,
+                    ownerId = FIRST_OWNER_ID,
+                    firstOccurrenceId = 1L,
+                    jsonMarker = 'a',
+                    imageMarker = 'b',
+                    jsonProvenance = ContentProvenance.TRANSPORT_200,
+                    imageProvenance = ContentProvenance.TRANSPORT_200,
+                ) + ordinaryOccurrence(3L, SECOND_OWNER_ID, 'c'),
+            ),
+        )
+        driver.driveToPendingCandidate(JSON_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(JSON_ORDINAL)
+        driver.driveToPendingCandidate(IMAGE_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.advanceSpriteCommit(IMAGE_ORDINAL)
+        val validation = assertIs<ValidateSpritePair>(driver.actions.single())
+        assertEquals(listOf(ParkedRoute(IMAGE_ORDINAL, ParkedRouteBarrier.SpritePair(GROUP_ONE))), driver.parked)
+        assertEquals(listOf(2L, JSON_ORDINAL), driver.state.activeRouteOrdinals)
+        val blockingFailure = failure(RenGErrorCode.TRANSPORT_EXECUTION_FAILED)
+
+        driver.event(RouteCompleted(2L, ResourceRouteOutcome.Failure(blockingFailure)))
+
+        assertEquals(2L, driver.state.startCeilingOrdinal)
+        assertEquals(
+            listOf(ParkedRoute(IMAGE_ORDINAL, ParkedRouteBarrier.SpritePair(GROUP_ONE))),
+            driver.parked,
+        )
+        assertEquals(ResourceRouteStatus.RUNNING, driver.record(IMAGE_ORDINAL).status)
+        assertEquals(0L, driver.state.nextRetirementOrdinal)
+        assertNull(driver.state.terminalSelection)
+        assertNull(driver.outcome)
+        assertTrue(driver.emitted.filterIsInstance<CancelRoute>().isEmpty())
+
+        driver.event(SpritePairValidationCompleted(validation.actionId, SpritePairValidationOutcome.Valid))
+        val jsonWrite = assertIs<WriteSpriteMember>(driver.actions.single())
+        assertEquals(SpriteMember.JSON, jsonWrite.member)
+        driver.event(
+            SpriteMemberWriteCompleted(
+                jsonWrite.actionId,
+                GROUP_ONE,
+                SpriteMember.JSON,
+                SuppliedCallOutcome.Success(Unit),
+            ),
+        )
+        val imageWrite = assertIs<WriteSpriteMember>(driver.actions.single())
+        assertEquals(SpriteMember.IMAGE, imageWrite.member)
+        driver.event(
+            SpriteMemberWriteCompleted(
+                imageWrite.actionId,
+                GROUP_ONE,
+                SpriteMember.IMAGE,
+                SuppliedCallOutcome.Success(Unit),
+            ),
+        )
+        val install = assertIs<InstallSpriteVisibility>(driver.actions.single())
+
+        driver.event(SpriteVisibilityInstallCompleted(install.actionId, GROUP_ONE, SuppliedInstallOutcome.Succeeded))
+
+        assertEquals(ResourceOperationOutcome.Failure(blockingFailure), driver.outcome)
+        assertEquals(
+            ResourceTerminalSelection.Route(2L, ResourceRouteOutcome.Failure(blockingFailure)),
+            driver.state.terminalSelection,
+        )
+        assertEquals(3L, driver.state.nextRetirementOrdinal)
+        assertTrue(driver.parked.isEmpty())
+        assertTrue(driver.state.activeRouteOrdinals.isEmpty())
+        assertTrue(driver.group().visible)
+        assertTrue(driver.record(JSON_ORDINAL).visibilityInstalled)
+        assertTrue(driver.record(IMAGE_ORDINAL).visibilityInstalled)
+        assertEquals(ResourceRouteStatus.RESOLVED, driver.record(JSON_ORDINAL).status)
+        assertEquals(ResourceRouteStatus.RESOLVED, driver.record(IMAGE_ORDINAL).status)
+        assertEquals(1, driver.emitted.filterIsInstance<InstallSpriteVisibility>().size)
+        assertTrue(driver.emitted.filterIsInstance<CancelRoute>().isEmpty())
+        driver.assertNoRecoveryActions("parked member under in-flight group work")
+    }
+
+    @Test
     fun aBufferedFailureAlsoClosesAnActiveLowerMemberThatWouldOtherwisePark() {
         val driver = SpriteDriver(
             definitionOf(

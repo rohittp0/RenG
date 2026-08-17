@@ -633,6 +633,60 @@ class ResourceOperationStyleCommitTest {
     }
 
     @Test
+    fun aDiscoveringStyleChildAnnouncesItsOwnChildrenAndTheStyleStillInstalls() {
+        val driver = StyleDriver(styleDefinition(concurrency = 1))
+        val discovering = discoveringFirstChild()
+        driver.driveStyleChildren(listOf(discovering, secondChild()))
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
+        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
+
+        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
+
+        assertTrue(driver.actions.isEmpty())
+        assertEquals(
+            PendingChildDiscovery(FIRST_CHILD_ORDINAL, driver.candidate(FIRST_CHILD_ORDINAL)),
+            driver.record(FIRST_CHILD_ORDINAL).cursor,
+        )
+        assertTrue(driver.record(FIRST_CHILD_ORDINAL).visibilityInstalled)
+        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
+        assertTrue(driver.state.bufferedRouteOutcomes.isEmpty())
+        driver.assertStyleAssignedAndUnretired("discovering child installed")
+
+        driver.event(RouteReadyForDiscovery(FIRST_CHILD_ORDINAL, discovering.occurrence.id))
+
+        assertEquals(
+            listOf(DiscoverChildren(FIRST_CHILD_ORDINAL, discovering.occurrence.id)),
+            driver.actions,
+        )
+        assertEquals(
+            listOf(BufferedRouteOutcome(FIRST_CHILD_ORDINAL, ResourceRouteOutcome.Success)),
+            driver.state.bufferedRouteOutcomes,
+        )
+        driver.assertStyleAssignedAndUnretired("discovering child retired")
+
+        driver.event(ChildrenDiscovered(discovering.occurrence.id, emptyList()))
+
+        assertEquals(listOf(SECOND_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
+        assertTrue(driver.state.traversal.frontierStack.isEmpty())
+
+        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
+        driver.completeStyleCommit()
+        driver.driveOwnerRoutes()
+        driver.finishStyleWriteAndInstall()
+
+        assertTrue(driver.style().visible)
+        assertTrue(driver.record(STYLE_ORDINAL).visibilityInstalled)
+        assertEquals(5L, driver.state.nextRetirementOrdinal)
+        val success = assertIs<ResourceOperationOutcome.Success>(driver.outcome)
+        assertEquals(
+            listOf(ResourceOwnerId(OWNER_A), ResourceOwnerId(OWNER_B)),
+            success.resourceSets.map(OwnerResourceSet::ownerId),
+        )
+        driver.assertSingleSlot("discovering child")
+        driver.assertNoRecoveryActions("discovering child")
+    }
+
+    @Test
     fun everyStyleCursorBlocksRetirementWhileItsAdapterActionIsInFlight() {
         val validationDriver = StyleDriver(styleDefinition(concurrency = 1))
         validationDriver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
@@ -1230,6 +1284,20 @@ private fun firstChild(): DiscoveredResourceChild = DiscoveredResourceChild(
         commitBinding = ResourceCommitBinding.Single,
     ),
 )
+
+private fun discoveringFirstChild(): DiscoveredResourceChild {
+    val child = firstChild()
+    return DiscoveredResourceChild(
+        traversal = child.traversal,
+        occurrence = ResourceOccurrence(
+            id = child.occurrence.id,
+            ownerId = child.occurrence.ownerId,
+            registration = child.occurrence.registration,
+            discoveryRequired = true,
+            commitBinding = child.occurrence.commitBinding,
+        ),
+    )
+}
 
 private fun secondChild(): DiscoveredResourceChild = DiscoveredResourceChild(
     traversal = ResourceChildTraversal.BasemapSource("beta", BasemapSourceMember.Metadata),

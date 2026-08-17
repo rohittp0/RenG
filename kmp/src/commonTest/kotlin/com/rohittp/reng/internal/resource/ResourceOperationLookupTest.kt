@@ -603,8 +603,12 @@ class ResourceOperationLookupTest {
     }
 
     @Test
-    fun discoveryRouteThatFetchedItsOwnBytesRetiresIntoChildDiscovery() {
-        var state = startedState(ResourceAccessMode.RELOAD, discoveryRequired = true).state
+    fun discoveryRouteThatFetchedItsOwnBytesCommitsThemBeforeRetiringIntoChildDiscovery() {
+        var state = startedState(
+            ResourceAccessMode.RELOAD,
+            resourceClass = ResourceClass.BASEMAP_TILE_JSON,
+            discoveryRequired = true,
+        ).state
         val parentId = state.occurrences.single().id
         state = beginAndSample(state)
         state = requireNotNull(
@@ -622,15 +626,64 @@ class ResourceOperationLookupTest {
                 ),
             ).state,
         )
-        assertIs<PendingClassGates>(state.routeRecords.single().cursor)
+        val content = assertIs<PendingClassGates>(state.routeRecords.single().cursor).content
 
-        val ready = ResourceOperationStateMachine.transition(state, RouteReadyForDiscovery(0L, parentId))
+        assertEquals(
+            "route discovery readiness requires its own installed visibility",
+            assertFailsWith<IllegalArgumentException> {
+                ResourceOperationStateMachine.transition(state, RouteReadyForDiscovery(0L, parentId))
+            }.message,
+        )
+
+        val gated = ResourceOperationStateMachine.transition(state, AdvancePendingClassGates(0L))
+        val gate = assertIs<ValidateResourceClass>(gated.actions.single())
+        assertEquals(ResourceClassGate.PARSE_TILEJSON, gate.gate)
+        assertEquals(
+            "route discovery readiness requires no in-flight adapter action",
+            assertFailsWith<IllegalArgumentException> {
+                ResourceOperationStateMachine.transition(
+                    requireNotNull(gated.state),
+                    RouteReadyForDiscovery(0L, parentId),
+                )
+            }.message,
+        )
+        val validated = ResourceOperationStateMachine.transition(
+            requireNotNull(gated.state),
+            ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Valid),
+        )
+        val write = assertIs<WriteStore>(validated.actions.single())
+        val written = ResourceOperationStateMachine.transition(
+            requireNotNull(validated.state),
+            StoreWriteCompleted(write.actionId, SuppliedCallOutcome.Success(Unit)),
+        )
+        val install = assertIs<InstallVisibility>(written.actions.single())
+        val installed = ResourceOperationStateMachine.transition(
+            requireNotNull(written.state),
+            VisibilityInstallCompleted(install.actionId, SuppliedInstallOutcome.Succeeded),
+        )
+
+        assertTrue(installed.actions.isEmpty())
+        assertNull(installed.outcome)
+        val installedState = requireNotNull(installed.state)
+        val installedRecord = installedState.routeRecords.single()
+        assertEquals(ResourceRouteStatus.RUNNING, installedRecord.status)
+        assertTrue(installedRecord.visibilityInstalled)
+        assertEquals(PendingChildDiscovery(0L, content), installedRecord.cursor)
+        assertEquals(listOf(0L), installedState.activeRouteOrdinals)
+        assertEquals(0L, installedState.nextRetirementOrdinal)
+        assertTrue(installedState.bufferedRouteOutcomes.isEmpty())
+
+        val ready = ResourceOperationStateMachine.transition(
+            installedState,
+            RouteReadyForDiscovery(0L, parentId),
+        )
 
         assertNull(ready.outcome)
         assertEquals(listOf(DiscoverChildren(0L, parentId)), ready.actions)
         val record = requireNotNull(ready.state).routeRecords.single()
         assertEquals(ResourceRouteStatus.RESOLVED, record.status)
         assertNull(record.cursor)
+        assertTrue(record.visibilityInstalled)
         assertEquals(
             ContentProvenance.TRANSPORT_200,
             record.lookup?.selectedContent?.provenance,

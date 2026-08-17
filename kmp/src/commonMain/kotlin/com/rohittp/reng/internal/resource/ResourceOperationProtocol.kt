@@ -582,6 +582,21 @@ internal data class PendingClassGates(
     }
 }
 
+/**
+ * A discovery occurrence's route that has completed every class gate, any required write, and its
+ * visibility install, and now awaits only its own discovery announcement. The route stays running and
+ * assigned so that [RouteReadyForDiscovery] remains the single retirement path that emits
+ * [DiscoverChildren].
+ */
+internal data class PendingChildDiscovery(
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
 internal enum class ResourceClassGate {
     PARSE_TILEJSON,
     DECODE_VECTOR_TILE,
@@ -1903,10 +1918,11 @@ internal sealed interface ResourceOperationState {
                 "next retirement ordinal must not exceed assigned route ordinals"
             }
 
-            val occurrenceIds = mutableSetOf<ResourceOccurrenceId>()
-            require(occurrenceSnapshot.all { occurrenceIds.add(it.id) }) {
+            val occurrenceById = mutableMapOf<ResourceOccurrenceId, ResourceOccurrence>()
+            require(occurrenceSnapshot.all { occurrenceById.put(it.id, it) == null }) {
                 "resource occurrence IDs must be unique"
             }
+            val occurrenceIds = occurrenceById.keys
             val identityStableIds = mutableSetOf<String>()
             require(identityRecordSnapshot.all { identityStableIds.add(it.resourceKey.stableId) }) {
                 "canonical identity stable IDs must be unique"
@@ -2023,6 +2039,13 @@ internal sealed interface ResourceOperationState {
                         is PendingClassGates -> require(
                             lookup?.selectedContent == cursor.content,
                         ) { "pending class gates require matching selected content" }
+                        is PendingChildDiscovery -> require(
+                            lookup?.selectedContent == cursor.content &&
+                                record.visibilityInstalled &&
+                                record.joinedOccurrenceIds.any { joinedId ->
+                                    occurrenceById[joinedId]?.discoveryRequired == true
+                                },
+                        ) { "pending child discovery requires an installed discovery occurrence" }
                         is AwaitingClassGate -> require(
                             lookup?.selectedContent == cursor.content &&
                                 ordinaryResourceClassGates(cursor.content.route.resourceClass)
@@ -2330,6 +2353,7 @@ private fun cursorOrdinal(cursor: ResourceRouteCursor): Long? = when (cursor) {
     is AwaitingTransport -> cursor.ordinal
     is AwaitingLatchedTransportReplay -> cursor.ordinal
     is PendingClassGates -> cursor.ordinal
+    is PendingChildDiscovery -> cursor.ordinal
     is AwaitingClassGate -> cursor.ordinal
     is AwaitingStoreWrite -> cursor.ordinal
     is AwaitingVisibilityInstall -> cursor.ordinal
@@ -2350,6 +2374,7 @@ private fun cursorActionId(cursor: ResourceRouteCursor): ResourceActionId? = whe
     is AwaitingTransport -> cursor.actionId
     is AwaitingLatchedTransportReplay -> cursor.actionId
     is PendingClassGates -> null
+    is PendingChildDiscovery -> null
     is AwaitingClassGate -> cursor.actionId
     is AwaitingStoreWrite -> cursor.actionId
     is AwaitingVisibilityInstall -> cursor.actionId

@@ -39,11 +39,40 @@ internal class MercatorSpatialPlan(
     geometries: List<ResolvedGeometry>,
     shaderProfiles: List<Pair<ShaderProfilePlan, ShaderProfilePlan>>,
 ) {
-    private val mapEntrySnapshot: ArrayList<ResolvedDrawnThing> = ArrayList(mapEntries)
-    private val screenEntrySnapshot: ArrayList<ResolvedDrawnThing> = ArrayList(screenEntries)
-    private val geometrySnapshot: ArrayList<ResolvedGeometry> = ArrayList(geometries)
-    private val shaderProfileSnapshot: ArrayList<Pair<ShaderProfilePlan, ShaderProfilePlan>> =
-        ArrayList(shaderProfiles)
+    private val mapEntrySnapshot: ArrayList<ResolvedDrawnThing>
+    private val screenEntrySnapshot: ArrayList<ResolvedDrawnThing>
+    private val geometrySnapshot: ArrayList<ResolvedGeometry>
+    private val shaderProfileSnapshot: ArrayList<Pair<ShaderProfilePlan, ShaderProfilePlan>>
+
+    init {
+        require((footprint == null) == (tileSelection == null)) {
+            "footprint and tileSelection must be jointly absent or present"
+        }
+        require(geometries.size == shaderProfiles.size) {
+            "geometries and shaderProfiles must have equal size"
+        }
+        require(mapEntries.all { it.placement.drawRegime == DrawRegime.MAP_OCCLUDED }) {
+            "mapEntries must contain only map-occluded placements"
+        }
+        require(screenEntries.all { it.placement.drawRegime == DrawRegime.SCREEN_COMPOSITED }) {
+            "screenEntries must contain only screen-composited placements"
+        }
+        for (index in geometries.indices) {
+            val shaderPair = geometries[index].shaderPair
+            val profiles = shaderProfiles[index]
+            require(
+                shaderPair.vertexSource == profiles.first.originalSource &&
+                    shaderPair.fragmentSource == profiles.second.originalSource,
+            ) {
+                "geometry and shader profile sources must correspond by index"
+            }
+        }
+
+        mapEntrySnapshot = ArrayList(mapEntries)
+        screenEntrySnapshot = ArrayList(screenEntries)
+        geometrySnapshot = ArrayList(geometries)
+        shaderProfileSnapshot = ArrayList(shaderProfiles)
+    }
 
     val mapEntries: List<ResolvedDrawnThing>
         get() = ArrayList(mapEntrySnapshot)

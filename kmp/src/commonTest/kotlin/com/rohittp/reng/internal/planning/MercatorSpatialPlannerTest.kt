@@ -20,9 +20,11 @@ import com.rohittp.reng.internal.projection.MERCATOR_MAXIMUM_LATITUDE_DEGREES
 import com.rohittp.reng.internal.projection.MercatorGroundPoint
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
+import com.rohittp.reng.internal.shader.ShaderProfilePlan
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -427,6 +429,139 @@ class MercatorSpatialPlannerTest {
     }
 
     @Test
+    fun spatialPlanConstructorAllowsInactiveAndActiveEmptyBasemapStates() {
+        val inactive = spatialPlanValue(
+            footprint = null,
+            tileSelection = null,
+        )
+        val emptySelection = TileSelectionOutcome.Success(emptyList(), emptyList())
+        val activeEmpty = spatialPlanValue(
+            footprint = ClosedMercatorFootprint.Empty,
+            tileSelection = emptySelection,
+        )
+
+        assertNull(inactive.footprint)
+        assertNull(inactive.tileSelection)
+        assertEquals(ClosedMercatorFootprint.Empty, activeEmpty.footprint)
+        assertEquals(emptySelection, activeEmpty.tileSelection)
+    }
+
+    @Test
+    fun spatialPlanConstructorRejectsFootprintSelectionPresenceMismatches() {
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                footprint = ClosedMercatorFootprint.Empty,
+                tileSelection = null,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                footprint = null,
+                tileSelection = TileSelectionOutcome.Success(emptyList(), emptyList()),
+            )
+        }
+    }
+
+    @Test
+    fun spatialPlanConstructorRejectsGeometryProfileCardinalityMismatches() {
+        val camera = resolvedCamera()
+        val geometry = geometry(
+            topLeft = Vector3(10.0, 0.0, 0.0),
+            bottomRight = Vector3(0.0, 1.0, 0.0),
+            vertexSuffix = "cardinality-vertex",
+            fragmentSuffix = "cardinality-fragment",
+        )
+        val resolvedGeometry = resolveGeometry(geometry, camera).successValue()
+        val profiles = requireNotNull(scanShaderProfile(geometry.shaderPair.vertexSource)) to
+            requireNotNull(scanShaderProfile(geometry.shaderPair.fragmentSource))
+
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                camera = camera,
+                geometries = listOf(resolvedGeometry),
+                shaderProfiles = emptyList(),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                camera = camera,
+                geometries = emptyList(),
+                shaderProfiles = listOf(profiles),
+            )
+        }
+    }
+
+    @Test
+    fun spatialPlanConstructorRequiresEachGeometryToMatchProfileSourcesAtTheSameIndex() {
+        val camera = resolvedCamera()
+        val first = geometry(
+            topLeft = Vector3(20.0, 0.0, 0.0),
+            bottomRight = Vector3(10.0, 1.0, 0.0),
+            vertexSuffix = "first-source-vertex",
+            fragmentSuffix = "first-source-fragment",
+        )
+        val second = geometry(
+            topLeft = Vector3(5.0, 2.0, 0.0),
+            bottomRight = Vector3(-5.0, 3.0, 0.0),
+            vertexSuffix = "second-source-vertex",
+            fragmentSuffix = "second-source-fragment",
+        )
+        val resolved = listOf(
+            resolveGeometry(first, camera).successValue(),
+            resolveGeometry(second, camera).successValue(),
+        )
+        val firstProfiles = requireNotNull(scanShaderProfile(first.shaderPair.vertexSource)) to
+            requireNotNull(scanShaderProfile(first.shaderPair.fragmentSource))
+        val secondProfiles = requireNotNull(scanShaderProfile(second.shaderPair.vertexSource)) to
+            requireNotNull(scanShaderProfile(second.shaderPair.fragmentSource))
+
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                camera = camera,
+                geometries = resolved,
+                shaderProfiles = listOf(secondProfiles, firstProfiles),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                camera = camera,
+                geometries = resolved,
+                shaderProfiles = listOf(
+                    firstProfiles.first to secondProfiles.second,
+                    secondProfiles,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun spatialPlanConstructorRejectsEntriesPlacedInTheWrongDrawRegime() {
+        val camera = resolvedCamera()
+        val mapEntry = ResolvedDrawnThing(
+            reference = DrawnThingReference.StickerAt(7),
+            placement = resolvePlacement(mapPlacement(), camera).successValue(),
+        )
+        val screenEntry = ResolvedDrawnThing(
+            reference = DrawnThingReference.ModelAt(11),
+            placement = resolvePlacement(screenPlacement(2.0), camera).successValue(),
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, mapEntries = listOf(screenEntry))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, screenEntries = listOf(mapEntry))
+        }
+        val valid = spatialPlanValue(
+            camera = camera,
+            mapEntries = listOf(mapEntry),
+            screenEntries = listOf(screenEntry),
+        )
+        assertEquals(listOf(mapEntry), valid.mapEntries)
+        assertEquals(listOf(screenEntry), valid.screenEntries)
+    }
+
+    @Test
     fun spatialPlanSnapshotsConstructorListsReturnsFreshCopiesAndUsesStructuralEquality() {
         val camera = resolvedCamera()
         val mapEntry = ResolvedDrawnThing(
@@ -466,10 +601,11 @@ class MercatorSpatialPlannerTest {
             shaderProfiles = profileInput,
         )
 
-        mapInput.clear()
-        screenInput.clear()
+        mapInput[0] = screenEntry
+        screenInput[0] = mapEntry
         geometryInput.clear()
-        profileInput.clear()
+        val foreignProfile = requireNotNull(scanShaderProfile(validShader("foreign-profile")))
+        profileInput[0] = foreignProfile to foreignProfile
         val firstMapRead = spatialPlan.mapEntries
         val firstScreenRead = spatialPlan.screenEntries
         val firstGeometryRead = spatialPlan.geometries
@@ -551,6 +687,25 @@ class MercatorSpatialPlannerTest {
             basemapStyleConfigured = basemapStyleConfigured,
         ),
     ).value
+
+    private fun spatialPlanValue(
+        camera: ResolvedMercatorCamera = resolvedCamera(),
+        footprint: ClosedMercatorFootprint? = null,
+        tileSelection: TileSelectionOutcome.Success? = null,
+        mapEntries: List<ResolvedDrawnThing> = emptyList(),
+        screenEntries: List<ResolvedDrawnThing> = emptyList(),
+        geometries: List<ResolvedGeometry> = emptyList(),
+        shaderProfiles: List<Pair<ShaderProfilePlan, ShaderProfilePlan>> = emptyList(),
+    ): MercatorSpatialPlan = MercatorSpatialPlan(
+        camera = camera,
+        lodObservation = LodObservation(0),
+        footprint = footprint,
+        tileSelection = tileSelection,
+        mapEntries = mapEntries,
+        screenEntries = screenEntries,
+        geometries = geometries,
+        shaderProfiles = shaderProfiles,
+    )
 
     private fun resolvedCamera(): ResolvedMercatorCamera =
         assertIs<SpatialOutcome.Success<ResolvedMercatorCamera>>(

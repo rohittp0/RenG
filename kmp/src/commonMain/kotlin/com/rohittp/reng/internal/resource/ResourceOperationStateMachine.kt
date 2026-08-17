@@ -680,10 +680,13 @@ internal object ResourceOperationStateMachine {
             require(record.status == ResourceRouteStatus.RUNNING) {
                 "route discovery readiness requires a running route"
             }
+            require(cursorActionId(record.cursor) == null) {
+                "route discovery readiness requires no in-flight adapter action"
+            }
             require(activeRouteOrdinals.remove(event.ordinal)) {
                 "route discovery readiness requires an active route"
             }
-            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
             bufferRouteOutcome(event.ordinal, ResourceRouteOutcome.Success)
             if (terminalSelection == null) {
                 actions += DiscoverChildren(event.ordinal, parent.id)
@@ -698,6 +701,9 @@ internal object ResourceOperationStateMachine {
             require(record.status == ResourceRouteStatus.RUNNING) {
                 "route completion requires a running route"
             }
+            require(cursorActionId(record.cursor) == null) {
+                "route completion requires no in-flight adapter action"
+            }
             if (event.outcome is ResourceRouteOutcome.Success) {
                 val frontierParentId = frontierStack.lastOrNull()?.parentOccurrenceId
                 require(frontierParentId == null || frontierParentId !in record.joinedOccurrenceIds) {
@@ -707,7 +713,7 @@ internal object ResourceOperationStateMachine {
             require(activeRouteOrdinals.remove(event.ordinal)) {
                 "route completion requires an active route"
             }
-            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
 
             if (terminalSelection == null) {
                 bufferRouteOutcome(event.ordinal, event.outcome)

@@ -14,6 +14,8 @@ import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.internal.acceptValue
+import com.rohittp.reng.internal.failure.FailureDescriptor
+import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -585,6 +587,82 @@ class ResourceOperationLookupTest {
         }
     }
 
+    @Test
+    fun retiringARouteWithAnInFlightAdapterActionIsRefused() {
+        var state = startedState(ResourceAccessMode.NORMAL).state
+        state = requireNotNull(ResourceOperationStateMachine.beginLookup(state, 0L).state)
+        assertIs<AwaitingClockSample>(state.routeRecords.single().cursor)
+
+        val refused = assertFailsWith<IllegalArgumentException> {
+            ResourceOperationStateMachine.transition(
+                state,
+                RouteCompleted(0L, ResourceRouteOutcome.Failure(transportFailure())),
+            )
+        }
+        assertEquals("route completion requires no in-flight adapter action", refused.message)
+    }
+
+    @Test
+    fun discoveryRouteThatFetchedItsOwnBytesRetiresIntoChildDiscovery() {
+        var state = startedState(ResourceAccessMode.RELOAD, discoveryRequired = true).state
+        val parentId = state.occurrences.single().id
+        state = beginAndSample(state)
+        state = requireNotNull(
+            ResourceOperationStateMachine.transition(
+                state,
+                TransportCompleted(
+                    ResourceActionId(2L),
+                    SuppliedCallOutcome.Success(
+                        TransportResponse(
+                            statusCode = 200,
+                            body = ABC_BYTES,
+                            metadata = TransportResponseMetadata(etag = "new-etag", freshUntilEpochMillis = 200L),
+                        ),
+                    ),
+                ),
+            ).state,
+        )
+        assertIs<PendingClassGates>(state.routeRecords.single().cursor)
+
+        val ready = ResourceOperationStateMachine.transition(state, RouteReadyForDiscovery(0L, parentId))
+
+        assertNull(ready.outcome)
+        assertEquals(listOf(DiscoverChildren(0L, parentId)), ready.actions)
+        val record = requireNotNull(ready.state).routeRecords.single()
+        assertEquals(ResourceRouteStatus.RESOLVED, record.status)
+        assertNull(record.cursor)
+        assertEquals(
+            ContentProvenance.TRANSPORT_200,
+            record.lookup?.selectedContent?.provenance,
+        )
+    }
+
+    @Test
+    fun retiringARouteFromPendingClassGatesIsPermitted() {
+        var state = startedState(ResourceAccessMode.NORMAL).state
+        state = startThroughResident(state, stored(freshUntil = 101L))
+        assertIs<PendingClassGates>(state.routeRecords.single().cursor)
+
+        val completed = ResourceOperationStateMachine.transition(
+            state,
+            RouteCompleted(0L, ResourceRouteOutcome.Failure(transportFailure())),
+        )
+
+        val record = requireNotNull(completed.state).routeRecords.single()
+        assertEquals(ResourceRouteStatus.RESOLVED, record.status)
+        assertNull(record.cursor)
+    }
+
+    private fun transportFailure(): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.TRANSPORT_EXECUTION_FAILED,
+        stage = PipelineStage.TRANSPORT,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.TRANSPORT,
+            resourceClass = ResourceClass.MODEL_GLB,
+            resourceKey = ResourceKey(ResourceKind.EXTERNAL, "a".repeat(64), ResourceClass.MODEL_GLB),
+        ),
+    )
+
     private fun beginAndSample(state: ResourceOperationState.Running): ResourceOperationState.Running {
         val lookup = ResourceOperationStateMachine.beginLookup(state, 0L)
         return requireNotNull(
@@ -634,6 +712,7 @@ private fun startedState(
     resourceClass: ResourceClass = ResourceClass.MODEL_GLB,
     joinedOccurrences: Int = 1,
     idOffset: Long = 0L,
+    discoveryRequired: Boolean = false,
 ): StartedLookup {
     require(joinedOccurrences > 0)
     val registration = registration(mode, maximumResponseBytes, resourceClass, idOffset)
@@ -642,7 +721,7 @@ private fun startedState(
             id = ResourceOccurrenceId(idOffset + index.toLong()),
             ownerId = ResourceOwnerId(idOffset + index.toLong()),
             registration = registration,
-            discoveryRequired = false,
+            discoveryRequired = discoveryRequired,
             commitBinding = ResourceCommitBinding.Single,
         )
     }

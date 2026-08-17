@@ -27,19 +27,10 @@ import kotlin.test.assertTrue
 class ResourceOperationResponseTest {
     @Test
     fun malformedMetadataBeatsEveryStatusAndBodyFault() {
-        data class Case(val name: String, val metadata: TransportResponseMetadata)
-        val cases = listOf(
-            Case("blank content type", TransportResponseMetadata(contentType = " ")),
-            Case("content type CR", TransportResponseMetadata(contentType = "a\rb")),
-            Case("blank ETag", TransportResponseMetadata(etag = "\t")),
-            Case("ETag LF", TransportResponseMetadata(etag = "a\nb")),
-            Case("last-modified surrogate", TransportResponseMetadata(lastModified = "\uDC00")),
-            Case("negative freshness", TransportResponseMetadata(freshUntilEpochMillis = -1L)),
-        )
         val route = responseRoute(maximumResponseBytes = 1L)
         val key = responseKey()
 
-        cases.forEach { case ->
+        METADATA_FAULT_CASES.forEach { case ->
             listOf(
                 TransportResponse(200, byteArrayOf(), case.metadata),
                 TransportResponse(200, byteArrayOf(1, 2), case.metadata),
@@ -60,6 +51,39 @@ class ResourceOperationResponseTest {
                 )
                 assertInvalidResponse(outcome, response.statusCode, expectedField = null)
             }
+        }
+    }
+
+    @Test
+    fun malformedMetadataBeatsResponsesThatWouldOtherwiseBeSelected() {
+        METADATA_FAULT_CASES.forEach { case ->
+            val mergeable = assertIs<ResponseRuleOutcome.Failure>(
+                resolveTransportResponse(
+                    responseRoute(),
+                    responseKey(),
+                    700L,
+                    staleBaseline = validBaseline(),
+                    conditionalRequest = true,
+                    TransportResponse(304, byteArrayOf(), case.metadata),
+                    PureKotlinSha256,
+                ),
+                case.name,
+            )
+            assertInvalidResponse(mergeable, 304, expectedField = null)
+
+            val inLimit = assertIs<ResponseRuleOutcome.Failure>(
+                resolveTransportResponse(
+                    responseRoute(),
+                    responseKey(),
+                    700L,
+                    staleBaseline = null,
+                    conditionalRequest = false,
+                    TransportResponse(200, "abc".encodeToByteArray(), case.metadata),
+                    PureKotlinSha256,
+                ),
+                case.name,
+            )
+            assertInvalidResponse(inLimit, 200, expectedField = null)
         }
     }
 
@@ -222,10 +246,46 @@ class ResourceOperationResponseTest {
                 StoredRawResource(byteArrayOf(), RESPONSE_ABC_DIGEST, baselineMetadata()),
             ),
             Case(
+                "oversized baseline",
+                responseRoute(maximumResponseBytes = 2L),
+                true,
+                validBaseline(),
+            ),
+            Case(
                 "bad baseline digest",
                 responseRoute(),
                 true,
                 StoredRawResource("abc".encodeToByteArray(), "f".repeat(64), baselineMetadata()),
+            ),
+            Case(
+                "uppercase baseline digest",
+                responseRoute(),
+                true,
+                StoredRawResource(
+                    "abc".encodeToByteArray(),
+                    RESPONSE_ABC_DIGEST.uppercase(),
+                    baselineMetadata(),
+                ),
+            ),
+            Case(
+                "short baseline digest",
+                responseRoute(),
+                true,
+                StoredRawResource(
+                    "abc".encodeToByteArray(),
+                    RESPONSE_ABC_DIGEST.drop(1),
+                    baselineMetadata(),
+                ),
+            ),
+            Case(
+                "negative baseline stored-at",
+                responseRoute(),
+                true,
+                StoredRawResource(
+                    "abc".encodeToByteArray(),
+                    RESPONSE_ABC_DIGEST,
+                    baselineMetadata(storedAt = -1L),
+                ),
             ),
             Case(
                 "bad baseline metadata",
@@ -254,6 +314,62 @@ class ResourceOperationResponseTest {
             )
             assertInvalidResponse(failure, 304, expectedField = null)
         }
+    }
+
+    @Test
+    fun eitherValidatorAloneAndEveryNonFutureFreshnessAdmitsAnEmpty304() {
+        data class Case(val name: String, val baseline: StoredRawResource)
+        val cases = listOf(
+            Case("ETag only", validBaseline(lastModified = null)),
+            Case("last-modified only", validBaseline(etag = null)),
+            Case("freshness equal to the sample", validBaseline(freshUntil = 700L)),
+            Case("absent freshness", validBaseline(freshUntil = null)),
+        )
+
+        cases.forEach { case ->
+            val selected = assertIs<ResponseRuleOutcome.Selected>(
+                resolveTransportResponse(
+                    responseRoute(),
+                    responseKey(),
+                    700L,
+                    case.baseline,
+                    true,
+                    TransportResponse(304, byteArrayOf()),
+                    PureKotlinSha256,
+                ),
+                case.name,
+            ).content
+            assertEquals(ContentProvenance.TRANSPORT_304_MERGED, selected.provenance, case.name)
+            assertContentEquals("abc".encodeToByteArray(), selected.stored.bytes, case.name)
+            assertEquals(700L, selected.stored.metadata.storedAtEpochMillis, case.name)
+        }
+    }
+
+    @Test
+    fun valid304MergeNeverAliasesTheSuppliedBaselineBytes() {
+        val suppliedBytes = "abc".encodeToByteArray()
+        val baseline = StoredRawResource(suppliedBytes, RESPONSE_ABC_DIGEST, baselineMetadata())
+
+        val selected = assertIs<ResponseRuleOutcome.Selected>(
+            resolveTransportResponse(
+                responseRoute(),
+                responseKey(),
+                700L,
+                baseline,
+                true,
+                TransportResponse(304, byteArrayOf()),
+                PureKotlinSha256,
+            ),
+        ).content
+
+        suppliedBytes[0] = 0
+        val firstRead = selected.stored.bytes
+        val secondRead = selected.stored.bytes
+        assertNotSame(firstRead, secondRead)
+        assertContentEquals("abc".encodeToByteArray(), firstRead)
+        firstRead[0] = 0
+        assertContentEquals("abc".encodeToByteArray(), secondRead)
+        assertContentEquals("abc".encodeToByteArray(), selected.stored.bytes)
     }
 
     @Test
@@ -402,6 +518,17 @@ class ResourceOperationResponseTest {
         assertNull(diagnostic.actual)
     }
 }
+
+private data class MetadataFaultCase(val name: String, val metadata: TransportResponseMetadata)
+
+private val METADATA_FAULT_CASES: List<MetadataFaultCase> = listOf(
+    MetadataFaultCase("blank content type", TransportResponseMetadata(contentType = " ")),
+    MetadataFaultCase("content type CR", TransportResponseMetadata(contentType = "a\rb")),
+    MetadataFaultCase("blank ETag", TransportResponseMetadata(etag = "\t")),
+    MetadataFaultCase("ETag LF", TransportResponseMetadata(etag = "a\nb")),
+    MetadataFaultCase("last-modified surrogate", TransportResponseMetadata(lastModified = "\uDC00")),
+    MetadataFaultCase("negative freshness", TransportResponseMetadata(freshUntilEpochMillis = -1L)),
+)
 
 private class CapturingSha(hex: String) : Sha256Function {
     private val result = Sha256Digest(hexToBytes(hex))

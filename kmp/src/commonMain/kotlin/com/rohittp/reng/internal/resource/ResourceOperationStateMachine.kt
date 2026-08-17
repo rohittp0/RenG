@@ -145,6 +145,10 @@ internal object ResourceOperationStateMachine {
             is ResourceClassValidationCompleted -> work.classValidationCompleted(event)
             is StoreWriteCompleted -> work.storeWriteCompleted(event)
             is VisibilityInstallCompleted -> work.visibilityInstallCompleted(event)
+            is AdvancePendingSpriteCommit -> work.advancePendingSpriteCommit(event)
+            is SpritePairValidationCompleted -> work.spritePairValidationCompleted(event)
+            is SpriteMemberWriteCompleted -> work.spriteMemberWriteCompleted(event)
+            is SpriteVisibilityInstallCompleted -> work.spriteVisibilityInstallCompleted(event)
             is RouteReadyForDiscovery -> work.routeReadyForDiscovery(event)
             is ChildrenDiscovered -> work.childrenDiscovered(event)
             is RouteCompleted -> work.routeCompleted(event)
@@ -181,6 +185,10 @@ internal object ResourceOperationStateMachine {
         private val activeRouteOrdinals: MutableList<Long> = initial.activeRouteOrdinals.toMutableList()
         private val bufferedRouteOutcomes: MutableList<BufferedRouteOutcome> =
             initial.bufferedRouteOutcomes.toMutableList()
+        private val spriteCommitStates: MutableList<SpriteCommitState> =
+            initial.spriteCommitStates.toMutableList()
+        private val spriteStateIndexByGroup: MutableMap<SpriteGroupId, Int> = mutableMapOf()
+        private val parkedRoutes: MutableList<ParkedRoute> = initial.parkedRoutes.toMutableList()
         private val actions: MutableList<ResourceOperationAction> = mutableListOf()
         private var nextActionId: Long = initial.nextActionId
         private var nextRouteOrdinal: Long = initial.nextRouteOrdinal
@@ -258,8 +266,20 @@ internal object ResourceOperationStateMachine {
             val runningOrdinals = routeRecords.mapNotNull { record ->
                 record.ordinal?.takeIf { record.status == ResourceRouteStatus.RUNNING }
             }.toSet()
-            require(activeRouteOrdinals.toSet() == runningOrdinals) {
-                "active route ordinals must correspond exactly to running routes"
+            val parkedOrdinals = parkedRoutes.map(ParkedRoute::ordinal).toSet()
+            require(parkedOrdinals.size == parkedRoutes.size) {
+                "parked route ordinals must be distinct"
+            }
+            require(parkedOrdinals.none(activeRouteOrdinals::contains)) {
+                "a parked route must not occupy active capacity"
+            }
+            require(activeRouteOrdinals.toSet() + parkedOrdinals == runningOrdinals) {
+                "running routes must be exactly the active and parked route ordinals"
+            }
+            spriteCommitStates.forEachIndexed { index, group ->
+                require(spriteStateIndexByGroup.put(group.groupId, index) == null) {
+                    "sprite commit group IDs must be unique"
+                }
             }
         }
 
@@ -594,6 +614,443 @@ internal object ResourceOperationStateMachine {
             }
         }
 
+        fun advancePendingSpriteCommit(event: AdvancePendingSpriteCommit) {
+            require(terminalSelection == null) { "sprite commit cannot advance after terminal selection" }
+            val routeIndex = requireNotNull(routeIndexByOrdinal[event.ordinal]) {
+                "sprite commit advancement must name an assigned route"
+            }
+            val record = routeRecords[routeIndex]
+            require(record.status == ResourceRouteStatus.RUNNING && event.ordinal in activeRouteOrdinals) {
+                "sprite commit advancement requires an active running route"
+            }
+            val cursor = record.cursor
+            require(cursor is PendingClassGates && cursor.ordinal == event.ordinal) {
+                "sprite commit advancement requires pending selected content at the same ordinal"
+            }
+            val binding = spriteCommitBinding(routeIndex)
+            val group = spriteCommitStateFor(binding.groupId, binding.member, event.ordinal)
+            require(group.candidate(binding.member) == null) {
+                "each sprite member supplies exactly one validated candidate"
+            }
+            require(group.jointValidationStatus == SpriteJointValidationStatus.WAITING) {
+                "joint sprite validation may be requested only once"
+            }
+            val staged = group.withCandidate(binding.member, cursor.content)
+            putSpriteCommitState(staged)
+
+            val ceiling = startCeilingOrdinal
+            if (ceiling != null && event.ordinal < ceiling) {
+                closeRouteWithoutRemainingWork(routeIndex, event.ordinal)
+                return
+            }
+            if (
+                staged.jsonCandidate != null &&
+                staged.imageCandidate != null &&
+                event.ordinal == staged.jsonOrdinal
+            ) {
+                requestSpritePairValidation(routeIndex, staged)
+                return
+            }
+            parkRoute(routeIndex, event.ordinal, ParkedRouteBarrier.SpritePair(staged.groupId))
+            startEligibleRoutes()
+        }
+
+        fun spritePairValidationCompleted(event: SpritePairValidationCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingSpritePairValidation>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingSpritePairValidation
+            if (finishActionAfterTerminal(routeIndex)) return
+            val group = spriteCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                SpritePairValidationOutcome.Valid -> {
+                    val validated = group.withJointValidationStatus(SpriteJointValidationStatus.VALID)
+                    putSpriteCommitState(validated)
+                    advanceSpriteWritesOrInstall(routeIndex, validated)
+                }
+                is SpritePairValidationOutcome.Failed -> {
+                    putSpriteCommitState(
+                        group.withJointValidationStatus(SpriteJointValidationStatus.FAILED),
+                    )
+                    val reported = requireNotNull(group.candidate(outcome.member)) {
+                        "a reported sprite member requires its validated candidate"
+                    }
+                    closeSpriteMember(
+                        routeIndex,
+                        group,
+                        outcome.member,
+                        ResourceRouteOutcome.Failure(spritePairFailure(reported, outcome.kind)),
+                    )
+                }
+                is SpritePairValidationOutcome.Cancelled -> {
+                    putSpriteCommitState(
+                        group.withJointValidationStatus(SpriteJointValidationStatus.FAILED),
+                    )
+                    closeSpriteOwner(
+                        routeIndex,
+                        group,
+                        ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                    )
+                }
+            }
+        }
+
+        fun spriteMemberWriteCompleted(event: SpriteMemberWriteCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingSpriteMemberWrite>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingSpriteMemberWrite
+            require(cursor.groupId == event.groupId && cursor.member == event.member) {
+                "sprite write acknowledgement must match its complete binding cursor"
+            }
+            if (finishActionAfterTerminal(routeIndex)) return
+            val group = spriteCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                is SuppliedCallOutcome.Success -> {
+                    val acknowledged = group.withAcknowledgedWrite(event.member)
+                    putSpriteCommitState(acknowledged)
+                    advanceSpriteWritesOrInstall(routeIndex, acknowledged)
+                }
+                SuppliedCallOutcome.Failed -> closeSpriteMember(
+                    routeIndex,
+                    group,
+                    event.member,
+                    ResourceRouteOutcome.Failure(storeWriteFailure(cursor.content)),
+                )
+                is SuppliedCallOutcome.Cancelled -> closeSpriteMember(
+                    routeIndex,
+                    group,
+                    event.member,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        fun spriteVisibilityInstallCompleted(event: SpriteVisibilityInstallCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingSpriteVisibilityInstall>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingSpriteVisibilityInstall
+            require(cursor.groupId == event.groupId) {
+                "sprite visibility acknowledgement must match its complete binding cursor"
+            }
+            if (finishActionAfterTerminal(routeIndex)) return
+            val group = spriteCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                SuppliedInstallOutcome.Succeeded -> installSpriteVisibility(routeIndex, group)
+                is SuppliedInstallOutcome.Failed -> closeSpriteOwner(
+                    routeIndex,
+                    group,
+                    ResourceRouteOutcome.Failure(outcome.failure),
+                )
+                is SuppliedInstallOutcome.Cancelled -> closeSpriteOwner(
+                    routeIndex,
+                    group,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        private fun requestSpritePairValidation(routeIndex: Int, group: SpriteCommitState) {
+            val json = requireNotNull(group.jsonCandidate) {
+                "joint sprite validation requires its JSON candidate"
+            }
+            val image = requireNotNull(group.imageCandidate) {
+                "joint sprite validation requires its image candidate"
+            }
+            require(routeRecords[routeIndex].ordinal == group.jsonOrdinal) {
+                "sprite group work belongs to its JSON member ordinal"
+            }
+            val actionId = takeNextActionId()
+            putSpriteCommitState(group.withJointValidationStatus(SpriteJointValidationStatus.REQUESTED))
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingSpritePairValidation(
+                    actionId = actionId,
+                    groupId = group.groupId,
+                    jsonOrdinal = group.jsonOrdinal,
+                    imageOrdinal = group.imageOrdinal,
+                    json = json,
+                    image = image,
+                ),
+            )
+            actions += ValidateSpritePair(actionId, group.groupId, json, image)
+        }
+
+        private fun advanceSpriteWritesOrInstall(routeIndex: Int, group: SpriteCommitState) {
+            val nextMember = group.requiredMemberWrites.getOrNull(group.acknowledgedWrites.size)
+            if (nextMember == null) {
+                requestSpriteVisibilityInstall(routeIndex, group)
+                return
+            }
+            val content = requireNotNull(group.candidate(nextMember)) {
+                "a written sprite member requires its validated candidate"
+            }
+            val memberOrdinal = group.ordinalOf(nextMember)
+            val memberRouteIndex = requireNotNull(routeIndexByOrdinal[memberOrdinal]) {
+                "a written sprite member must name an assigned route"
+            }
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingSpriteMemberWrite(
+                    actionId = actionId,
+                    groupId = group.groupId,
+                    member = nextMember,
+                    ordinal = memberOrdinal,
+                    content = content,
+                ),
+            )
+            actions += WriteSpriteMember(
+                actionId = actionId,
+                groupId = group.groupId,
+                member = nextMember,
+                ordinal = memberOrdinal,
+                rawKey = routeRecords[memberRouteIndex].registration.rawKey,
+                resource = copyStored(content.stored),
+            )
+        }
+
+        private fun requestSpriteVisibilityInstall(routeIndex: Int, group: SpriteCommitState) {
+            val json = requireNotNull(group.jsonCandidate) {
+                "sprite visibility requires its JSON candidate"
+            }
+            val image = requireNotNull(group.imageCandidate) {
+                "sprite visibility requires its image candidate"
+            }
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingSpriteVisibilityInstall(actionId, group.groupId, json, image),
+            )
+            actions += InstallSpriteVisibility(actionId, group.groupId, json, image)
+        }
+
+        private fun installSpriteVisibility(routeIndex: Int, group: SpriteCommitState) {
+            val imageRouteIndex = requireNotNull(routeIndexByOrdinal[group.imageOrdinal]) {
+                "a sprite image member must name an assigned route"
+            }
+            require(activeRouteOrdinals.remove(group.jsonOrdinal)) {
+                "sprite group work requires its active JSON owner"
+            }
+            require(parkedRoutes.removeAll { it.ordinal == group.imageOrdinal }) {
+                "sprite visibility requires its parked image member"
+            }
+            putSpriteCommitState(group.withVisible())
+            updateRouteRecord(
+                routeIndex,
+                cursor = null,
+                status = ResourceRouteStatus.RESOLVED,
+                visibilityInstalled = true,
+            )
+            updateRouteRecord(
+                imageRouteIndex,
+                cursor = null,
+                status = ResourceRouteStatus.RESOLVED,
+                visibilityInstalled = true,
+            )
+            bufferRouteOutcome(group.jsonOrdinal, ResourceRouteOutcome.Success)
+            if (terminalSelection == null) {
+                bufferRouteOutcome(group.imageOrdinal, ResourceRouteOutcome.Success)
+            }
+            if (terminalSelection == null) startEligibleRoutes()
+        }
+
+        private fun closeSpriteMember(
+            routeIndex: Int,
+            group: SpriteCommitState,
+            member: SpriteMember,
+            outcome: ResourceRouteOutcome,
+        ) {
+            require(outcome !is ResourceRouteOutcome.Success) {
+                "a closed sprite member reports its own non-success"
+            }
+            require(activeRouteOrdinals.remove(group.jsonOrdinal)) {
+                "sprite group work requires its active JSON owner"
+            }
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            val reportedOrdinal = group.ordinalOf(member)
+            if (reportedOrdinal == group.jsonOrdinal) {
+                bufferRouteOutcome(reportedOrdinal, outcome)
+            } else {
+                val reportedRouteIndex = requireNotNull(routeIndexByOrdinal[reportedOrdinal]) {
+                    "a reported sprite member must name an assigned route"
+                }
+                require(parkedRoutes.removeAll { it.ordinal == reportedOrdinal }) {
+                    "a reported later sprite member must be parked"
+                }
+                updateRouteRecord(reportedRouteIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+                bufferRouteOutcome(reportedOrdinal, outcome)
+                if (terminalSelection == null) {
+                    bufferRouteOutcome(group.jsonOrdinal, ResourceRouteOutcome.Success)
+                }
+            }
+            if (terminalSelection == null) startEligibleRoutes()
+        }
+
+        private fun closeSpriteOwner(
+            routeIndex: Int,
+            group: SpriteCommitState,
+            outcome: ResourceRouteOutcome,
+        ) {
+            require(activeRouteOrdinals.remove(group.jsonOrdinal)) {
+                "sprite group work requires its active JSON owner"
+            }
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            bufferRouteOutcome(group.jsonOrdinal, outcome)
+            if (terminalSelection == null) startEligibleRoutes()
+        }
+
+        private fun closeRouteWithoutRemainingWork(routeIndex: Int, ordinal: Long) {
+            require(activeRouteOrdinals.remove(ordinal)) {
+                "closing an unstarted commit requires an active route"
+            }
+            updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            bufferRouteOutcome(ordinal, ResourceRouteOutcome.Success)
+            if (terminalSelection == null) startEligibleRoutes()
+        }
+
+        private fun parkRoute(routeIndex: Int, ordinal: Long, barrier: ParkedRouteBarrier) {
+            require(routeRecords[routeIndex].status == ResourceRouteStatus.RUNNING) {
+                "parking requires a running route"
+            }
+            require(cursorActionId(routeRecords[routeIndex].cursor) == null) {
+                "a parked route must have no in-flight adapter action"
+            }
+            require(activeRouteOrdinals.remove(ordinal)) {
+                "parking requires an active route"
+            }
+            val insertionPoint = parkedRoutes.indexOfFirst { it.ordinal > ordinal }
+            val parked = ParkedRoute(ordinal, barrier)
+            if (insertionPoint < 0) parkedRoutes += parked else parkedRoutes.add(insertionPoint, parked)
+        }
+
+        private fun resumeReadyParkedRoutes() {
+            while (activeRouteOrdinals.size < initial.definition.maximumConcurrentRoutes) {
+                val ceiling = startCeilingOrdinal
+                val resumable = parkedRoutes
+                    .filter { parked ->
+                        (ceiling == null || parked.ordinal < ceiling) && isParkedBarrierReady(parked)
+                    }
+                    .minByOrNull(ParkedRoute::ordinal) ?: return
+                val routeIndex = requireNotNull(routeIndexByOrdinal[resumable.ordinal]) {
+                    "a parked route must name an assigned route"
+                }
+                parkedRoutes.remove(resumable)
+                activeRouteOrdinals += resumable.ordinal
+                when (val barrier = resumable.barrier) {
+                    is ParkedRouteBarrier.SpritePair -> requestSpritePairValidation(
+                        routeIndex,
+                        spriteCommitState(barrier.groupId),
+                    )
+                }
+            }
+        }
+
+        private fun isParkedBarrierReady(parked: ParkedRoute): Boolean =
+            when (val barrier = parked.barrier) {
+                is ParkedRouteBarrier.SpritePair -> {
+                    val group = spriteCommitState(barrier.groupId)
+                    parked.ordinal == group.jsonOrdinal &&
+                        group.jsonCandidate != null &&
+                        group.imageCandidate != null &&
+                        group.jointValidationStatus == SpriteJointValidationStatus.WAITING
+                }
+            }
+
+        private fun closeParkedRoutesBelow(ceiling: Long) {
+            val closable = parkedRoutes.map(ParkedRoute::ordinal).filter { it < ceiling }.sorted()
+            if (closable.isEmpty()) return
+            parkedRoutes.removeAll { it.ordinal < ceiling }
+            closable.forEach { ordinal ->
+                val routeIndex = requireNotNull(routeIndexByOrdinal[ordinal]) {
+                    "a parked route must name an assigned route"
+                }
+                updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+                insertBufferedOutcome(ordinal, ResourceRouteOutcome.Success)
+            }
+        }
+
+        private fun discardParkedRoutes() {
+            parkedRoutes.map(ParkedRoute::ordinal).forEach { ordinal ->
+                val routeIndex = requireNotNull(routeIndexByOrdinal[ordinal]) {
+                    "a parked route must name an assigned route"
+                }
+                updateRouteRecord(routeIndex, cursor = null, status = ResourceRouteStatus.RESOLVED)
+            }
+            parkedRoutes.clear()
+        }
+
+        private fun spriteCommitBinding(routeIndex: Int): ResourceCommitBinding.Sprite {
+            val binding = joinedOccurrenceIdsByRouteIndex[routeIndex]
+                .map { occurrence(it).commitBinding }
+                .distinct()
+                .singleOrNull()
+            require(binding is ResourceCommitBinding.Sprite) {
+                "sprite commit requires exactly one sprite commit binding"
+            }
+            require(
+                routeRecords[routeIndex].registration.route.resourceClass ==
+                    spriteMemberResourceClass(binding.member),
+            ) { "a sprite member route must carry its member resource class" }
+            return binding
+        }
+
+        private fun spriteCommitState(groupId: SpriteGroupId): SpriteCommitState {
+            val index = requireNotNull(spriteStateIndexByGroup[groupId]) {
+                "sprite commit work requires its group commit state"
+            }
+            return spriteCommitStates[index]
+        }
+
+        private fun putSpriteCommitState(group: SpriteCommitState) {
+            val index = requireNotNull(spriteStateIndexByGroup[group.groupId]) {
+                "sprite commit work requires its group commit state"
+            }
+            spriteCommitStates[index] = group
+        }
+
+        private fun spriteCommitStateFor(
+            groupId: SpriteGroupId,
+            member: SpriteMember,
+            ordinal: Long,
+        ): SpriteCommitState {
+            spriteStateIndexByGroup[groupId]?.let { index ->
+                val established = spriteCommitStates[index]
+                require(established.ordinalOf(member) == ordinal) {
+                    "a sprite member must keep its group member ordinal"
+                }
+                return established
+            }
+
+            val otherMember = spriteMemberOrder().single { it != member }
+            val otherOrdinal = spriteMemberRouteOrdinal(groupId, otherMember)
+            val created = SpriteCommitState(
+                groupId = groupId,
+                jsonOrdinal = if (member == SpriteMember.JSON) ordinal else otherOrdinal,
+                imageOrdinal = if (member == SpriteMember.IMAGE) ordinal else otherOrdinal,
+                jsonCandidate = null,
+                imageCandidate = null,
+                jointValidationStatus = SpriteJointValidationStatus.WAITING,
+                acknowledgedWrites = emptyList(),
+                visible = false,
+            )
+            spriteStateIndexByGroup[groupId] = spriteCommitStates.size
+            spriteCommitStates += created
+            return created
+        }
+
+        private fun spriteMemberRouteOrdinal(groupId: SpriteGroupId, member: SpriteMember): Long {
+            val binding = ResourceCommitBinding.Sprite(groupId, member)
+            val ordinals = occurrences
+                .filter { it.commitBinding == binding }
+                .map { routeIndex(it.registration.route) }
+                .filter { it >= 0 }
+                .mapNotNull { routeRecords[it].ordinal }
+                .distinct()
+            require(ordinals.size == 1) {
+                "each sprite member requires exactly one assigned route ordinal"
+            }
+            return ordinals.single()
+        }
+
         private fun requestClassGate(
             routeIndex: Int,
             ordinal: Long,
@@ -867,6 +1324,7 @@ internal object ResourceOperationStateMachine {
         fun externalCancellationRequested(event: ExternalCancellationRequested) {
             if (terminalSelection != null) return
             terminalSelection = ResourceTerminalSelection.External(event.cancellation)
+            discardParkedRoutes()
             cancelActiveRoutes(activeRouteOrdinals.toList())
         }
 
@@ -1085,6 +1543,11 @@ internal object ResourceOperationStateMachine {
 
         private fun startEligibleRoutes() {
             if (terminalSelection != null) return
+            resumeReadyParkedRoutes()
+            startNotYetStartedRoutes()
+        }
+
+        private fun startNotYetStartedRoutes() {
             val ceiling = startCeilingOrdinal
             val candidates = routeRecords.withIndex()
                 .filter { (_, record) ->
@@ -1113,6 +1576,19 @@ internal object ResourceOperationStateMachine {
             require(ordinal >= nextRetirementOrdinal && ordinal < nextRouteOrdinal) {
                 "route completion must name an unretired assigned ordinal"
             }
+            insertBufferedOutcome(ordinal, outcome)
+            if (outcome !is ResourceRouteOutcome.Success) {
+                val ceiling = minOf(startCeilingOrdinal ?: ordinal, ordinal)
+                startCeilingOrdinal = ceiling
+                closeParkedRoutesBelow(ceiling)
+            }
+            retireBufferedPrefix()
+        }
+
+        private fun insertBufferedOutcome(
+            ordinal: Long,
+            outcome: ResourceRouteOutcome,
+        ) {
             val insertionPoint = bufferedRouteOutcomes.binarySearch { buffered ->
                 buffered.ordinal.compareTo(ordinal)
             }
@@ -1121,10 +1597,6 @@ internal object ResourceOperationStateMachine {
                 index = -insertionPoint - 1,
                 element = BufferedRouteOutcome(ordinal, outcome),
             )
-            if (outcome !is ResourceRouteOutcome.Success) {
-                startCeilingOrdinal = minOf(startCeilingOrdinal ?: ordinal, ordinal)
-            }
-            retireBufferedPrefix()
         }
 
         private fun retireBufferedPrefix() {
@@ -1146,6 +1618,7 @@ internal object ResourceOperationStateMachine {
                             retired.ordinal,
                             retired.outcome,
                         )
+                        discardParkedRoutes()
                         cancelActiveRoutes(
                             activeRouteOrdinals.filter { it > retired.ordinal },
                         )
@@ -1346,6 +1819,8 @@ internal object ResourceOperationStateMachine {
                 bufferedRouteOutcomes = bufferedRouteOutcomes,
                 startCeilingOrdinal = startCeilingOrdinal,
                 terminalSelection = terminalSelection,
+                spriteCommitStates = spriteCommitStates,
+                parkedRoutes = parkedRoutes,
             ),
             actions = actions,
             outcome = terminalOutcome(),
@@ -1414,6 +1889,8 @@ internal object ResourceOperationStateMachine {
         bufferedRouteOutcomes: List<BufferedRouteOutcome> = emptyList(),
         startCeilingOrdinal: Long? = null,
         terminalSelection: ResourceTerminalSelection? = null,
+        spriteCommitStates: List<SpriteCommitState> = emptyList(),
+        parkedRoutes: List<ParkedRoute> = emptyList(),
     ): ResourceOperationState.Running = ResourceOperationState.Running(
         definition = definition,
         occurrences = occurrences,
@@ -1429,6 +1906,8 @@ internal object ResourceOperationStateMachine {
         bufferedRouteOutcomes = bufferedRouteOutcomes,
         startCeilingOrdinal = startCeilingOrdinal,
         terminalSelection = terminalSelection,
+        spriteCommitStates = spriteCommitStates,
+        parkedRoutes = parkedRoutes,
     )
 
     private fun ambiguousRouteFailure(): FailureDescriptor = FailureDescriptor(
@@ -1537,6 +2016,30 @@ internal object ResourceOperationStateMachine {
         }
     }
 
+    private fun spritePairFailure(
+        content: ResolvedResourceContent,
+        kind: SpritePairFailureKind,
+    ): FailureDescriptor {
+        if (content.provenance == ContentProvenance.STORE) return storeIntegrityFailure(content)
+        return when (kind) {
+            SpritePairFailureKind.JSON_PARSE -> resourceFormatFailure(
+                content,
+                RenGErrorCode.RESOURCE_PARSE_FAILED,
+                PipelineStage.RESOURCE_PARSING,
+            )
+            SpritePairFailureKind.IMAGE_DECODE -> resourceFormatFailure(
+                content,
+                RenGErrorCode.RESOURCE_DECODE_FAILED,
+                PipelineStage.RESOURCE_DECODING,
+            )
+            SpritePairFailureKind.UNSUPPORTED_FEATURE -> resourceFormatFailure(
+                content,
+                RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE,
+                PipelineStage.RESOURCE_PARSING,
+            )
+        }
+    }
+
     private fun resourceFormatFailure(
         content: ResolvedResourceContent,
         code: RenGErrorCode,
@@ -1577,6 +2080,9 @@ internal object ResourceOperationStateMachine {
         is AwaitingClassGate -> cursor.actionId
         is AwaitingStoreWrite -> cursor.actionId
         is AwaitingVisibilityInstall -> cursor.actionId
+        is AwaitingSpritePairValidation -> cursor.actionId
+        is AwaitingSpriteMemberWrite -> cursor.actionId
+        is AwaitingSpriteVisibilityInstall -> cursor.actionId
     }
 
     private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(

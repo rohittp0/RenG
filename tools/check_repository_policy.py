@@ -95,6 +95,31 @@ _LIBRARY_CREATED_DATA_CLASSES = (
     ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
 )
+_EXPECTED_PLUGIN_BLOCKS = {
+    "build.gradle.kts": (
+        "alias", "(", "libs", ".", "plugins", ".", "kotlin", ".", "multiplatform", ")",
+        "apply", "false",
+        "alias", "(", "libs", ".", "plugins", ".", "android", ".", "kotlin", ".",
+        "multiplatform", ".", "library", ")", "apply", "false",
+        "alias", "(", "libs", ".", "plugins", ".", "maven", ".", "publish", ")",
+        "apply", "false",
+    ),
+    "kmp/build.gradle.kts": (
+        "alias", "(", "libs", ".", "plugins", ".", "kotlin", ".", "multiplatform", ")",
+        "alias", "(", "libs", ".", "plugins", ".", "android", ".", "kotlin", ".",
+        "multiplatform", ".", "library", ")",
+        "alias", "(", "libs", ".", "plugins", ".", "maven", ".", "publish", ")",
+    ),
+    "settings.gradle.kts": (
+        "id", "(", "org.gradle.toolchains.foojay-resolver-convention", ")",
+        "version", "1.0.0",
+    ),
+}
+_PLUGIN_ACCESSORS = (
+    ("libs", ".", "plugins", ".", "kotlin", ".", "multiplatform"),
+    ("libs", ".", "plugins", ".", "android", ".", "kotlin", ".", "multiplatform", ".", "library"),
+    ("libs", ".", "plugins", ".", "maven", ".", "publish"),
+)
 _PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
 _COMPLETION_STEP_NAMES = (
     "Verify exact public artifacts and aggregate metadata",
@@ -376,17 +401,75 @@ def _annotation_token(tokens: Sequence[_Token], name: str) -> _Token | None:
     )
 
 
+def _delimiter_end(
+    tokens: Sequence[_Token], opening_index: int, opening: str, closing: str,
+) -> int | None:
+    if opening_index >= len(tokens) or tokens[opening_index].value != opening:
+        return None
+    depth = 1
+    for current in range(opening_index + 1, len(tokens)):
+        if tokens[current].value == opening:
+            depth += 1
+        elif tokens[current].value == closing:
+            depth -= 1
+            if depth == 0:
+                return current
+    return None
+
+
+def _annotation_end(
+    tokens: Sequence[_Token], annotation_index: int,
+) -> tuple[int, str] | None:
+    if annotation_index >= len(tokens) or tokens[annotation_index].value != "@":
+        return None
+    current = annotation_index + 1
+    if current >= len(tokens) or tokens[current].kind != "identifier":
+        return None
+    annotation_name = tokens[current].value
+    current += 1
+    while (
+        current + 1 < len(tokens)
+        and tokens[current].value == "."
+        and tokens[current + 1].kind == "identifier"
+    ):
+        annotation_name = tokens[current + 1].value
+        current += 2
+    if current < len(tokens) and tokens[current].value == "(":
+        closing = _delimiter_end(tokens, current, "(", ")")
+        if closing is None:
+            return None
+        current = closing + 1
+    return current, annotation_name
+
+
 def _consistent_data_class_declarations(
     tokens: Sequence[_Token], class_name: str,
 ) -> tuple[_Token, ...]:
-    required = (
-        "@", "ConsistentCopyVisibility", "public", "data", "class", class_name,
-        "internal", "constructor", "(",
+    declaration = (
+        "public", "data", "class", class_name, "internal", "constructor", "(",
     )
-    return tuple(
-        token for index, token in enumerate(tokens)
-        if _token_sequence_at(tokens, index, required)
-    )
+    matches = []
+    for declaration_index, declaration_token in enumerate(tokens):
+        if not _token_sequence_at(tokens, declaration_index, declaration):
+            continue
+        found = False
+        for annotation_index in range(declaration_index):
+            if tokens[annotation_index].value != "@":
+                continue
+            current = annotation_index
+            annotation_names = []
+            while current < declaration_index and tokens[current].value == "@":
+                parsed = _annotation_end(tokens, current)
+                if parsed is None:
+                    break
+                current, annotation_name = parsed
+                annotation_names.append(annotation_name)
+            if current == declaration_index and "ConsistentCopyVisibility" in annotation_names:
+                found = True
+                break
+        if found:
+            matches.append(declaration_token)
+    return tuple(matches)
 
 
 def _dependency_marker_indices(
@@ -401,6 +484,162 @@ def _dependency_marker_indices(
 
 def _is_call_or_block(tokens: Sequence[_Token], index: int) -> bool:
     return index + 1 < len(tokens) and tokens[index + 1].value in {"(", "{"}
+
+
+def _named_block_ranges(
+    tokens: Sequence[_Token], name: str,
+) -> tuple[tuple[int, int, int], ...]:
+    ranges = []
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier" or token.value != name:
+            continue
+        if index + 1 >= len(tokens) or tokens[index + 1].value != "{":
+            continue
+        end = _block_end(tokens, index + 1)
+        if end is not None:
+            ranges.append((index, index + 2, end))
+    return tuple(ranges)
+
+
+def _inside_token_ranges(index: int, ranges: Sequence[tuple[int, int, int]]) -> bool:
+    return any(start <= index < end for _, start, end in ranges)
+
+
+def _plugin_policy_token(root: Path, path: Path, tokens: Sequence[_Token]) -> _Token | None:
+    relative = path.relative_to(root).as_posix()
+    plugin_ranges = _named_block_ranges(tokens, "plugins")
+    expected = _EXPECTED_PLUGIN_BLOCKS.get(relative)
+    if expected is None:
+        if plugin_ranges:
+            return tokens[plugin_ranges[0][0]]
+    elif (
+        len(plugin_ranges) != 1
+        or tuple(token.value for token in tokens[plugin_ranges[0][1]:plugin_ranges[0][2]]) != expected
+    ):
+        return (
+            tokens[plugin_ranges[0][0]] if plugin_ranges
+            else tokens[0] if tokens
+            else _Token("policy", "", 0)
+        )
+
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier":
+            continue
+        if token.value == "includeBuild":
+            return token
+        if token.value == "apply":
+            allowed_false = (
+                _inside_token_ranges(index, plugin_ranges)
+                and index + 1 < len(tokens)
+                and tokens[index + 1].value == "false"
+            )
+            if not allowed_false:
+                return token
+        if token.value in {"alias", "id"} and _call_arguments(tokens, index) is not None:
+            if not _inside_token_ranges(index, plugin_ranges):
+                return token
+    return None
+
+
+def _plugin_accessor_at(tokens: Sequence[_Token], index: int) -> tuple[str, ...] | None:
+    for accessor in _PLUGIN_ACCESSORS:
+        if not _token_sequence_at(tokens, index, accessor):
+            continue
+        if (
+            index >= 2
+            and tokens[index - 2].value == "alias"
+            and tokens[index - 1].value == "("
+            and index + len(accessor) < len(tokens)
+            and tokens[index + len(accessor)].value == ")"
+        ):
+            return accessor
+    return None
+
+
+def _inside_plugin_accessor(tokens: Sequence[_Token], index: int) -> bool:
+    for start in range(max(0, index - max(map(len, _PLUGIN_ACCESSORS))), index + 1):
+        accessor = _plugin_accessor_at(tokens, start)
+        if accessor is not None and start <= index < start + len(accessor):
+            return True
+    return False
+
+
+def _dependency_name_policy_token(
+    root: Path, path: Path, tokens: Sequence[_Token],
+    allowed_call_indices: frozenset[int],
+) -> _Token | None:
+    relative = path.relative_to(root).as_posix()
+    kotlin_blocks = tuple(
+        index for index, token in enumerate(tokens)
+        if token.kind == "identifier"
+        and token.value == "kotlin"
+        and index + 1 < len(tokens)
+        and tokens[index + 1].value == "{"
+    )
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier":
+            continue
+        if token.value == "libs":
+            plugin_accessor = _plugin_accessor_at(tokens, index)
+            rentile_dependency = (
+                relative == "kmp/build.gradle.kts"
+                and index >= 2
+                and index - 2 in allowed_call_indices
+                and tokens[index - 2].value == "implementation"
+                and tokens[index - 1].value == "("
+                and _token_sequence_at(tokens, index, ("libs", ".", "rentile", ".", "kmp"))
+                and index + 5 < len(tokens)
+                and tokens[index + 5].value == ")"
+            )
+            if plugin_accessor is None and not rentile_dependency:
+                return token
+        if token.value == "kotlin":
+            qualified_name = (
+                index > 0
+                and index + 1 < len(tokens)
+                and tokens[index - 1].value == "."
+                and tokens[index + 1].value == "."
+            )
+            project_extension = (
+                relative == "kmp/build.gradle.kts"
+                and kotlin_blocks == (index,)
+            )
+            test_dependency = (
+                relative == "kmp/build.gradle.kts"
+                and index >= 2
+                and index - 2 in allowed_call_indices
+                and tokens[index - 2].value == "implementation"
+                and tokens[index - 1].value == "("
+                and _token_sequence_at(tokens, index, ("kotlin", "(", "test", ")", ")"))
+            )
+            if not (
+                qualified_name
+                or project_extension
+                or test_dependency
+                or _inside_plugin_accessor(tokens, index)
+            ):
+                return token
+    return None
+
+
+def _unexpected_build_logic_file(root: Path) -> Path | None:
+    kmp_sources = root / "kmp/src"
+    standalone_consumer = root / "consumer-smoke"
+    for path in _files(root, lambda item: True):
+        if path == standalone_consumer or standalone_consumer in path.parents:
+            continue
+        relative_parts = path.relative_to(root).parts
+        normalized_parts = {
+            part.lower().replace("_", "-") for part in relative_parts
+        }
+        if normalized_parts & {
+            "buildsrc", "build-logic", "buildlogic",
+            "convention-plugins", "conventionplugins",
+        }:
+            return path
+        if path.suffix == ".kt" and kmp_sources not in path.parents:
+            return path
+    return None
 
 
 def _dependency_indirection_token(
@@ -612,6 +851,10 @@ def check_dependencies(root: Path) -> list[Violation]:
     )
 
     violations = []
+    kmp_plugin = _plugin_policy_token(root, path, tokens)
+    kmp_names = _dependency_name_policy_token(
+        root, path, tokens, allowed_call_indices,
+    )
     kmp_indirection = _dependency_indirection_token(
         tokens, allowed_call_indices, allowed_dependency_markers,
     )
@@ -626,8 +869,14 @@ def check_dependencies(root: Path) -> list[Violation]:
         if forbidden_token is not None:
             break
 
-    if not allowed or forbidden_token is not None or kmp_indirection is not None:
-        first_token = forbidden_token or kmp_indirection
+    if (
+        not allowed
+        or forbidden_token is not None
+        or kmp_plugin is not None
+        or kmp_names is not None
+        or kmp_indirection is not None
+    ):
+        first_token = forbidden_token or kmp_plugin or kmp_names or kmp_indirection
         offset = first_token.start if first_token is not None else (
             dependency_calls[0][1].start if dependency_calls else 0
         )
@@ -638,11 +887,34 @@ def check_dependencies(root: Path) -> list[Violation]:
             _CYCLE_B_DEPENDENCY_MESSAGE,
         ))
 
+    for relative in _EXPECTED_PLUGIN_BLOCKS:
+        expected_path = root / relative
+        if not expected_path.is_file():
+            violations.append(_violation(
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
+                expected_path,
+                1,
+                _CYCLE_B_DEPENDENCY_MESSAGE,
+            ))
+
+    build_logic_file = _unexpected_build_logic_file(root)
+    if build_logic_file is not None:
+        violations.append(_violation(
+            "FORBIDDEN_CYCLE_B_DEPENDENCY",
+            build_logic_file,
+            1,
+            _CYCLE_B_DEPENDENCY_MESSAGE,
+        ))
+
     for configuration_path in _kmp_gradle_configuration_files(root):
         if configuration_path == path or configuration_path.name.endswith(".versions.toml"):
             continue
         configuration_text = _read(configuration_path)
         configuration_tokens = _kotlin_tokens(configuration_text)
+        plugin = _plugin_policy_token(root, configuration_path, configuration_tokens)
+        names = _dependency_name_policy_token(
+            root, configuration_path, configuration_tokens, frozenset(),
+        )
         indirection = _dependency_indirection_token(
             configuration_tokens, frozenset(), frozenset(),
         )
@@ -656,7 +928,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             forbidden = _contains_forbidden(arguments)
             if forbidden is not None:
                 break
-        first_token = forbidden or indirection
+        first_token = forbidden or plugin or names or indirection
         if first_token is not None:
             violations.append(_violation(
                 "FORBIDDEN_CYCLE_B_DEPENDENCY",
@@ -680,11 +952,31 @@ def check_dependencies(root: Path) -> list[Violation]:
             exact = False
         versions = parsed.get("versions", {})
         libraries = parsed.get("libraries", {})
-        exact = exact and isinstance(versions, dict) and versions.get("rentile") == "0.1.5"
+        plugins = parsed.get("plugins", {})
+        exact = exact and versions == {
+            "agp": "9.3.1",
+            "kotlin": "2.3.21",
+            "mavenPublish": "0.36.0",
+            "rentile": "0.1.5",
+        }
         exact = exact and libraries == {
             "rentile-kmp": {
                 "module": "com.rohittp.rentile:kmp",
                 "version": {"ref": "rentile"},
+            },
+        }
+        exact = exact and plugins == {
+            "kotlin-multiplatform": {
+                "id": "org.jetbrains.kotlin.multiplatform",
+                "version": {"ref": "kotlin"},
+            },
+            "android-kotlin-multiplatform-library": {
+                "id": "com.android.kotlin.multiplatform.library",
+                "version": {"ref": "agp"},
+            },
+            "maven-publish": {
+                "id": "com.vanniktech.maven.publish",
+                "version": {"ref": "mavenPublish"},
             },
         }
         forbidden_match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))

@@ -60,6 +60,15 @@ PUBLISH_WORKFLOW = (
     + COMPLETION_PUBLIC_STEP
 )
 
+LIBRARY_CREATED_DATA_CLASSES = (
+    ("Diagnostic", "kmp/src/commonMain/kotlin/com/rohittp/reng/Diagnostics.kt"),
+    ("RawResourceKey", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceAdapters.kt"),
+    ("ResourceKey", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceUsage", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+)
+
 
 def write(root: Path, relative: str, text: str) -> None:
     path = root / relative
@@ -89,12 +98,30 @@ rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
           "commonTest.dependencies { implementation(kotlin(\"test\")) }\n")
     write(root, "consumer-smoke/build.gradle.kts", TARGETS + "\n" +
           "implementation(\"com.rohittp.reng:kmp:$rengVersion\")\n")
+    write(root, "consumer-smoke/settings.gradle.kts", "rootProject.name = \"consumer-smoke\"\n")
+    abi_classes = "\n".join(
+        f"final class com.rohittp.reng/{class_name} {{\n}}\n"
+        for class_name, _ in LIBRARY_CREATED_DATA_CLASSES
+    )
     write(
         root,
         "kmp/api/kmp.klib.api",
         "// Targets: [iosArm64, iosSimulatorArm64, linuxArm64, linuxX64, macosArm64]\n"
-        "final class com.rohittp.reng/Public\n",
+        "final class com.rohittp.reng/Public\n\n"
+        + abi_classes,
     )
+    declarations_by_path: dict[str, list[str]] = {}
+    for class_name, relative in LIBRARY_CREATED_DATA_CLASSES:
+        declarations_by_path.setdefault(relative, []).append(
+            "@ConsistentCopyVisibility\n"
+            f"public data class {class_name} internal constructor(public val value: String)\n"
+        )
+    for relative, declarations in declarations_by_path.items():
+        write(
+            root,
+            relative,
+            "package com.rohittp.reng\n\n" + "\n".join(declarations),
+        )
     write(root, "README.md", "RenG Apache-2.0 com.rohittp.reng:kmp:<version>\n")
     write(root, "LICENSE", "Apache License\nVersion 2.0, January 2004\n")
     for name in (".nojekyll", "robots.txt", "sitemap.xml", "llms.txt"):
@@ -156,7 +183,6 @@ class RepositoryPolicyTests(unittest.TestCase):
             ("final fun com.rohittp.reng/createRenderer(): com.rohittp.reng/Renderer\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
             ("final class com.rohittp.reng/RendererFactory\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
             ("final object com.rohittp.reng/RenG\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
-            ("@ExposedCopyVisibility\n", "EXPOSED_COPY_VISIBILITY"),
         )
         for mutation, expected in append_cases:
             with self.subTest(expected=expected, mutation=mutation):
@@ -174,6 +200,77 @@ class RepositoryPolicyTests(unittest.TestCase):
             write(root, "kmp/api/jvm.api", "final class com.rohittp.reng/JvmOnly\n")
             codes = {violation.code for violation in check_repository(root)}
             self.assertIn("JVM_ABI", codes)
+
+    def test_library_created_data_classes_require_source_copy_visibility_and_closed_abi(self) -> None:
+        for class_name, relative in LIBRARY_CREATED_DATA_CLASSES:
+            declaration = (
+                "@ConsistentCopyVisibility\n"
+                f"public data class {class_name} internal constructor(public val value: String)"
+            )
+            without_annotation = (
+                f"public data class {class_name} internal constructor(public val value: String)"
+            )
+            exposed_annotation = (
+                "@ExposedCopyVisibility\n"
+                f"public data class {class_name} internal constructor(public val value: String)"
+            )
+            for replacement, expected in (
+                (without_annotation, "CONSISTENT_COPY_VISIBILITY"),
+                (exposed_annotation, "EXPOSED_COPY_VISIBILITY"),
+            ):
+                with self.subTest(class_name=class_name, source_expected=expected):
+                    with TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        create_clean_fixture(root)
+                        source = root / relative
+                        source.write_text(
+                            source.read_text(encoding="utf-8").replace(declaration, replacement),
+                            encoding="utf-8",
+                        )
+                        codes = {violation.code for violation in check_repository(root)}
+                        self.assertIn(expected, codes)
+
+            generated_leaks = (
+                (
+                    f"    constructor <init>(kotlin/String) // "
+                    f"com.rohittp.reng/{class_name}.<init>|<init>(kotlin.String){{}}[0]\n",
+                    "constructor",
+                ),
+                (
+                    f"    final fun copy(kotlin/String = ...): com.rohittp.reng/{class_name} // "
+                    f"com.rohittp.reng/{class_name}.copy|copy(kotlin.String){{}}[0]\n",
+                    "copy",
+                ),
+            )
+            for leak, shape in generated_leaks:
+                with self.subTest(class_name=class_name, abi_leak=shape):
+                    with TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        create_clean_fixture(root)
+                        abi = root / "kmp/api/kmp.klib.api"
+                        header = f"final class com.rohittp.reng/{class_name} {{\n"
+                        abi.write_text(
+                            abi.read_text(encoding="utf-8").replace(header, header + leak),
+                            encoding="utf-8",
+                        )
+                        codes = {violation.code for violation in check_repository(root)}
+                        self.assertIn("LIBRARY_CREATED_DATA_CLASS_ABI", codes)
+
+    def test_internal_package_public_abi_fails_closed_for_dot_and_slash_dumps(self) -> None:
+        mutations = (
+            "final class com.rohittp.reng.internal/Leaked\n",
+            "final class com/rohittp/reng/internal/Leaked\n",
+            "final class com.rohittp.reng.internal.Leaked\n",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    abi = root / "kmp/api/kmp.klib.api"
+                    abi.write_text(abi.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("ABI_INTERNAL_LEAK", codes)
 
     def test_cycle_b_dependency_allowlist_rejects_every_addition(self) -> None:
         mutations = (
@@ -226,6 +323,101 @@ class RepositoryPolicyTests(unittest.TestCase):
                     )
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_cycle_b_dependency_allowlist_rejects_gradle_indirection(self) -> None:
+        script_mutations = (
+            (
+                "kmp/build.gradle.kts",
+                "\ndependencies.addProvider(\"commonMainImplementation\", "
+                "providers.provider { \"com.example:runtime:1\" })\n",
+            ),
+            (
+                "kmp/build.gradle.kts",
+                "\nconfigurations.named(\"commonMainImplementation\") { "
+                "dependencies += project.dependencies.create(\"com.example:runtime:1\") }\n",
+            ),
+            (
+                "kmp/build.gradle.kts",
+                "\ncommonMainImplementation(\"com.example:runtime:1\")\n",
+            ),
+            (
+                "build.gradle.kts",
+                "\nsubprojects { dependencies { "
+                "add(\"commonMainImplementation\", \"com.example:runtime:1\") } }\n",
+            ),
+            (
+                "build.gradle.kts",
+                "\nallprojects { configurations.configureEach { withDependencies { "
+                "add(project.dependencies.create(\"com.example:runtime:1\")) } } }\n",
+            ),
+            (
+                "build.gradle.kts",
+                "\nconfigurations.configureEach { resolutionStrategy.dependencySubstitution { "
+                "substitute(module(\"com.rohittp.rentile:kmp\"))"
+                ".using(module(\"com.example:replacement:1\")) } }\n",
+            ),
+        )
+        for relative, mutation in script_mutations:
+            with self.subTest(relative=relative, mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    path = root / relative
+                    path.write_text(path.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "gradle/injected.gradle.kts",
+                "dependencies { add(\"commonMainImplementation\", \"com.example:runtime:1\") }\n",
+            )
+            build = root / "kmp/build.gradle.kts"
+            build.write_text(
+                build.read_text(encoding="utf-8")
+                + "\napply(from = rootProject.file(\"gradle/injected.gradle.kts\"))\n",
+                encoding="utf-8",
+            )
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_cycle_b_dependency_catalog_is_exact_and_custom_catalogs_are_rejected(self) -> None:
+        catalog_mutations = (
+            lambda text: text.replace("com.rohittp.rentile:kmp", "com.example:replacement"),
+            lambda text: text.replace('rentile = "0.1.5"', 'rentile = "9.9.9"'),
+            lambda text: text + '\nextra = { module = "com.example:runtime", version = "1" }\n',
+        )
+        for mutate in catalog_mutations:
+            with self.subTest(mutate=mutate):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    catalog = root / "gradle/libs.versions.toml"
+                    catalog.write_text(mutate(catalog.read_text(encoding="utf-8")), encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "gradle/injected.versions.toml",
+                '[versions]\nextra = "1"\n[libraries]\n'
+                'extra = { module = "com.example:runtime", version.ref = "extra" }\n',
+            )
+            settings = root / "settings.gradle.kts"
+            settings.write_text(
+                settings.read_text(encoding="utf-8")
+                + "\ndependencyResolutionManagement { versionCatalogs { "
+                "create(\"injected\") { from(files(\"gradle/injected.versions.toml\")) } } }\n",
+                encoding="utf-8",
+            )
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
     def test_each_mutation_reports_expected_policy(self) -> None:
         mutations = (
@@ -366,12 +558,12 @@ class RepositoryPolicyTests(unittest.TestCase):
             (
                 "gradle/libs.versions.toml",
                 "\nreng-kmp = { group = \"com.rohittp.reng\", name = \"kmp\", version.ref = \"reng\" }\n",
-                None,
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
             ),
             (
                 "gradle/libs.versions.toml",
                 "\nother-kmp = { group = \"example.org\", name = \"kmp\", version = \"0.2.0\" }\n",
-                None,
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
             ),
             (
                 "consumer-smoke/src/commonMain/kotlin/Comment.kt",

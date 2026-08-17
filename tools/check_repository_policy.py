@@ -73,9 +73,28 @@ _KMP_TARGET_FACTORIES = frozenset({
     "watchosDeviceArm64", "watchosSimulatorArm64", "watchosX64", "watchosX86",
 })
 _DEPENDENCY_CALLS = frozenset({
-    "add", "api", "compileOnly", "implementation", "runtimeOnly", "testApi",
-    "testCompileOnly", "testImplementation", "testRuntimeOnly",
+    "add", "annotationProcessor", "api", "classpath", "compileOnly", "implementation",
+    "kapt", "ksp", "runtimeOnly", "testApi", "testCompileOnly", "testImplementation",
+    "testRuntimeOnly",
 })
+_DEPENDENCY_INDIRECTION_IDENTIFIERS = frozenset({
+    "addAll", "addAllLater", "addLater", "addProvider", "addProviderConvertible",
+    "componentMetadata", "componentSelection", "components", "constraints",
+    "defaultDependencies", "dependencySubstitution", "eachDependency", "extendsFrom",
+    "force", "moduleReplacement", "modules", "plusAssign", "resolutionStrategy",
+    "setDependencies", "setExtendsFrom", "substitute", "versionCatalogs", "withDependencies",
+})
+_DEPENDENCY_CONFIGURATION_SUFFIXES = (
+    "Api", "CompileOnly", "Implementation", "RuntimeOnly",
+)
+_LIBRARY_CREATED_DATA_CLASSES = (
+    ("Diagnostic", "kmp/src/commonMain/kotlin/com/rohittp/reng/Diagnostics.kt"),
+    ("RawResourceKey", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceAdapters.kt"),
+    ("ResourceKey", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceUsage", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+)
 _PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
 _COMPLETION_STEP_NAMES = (
     "Verify exact public artifacts and aggregate metadata",
@@ -134,6 +153,24 @@ def _files(root: Path, predicate) -> tuple[Path, ...]:
 
 def _production_gradle_scripts(root: Path) -> tuple[Path, ...]:
     return _files(root, lambda path: path.name.endswith((".gradle", ".gradle.kts")))
+
+
+def _belongs_to_root_gradle_build(root: Path, path: Path) -> bool:
+    standalone_consumer = root / "consumer-smoke"
+    return path != standalone_consumer and standalone_consumer not in path.parents
+
+
+def _kmp_gradle_configuration_files(root: Path) -> tuple[Path, ...]:
+    return tuple(
+        path for path in _files(
+            root,
+            lambda item: (
+                item.name.endswith((".gradle", ".gradle.kts"))
+                or item.name.endswith(".versions.toml")
+            ),
+        )
+        if _belongs_to_root_gradle_build(root, path)
+    )
 
 
 def _workflow_files(root: Path) -> tuple[Path, ...]:
@@ -322,6 +359,85 @@ def _inside_ranges(index: int, ranges: Sequence[tuple[int, int]]) -> bool:
     return any(start <= index < end for start, end in ranges)
 
 
+def _token_sequence_at(tokens: Sequence[_Token], index: int, values: Sequence[str]) -> bool:
+    return (
+        index + len(values) <= len(tokens)
+        and tuple(token.value for token in tokens[index:index + len(values)]) == tuple(values)
+    )
+
+
+def _annotation_token(tokens: Sequence[_Token], name: str) -> _Token | None:
+    return next(
+        (
+            token for token in tokens
+            if token.kind == "identifier" and token.value == name
+        ),
+        None,
+    )
+
+
+def _consistent_data_class_declarations(
+    tokens: Sequence[_Token], class_name: str,
+) -> tuple[_Token, ...]:
+    required = (
+        "@", "ConsistentCopyVisibility", "public", "data", "class", class_name,
+        "internal", "constructor", "(",
+    )
+    return tuple(
+        token for index, token in enumerate(tokens)
+        if _token_sequence_at(tokens, index, required)
+    )
+
+
+def _dependency_marker_indices(
+    tokens: Sequence[_Token], source_set: str,
+) -> tuple[int, ...]:
+    return tuple(
+        index + 2
+        for index in range(len(tokens) - 3)
+        if _token_sequence_at(tokens, index, (source_set, ".", "dependencies", "{"))
+    )
+
+
+def _is_call_or_block(tokens: Sequence[_Token], index: int) -> bool:
+    return index + 1 < len(tokens) and tokens[index + 1].value in {"(", "{"}
+
+
+def _dependency_indirection_token(
+    tokens: Sequence[_Token], allowed_call_indices: frozenset[int],
+    allowed_dependency_markers: frozenset[int],
+) -> _Token | None:
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier":
+            continue
+        if token.value == "apply" and _is_call_or_block(tokens, index):
+            return token
+        if token.value == "dependencies" and index not in allowed_dependency_markers:
+            return token
+        qualified_name_segment = (
+            index > 0
+            and index + 1 < len(tokens)
+            and tokens[index - 1].value == "."
+            and tokens[index + 1].value == "."
+        )
+        if (
+            token.value in _DEPENDENCY_CALLS
+            and index not in allowed_call_indices
+            and not qualified_name_segment
+        ):
+            return token
+        if token.value in _DEPENDENCY_INDIRECTION_IDENTIFIERS:
+            return token
+        if token.value == "configurations":
+            return token
+        if (
+            token.value != "explicitApi"
+            and token.value.endswith(_DEPENDENCY_CONFIGURATION_SUFFIXES)
+        ):
+            return token
+    return None
+
+
 def _has_empty_call(tokens: Sequence[_Token], name: str) -> _Token | None:
     for index, token in enumerate(tokens):
         if token.value == name and _call_arguments(tokens, index) == ():
@@ -450,7 +566,8 @@ def check_dependencies(root: Path) -> list[Violation]:
     dependency_calls = [
         (index, token, arguments)
         for index, token in enumerate(tokens)
-        if token.value in _DEPENDENCY_CALLS
+        if token.kind == "identifier"
+        and token.value in _DEPENDENCY_CALLS
         and (arguments := _call_arguments(tokens, index)) is not None
     ]
 
@@ -474,18 +591,44 @@ def check_dependencies(root: Path) -> list[Violation]:
         and len(dependency_calls) == 2
     )
 
+    allowed_call_indices = frozenset(
+        index
+        for index, token, arguments in dependency_calls
+        if token.value == "implementation"
+        and (
+            (
+                _inside_ranges(index, common_main_ranges)
+                and tuple(item.value for item in arguments) == expected_main
+            )
+            or (
+                _inside_ranges(index, common_test_ranges)
+                and tuple(item.value for item in arguments) == expected_test
+            )
+        )
+    )
+    allowed_dependency_markers = frozenset(
+        _dependency_marker_indices(tokens, "commonMain")
+        + _dependency_marker_indices(tokens, "commonTest")
+    )
+
+    violations = []
+    kmp_indirection = _dependency_indirection_token(
+        tokens, allowed_call_indices, allowed_dependency_markers,
+    )
     forbidden_token = None
     for index, token in enumerate(tokens):
         arguments = _call_arguments(tokens, index)
-        if arguments is None or token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
+        if arguments is None or token.kind != "identifier":
+            continue
+        if token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
             continue
         forbidden_token = _contains_forbidden(arguments)
         if forbidden_token is not None:
             break
 
-    violations = []
-    if not allowed or forbidden_token is not None:
-        offset = forbidden_token.start if forbidden_token is not None else (
+    if not allowed or forbidden_token is not None or kmp_indirection is not None:
+        first_token = forbidden_token or kmp_indirection
+        offset = first_token.start if first_token is not None else (
             dependency_calls[0][1].start if dependency_calls else 0
         )
         violations.append(_violation(
@@ -495,16 +638,146 @@ def check_dependencies(root: Path) -> list[Violation]:
             _CYCLE_B_DEPENDENCY_MESSAGE,
         ))
 
-    catalog = root / "gradle/libs.versions.toml"
-    if catalog.is_file():
-        catalog_text = _read(catalog)
-        match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))
-        if match is not None:
+    for configuration_path in _kmp_gradle_configuration_files(root):
+        if configuration_path == path or configuration_path.name.endswith(".versions.toml"):
+            continue
+        configuration_text = _read(configuration_path)
+        configuration_tokens = _kotlin_tokens(configuration_text)
+        indirection = _dependency_indirection_token(
+            configuration_tokens, frozenset(), frozenset(),
+        )
+        forbidden = None
+        for index, token in enumerate(configuration_tokens):
+            arguments = _call_arguments(configuration_tokens, index)
+            if arguments is None or token.kind != "identifier":
+                continue
+            if token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
+                continue
+            forbidden = _contains_forbidden(arguments)
+            if forbidden is not None:
+                break
+        first_token = forbidden or indirection
+        if first_token is not None:
             violations.append(_violation(
                 "FORBIDDEN_CYCLE_B_DEPENDENCY",
-                catalog,
-                _line(catalog_text, match.start()),
-                "Cycle B must not declare coroutine, crypto/hash, serialization, Ktor, Skiko, Wire, or corpus dependencies",
+                configuration_path,
+                _line(configuration_text, first_token.start),
+                _CYCLE_B_DEPENDENCY_MESSAGE,
+            ))
+
+    catalog = root / "gradle/libs.versions.toml"
+    catalog_paths = tuple(
+        item for item in _kmp_gradle_configuration_files(root)
+        if item.name.endswith(".versions.toml")
+    )
+    for catalog_path in catalog_paths:
+        catalog_text = _read(catalog_path)
+        exact = catalog_path == catalog
+        try:
+            parsed = tomllib.loads(_mask_hash_comments(catalog_text))
+        except tomllib.TOMLDecodeError:
+            parsed = {}
+            exact = False
+        versions = parsed.get("versions", {})
+        libraries = parsed.get("libraries", {})
+        exact = exact and isinstance(versions, dict) and versions.get("rentile") == "0.1.5"
+        exact = exact and libraries == {
+            "rentile-kmp": {
+                "module": "com.rohittp.rentile:kmp",
+                "version": {"ref": "rentile"},
+            },
+        }
+        forbidden_match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))
+        if not exact or forbidden_match is not None:
+            offset = forbidden_match.start() if forbidden_match is not None else 0
+            violations.append(_violation(
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
+                catalog_path,
+                _line(catalog_text, offset),
+                _CYCLE_B_DEPENDENCY_MESSAGE,
+            ))
+    if catalog not in catalog_paths:
+        violations.append(_violation(
+            "FORBIDDEN_CYCLE_B_DEPENDENCY",
+            catalog,
+            1,
+            _CYCLE_B_DEPENDENCY_MESSAGE,
+        ))
+    return violations
+
+
+def _production_kotlin_sources(root: Path) -> tuple[Path, ...]:
+    source_root = root / "kmp/src"
+    if not source_root.is_dir():
+        return ()
+    return tuple(sorted(
+        (
+            path for path in source_root.rglob("*.kt")
+            if path.is_file()
+            and not _is_ignored(root, path)
+            and path.relative_to(source_root).parts
+            and not path.relative_to(source_root).parts[0].lower().endswith("test")
+        ),
+        key=lambda path: path.as_posix(),
+    ))
+
+
+def _abi_class_blocks(
+    declarations: Sequence[tuple[int, str]], class_name: str,
+) -> tuple[tuple[int, tuple[tuple[int, str], ...]], ...]:
+    qualified_name = (
+        rf"com(?:[/.])rohittp(?:[/.])reng(?:[/.]){re.escape(class_name)}"
+    )
+    header = re.compile(rf"^\s*(?:final\s+)?class\s+{qualified_name}\b.*\{{\s*(?://.*)?$")
+    blocks = []
+    for index, (line_number, source_line) in enumerate(declarations):
+        if header.search(source_line) is None:
+            continue
+        body = []
+        depth = source_line.split("//", 1)[0].count("{") - source_line.split("//", 1)[0].count("}")
+        for body_line_number, body_line in declarations[index + 1:]:
+            code = body_line.split("//", 1)[0]
+            depth += code.count("{") - code.count("}")
+            if depth <= 0:
+                break
+            body.append((body_line_number, body_line))
+        blocks.append((line_number, tuple(body)))
+    return tuple(blocks)
+
+
+def _check_library_created_data_classes(root: Path) -> list[Violation]:
+    violations = []
+    for source_path in _production_kotlin_sources(root):
+        source_text = _read(source_path)
+        exposed = _annotation_token(_kotlin_tokens(source_text), "ExposedCopyVisibility")
+        if exposed is not None:
+            violations.append(_violation(
+                "EXPOSED_COPY_VISIBILITY",
+                source_path,
+                _line(source_text, exposed.start),
+                "production source must never expose copy for library-created data classes",
+            ))
+
+    for class_name, relative in _LIBRARY_CREATED_DATA_CLASSES:
+        source_path = root / relative
+        if not source_path.is_file():
+            violations.append(_violation(
+                "CONSISTENT_COPY_VISIBILITY",
+                source_path,
+                1,
+                f"{class_name} must have one unconditional @ConsistentCopyVisibility declaration",
+            ))
+            continue
+        source_text = _read(source_path)
+        declarations = _consistent_data_class_declarations(
+            _kotlin_tokens(source_text), class_name,
+        )
+        if len(declarations) != 1:
+            violations.append(_violation(
+                "CONSISTENT_COPY_VISIBILITY",
+                source_path,
+                _line(source_text, declarations[0].start) if declarations else 1,
+                f"{class_name} must have one unconditional @ConsistentCopyVisibility declaration",
             ))
     return violations
 
@@ -512,7 +785,7 @@ def check_dependencies(root: Path) -> list[Violation]:
 def check_abi(root: Path) -> list[Violation]:
     api_directory = root / "kmp/api"
     api_file = api_directory / "kmp.klib.api"
-    violations = []
+    violations = _check_library_created_data_classes(root)
     if not api_file.is_file():
         violations.append(_violation(
             "KLIB_ABI", api_file, 1, "Cycle B requires kmp/api/kmp.klib.api",
@@ -535,6 +808,52 @@ def check_abi(root: Path) -> list[Violation]:
                 declarations[0][0] if declarations else 1,
                 "Cycle B ABI must contain a com.rohittp.reng declaration",
             ))
+
+        internal_pattern = re.compile(
+            r"\bcom(?:[/.])rohittp(?:[/.])reng(?:[/.])internal(?:[/.])"
+        )
+        for line_number, source_line in declarations:
+            if internal_pattern.search(source_line) is not None:
+                violations.append(_violation(
+                    "ABI_INTERNAL_LEAK",
+                    api_file,
+                    line_number,
+                    "Cycle B ABI must not contain public declarations under com.rohittp.reng.internal",
+                ))
+                break
+
+        for class_name, _ in _LIBRARY_CREATED_DATA_CLASSES:
+            blocks = _abi_class_blocks(declarations, class_name)
+            leak_line = None
+            if len(blocks) == 1:
+                _, body = blocks[0]
+                for line_number, source_line in body:
+                    code = source_line.split("//", 1)[0]
+                    if re.search(r"^\s*constructor\s+<init>\s*\(", code) is not None:
+                        leak_line = line_number
+                        break
+                    if re.search(r"^\s*(?:final\s+)?fun\s+copy\s*\(", code) is not None:
+                        leak_line = line_number
+                        break
+                qualified_symbol = re.compile(
+                    rf"com(?:[/.])rohittp(?:[/.])reng(?:[/.]){re.escape(class_name)}"
+                    r"(?:\.<init>|\.copy(?:\b|\|))"
+                )
+                if leak_line is None:
+                    leak_line = next(
+                        (
+                            line_number for line_number, source_line in declarations
+                            if qualified_symbol.search(source_line) is not None
+                        ),
+                        None,
+                    )
+            if len(blocks) != 1 or leak_line is not None:
+                violations.append(_violation(
+                    "LIBRARY_CREATED_DATA_CLASS_ABI",
+                    api_file,
+                    leak_line or (blocks[0][0] if blocks else 1),
+                    f"{class_name} ABI must expose neither a public constructor nor copy",
+                ))
 
         forbidden_patterns = (
             (r"com\.rohittp\.rentile", "ABI_RENTILE_LEAK", "Cycle B ABI must not expose Rentile types"),

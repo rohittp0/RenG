@@ -228,7 +228,7 @@ _REPOSITORY_IDENTIFIERS = frozenset({
     "repositories", "repositoriesMode", "r2Bucket", "r2Endpoint", "subprojects",
 })
 _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
-    "build.gradle.kts": "dd287b9ac779dfeac3cbbacc1615df26c0d8c4a118a02a15f64a2b2e9872ebcd",
+    "build.gradle.kts": "552201d8dc4bf1ffffc11bb1c95363bb853ee62e7d25a4b55bb853a61c7af352",
     "gradle/libs.versions.toml": "35bfceee660cef966bffdcca954dbf501ea1acdd8a4f0c4e48069594bc80ab1f",
     "kmp/build.gradle.kts": "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
     "settings.gradle.kts": "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
@@ -250,6 +250,7 @@ _FORBIDDEN_BUILD_PAYLOAD_MAGIC_PREFIXES = (
     b"\xca\xfe\xba\xbf",
     b"\xbf\xba\xfe\xca",
     b"!<arch>\n",
+    b"!<thin>\n",
     b"\x00asm",
     b"BC\xc0\xde",
     b"\xde\xc0\x17\x0b",
@@ -560,6 +561,106 @@ def _kotlin_string_end(text: str, start: int, *, raw: bool) -> int:
     return len(text)
 
 
+def _shift_tokens(tokens: Sequence[_Token], offset: int) -> tuple[_Token, ...]:
+    return tuple(
+        _Token(token.kind, token.value, token.start + offset)
+        for token in tokens
+    )
+
+
+def _kotlin_string_fingerprint_tokens(
+    text: str, start: int, *, raw: bool,
+) -> tuple[tuple[_Token, ...], int]:
+    quote = '"""' if raw else '"'
+    token_prefix = "raw-string" if raw else "string"
+    index = start + len(quote)
+    literal_start = index
+    components = [_Token(f"{token_prefix}-start", quote, start)]
+    has_template = False
+
+    def append_literal(end: int) -> None:
+        if literal_start < end:
+            components.append(_Token(
+                f"{token_prefix}-literal",
+                text[literal_start:end],
+                literal_start,
+            ))
+
+    while index < len(text):
+        if raw and text.startswith(quote, index):
+            end = index + len(quote)
+            if not has_template:
+                return (_Token(token_prefix, text[start:end], start),), end
+            append_literal(index)
+            components.append(_Token(f"{token_prefix}-end", quote, index))
+            return tuple(components), end
+        if not raw and text[index] == "\\":
+            index = min(len(text), index + 2)
+            continue
+        if not raw and text[index] == '"':
+            end = index + 1
+            if not has_template:
+                return (_Token(token_prefix, text[start:end], start),), end
+            append_literal(index)
+            components.append(_Token(f"{token_prefix}-end", quote, index))
+            return tuple(components), end
+        if text.startswith("${", index):
+            has_template = True
+            append_literal(index)
+            expression_end = _kotlin_template_expression_end(text, index + 2)
+            closed = expression_end > index + 2 and text[expression_end - 1] == "}"
+            content_end = expression_end - 1 if closed else expression_end
+            components.append(_Token("template-expression-start", "${", index))
+            components.extend(_shift_tokens(
+                _kotlin_fingerprint_tokens(text[index + 2:content_end]),
+                index + 2,
+            ))
+            if closed:
+                components.append(_Token(
+                    "template-expression-end", "}", expression_end - 1,
+                ))
+            else:
+                components.append(_Token(
+                    "template-expression-unterminated", "", expression_end,
+                ))
+            index = expression_end
+            literal_start = index
+            continue
+        if text[index] == "$" and index + 1 < len(text):
+            next_character = text[index + 1]
+            if next_character == "`":
+                template_end = text.find("`", index + 2)
+                template_end = (
+                    len(text) if template_end == -1 else template_end + 1
+                )
+            elif next_character == "_" or next_character.isalpha():
+                template_end = index + 2
+                while template_end < len(text) and (
+                    text[template_end].isalnum() or text[template_end] == "_"
+                ):
+                    template_end += 1
+            else:
+                template_end = index
+            if template_end != index:
+                has_template = True
+                append_literal(index)
+                components.append(_Token(
+                    "template-identifier",
+                    text[index:template_end],
+                    index,
+                ))
+                index = template_end
+                literal_start = index
+                continue
+        index += 1
+
+    if not has_template:
+        return (_Token(token_prefix, text[start:], start),), len(text)
+    append_literal(len(text))
+    components.append(_Token(f"{token_prefix}-unterminated", "", len(text)))
+    return tuple(components), len(text)
+
+
 def _kotlin_fingerprint_tokens(text: str) -> tuple[_Token, ...]:
     source = text
     tokens = []
@@ -577,13 +678,17 @@ def _kotlin_fingerprint_tokens(text: str) -> tuple[_Token, ...]:
             index = _kotlin_block_comment_end(source, index)
             continue
         if source.startswith('"""', index):
-            end = _kotlin_string_end(source, index, raw=True)
-            tokens.append(_Token("raw-string", source[index:end], index))
+            string_tokens, end = _kotlin_string_fingerprint_tokens(
+                source, index, raw=True,
+            )
+            tokens.extend(string_tokens)
             index = end
             continue
         if character == '"':
-            end = _kotlin_string_end(source, index, raw=False)
-            tokens.append(_Token("string", source[index:end], index))
+            string_tokens, end = _kotlin_string_fingerprint_tokens(
+                source, index, raw=False,
+            )
+            tokens.extend(string_tokens)
             index = end
             continue
         if character == "'":
@@ -757,54 +862,32 @@ def _kotlin_template_offset(
     return None
 
 
-def _active_code_occurrences(text: str, needle: str) -> tuple[int, ...]:
-    offsets = []
-    index = 0
-    while index < len(text):
-        if text.startswith("//", index):
-            end = text.find("\n", index)
-            index = len(text) if end == -1 else end
-            continue
-        if text.startswith("/*", index):
-            depth = 1
-            index += 2
-            while index < len(text) and depth:
-                if text.startswith("/*", index):
-                    depth += 1
-                    index += 2
-                elif text.startswith("*/", index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            continue
-        if text.startswith(needle, index):
-            offsets.append(index)
-            index += len(needle)
-            continue
-        if text.startswith('"""', index):
-            index = _quoted_end(text, index, '"""')
-            continue
-        if text[index] in {'"', "'"}:
-            index = _quoted_end(text, index, text[index])
-            continue
-        index += 1
-    return tuple(offsets)
-
-
 def _approved_template_ranges(root: Path, path: Path, text: str) -> tuple[tuple[int, int], ...]:
     if path.relative_to(root).as_posix() != "build.gradle.kts":
         return ()
-    occurrences = _active_code_occurrences(
-        text, _APPROVED_R2_TEMPLATE_ASSIGNMENT,
+    tokens = _kotlin_fingerprint_tokens(text)
+    expected = _kotlin_fingerprint_tokens(_APPROVED_R2_TEMPLATE_ASSIGNMENT)
+    expected_signature = tuple(
+        (token.kind, token.value) for token in expected
+    )
+    occurrences = tuple(
+        index for index in range(len(tokens))
+        if tuple(
+            (token.kind, token.value)
+            for token in tokens[index:index + len(expected)]
+        ) == expected_signature
     )
     if len(occurrences) != 1:
         return ()
-    assignment_start = occurrences[0]
-    literal_start = assignment_start + _APPROVED_R2_TEMPLATE_ASSIGNMENT.index(
-        _APPROVED_R2_TEMPLATE_LITERAL
+    matched = tokens[occurrences[0]:occurrences[0] + len(expected)]
+    literal = next(
+        (token for token in matched if token.kind == "string-start"),
+        None,
     )
-    return ((literal_start, literal_start + len(_APPROVED_R2_TEMPLATE_LITERAL)),)
+    if literal is None:
+        return ()
+    literal_end = _kotlin_string_end(text, literal.start, raw=False)
+    return ((literal.start, literal_end),)
 
 
 def _call_arguments(tokens: Sequence[_Token], index: int) -> tuple[_Token, ...] | None:
@@ -1262,14 +1345,21 @@ def _has_forbidden_payload_magic(path: Path) -> bool:
     try:
         with path.open("rb") as stream:
             header = stream.read(4096)
+            if any(
+                header.startswith(prefix)
+                for prefix in _FORBIDDEN_BUILD_PAYLOAD_MAGIC_PREFIXES
+            ):
+                return True
+            if len(header) >= 0x40 and header.startswith(b"MZ"):
+                pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+                stream.seek(0, 2)
+                file_size = stream.tell()
+                if 0x40 <= pe_offset <= file_size - 4:
+                    stream.seek(pe_offset)
+                    if stream.read(4) == b"PE\0\0":
+                        return True
     except OSError:
         return True
-    if any(header.startswith(prefix) for prefix in _FORBIDDEN_BUILD_PAYLOAD_MAGIC_PREFIXES):
-        return True
-    if len(header) >= 0x40 and header.startswith(b"MZ"):
-        pe_offset = int.from_bytes(header[0x3C:0x40], "little")
-        if pe_offset + 4 <= len(header) and header[pe_offset:pe_offset + 4] == b"PE\0\0":
-            return True
     return len(header) >= 263 and header[257:263] in {b"ustar\0", b"ustar "}
 
 

@@ -4,10 +4,15 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+import struct
 import subprocess
 from tempfile import TemporaryDirectory
 
-from tools.check_repository_policy import check_repository, main
+from tools.check_repository_policy import (
+    _build_configuration_fingerprint,
+    check_repository,
+    main,
+)
 
 TARGETS = """
 android { compileSdk = 37; minSdk = 30 }
@@ -341,6 +346,81 @@ def force_track_fixture(root: Path) -> None:
         ("git", "-C", str(root), "add", "--force", "."),
         check=True,
     )
+
+
+def gnu_thin_archive_fixture() -> bytes:
+    # Exact valid layout emitted by `llvm-ar crsT thin-archive member.txt`.
+    return (
+        b"!<thin>\n"
+        b"//                                              12        `\n"
+        b"member.txt/\n"
+        b"/0              0           0     0     644     14        `\n"
+    )
+
+
+def pe32_plus_fixture_with_late_header(pe_offset: int = 0x1200) -> bytes:
+    file_alignment = 0x200
+    section_alignment = 0x1000
+    optional_header_size = 0xF0
+    section_header_size = 40
+    headers_end = pe_offset + 4 + 20 + optional_header_size + section_header_size
+    size_of_headers = (
+        (headers_end + file_alignment - 1) // file_alignment * file_alignment
+    )
+
+    image = bytearray(size_of_headers + file_alignment)
+    image[:2] = b"MZ"
+    struct.pack_into("<H", image, 0x02, 0x0090)
+    struct.pack_into("<H", image, 0x04, 0x0003)
+    struct.pack_into("<H", image, 0x08, 0x0004)
+    struct.pack_into("<H", image, 0x18, 0x0040)
+    struct.pack_into("<I", image, 0x3C, pe_offset)
+
+    image[pe_offset:pe_offset + 4] = b"PE\0\0"
+    coff_offset = pe_offset + 4
+    struct.pack_into(
+        "<HHIIIHH",
+        image,
+        coff_offset,
+        0x8664,
+        1,
+        0,
+        0,
+        0,
+        optional_header_size,
+        0x0022,
+    )
+
+    optional_offset = coff_offset + 20
+    struct.pack_into("<H", image, optional_offset, 0x020B)
+    image[optional_offset + 2] = 14
+    struct.pack_into("<I", image, optional_offset + 4, file_alignment)
+    struct.pack_into("<I", image, optional_offset + 16, section_alignment)
+    struct.pack_into("<I", image, optional_offset + 20, section_alignment)
+    struct.pack_into("<Q", image, optional_offset + 24, 0x140000000)
+    struct.pack_into("<I", image, optional_offset + 32, section_alignment)
+    struct.pack_into("<I", image, optional_offset + 36, file_alignment)
+    struct.pack_into("<H", image, optional_offset + 40, 6)
+    struct.pack_into("<H", image, optional_offset + 48, 6)
+    struct.pack_into("<I", image, optional_offset + 56, 0x2000)
+    struct.pack_into("<I", image, optional_offset + 60, size_of_headers)
+    struct.pack_into("<H", image, optional_offset + 68, 3)
+    struct.pack_into("<H", image, optional_offset + 70, 0x8160)
+    struct.pack_into("<Q", image, optional_offset + 72, 0x100000)
+    struct.pack_into("<Q", image, optional_offset + 80, 0x1000)
+    struct.pack_into("<Q", image, optional_offset + 88, 0x100000)
+    struct.pack_into("<Q", image, optional_offset + 96, 0x1000)
+    struct.pack_into("<I", image, optional_offset + 108, 16)
+
+    section_offset = optional_offset + optional_header_size
+    image[section_offset:section_offset + 8] = b".text\0\0\0"
+    struct.pack_into("<I", image, section_offset + 8, 1)
+    struct.pack_into("<I", image, section_offset + 12, section_alignment)
+    struct.pack_into("<I", image, section_offset + 16, file_alignment)
+    struct.pack_into("<I", image, section_offset + 20, size_of_headers)
+    struct.pack_into("<I", image, section_offset + 36, 0x60000020)
+    image[size_of_headers] = 0xC3
+    return bytes(image)
 
 
 def create_clean_fixture(root: Path) -> None:
@@ -792,6 +872,48 @@ fun Any.kotlin(): String = "com.example:unknown-runtime:1"
                 encoding="utf-8",
             )
             self.assertEqual([], check_repository(root))
+
+    def test_build_token_freeze_normalizes_approved_template_expression_trivia(self) -> None:
+        original = '"s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}"'
+        equivalent_templates = (
+            '"s3://${  r2Bucket . orNull  ?:  "r2-publishing-not-configured"  }"',
+            '"s3://${/* outer /* nested */ comment */r2Bucket.orNull'
+            ' ?: /* fallback */"r2-publishing-not-configured"}"',
+        )
+        for replacement in equivalent_templates:
+            with self.subTest(replacement=replacement):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "build.gradle.kts"
+                    baseline = build.read_text(encoding="utf-8")
+                    mutated = baseline.replace(original, replacement, 1)
+                    self.assertEqual(
+                        _build_configuration_fingerprint(build, baseline),
+                        _build_configuration_fingerprint(build, mutated),
+                    )
+                    build.write_text(mutated, encoding="utf-8")
+                    self.assertEqual([], check_repository(root))
+
+        changed_templates = (
+            '"s3://${r2Endpoint.orNull ?: "r2-publishing-not-configured"}"',
+            '"s3://${r2Bucket.orNull ?: "changed-fallback"}"',
+        )
+        for replacement in changed_templates:
+            with self.subTest(replacement=replacement):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "build.gradle.kts"
+                    baseline = build.read_text(encoding="utf-8")
+                    mutated = baseline.replace(original, replacement, 1)
+                    self.assertNotEqual(
+                        _build_configuration_fingerprint(build, baseline),
+                        _build_configuration_fingerprint(build, mutated),
+                    )
+                    build.write_text(mutated, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
     def test_cycle_b_dependency_allowlist_rejects_build_logic_and_plugin_injection(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1246,6 +1368,72 @@ class InjectedPlugin : Plugin<Project> {
                     write_bytes(root, relative, contents)
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_repository_policy_rejects_force_tracked_extensionless_payloads(self) -> None:
+        thin_archive = gnu_thin_archive_fixture()
+        self.assertTrue(thin_archive.startswith(b"!<thin>\n"))
+
+        late_pe = pe32_plus_fixture_with_late_header()
+        pe_offset = int.from_bytes(late_pe[0x3C:0x40], "little")
+        self.assertGreater(pe_offset, 4096)
+        self.assertEqual(b"PE\0\0", late_pe[pe_offset:pe_offset + 4])
+
+        fixtures = (
+            (
+                "build/native/thin-archive",
+                thin_archive,
+                ("build/native/member.txt", b"member payload"),
+            ),
+            (
+                "build/native/windows-image",
+                late_pe,
+                None,
+            ),
+        )
+        for relative, contents, companion in fixtures:
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    write(root, ".gitignore", "build/\n")
+                    write_bytes(root, relative, contents)
+                    if companion is not None:
+                        write_bytes(root, companion[0], companion[1])
+                    force_track_fixture(root)
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_repository_policy_handles_malformed_pe_offsets_without_crashing(self) -> None:
+        invalid_images = []
+
+        truncated = bytearray(0x20)
+        truncated[:2] = b"MZ"
+        invalid_images.append(bytes(truncated))
+
+        before_dos_header_end = bytearray(128)
+        before_dos_header_end[:2] = b"MZ"
+        before_dos_header_end[0x3C:0x40] = (0x20).to_bytes(4, "little")
+        before_dos_header_end[0x20:0x24] = b"PE\0\0"
+        invalid_images.append(bytes(before_dos_header_end))
+
+        beyond_end = bytearray(128)
+        beyond_end[:2] = b"MZ"
+        beyond_end[0x3C:0x40] = (0xFFFFFFFF).to_bytes(4, "little")
+        invalid_images.append(bytes(beyond_end))
+
+        truncated_signature = bytearray(128)
+        truncated_signature[:2] = b"MZ"
+        truncated_signature[0x3C:0x40] = (126).to_bytes(4, "little")
+        truncated_signature[126:128] = b"PE"
+        invalid_images.append(bytes(truncated_signature))
+
+        for index, contents in enumerate(invalid_images):
+            with self.subTest(index=index):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    write_bytes(root, f"payload/malformed-pe-{index}", contents)
+                    self.assertEqual([], check_repository(root))
 
     def test_each_mutation_reports_expected_policy(self) -> None:
         mutations = (

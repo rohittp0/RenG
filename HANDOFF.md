@@ -149,17 +149,102 @@ Observed results:
 
 These commands verify integration/build state, not the two pending code-review gates.
 
-## Git and worktree state
+## Fresh-device checkout and environment setup
 
-All completed Task 9D and Task 13 worker commits and reports were moved into the controller before their auxiliary worktrees and branches were deleted. At handoff creation, no `agent-*` worktree remained.
+The next agent is expected to run on a different device. None of the absolute paths, ignored SDD ledger/reports, Gradle caches, or worktrees from the source machine will exist there. All required source, tests, specification, plan, decisions, and recovery instructions are committed on the remote branch.
 
-The live Claude session itself is pinned to:
+Start from a fresh clone:
+
+```bash
+git clone --branch docs/cycle-b-resource-contract --single-branch \
+  https://github.com/rohittp0/RenG.git
+cd RenG
+git status --short
+git rev-parse HEAD
+git log -5 --oneline
+```
+
+`git status --short` must be empty. If the repository already exists on the new device, stop if it has local changes, then fetch and switch without resetting or discarding anything:
+
+```bash
+git fetch origin
+git switch docs/cycle-b-resource-contract 2>/dev/null || \
+  git switch --create docs/cycle-b-resource-contract \
+    --track origin/docs/cycle-b-resource-contract
+git pull --ff-only
+git status --short
+```
+
+Required local tools:
+
+- Git.
+- A 64-bit JDK 21. Android host compilation targets JVM 21.
+- Python 3; repository tools use only the standard library.
+- Android SDK Platform 37. Set its path in untracked `local.properties`, for example:
+
+  ```properties
+  sdk.dir=/absolute/path/to/Android/sdk
+  ```
+
+- The checked-in Gradle 9.5.0 wrapper; do not substitute a system Gradle.
+- Network access on the first build for the Gradle distribution, Kotlin/Native toolchain, Google Maven, Maven Central, and `https://maven.rohittp.com`.
+- For complete local Apple gates: Apple Silicon macOS with Xcode and Command Line Tools installed. The project deliberately has no Intel macOS/iOS simulator targets.
+- On Ubuntu x64, use the Linux CI command below; Apple targets cannot be built there. Linux Arm64 is a compile-only cross-target gate from x64.
+
+No Docker, R2/AWS credentials, signing key, Firebase setup, publication secret, or `mavenLocal()` repository is needed for the pending Cycle B reviews and pure-core tasks. Do not create or commit `local.properties` beyond the local machine.
+
+Sanity-check the fresh environment before reviewing code:
+
+```bash
+java -version
+python3 --version
+./gradlew --version
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tools/tests -p 'test_*.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
+```
+
+On Apple Silicon macOS, run the locally complete implementation gate:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:macosArm64Test \
+  :kmp:compileKotlinIosArm64 \
+  :kmp:compileKotlinIosSimulatorArm64 \
+  :kmp:compileKotlinMacosArm64 \
+  :kmp:compileKotlinLinuxX64 \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
+
+On Ubuntu x64, use the host-executable CI subset instead:
+
+```bash
+./gradlew --no-configuration-cache \
+  :kmp:checkKotlinAbi \
+  :kmp:testAndroidHostTest \
+  :kmp:linuxX64Test \
+  :kmp:compileKotlinLinuxArm64 \
+  :kmp:bundleAndroidMainAar
+```
+
+Do not claim `linuxX64Test` from macOS or `macosArm64Test` from Linux. Kotlin/Native's first invocation may download toolchains and take substantially longer than later runs.
+
+The ignored `.superpowers/sdd/...` ledger, extracted task briefs, and `/tmp` worker reports are intentionally not transportable. The tracked plan contains every task requirement. If the next agent uses the Superpowers SDD workflow, initialize a new local ledger from this handoff and regenerate Task 9D/13 briefs from the tracked plan rather than looking for source-machine scratch files. The exact pending review ranges are recorded above.
+
+## Git and source-machine worktree state
+
+All completed Task 9D and Task 13 worker commits were cherry-picked into `docs/cycle-b-resource-contract` before their auxiliary worktrees and branches were deleted. At handoff creation, no `agent-*` worktree remained.
+
+The source machine's live Claude session was pinned to:
 
 `/Users/rohittp/Data/Other/RenG/.claude/worktrees/cycle-a-implementation`
 
-That directory name is stale; it contains the Cycle B branch, not unintegrated Cycle A work. A session cannot safely delete its own current working directory. After verifying this handoff commit exists on `origin/docs/cycle-b-resource-contract`, a new agent operating from the primary checkout may remove that controller worktree. Do not remove it before confirming local and remote branch SHAs match.
+That absolute path and worktree are irrelevant on the new device and do not need to be recreated. Its stale directory name contained the Cycle B branch, not unintegrated Cycle A work. The remote branch is the authority for cross-device continuation.
 
-The primary checkout is on its pre-existing branch and was not merged or modified by this handoff. No PR, merge, workflow dispatch, R2 upload, publication, or release was performed.
+The source machine's primary checkout remained on its pre-existing branch and was not merged or modified by this handoff. No PR, merge, workflow dispatch, R2 upload, publication, or release was performed.
 
 ## Publication boundary
 

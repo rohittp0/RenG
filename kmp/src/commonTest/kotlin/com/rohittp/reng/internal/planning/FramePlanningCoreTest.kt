@@ -154,10 +154,52 @@ class FramePlanningCoreTest {
             ),
         )
 
+        val heldBelowItsHistorylessSelection = planSuccess(
+            planningCore,
+            request(
+                plan = framePlan(
+                    frameIndex = 3L,
+                    camera = Camera(0.0, 0.0, 2.6, 0.0, 0.0),
+                    drawBasemap = false,
+                ),
+                previousSelectedLod = 2,
+            ),
+        )
+        val sameZoomWithoutHistory = planSuccess(
+            planningCore,
+            request(
+                plan = framePlan(
+                    frameIndex = 4L,
+                    camera = Camera(0.0, 0.0, 2.6, 0.0, 0.0),
+                    drawBasemap = false,
+                ),
+            ),
+        )
+
         assertEquals(4, hysteresisWithoutBasemap.spatialPlan.lodObservation.selectedLod)
         assertEquals(3, withoutHistory.spatialPlan.lodObservation.selectedLod)
         assertEquals(4, hysteresisWithBasemap.spatialPlan.lodObservation.selectedLod)
         assertNotNull(hysteresisWithBasemap.spatialPlan.tileSelection)
+        assertEquals(2, heldBelowItsHistorylessSelection.spatialPlan.lodObservation.selectedLod)
+        assertEquals(3, sameZoomWithoutHistory.spatialPlan.lodObservation.selectedLod)
+    }
+
+    @Test
+    fun framePlanningRequestRejectsAnUnusableTileBudgetOrLodHistory() {
+        assertFailsWith<IllegalArgumentException> {
+            request(plan = framePlan(), maximumBasemapTileInstances = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            request(plan = framePlan(), maximumBasemapTileInstances = -1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            request(plan = framePlan(), previousSelectedLod = 23)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            request(plan = framePlan(), previousSelectedLod = -1)
+        }
+        assertEquals(0, request(plan = framePlan(), previousSelectedLod = 0).previousSelectedLod)
+        assertEquals(22, request(plan = framePlan(), previousSelectedLod = 22).previousSelectedLod)
     }
 
     @Test
@@ -509,6 +551,161 @@ class FramePlanningCoreTest {
         assertEquals(structurallyEqual.hashCode(), core.hashCode())
         assertNotEquals(different, core)
         assertEquals(listOf(first), planned.staticResourceTraversal)
+
+        val otherFrameIndex = planSuccess(
+            planningCore(resolver),
+            request(plan = framePlan(frameIndex = 41L, stickers = listOf(sticker("snapshot-sticker")))),
+        )
+        val otherCamera = planSuccess(
+            planningCore(resolver),
+            request(
+                plan = framePlan(
+                    frameIndex = 42L,
+                    camera = Camera(0.0, 0.0, 5.0, 0.0, 0.0),
+                    stickers = listOf(sticker("snapshot-sticker")),
+                ),
+            ),
+        )
+        val differentEncodedPlan = PlannedFrameCore(
+            encodedPlan = otherFrameIndex.encodedPlan,
+            structuralDiff = planned.structuralDiff,
+            spatialPlan = planned.spatialPlan,
+            staticResourceTraversal = listOf(first),
+        )
+        val differentStructuralDiff = PlannedFrameCore(
+            encodedPlan = planned.encodedPlan,
+            structuralDiff = FrameStructuralDiff(listOf(FramePlanSegment.CAMERA)),
+            spatialPlan = planned.spatialPlan,
+            staticResourceTraversal = listOf(first),
+        )
+        val differentSpatialPlan = PlannedFrameCore(
+            encodedPlan = planned.encodedPlan,
+            structuralDiff = planned.structuralDiff,
+            spatialPlan = otherCamera.spatialPlan,
+            staticResourceTraversal = listOf(first),
+        )
+
+        assertNotEquals(planned.encodedPlan, otherFrameIndex.encodedPlan)
+        assertNotEquals(planned.structuralDiff, differentStructuralDiff.structuralDiff)
+        assertNotEquals(planned.spatialPlan, otherCamera.spatialPlan)
+        assertNotEquals(differentEncodedPlan, core)
+        assertNotEquals(differentEncodedPlan.hashCode(), core.hashCode())
+        assertNotEquals(differentStructuralDiff, core)
+        assertNotEquals(differentStructuralDiff.hashCode(), core.hashCode())
+        assertNotEquals(differentSpatialPlan, core)
+        assertNotEquals(differentSpatialPlan.hashCode(), core.hashCode())
+        assertNotEquals(different.hashCode(), core.hashCode())
+    }
+
+    @Test
+    fun plannedFrameCoreRejectsATraversalContradictingItsSpatialPlan() {
+        val resolver = RecordingPrivateKeyResolver()
+        val planningCore = planningCore(resolver)
+        val stickerOnly = planSuccess(
+            planningCore,
+            request(plan = framePlan(frameIndex = 31L, stickers = listOf(sticker("guard-sticker")))),
+        )
+        val withGeometry = planSuccess(
+            planningCore,
+            request(
+                plan = framePlan(
+                    frameIndex = 32L,
+                    stickers = listOf(sticker("guard-sticker")),
+                    geometries = listOf(
+                        geometry(Vector3(20.0, 0.0, 0.0), Vector3(10.0, 1.0, 0.0), shaderPair("guard")),
+                    ),
+                ),
+            ),
+        )
+        val activeBasemap = planSuccess(
+            planningCore,
+            request(
+                plan = framePlan(frameIndex = 33L, stickers = listOf(sticker("guard-sticker"))),
+                outputPixelSize = OutputPixelSize(1024, 1024),
+                basemapStyle = ResourceLocator("style-document"),
+            ),
+        )
+        val stickerReference = expectedExternal("guard-sticker", ResourceClass.STICKER_IMAGE)
+        val styleReference = expectedExternal("style-document", ResourceClass.BASEMAP_STYLE)
+        val guardProgram = expectedGeometryProgram(shaderPair("guard"))
+        val otherProgram = expectedGeometryProgram(shaderPair("other"))
+
+        assertFailsWith<IllegalArgumentException> {
+            PlannedFrameCore(
+                encodedPlan = withGeometry.encodedPlan,
+                structuralDiff = withGeometry.structuralDiff,
+                spatialPlan = withGeometry.spatialPlan,
+                staticResourceTraversal = listOf(stickerReference),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PlannedFrameCore(
+                encodedPlan = stickerOnly.encodedPlan,
+                structuralDiff = stickerOnly.structuralDiff,
+                spatialPlan = stickerOnly.spatialPlan,
+                staticResourceTraversal = listOf(stickerReference, guardProgram),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PlannedFrameCore(
+                encodedPlan = withGeometry.encodedPlan,
+                structuralDiff = withGeometry.structuralDiff,
+                spatialPlan = withGeometry.spatialPlan,
+                staticResourceTraversal = listOf(stickerReference, otherProgram),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PlannedFrameCore(
+                encodedPlan = stickerOnly.encodedPlan,
+                structuralDiff = stickerOnly.structuralDiff,
+                spatialPlan = stickerOnly.spatialPlan,
+                staticResourceTraversal = listOf(styleReference, stickerReference),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PlannedFrameCore(
+                encodedPlan = activeBasemap.encodedPlan,
+                structuralDiff = activeBasemap.structuralDiff,
+                spatialPlan = activeBasemap.spatialPlan,
+                staticResourceTraversal = listOf(styleReference, styleReference, stickerReference),
+            )
+        }
+
+        assertEquals(listOf(stickerReference, guardProgram), withGeometry.staticResourceTraversal)
+        assertEquals(listOf(styleReference, stickerReference), activeBasemap.staticResourceTraversal)
+    }
+
+    @Test
+    fun staticExternalReferencesAcceptOnlyTheStaticDirectResourceClasses() {
+        val deriver = ResourceKeyDeriver(PureKotlinSha256)
+        val staticDirect = setOf(
+            ResourceClass.BASEMAP_STYLE,
+            ResourceClass.STICKER_IMAGE,
+            ResourceClass.MODEL_GLB,
+            ResourceClass.MODEL_TEXTURE,
+        )
+
+        for (resourceClass in ResourceClass.entries) {
+            val locator = ResourceLocator("static-direct-probe")
+            val derived = deriver.external(resourceClass, locator)
+            val construct = {
+                StaticResourceReference.External(
+                    resourceClass = resourceClass,
+                    locator = locator,
+                    maximumResponseBytes = 1L,
+                    resourceKey = derived.key,
+                    rawKey = requireNotNull(derived.rawKey),
+                    privateRentileKey = RentilePrivateKey("private"),
+                    canonicalIdentity = derived.identity,
+                )
+            }
+
+            if (resourceClass in staticDirect) {
+                assertEquals(resourceClass, construct().resourceClass)
+            } else {
+                assertFailsWith<IllegalArgumentException> { construct() }
+            }
+        }
     }
 
     @Test

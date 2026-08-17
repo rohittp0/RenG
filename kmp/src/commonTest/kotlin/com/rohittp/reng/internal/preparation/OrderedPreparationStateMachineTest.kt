@@ -1172,7 +1172,9 @@ class OrderedPreparationStateMachineTest {
             submit(OrderedPreparationEvent.ResourcesCompleted(outcome))
 
         fun discoveredChild(token: String): VisibleResource = visibleResource(
-            externalReference(token, ResourceClass.BASEMAP_VECTOR_TILE),
+            locator = ResourceLocator("$token.bin"),
+            resourceClass = ResourceClass.BASEMAP_VECTOR_TILE,
+            maximumResponseBytes = DISCOVERED_CHILD_RESPONSE_BYTES,
         )
 
         fun resourceSuccess(
@@ -1318,7 +1320,7 @@ class OrderedPreparationStateMachineTest {
             return StaticResourceReference.External(
                 resourceClass = resourceClass,
                 locator = locator,
-                maximumResponseBytes = 1024L,
+                maximumResponseBytes = DISCOVERED_CHILD_RESPONSE_BYTES,
                 resourceKey = derived.key,
                 rawKey = assertNotNull(derived.rawKey),
                 privateRentileKey = FakePrivateKeyResolver.resolve(locator, resourceClass),
@@ -1326,21 +1328,33 @@ class OrderedPreparationStateMachineTest {
             )
         }
 
-        fun visibleResource(reference: StaticResourceReference.External): VisibleResource =
-            VisibleResource(
-                resourceKey = reference.resourceKey,
+        fun visibleResource(reference: StaticResourceReference.External): VisibleResource = visibleResource(
+            locator = reference.locator,
+            resourceClass = reference.resourceClass,
+            maximumResponseBytes = reference.maximumResponseBytes,
+        )
+
+        fun visibleResource(
+            locator: ResourceLocator,
+            resourceClass: ResourceClass,
+            maximumResponseBytes: Long,
+        ): VisibleResource {
+            val resourceKey = ResourceKeyDeriver(PureKotlinSha256).external(resourceClass, locator).key
+            return VisibleResource(
+                resourceKey = resourceKey,
                 content = ResolvedResourceContent(
                     route = ResourceRouteKey(
                         accessMode = ResourceAccessMode.NORMAL,
-                        locator = reference.locator,
-                        resourceClass = reference.resourceClass,
-                        maximumResponseBytes = reference.maximumResponseBytes,
+                        locator = locator,
+                        resourceClass = resourceClass,
+                        maximumResponseBytes = maximumResponseBytes,
                     ),
-                    resourceKey = reference.resourceKey,
+                    resourceKey = resourceKey,
                     stored = STORED_RESOURCE,
                     provenance = ContentProvenance.RESIDENT,
                 ),
             )
+        }
 
         fun shaderFailure(): FailureDescriptor = FailureDescriptor(
             code = RenGErrorCode.INVALID_VALUE,
@@ -1370,6 +1384,8 @@ class OrderedPreparationStateMachineTest {
                 ),
             )
         }
+
+        const val DISCOVERED_CHILD_RESPONSE_BYTES: Long = 1024L
 
         val STORED_RESOURCE: StoredRawResource = StoredRawResource(
             bytes = byteArrayOf(1, 2, 3),

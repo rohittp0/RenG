@@ -39,7 +39,14 @@ internal data class FramePlanningRequest(
     val maximumBasemapTileInstances: Int,
     val previousPlan: EncodedFramePlan?,
     val previousSelectedLod: Int?,
-)
+) {
+    init {
+        require(maximumBasemapTileInstances > 0) { "maximumBasemapTileInstances must be positive" }
+        require(previousSelectedLod == null || previousSelectedLod in MINIMUM_MERCATOR_LOD..MAXIMUM_MERCATOR_LOD) {
+            "previousSelectedLod must be within the Mercator LOD range"
+        }
+    }
+}
 
 internal sealed interface StaticResourceReference {
     val resourceKey: ResourceKey
@@ -57,6 +64,9 @@ internal sealed interface StaticResourceReference {
     ) : StaticResourceReference {
         init {
             require(maximumResponseBytes > 0L) { "maximum response bytes must be positive" }
+            require(resourceClass.isStaticDirect) {
+                "external references require a static direct resource class"
+            }
             require(resourceKey.kind == ResourceKind.EXTERNAL) {
                 "external references require an external resource key"
             }
@@ -98,6 +108,30 @@ internal class PlannedFrameCore(
 ) {
     private val staticResourceTraversalSnapshot: List<StaticResourceReference> =
         freshListCopy(staticResourceTraversal)
+
+    init {
+        val plannedGeometries = spatialPlan.geometries
+        val geometryPrograms =
+            staticResourceTraversalSnapshot.filterIsInstance<StaticResourceReference.GeometryProgram>()
+        require(geometryPrograms.size == plannedGeometries.size) {
+            "geometry program traversal entries and planned geometries must have equal size"
+        }
+        for (index in geometryPrograms.indices) {
+            require(geometryPrograms[index].shaderPair == plannedGeometries[index].shaderPair) {
+                "geometry program traversal entries and planned geometries must correspond by index"
+            }
+        }
+        val basemapStyleRoutes = staticResourceTraversalSnapshot.count { reference ->
+            reference is StaticResourceReference.External &&
+                reference.resourceClass == ResourceClass.BASEMAP_STYLE
+        }
+        require(basemapStyleRoutes <= 1) {
+            "at most one basemap style may be traversed"
+        }
+        require(basemapStyleRoutes == 0 || spatialPlan.tileSelection != null) {
+            "a traversed basemap style requires a planned tile selection"
+        }
+    }
 
     val staticResourceTraversal: List<StaticResourceReference>
         get() = freshListCopy(staticResourceTraversalSnapshot)
@@ -211,6 +245,23 @@ internal class FramePlanningCore(
     }
 }
 
+private val ResourceClass.isStaticDirect: Boolean
+    get() = when (this) {
+        ResourceClass.BASEMAP_STYLE,
+        ResourceClass.STICKER_IMAGE,
+        ResourceClass.MODEL_GLB,
+        ResourceClass.MODEL_TEXTURE,
+        -> true
+        ResourceClass.BASEMAP_TILE_JSON,
+        ResourceClass.BASEMAP_VECTOR_TILE,
+        ResourceClass.BASEMAP_RASTER_TILE,
+        ResourceClass.BASEMAP_DEM_TILE,
+        ResourceClass.BASEMAP_SPRITE_JSON,
+        ResourceClass.BASEMAP_SPRITE_IMAGE,
+        ResourceClass.BASEMAP_GEO_JSON,
+        -> false
+    }
+
 private fun frameIdentityCollisionFailure(): FramePlanningOutcome.Failure = FramePlanningOutcome.Failure(
     FailureDescriptor(
         code = RenGErrorCode.IDENTITY_COLLISION,
@@ -232,3 +283,6 @@ private fun unsupportedProjectionModeFailure(): FramePlanningOutcome.Failure = F
         ),
     ),
 )
+
+private const val MINIMUM_MERCATOR_LOD: Int = 0
+private const val MAXIMUM_MERCATOR_LOD: Int = 22

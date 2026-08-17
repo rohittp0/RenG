@@ -9,8 +9,19 @@ internal class CanonicalBytes(bytes: ByteArray) {
     internal val size: Int
         get() = snapshot.size
 
+    internal fun byteAt(index: Int): Byte = snapshot[index]
+
     internal fun copyInto(destination: ByteArray, destinationOffset: Int) {
         snapshot.copyInto(destination, destinationOffset)
+    }
+
+    internal fun copyRangeInto(
+        destination: ByteArray,
+        destinationOffset: Int,
+        startIndex: Int,
+        endIndex: Int,
+    ) {
+        snapshot.copyInto(destination, destinationOffset, startIndex, endIndex)
     }
 
     override fun equals(other: Any?): Boolean =

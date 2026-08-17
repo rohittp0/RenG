@@ -59,6 +59,25 @@ class Sha256Test {
     }
 
     @Test
+    fun canonicalBytesSupportNonMutatingBlockReadsAndRemainderCopies() {
+        val canonicalBytes = CanonicalBytes(byteArrayOf(0x10, 0x20, 0x30, 0x40))
+        val destination = ByteArray(4) { 0x7f }
+
+        assertEquals(0x20.toByte(), canonicalBytes.byteAt(1))
+        canonicalBytes.copyRangeInto(
+            destination = destination,
+            destinationOffset = 1,
+            startIndex = 1,
+            endIndex = 3,
+        )
+        assertContentEquals(byteArrayOf(0x7f, 0x20, 0x30, 0x7f), destination)
+
+        destination[1] = 0
+        assertEquals(0x20.toByte(), canonicalBytes.byteAt(1))
+        assertContentEquals(byteArrayOf(0x10, 0x20, 0x30, 0x40), canonicalBytes.bytes)
+    }
+
+    @Test
     fun digestRequiresExactly32BytesAndDefensivelyCopies() {
         assertFailsWith<IllegalArgumentException> { Sha256Digest(ByteArray(31)) }
         assertFailsWith<IllegalArgumentException> { Sha256Digest(ByteArray(33)) }

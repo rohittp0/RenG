@@ -169,6 +169,9 @@ private enum class IdentityRequirement {
         override fun matches(key: ResourceKey?): Boolean =
             key?.kind == ResourceKind.EXTERNAL && key.resourceClass != null
     },
+    REQUIRED_ANY {
+        override fun matches(key: ResourceKey?): Boolean = key != null
+    },
     OPTIONAL_EXTERNAL {
         override fun matches(key: ResourceKey?): Boolean =
             key == null || (key.kind == ResourceKind.EXTERNAL && key.resourceClass != null)
@@ -405,10 +408,15 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
 
         RenGErrorCode.IDENTITY_COLLISION -> when (stage) {
             PipelineStage.FRAME_PLANNING -> FailureRule.Context(setOf(DiagnosticField.FRAME_IDENTITY))
-            PipelineStage.RESOURCE_LOOKUP -> externalResourceRule
+            PipelineStage.RESOURCE_LOOKUP -> establishedResourceRule
             else -> null
         }
     }
+
+private val establishedResourceRule: FailureRule.Context = FailureRule.Context(
+    fields = setOf(DiagnosticField.RESOURCE),
+    identity = IdentityRequirement.REQUIRED_ANY,
+)
 
 private val externalResourceRule: FailureRule.Context = FailureRule.Context(
     fields = setOf(DiagnosticField.RESOURCE),

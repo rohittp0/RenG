@@ -18,57 +18,26 @@ class DiagnosticsAndFailuresTest {
     fun publicDiagnosticEnumsHaveTheSpecifiedMembersInOrder() {
         assertEquals(
             listOf(
-                "CONFIGURATION",
-                "FRAME_PLANNING",
-                "FRAME_PREPARATION",
-                "RESOURCE_LOOKUP",
-                "STORE_READ",
-                "STORE_VALIDATION",
-                "TRANSPORT",
-                "TRANSPORT_VALIDATION",
-                "STORE_WRITE",
-                "RESOURCE_DECODING",
-                "RESOURCE_PARSING",
-                "SHADER_COMPILATION",
-                "GPU_RESOURCE",
-                "RENDER_TARGET",
-                "DRAW",
-                "RESOURCE_FREE",
-                "RENDERER_CLOSE",
+                "CONFIGURATION", "FRAME_PLANNING", "FRAME_PREPARATION", "RESOURCE_LOOKUP",
+                "STORE_READ", "STORE_VALIDATION", "TRANSPORT", "TRANSPORT_VALIDATION",
+                "STORE_WRITE", "RESOURCE_DECODING", "RESOURCE_PARSING", "SHADER_COMPILATION",
+                "GPU_RESOURCE", "RENDER_TARGET", "DRAW", "RESOURCE_FREE", "RENDERER_CLOSE",
                 "CONTEXT_ADOPTION",
             ),
             PipelineStage.entries.map { it.name },
         )
         assertEquals(
             listOf(
-                "INVALID_VALUE",
-                "RESOURCE_LIMIT_EXCEEDED",
-                "UNSUPPORTED_PROJECTION_MODE",
-                "PREPARATION_ORDER_VIOLATION",
-                "PREPARATION_IN_PROGRESS",
-                "RENDERER_CLOSED",
-                "RENDER_CONTEXT_ADOPTION_REQUIRED",
-                "NO_CURRENT_RENDER_CONTEXT",
-                "DIFFERENT_CURRENT_RENDER_CONTEXT",
-                "UNSUPPORTED_RENDER_CONTEXT",
-                "FOREIGN_PREPARED_FRAME",
-                "PREPARED_FRAME_CLOSED",
-                "FOREIGN_RENDER_TARGET",
-                "STALE_RENDER_TARGET",
-                "INVALID_RENDER_TARGET",
-                "AMBIGUOUS_RESOURCE_ROUTE",
-                "RESOURCE_UNAVAILABLE",
-                "TRANSPORT_EXECUTION_FAILED",
-                "INVALID_TRANSPORT_RESPONSE",
-                "STORE_READ_FAILED",
-                "STORE_WRITE_FAILED",
-                "STORE_INTEGRITY_FAILED",
-                "RESOURCE_DECODE_FAILED",
-                "RESOURCE_PARSE_FAILED",
-                "UNSUPPORTED_RESOURCE_FEATURE",
-                "SHADER_COMPILE_FAILED",
-                "SHADER_LINK_FAILED",
-                "GPU_OPERATION_FAILED",
+                "INVALID_VALUE", "RESOURCE_LIMIT_EXCEEDED", "UNSUPPORTED_PROJECTION_MODE",
+                "PREPARATION_ORDER_VIOLATION", "PREPARATION_IN_PROGRESS", "RENDERER_CLOSED",
+                "RENDER_CONTEXT_ADOPTION_REQUIRED", "NO_CURRENT_RENDER_CONTEXT",
+                "DIFFERENT_CURRENT_RENDER_CONTEXT", "UNSUPPORTED_RENDER_CONTEXT",
+                "FOREIGN_PREPARED_FRAME", "PREPARED_FRAME_CLOSED", "FOREIGN_RENDER_TARGET",
+                "STALE_RENDER_TARGET", "INVALID_RENDER_TARGET", "AMBIGUOUS_RESOURCE_ROUTE",
+                "RESOURCE_UNAVAILABLE", "TRANSPORT_EXECUTION_FAILED", "INVALID_TRANSPORT_RESPONSE",
+                "STORE_READ_FAILED", "STORE_WRITE_FAILED", "STORE_INTEGRITY_FAILED",
+                "RESOURCE_DECODE_FAILED", "RESOURCE_PARSE_FAILED", "UNSUPPORTED_RESOURCE_FEATURE",
+                "SHADER_COMPILE_FAILED", "SHADER_LINK_FAILED", "GPU_OPERATION_FAILED",
                 "IDENTITY_COLLISION",
             ),
             RenGErrorCode.entries.map { it.name },
@@ -84,27 +53,13 @@ class DiagnosticsAndFailuresTest {
     fun diagnosticFieldAllowlistHasExactlyTheSpecifiedWireNames() {
         assertEquals(
             listOf(
-                "plans",
-                "frameIndex",
-                "projectionMode",
-                "camera.latitude",
-                "camera.unwrappedLongitude",
-                "mapPosition.latitude",
-                "mapPosition.unwrappedLongitude",
-                "mapPosition.altitude",
-                "screenPosition.x",
-                "screenPosition.y",
-                "placement.scale",
-                "geometry.latitude",
-                "geometry.unwrappedLongitude",
-                "geometry.altitude",
-                "basemapTileInstances",
-                "responseBodyBytes",
-                "resource",
-                "frameIdentity",
-                "animationSelector",
-                "shaderPair",
-                "renderTarget",
+                "plans", "frameIndex", "projectionMode", "camera.latitude",
+                "camera.unwrappedLongitude", "mapPosition.latitude",
+                "mapPosition.unwrappedLongitude", "mapPosition.altitude", "screenPosition.x",
+                "screenPosition.y", "placement.scale", "geometry.latitude",
+                "geometry.unwrappedLongitude", "geometry.altitude", "basemapTileInstances",
+                "responseBodyBytes", "resource", "frameIdentity", "animationSelector",
+                "shaderPair", "renderTarget",
             ),
             DiagnosticField.entries.map { it.wireName },
         )
@@ -137,224 +92,85 @@ class DiagnosticsAndFailuresTest {
     }
 
     @Test
-    fun failureFactoryAcceptsEveryErrorCodeAtAnAllowlistedStage() {
-        val externalKey = externalKey('a')
-        val geometryProgramKey = ResourceKey(ResourceKind.GEOMETRY_PROGRAM, stableId('b'), null)
-        val cases = listOf(
-            FactoryCase(RenGErrorCode.INVALID_VALUE, PipelineStage.CONTEXT_ADOPTION),
-            FactoryCase(
-                RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                PipelineStage.FRAME_PLANNING,
-                failureContextDiagnostic(
-                    stage = PipelineStage.FRAME_PLANNING,
-                    fieldName = DiagnosticField.PLANS,
-                    limit = 1L,
-                    actual = 2L,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.UNSUPPORTED_PROJECTION_MODE,
-                PipelineStage.FRAME_PLANNING,
-                failureContextDiagnostic(PipelineStage.FRAME_PLANNING, DiagnosticField.PROJECTION_MODE),
-            ),
-            FactoryCase(
-                RenGErrorCode.PREPARATION_ORDER_VIOLATION,
-                PipelineStage.FRAME_PLANNING,
-                failureContextDiagnostic(PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_INDEX),
-            ),
-            FactoryCase(RenGErrorCode.PREPARATION_IN_PROGRESS, PipelineStage.FRAME_PREPARATION),
-            FactoryCase(RenGErrorCode.RENDERER_CLOSED, PipelineStage.FRAME_PREPARATION),
-            FactoryCase(RenGErrorCode.RENDER_CONTEXT_ADOPTION_REQUIRED, PipelineStage.DRAW),
-            FactoryCase(RenGErrorCode.NO_CURRENT_RENDER_CONTEXT, PipelineStage.CONTEXT_ADOPTION),
-            FactoryCase(RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT, PipelineStage.DRAW),
-            FactoryCase(RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT, PipelineStage.CONFIGURATION),
-            FactoryCase(RenGErrorCode.FOREIGN_PREPARED_FRAME, PipelineStage.DRAW),
-            FactoryCase(RenGErrorCode.PREPARED_FRAME_CLOSED, PipelineStage.DRAW),
-            FactoryCase(RenGErrorCode.FOREIGN_RENDER_TARGET, PipelineStage.RENDER_TARGET),
-            FactoryCase(RenGErrorCode.STALE_RENDER_TARGET, PipelineStage.RENDER_TARGET),
-            FactoryCase(
-                RenGErrorCode.INVALID_RENDER_TARGET,
-                PipelineStage.RENDER_TARGET,
-                failureContextDiagnostic(PipelineStage.RENDER_TARGET, DiagnosticField.RENDER_TARGET),
-            ),
-            FactoryCase(
-                RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE,
-                PipelineStage.RESOURCE_LOOKUP,
-                failureContextDiagnostic(PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE),
-            ),
-            FactoryCase(
-                RenGErrorCode.RESOURCE_UNAVAILABLE,
-                PipelineStage.RESOURCE_LOOKUP,
-                failureContextDiagnostic(
-                    PipelineStage.RESOURCE_LOOKUP,
-                    DiagnosticField.RESOURCE,
-                    ResourceClass.STICKER_IMAGE,
-                    externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.TRANSPORT_EXECUTION_FAILED,
-                PipelineStage.TRANSPORT,
-                failureContextDiagnostic(
-                    PipelineStage.TRANSPORT,
-                    resourceClass = ResourceClass.STICKER_IMAGE,
-                    resourceKey = externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.INVALID_TRANSPORT_RESPONSE,
-                PipelineStage.TRANSPORT_VALIDATION,
-                failureContextDiagnostic(
-                    PipelineStage.TRANSPORT_VALIDATION,
-                    resourceClass = ResourceClass.STICKER_IMAGE,
-                    resourceKey = externalKey,
-                    statusCode = 304,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.STORE_READ_FAILED,
-                PipelineStage.STORE_READ,
-                failureContextDiagnostic(
-                    PipelineStage.STORE_READ,
-                    resourceClass = ResourceClass.STICKER_IMAGE,
-                    resourceKey = externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.STORE_WRITE_FAILED,
-                PipelineStage.STORE_WRITE,
-                failureContextDiagnostic(
-                    PipelineStage.STORE_WRITE,
-                    resourceClass = ResourceClass.STICKER_IMAGE,
-                    resourceKey = externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.STORE_INTEGRITY_FAILED,
-                PipelineStage.STORE_VALIDATION,
-                failureContextDiagnostic(
-                    PipelineStage.STORE_VALIDATION,
-                    DiagnosticField.RESOURCE,
-                    ResourceClass.STICKER_IMAGE,
-                    externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.RESOURCE_DECODE_FAILED,
-                PipelineStage.RESOURCE_DECODING,
-                failureContextDiagnostic(
-                    PipelineStage.RESOURCE_DECODING,
-                    DiagnosticField.RESOURCE,
-                    ResourceClass.STICKER_IMAGE,
-                    externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.RESOURCE_PARSE_FAILED,
-                PipelineStage.RESOURCE_PARSING,
-                failureContextDiagnostic(
-                    PipelineStage.RESOURCE_PARSING,
-                    DiagnosticField.ANIMATION_SELECTOR,
-                    ResourceClass.STICKER_IMAGE,
-                    externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE,
-                PipelineStage.RESOURCE_PARSING,
-                failureContextDiagnostic(
-                    PipelineStage.RESOURCE_PARSING,
-                    DiagnosticField.RESOURCE,
-                    ResourceClass.STICKER_IMAGE,
-                    externalKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.SHADER_COMPILE_FAILED,
-                PipelineStage.SHADER_COMPILATION,
-                failureContextDiagnostic(
-                    PipelineStage.SHADER_COMPILATION,
-                    DiagnosticField.SHADER_PAIR,
-                    resourceKey = geometryProgramKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.SHADER_LINK_FAILED,
-                PipelineStage.SHADER_COMPILATION,
-                failureContextDiagnostic(
-                    PipelineStage.SHADER_COMPILATION,
-                    DiagnosticField.SHADER_PAIR,
-                    resourceKey = geometryProgramKey,
-                ),
-            ),
-            FactoryCase(
-                RenGErrorCode.GPU_OPERATION_FAILED,
-                PipelineStage.GPU_RESOURCE,
-                failureContextDiagnostic(PipelineStage.GPU_RESOURCE),
-            ),
-            FactoryCase(
-                RenGErrorCode.IDENTITY_COLLISION,
-                PipelineStage.FRAME_PLANNING,
-                failureContextDiagnostic(PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_IDENTITY),
-            ),
-        )
+    fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
+        assertEquals(92, allowedFailureCases.size)
+        assertEquals(27, allowedFailureCases.count { !it.hasDiagnostic })
+        assertEquals(65, allowedFailureCases.count { it.hasDiagnostic })
+        assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
-        assertEquals(RenGErrorCode.entries.size, cases.size)
-        cases.forEach { case ->
-            val failure = renGFailure(case.code, case.stage, case.diagnostic)
-            assertEquals(case.code, failure.code)
-            assertEquals(case.stage, failure.stage)
-            assertEquals(case.diagnostic?.let(::listOf) ?: emptyList(), failure.diagnostics)
+        allowedFailureCases.forEach(::assertFailureTableOutcome)
+    }
+
+    @Test
+    fun factorySystematicallyRejectsDisallowedStagesFieldsIdentitiesStatusesAndLimits() {
+        val allowedNoDiagnostic = allowedFailureCases.filter { !it.hasDiagnostic }.toSet()
+        RenGErrorCode.entries.forEach { code ->
+            PipelineStage.entries.forEach { stage ->
+                val candidate = FailureCase(code, stage)
+                if (candidate in allowedNoDiagnostic) {
+                    assertFailureTableOutcome(candidate)
+                } else {
+                    assertFailsWith<IllegalArgumentException> {
+                        renGFailure(code, stage)
+                    }
+                }
+            }
+        }
+
+        allowedFailureCases.filter { it.hasDiagnostic }.forEach { expected ->
+            fieldsForStage(expected.stage).forEach { field ->
+                assertFailureTableOutcome(expected.copy(field = field))
+            }
+            IdentityShape.entries.forEach { identity ->
+                assertFailureTableOutcome(expected.copy(identity = identity))
+            }
+            listOf(false, true).forEach { hasStatus ->
+                assertFailureTableOutcome(expected.copy(hasStatus = hasStatus))
+            }
+            LimitShape.entries.forEach { limitShape ->
+                assertFailureTableOutcome(expected.copy(limitShape = limitShape))
+            }
+            PipelineStage.entries.forEach { stage ->
+                assertFailureTableOutcome(expected.copy(stage = stage))
+            }
         }
     }
 
     @Test
-    fun factoryRejectsNonallowlistedFailureCombinationsAndUnmatchedContext() {
-        val externalKey = externalKey('c')
-        val plansDiagnostic = failureContextDiagnostic(
-            stage = PipelineStage.FRAME_PLANNING,
-            fieldName = DiagnosticField.PLANS,
-        )
-        val resourceDiagnostic = failureContextDiagnostic(
-            stage = PipelineStage.RESOURCE_LOOKUP,
-            fieldName = DiagnosticField.RESOURCE,
-            resourceClass = ResourceClass.STICKER_IMAGE,
-            resourceKey = externalKey,
-        )
+    fun identityCollisionAcceptsAnyEstablishedKeyButAmbiguousRouteHasNoIdentity() {
+        IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
+            assertFailureTableOutcome(
+                failureContext(
+                    code = RenGErrorCode.IDENTITY_COLLISION,
+                    stage = PipelineStage.RESOURCE_LOOKUP,
+                    field = DiagnosticField.RESOURCE,
+                    identity = identity,
+                ),
+            )
+        }
 
-        assertFailsWith<IllegalArgumentException> {
-            failureContextDiagnostic(PipelineStage.RESOURCE_LOOKUP, DiagnosticField.PLANS)
-        }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(
-                RenGErrorCode.PREPARATION_ORDER_VIOLATION,
-                PipelineStage.FRAME_PLANNING,
-                plansDiagnostic,
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(
-                RenGErrorCode.RESOURCE_UNAVAILABLE,
-                PipelineStage.RESOURCE_LOOKUP,
-                failureContextDiagnostic(PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE),
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(
-                RenGErrorCode.PREPARATION_ORDER_VIOLATION,
-                PipelineStage.FRAME_PLANNING,
-                resourceDiagnostic,
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(RenGErrorCode.RENDERER_CLOSED, PipelineStage.FRAME_PREPARATION, plansDiagnostic)
+        IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
+            assertFailsWith<IllegalArgumentException> {
+                renGFailure(
+                    RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE,
+                    PipelineStage.RESOURCE_LOOKUP,
+                    diagnosticFor(
+                        failureContext(
+                            code = RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE,
+                            stage = PipelineStage.RESOURCE_LOOKUP,
+                            field = DiagnosticField.RESOURCE,
+                            identity = identity,
+                        ),
+                    ),
+                )
+            }
         }
     }
 
     @Test
     fun diagnosticValidatesStatusLimitsAndEstablishedResourceIdentity() {
-        val externalKey = externalKey('d')
-        val geometryProgramKey = ResourceKey(ResourceKind.GEOMETRY_PROGRAM, stableId('e'), null)
+        val externalKey = resourceKey(IdentityShape.EXTERNAL)!!
+        val geometryProgramKey = resourceKey(IdentityShape.GEOMETRY_PROGRAM)!!
 
         assertFailsWith<IllegalArgumentException> {
             failureContextDiagnostic(PipelineStage.TRANSPORT, statusCode = 200)
@@ -366,10 +182,7 @@ class DiagnosticsAndFailuresTest {
             failureContextDiagnostic(PipelineStage.FRAME_PLANNING, actual = 2L)
         }
         assertFailsWith<IllegalArgumentException> {
-            failureContextDiagnostic(
-                PipelineStage.RESOURCE_LOOKUP,
-                resourceClass = ResourceClass.STICKER_IMAGE,
-            )
+            failureContextDiagnostic(PipelineStage.RESOURCE_LOOKUP, resourceClass = ResourceClass.STICKER_IMAGE)
         }
         assertFailsWith<IllegalArgumentException> {
             failureContextDiagnostic(
@@ -385,34 +198,11 @@ class DiagnosticsAndFailuresTest {
                 resourceKey = geometryProgramKey,
             )
         }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(
-                RenGErrorCode.INVALID_TRANSPORT_RESPONSE,
-                PipelineStage.TRANSPORT_VALIDATION,
-                failureContextDiagnostic(
-                    PipelineStage.TRANSPORT_VALIDATION,
-                    resourceClass = ResourceClass.STICKER_IMAGE,
-                    resourceKey = externalKey,
-                ),
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            renGFailure(
-                RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                PipelineStage.FRAME_PLANNING,
-                failureContextDiagnostic(
-                    PipelineStage.FRAME_PLANNING,
-                    DiagnosticField.PLANS,
-                    limit = 2L,
-                    actual = 1L,
-                ),
-            )
-        }
     }
 
     @Test
     fun reloadDiagnosticHasStableWarningShapeAndSafeStructuralText() {
-        val key = externalKey('f')
+        val key = resourceKey(IdentityShape.EXTERNAL)!!
         val diagnostic = resourceReloadedAfterFreeDiagnostic(key)
 
         assertEquals(DiagnosticCode.RESOURCE_RELOADED_AFTER_FREE, diagnostic.code)
@@ -424,8 +214,8 @@ class DiagnosticsAndFailuresTest {
         assertEquals(null, diagnostic.statusCode)
         assertEquals(null, diagnostic.limit)
         assertEquals(null, diagnostic.actual)
-        assertEquals(diagnostic, resourceReloadedAfterFreeDiagnostic(externalKey('f')))
-        assertEquals(diagnostic.hashCode(), resourceReloadedAfterFreeDiagnostic(externalKey('f')).hashCode())
+        assertEquals(diagnostic, resourceReloadedAfterFreeDiagnostic(key))
+        assertEquals(diagnostic.hashCode(), resourceReloadedAfterFreeDiagnostic(key).hashCode())
         assertRedacted(diagnostic.toString(), key.stableId)
 
         assertFailsWith<IllegalArgumentException> {
@@ -440,10 +230,7 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun exceptionSnapshotsAtMostOneDiagnosticAndUsesIdentityEquality() {
-        val diagnostic = failureContextDiagnostic(
-            PipelineStage.FRAME_PLANNING,
-            DiagnosticField.FRAME_INDEX,
-        )
+        val diagnostic = failureContextDiagnostic(PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_INDEX)
         val supplied = mutableListOf(diagnostic)
         val first = RenGException(
             RenGErrorCode.PREPARATION_ORDER_VIOLATION,
@@ -484,14 +271,9 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun sinkNoneAndFailureDescriptorsRetainOnlySanitizedContext() {
-        DiagnosticSink.None.emit(
-            resourceReloadedAfterFreeDiagnostic(externalKey('0')),
-        )
+        DiagnosticSink.None.emit(resourceReloadedAfterFreeDiagnostic(resourceKey(IdentityShape.EXTERNAL)!!))
 
-        val diagnostic = failureContextDiagnostic(
-            PipelineStage.FRAME_PLANNING,
-            DiagnosticField.FRAME_INDEX,
-        )
+        val diagnostic = failureContextDiagnostic(PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_INDEX)
         val descriptor = FailureDescriptor(
             RenGErrorCode.PREPARATION_ORDER_VIOLATION,
             PipelineStage.FRAME_PLANNING,
@@ -515,12 +297,27 @@ class DiagnosticsAndFailuresTest {
     }
 
     @Test
-    fun failuresNeverExposeSensitiveCallerOrAdapterText() {
-        val locator = ResourceLocator("https://example.test/assets/model.glb?signature=locator-secret")
-        val shaderSource = "shader-secret"
-        val validator = "validator-secret"
-        val metadata = "metadata-secret"
-        val adapterMessage = "adapter-secret"
+    fun diagnosticAndFailurePathsRedactEstablishedStableIds() {
+        val secretStableId = stableId('f')
+        val key = ResourceKey(ResourceKind.EXTERNAL, secretStableId, ResourceClass.STICKER_IMAGE)
+        val diagnosticFailure = assertFailsWith<IllegalArgumentException> {
+            Diagnostic(
+                code = DiagnosticCode.FAILURE_CONTEXT,
+                severity = DiagnosticSeverity.ERROR,
+                stage = PipelineStage.RESOURCE_LOOKUP,
+                fieldName = DiagnosticField.RESOURCE.wireName,
+                resourceClass = ResourceClass.MODEL_GLB,
+                resourceKey = key,
+            )
+        }
+        val factoryFailure = assertFailsWith<IllegalArgumentException> {
+            failureContextDiagnostic(
+                PipelineStage.RESOURCE_LOOKUP,
+                DiagnosticField.RESOURCE,
+                ResourceClass.MODEL_GLB,
+                key,
+            )
+        }
         val failure = renGFailure(
             RenGErrorCode.RESOURCE_UNAVAILABLE,
             PipelineStage.RESOURCE_LOOKUP,
@@ -528,45 +325,273 @@ class DiagnosticsAndFailuresTest {
                 PipelineStage.RESOURCE_LOOKUP,
                 DiagnosticField.RESOURCE,
                 ResourceClass.STICKER_IMAGE,
-                externalKey('1'),
+                key,
             ),
         )
 
-        assertNull(failure.cause)
-        assertRedacted(
-            failure.toString(),
-            locator.value,
-            shaderSource,
-            validator,
-            metadata,
-            adapterMessage,
-            externalKey('1').stableId,
-        )
-        assertRedacted(
-            failure.diagnostics.single().toString(),
-            locator.value,
-            shaderSource,
-            validator,
-            metadata,
-            adapterMessage,
-            externalKey('1').stableId,
+        assertRedacted(diagnosticFailure.message.orEmpty(), secretStableId)
+        assertRedacted(factoryFailure.message.orEmpty(), secretStableId)
+        assertRedacted(failure.toString(), secretStableId)
+        assertRedacted(failure.diagnostics.single().toString(), secretStableId)
+    }
+
+    private fun assertFailureTableOutcome(candidate: FailureCase) {
+        val execute = { renGFailure(candidate.code, candidate.stage, diagnosticFor(candidate)) }
+        if (candidate in allowedFailureCases) {
+            val failure = execute()
+            assertEquals(candidate.code, failure.code)
+            assertEquals(candidate.stage, failure.stage)
+            assertEquals(candidate.hasDiagnostic, failure.diagnostics.isNotEmpty())
+        } else {
+            assertFailsWith<IllegalArgumentException> { execute() }
+        }
+    }
+
+    private fun diagnosticFor(candidate: FailureCase): Diagnostic? {
+        if (!candidate.hasDiagnostic) return null
+        val key = resourceKey(candidate.identity)
+        val (limit, actual) = when (candidate.limitShape) {
+            LimitShape.NONE -> null to null
+            LimitShape.EXCEEDED -> 1L to 2L
+            LimitShape.EQUAL -> 1L to 1L
+            LimitShape.UNDER -> 2L to 1L
+        }
+        return failureContextDiagnostic(
+            stage = candidate.stage,
+            fieldName = candidate.field,
+            resourceClass = key?.resourceClass,
+            resourceKey = key,
+            statusCode = if (candidate.hasStatus) 200 else null,
+            limit = limit,
+            actual = actual,
         )
     }
 
-    private data class FactoryCase(
-        val code: RenGErrorCode,
-        val stage: PipelineStage,
-        val diagnostic: Diagnostic? = null,
-    )
+    private fun fieldsForStage(stage: PipelineStage): Set<DiagnosticField?> =
+        allowedFieldsByStage[stage].orEmpty() + null
 
-    private fun externalKey(stableIdCharacter: Char): ResourceKey =
-        ResourceKey(ResourceKind.EXTERNAL, stableId(stableIdCharacter), ResourceClass.STICKER_IMAGE)
+    private fun resourceKey(identity: IdentityShape): ResourceKey? = when (identity) {
+        IdentityShape.NONE -> null
+        IdentityShape.EXTERNAL -> ResourceKey(
+            ResourceKind.EXTERNAL,
+            stableId('a'),
+            ResourceClass.STICKER_IMAGE,
+        )
+        IdentityShape.GEOMETRY_PROGRAM -> ResourceKey(ResourceKind.GEOMETRY_PROGRAM, stableId('b'), null)
+        IdentityShape.INTERNAL_PIPELINE -> ResourceKey(ResourceKind.INTERNAL_PIPELINE, stableId('c'), null)
+        IdentityShape.OFFSCREEN_SURFACE -> ResourceKey(ResourceKind.OFFSCREEN_SURFACE, stableId('d'), null)
+    }
 
     private fun stableId(character: Char): String = character.toString().repeat(64)
 
     private fun assertRedacted(text: String, vararg sensitiveValues: String) {
         sensitiveValues.forEach { sensitiveValue ->
             assertFalse(text.contains(sensitiveValue), "text leaked $sensitiveValue: $text")
+        }
+    }
+
+    private data class FailureCase(
+        val code: RenGErrorCode,
+        val stage: PipelineStage,
+        val hasDiagnostic: Boolean = false,
+        val field: DiagnosticField? = null,
+        val identity: IdentityShape = IdentityShape.NONE,
+        val hasStatus: Boolean = false,
+        val limitShape: LimitShape = LimitShape.NONE,
+    )
+
+    private enum class IdentityShape {
+        NONE,
+        EXTERNAL,
+        GEOMETRY_PROGRAM,
+        INTERNAL_PIPELINE,
+        OFFSCREEN_SURFACE,
+    }
+
+    private enum class LimitShape {
+        NONE,
+        EXCEEDED,
+        EQUAL,
+        UNDER,
+    }
+
+    private companion object {
+        private fun noDiagnostic(code: RenGErrorCode, stage: PipelineStage): FailureCase =
+            FailureCase(code, stage)
+
+        private fun failureContext(
+            code: RenGErrorCode,
+            stage: PipelineStage,
+            field: DiagnosticField? = null,
+            identity: IdentityShape = IdentityShape.NONE,
+            hasStatus: Boolean = false,
+            limitShape: LimitShape = LimitShape.NONE,
+        ): FailureCase = FailureCase(code, stage, true, field, identity, hasStatus, limitShape)
+
+        private val allowedFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = mapOf(
+            PipelineStage.FRAME_PLANNING to setOf(
+                DiagnosticField.PLANS,
+                DiagnosticField.FRAME_INDEX,
+                DiagnosticField.PROJECTION_MODE,
+                DiagnosticField.CAMERA_LATITUDE,
+                DiagnosticField.CAMERA_UNWRAPPED_LONGITUDE,
+                DiagnosticField.MAP_POSITION_LATITUDE,
+                DiagnosticField.MAP_POSITION_UNWRAPPED_LONGITUDE,
+                DiagnosticField.MAP_POSITION_ALTITUDE,
+                DiagnosticField.SCREEN_POSITION_X,
+                DiagnosticField.SCREEN_POSITION_Y,
+                DiagnosticField.PLACEMENT_SCALE,
+                DiagnosticField.GEOMETRY_LATITUDE,
+                DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
+                DiagnosticField.GEOMETRY_ALTITUDE,
+                DiagnosticField.BASEMAP_TILE_INSTANCES,
+                DiagnosticField.FRAME_IDENTITY,
+                DiagnosticField.SHADER_PAIR,
+            ),
+            PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
+            PipelineStage.STORE_VALIDATION to setOf(DiagnosticField.RESOURCE),
+            PipelineStage.TRANSPORT_VALIDATION to setOf(DiagnosticField.RESPONSE_BODY_BYTES),
+            PipelineStage.RESOURCE_DECODING to setOf(DiagnosticField.RESOURCE),
+            PipelineStage.RESOURCE_PARSING to setOf(
+                DiagnosticField.RESOURCE,
+                DiagnosticField.ANIMATION_SELECTOR,
+            ),
+            PipelineStage.SHADER_COMPILATION to setOf(DiagnosticField.SHADER_PAIR),
+            PipelineStage.RENDER_TARGET to setOf(DiagnosticField.RENDER_TARGET),
+        )
+
+        private val allowedFailureCases: List<FailureCase> = buildList {
+            add(noDiagnostic(RenGErrorCode.INVALID_VALUE, PipelineStage.CONTEXT_ADOPTION))
+            addAll(
+                listOf(
+                    PipelineStage.FRAME_PREPARATION,
+                    PipelineStage.FRAME_PLANNING,
+                    PipelineStage.RESOURCE_FREE,
+                    PipelineStage.RENDERER_CLOSE,
+                ).map { noDiagnostic(RenGErrorCode.PREPARATION_IN_PROGRESS, it) },
+            )
+            addAll(
+                listOf(
+                    PipelineStage.FRAME_PREPARATION,
+                    PipelineStage.FRAME_PLANNING,
+                    PipelineStage.CONTEXT_ADOPTION,
+                    PipelineStage.RENDER_TARGET,
+                    PipelineStage.DRAW,
+                ).map { noDiagnostic(RenGErrorCode.RENDERER_CLOSED, it) },
+            )
+            addAll(
+                listOf(PipelineStage.RENDER_TARGET, PipelineStage.DRAW).map {
+                    noDiagnostic(RenGErrorCode.RENDER_CONTEXT_ADOPTION_REQUIRED, it)
+                },
+            )
+            addAll(
+                listOf(
+                    PipelineStage.CONTEXT_ADOPTION,
+                    PipelineStage.RENDER_TARGET,
+                    PipelineStage.DRAW,
+                    PipelineStage.RESOURCE_FREE,
+                    PipelineStage.RENDERER_CLOSE,
+                ).map { noDiagnostic(RenGErrorCode.NO_CURRENT_RENDER_CONTEXT, it) },
+            )
+            addAll(
+                listOf(
+                    PipelineStage.RENDER_TARGET,
+                    PipelineStage.DRAW,
+                    PipelineStage.RESOURCE_FREE,
+                    PipelineStage.RENDERER_CLOSE,
+                ).map { noDiagnostic(RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT, it) },
+            )
+            addAll(
+                listOf(PipelineStage.CONTEXT_ADOPTION, PipelineStage.CONFIGURATION).map {
+                    noDiagnostic(RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT, it)
+                },
+            )
+            add(noDiagnostic(RenGErrorCode.FOREIGN_PREPARED_FRAME, PipelineStage.DRAW))
+            add(noDiagnostic(RenGErrorCode.PREPARED_FRAME_CLOSED, PipelineStage.DRAW))
+            add(noDiagnostic(RenGErrorCode.FOREIGN_RENDER_TARGET, PipelineStage.RENDER_TARGET))
+            add(noDiagnostic(RenGErrorCode.STALE_RENDER_TARGET, PipelineStage.RENDER_TARGET))
+
+            addAll(
+                listOf(
+                    DiagnosticField.PLANS,
+                    DiagnosticField.CAMERA_LATITUDE,
+                    DiagnosticField.CAMERA_UNWRAPPED_LONGITUDE,
+                    DiagnosticField.MAP_POSITION_LATITUDE,
+                    DiagnosticField.MAP_POSITION_UNWRAPPED_LONGITUDE,
+                    DiagnosticField.MAP_POSITION_ALTITUDE,
+                    DiagnosticField.SCREEN_POSITION_X,
+                    DiagnosticField.SCREEN_POSITION_Y,
+                    DiagnosticField.PLACEMENT_SCALE,
+                    DiagnosticField.GEOMETRY_LATITUDE,
+                    DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
+                    DiagnosticField.GEOMETRY_ALTITUDE,
+                    DiagnosticField.SHADER_PAIR,
+                ).map { failureContext(RenGErrorCode.INVALID_VALUE, PipelineStage.FRAME_PLANNING, it) },
+            )
+            addAll(
+                listOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES).map {
+                    failureContext(
+                        RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                        PipelineStage.FRAME_PLANNING,
+                        it,
+                        limitShape = LimitShape.EXCEEDED,
+                    )
+                },
+            )
+            add(
+                failureContext(
+                    RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    PipelineStage.TRANSPORT_VALIDATION,
+                    DiagnosticField.RESPONSE_BODY_BYTES,
+                    IdentityShape.EXTERNAL,
+                    hasStatus = true,
+                    limitShape = LimitShape.EXCEEDED,
+                ),
+            )
+            add(failureContext(RenGErrorCode.UNSUPPORTED_PROJECTION_MODE, PipelineStage.FRAME_PLANNING, DiagnosticField.PROJECTION_MODE))
+            add(failureContext(RenGErrorCode.PREPARATION_ORDER_VIOLATION, PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_INDEX))
+            add(failureContext(RenGErrorCode.INVALID_RENDER_TARGET, PipelineStage.RENDER_TARGET, DiagnosticField.RENDER_TARGET))
+            add(failureContext(RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE, PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE))
+            add(failureContext(RenGErrorCode.RESOURCE_UNAVAILABLE, PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            add(failureContext(RenGErrorCode.TRANSPORT_EXECUTION_FAILED, PipelineStage.TRANSPORT, identity = IdentityShape.EXTERNAL))
+            addAll(
+                listOf(null, DiagnosticField.RESPONSE_BODY_BYTES).map {
+                    failureContext(
+                        RenGErrorCode.INVALID_TRANSPORT_RESPONSE,
+                        PipelineStage.TRANSPORT_VALIDATION,
+                        it,
+                        IdentityShape.EXTERNAL,
+                        hasStatus = true,
+                    )
+                },
+            )
+            add(failureContext(RenGErrorCode.STORE_READ_FAILED, PipelineStage.STORE_READ, identity = IdentityShape.EXTERNAL))
+            add(failureContext(RenGErrorCode.STORE_WRITE_FAILED, PipelineStage.STORE_WRITE, identity = IdentityShape.EXTERNAL))
+            add(failureContext(RenGErrorCode.STORE_INTEGRITY_FAILED, PipelineStage.STORE_VALIDATION, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            add(failureContext(RenGErrorCode.RESOURCE_DECODE_FAILED, PipelineStage.RESOURCE_DECODING, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            listOf(DiagnosticField.RESOURCE, DiagnosticField.ANIMATION_SELECTOR).forEach { field ->
+                add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field))
+                add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field, IdentityShape.EXTERNAL))
+            }
+            add(failureContext(RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE, PipelineStage.RESOURCE_PARSING, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            listOf(RenGErrorCode.SHADER_COMPILE_FAILED, RenGErrorCode.SHADER_LINK_FAILED).forEach { code ->
+                add(failureContext(code, PipelineStage.SHADER_COMPILATION, DiagnosticField.SHADER_PAIR, IdentityShape.GEOMETRY_PROGRAM))
+            }
+            listOf(
+                PipelineStage.GPU_RESOURCE,
+                PipelineStage.RENDER_TARGET,
+                PipelineStage.DRAW,
+                PipelineStage.RESOURCE_FREE,
+                PipelineStage.RENDERER_CLOSE,
+            ).forEach { stage ->
+                IdentityShape.entries.forEach { identity ->
+                    add(failureContext(RenGErrorCode.GPU_OPERATION_FAILED, stage, identity = identity))
+                }
+            }
+            add(failureContext(RenGErrorCode.IDENTITY_COLLISION, PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_IDENTITY))
+            IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
+                add(failureContext(RenGErrorCode.IDENTITY_COLLISION, PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE, identity))
+            }
         }
     }
 }

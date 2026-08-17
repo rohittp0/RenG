@@ -38,7 +38,7 @@ public class RenGException internal constructor(
     public val code: RenGErrorCode,
     public val stage: PipelineStage,
     diagnostics: List<Diagnostic> = emptyList(),
-) : RuntimeException("RenG failure: $code at $stage") {
+) : RuntimeException("RenG failure: $code at $stage", null) {
     private val diagnosticSnapshot: List<Diagnostic>
 
     init {

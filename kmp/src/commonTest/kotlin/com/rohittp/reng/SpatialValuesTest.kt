@@ -60,6 +60,17 @@ class SpatialValuesTest {
     }
 
     @Test
+    fun outputPixelSizeUsesExactStructuralEqualityAndHashing() {
+        val first = OutputPixelSize(640, 480)
+        val equal = OutputPixelSize(640, 480)
+        val different = OutputPixelSize(641, 480)
+
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertFalse(first == different)
+    }
+
+    @Test
     fun rejectsEveryNonFiniteFloatingArgument() {
         listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY).forEach { invalid ->
             assertFailsWith<IllegalArgumentException> { Vector3(invalid, 0.0, 0.0) }
@@ -88,6 +99,10 @@ class SpatialValuesTest {
 
         assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(-180.0001, 0.0, 0.0)) }
         assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(180.0, 0.0, 0.0)) }
+        assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(0.0, -180.0001, 0.0)) }
+        assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(0.0, 180.0, 0.0)) }
+        assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(0.0, 0.0, -180.0001)) }
+        assertFailsWith<IllegalArgumentException> { placement(rotation = Vector3(0.0, 0.0, 180.0)) }
         assertFailsWith<IllegalArgumentException> { placement(scale = -0.0001) }
     }
 

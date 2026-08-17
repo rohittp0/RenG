@@ -1,9 +1,12 @@
 package com.rohittp.reng
 
 import com.rohittp.reng.internal.acceptValue
+import com.rohittp.reng.internal.freshCopy
+import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.reportOrder
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -73,6 +76,34 @@ class ResourcesTest {
             ),
             ResourceAccessMode.entries,
         )
+    }
+
+    @Test
+    fun resourceLimitsUseExactStructuralEqualityAndHashing() {
+        val first = ResourceLimits()
+        val equal = ResourceLimits()
+        val different = ResourceLimits(maximumModelGlbBytes = 1L)
+
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertFalse(first == different)
+    }
+
+    @Test
+    fun copyHelpersReturnSnapshotsThatCannotAliasTheirSources() {
+        val sourceList = mutableListOf("initial")
+        val returnedList = freshListCopy(sourceList) as MutableList<String>
+        sourceList[0] = "source mutation"
+        assertEquals(listOf("initial"), returnedList)
+        returnedList[0] = "returned mutation"
+        assertEquals(listOf("source mutation"), sourceList)
+
+        val sourceBytes = byteArrayOf(1, 2)
+        val returnedBytes = sourceBytes.freshCopy()
+        sourceBytes[0] = 9
+        assertContentEquals(byteArrayOf(1, 2), returnedBytes)
+        returnedBytes[1] = 8
+        assertContentEquals(byteArrayOf(9, 2), sourceBytes)
     }
 
     @Test

@@ -158,6 +158,56 @@ class RendererLifecyclePrecedenceTest {
     }
 
     @Test
+    fun deferredQueueAloneRequiresExactContextAndDrainsOnlyAfterAnExactObservation() {
+        val queued = listOf(deletion(8L))
+        val operation = RendererLifecycleOperation.FreeResources(ResourceSelector.All)
+        val initial = snapshot(
+            ownerState = RendererOwnerState.LIVE,
+            hasLiveGpuObjects = false,
+            deferredDeletions = queued,
+        )
+
+        listOf(
+            ExactContextFact.NONE to RenGErrorCode.NO_CURRENT_RENDER_CONTEXT,
+            ExactContextFact.DIFFERENT to RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT,
+        ).forEach { (contextFact, expectedCode) ->
+            val begun = RendererLifecycleStateMachine.begin(initial, operation)
+            assertEquals(
+                listOf(RendererLifecycleAction.ObserveExactCurrentContext),
+                begun.actions,
+            )
+
+            val failed = RendererLifecycleStateMachine.resume(
+                requireNotNull(begun.cursor),
+                RendererLifecycleObservation.ExactContextObserved(contextFact),
+            )
+            assertFailure(failed, expectedCode, PipelineStage.RESOURCE_FREE)
+            assertFalse(failed.snapshot.gpuLedger.hasLiveGpuObjects)
+            assertEquals(queued, failed.snapshot.gpuLedger.deferredDeletions)
+            assertTrue(failed.actions.isEmpty())
+        }
+
+        val begun = RendererLifecycleStateMachine.begin(initial, operation)
+        val deleting = RendererLifecycleStateMachine.resume(
+            requireNotNull(begun.cursor),
+            RendererLifecycleObservation.ExactContextObserved(ExactContextFact.EXACT),
+        )
+        assertDeletionAction(deleting, queued.single(), queued)
+        assertFalse(deleting.snapshot.gpuLedger.hasLiveGpuObjects)
+
+        val drained = RendererLifecycleStateMachine.resume(
+            requireNotNull(deleting.cursor),
+            RendererLifecycleObservation.DeferredDeletionAcknowledged(DeletionId(8L)),
+        )
+        assertFalse(drained.snapshot.gpuLedger.hasLiveGpuObjects)
+        assertTrue(drained.snapshot.gpuLedger.deferredDeletions.isEmpty())
+        assertEquals(
+            listOf(RendererLifecycleAction.ExecutePermittedOperation(operation)),
+            drained.actions,
+        )
+    }
+
+    @Test
     fun contextObservationUsesTheOperationStageAndIsSkippedOnlyForGpuFreeFreeAndClose() {
         val framebufferName = FramebufferName(0u)
         val requiringContext = listOf(
@@ -376,6 +426,10 @@ class RendererLifecyclePrecedenceTest {
         val query = RendererLifecycleOperation.QueryResources(ResourceSelector.All)
         val adopt = RendererLifecycleOperation.AdoptCurrentRenderContext
         val deletionId = DeletionId(8L)
+        val deletionSnapshot = snapshot(
+            ownerState = RendererOwnerState.LIVE,
+            deferredDeletions = listOf(deletion(8L)),
+        )
         val framebufferName = FramebufferName(9u)
         val mismatches = listOf(
             CursorMismatch(
@@ -391,7 +445,7 @@ class RendererLifecyclePrecedenceTest {
                 RendererLifecycleObservation.ExactContextObserved(ExactContextFact.EXACT),
             ),
             CursorMismatch(
-                RendererLifecycleCursor.AwaitingDeferredDeletion(snapshot, query, deletionId),
+                RendererLifecycleCursor.AwaitingDeferredDeletion(deletionSnapshot, query, deletionId),
                 RendererLifecycleObservation.FramebufferObserved(FramebufferFact.COMPLETE),
             ),
             CursorMismatch(
@@ -407,11 +461,11 @@ class RendererLifecyclePrecedenceTest {
                 RendererLifecycleObservation.RenderCallsQuiesced,
             ),
             CursorMismatch(
-                RendererLifecycleCursor.AwaitingDeferredDeletion(snapshot, query, deletionId),
+                RendererLifecycleCursor.AwaitingDeferredDeletion(deletionSnapshot, query, deletionId),
                 RendererLifecycleObservation.DeferredDeletionAcknowledged(DeletionId(9L)),
             ),
             CursorMismatch(
-                RendererLifecycleCursor.AwaitingDeferredDeletion(snapshot, query, deletionId),
+                RendererLifecycleCursor.AwaitingDeferredDeletion(deletionSnapshot, query, deletionId),
                 RendererLifecycleObservation.DeferredDeletionFailed(
                     DeletionId(9L),
                     FailureDescriptor(

@@ -188,6 +188,38 @@ internal sealed interface SuppliedCallOutcome<out T> {
     }
 }
 
+internal sealed interface SuppliedValidationOutcome {
+    data object Valid : SuppliedValidationOutcome
+
+    data object Failed : SuppliedValidationOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : SuppliedValidationOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "supplied validation cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
+internal sealed interface SuppliedInstallOutcome {
+    data object Succeeded : SuppliedInstallOutcome
+
+    data class Failed(val failure: FailureDescriptor) : SuppliedInstallOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : SuppliedInstallOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "supplied install cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
 internal sealed interface LatchedTransportOutcome {
     data class Response(val response: TransportResponse) : LatchedTransportOutcome
 
@@ -550,6 +582,79 @@ internal data class PendingClassGates(
     }
 }
 
+internal enum class ResourceClassGate {
+    PARSE_TILEJSON,
+    DECODE_VECTOR_TILE,
+    DECODE_PNG,
+    VALIDATE_DEM_TERRAIN_ENCODING,
+    PARSE_GEOJSON,
+    PARSE_GLB,
+    VALIDATE_GLB_FEATURES,
+}
+
+internal fun ordinaryResourceClassGates(resourceClass: ResourceClass): List<ResourceClassGate>? =
+    when (resourceClass) {
+        ResourceClass.BASEMAP_TILE_JSON -> listOf(ResourceClassGate.PARSE_TILEJSON)
+        ResourceClass.BASEMAP_VECTOR_TILE -> listOf(ResourceClassGate.DECODE_VECTOR_TILE)
+        ResourceClass.BASEMAP_RASTER_TILE -> listOf(ResourceClassGate.DECODE_PNG)
+        ResourceClass.BASEMAP_DEM_TILE -> listOf(
+            ResourceClassGate.DECODE_PNG,
+            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
+        )
+        ResourceClass.BASEMAP_GEO_JSON -> listOf(ResourceClassGate.PARSE_GEOJSON)
+        ResourceClass.STICKER_IMAGE -> listOf(ResourceClassGate.DECODE_PNG)
+        ResourceClass.MODEL_TEXTURE -> listOf(ResourceClassGate.DECODE_PNG)
+        ResourceClass.MODEL_GLB -> listOf(
+            ResourceClassGate.PARSE_GLB,
+            ResourceClassGate.VALIDATE_GLB_FEATURES,
+        )
+        ResourceClass.BASEMAP_STYLE,
+        ResourceClass.BASEMAP_SPRITE_JSON,
+        ResourceClass.BASEMAP_SPRITE_IMAGE,
+        -> null
+    }
+
+internal fun requiresStoreWrite(provenance: ContentProvenance): Boolean =
+    when (provenance) {
+        ContentProvenance.RESIDENT,
+        ContentProvenance.STORE,
+        -> false
+        ContentProvenance.TRANSPORT_200,
+        ContentProvenance.TRANSPORT_304_MERGED,
+        -> true
+    }
+
+internal data class AwaitingClassGate(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+    val gate: ResourceClassGate,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingStoreWrite(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class AwaitingVisibilityInstall(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
 internal class RouteRecord(
     val registration: ResourceRouteRegistration,
     joinedOccurrenceIds: List<ResourceOccurrenceId>,
@@ -557,6 +662,7 @@ internal class RouteRecord(
     val cursor: ResourceRouteCursor?,
     val status: ResourceRouteStatus,
     val lookup: LookupProgress? = null,
+    val visibilityInstalled: Boolean = false,
 ) {
     private val joinedOccurrenceIdSnapshot: List<ResourceOccurrenceId> = freshListCopy(joinedOccurrenceIds)
 
@@ -653,6 +759,29 @@ internal data class TransportCompleted(
 
 internal data class LatchedTransportReplayCompleted(
     val actionId: ResourceActionId,
+) : ResourceOperationEvent
+
+internal data class AdvancePendingClassGates(
+    val ordinal: Long,
+) : ResourceOperationEvent {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class ResourceClassValidationCompleted(
+    val actionId: ResourceActionId,
+    val outcome: SuppliedValidationOutcome,
+) : ResourceOperationEvent
+
+internal data class StoreWriteCompleted(
+    val actionId: ResourceActionId,
+    val outcome: SuppliedCallOutcome<Unit>,
+) : ResourceOperationEvent
+
+internal data class VisibilityInstallCompleted(
+    val actionId: ResourceActionId,
+    val outcome: SuppliedInstallOutcome,
 ) : ResourceOperationEvent
 
 internal class ChildrenDiscovered(
@@ -771,6 +900,38 @@ internal data class ReplayLatchedTransport(
     val actionId: ResourceActionId,
     val ordinal: Long,
     val latch: TransportLatchRecord,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class ValidateResourceClass(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
+    val gate: ResourceClassGate,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class WriteStore(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val rawKey: RawResourceKey,
+    val resource: StoredRawResource,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class InstallVisibility(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val content: ResolvedResourceContent,
 ) : ResourceOperationAction {
     init {
         require(ordinal >= 0L) { "route ordinal must be non-negative" }
@@ -897,7 +1058,52 @@ internal sealed interface ResponseRuleOutcome {
     data class Failure(val failure: FailureDescriptor) : ResponseRuleOutcome
 }
 
+internal data class VisibleResource(
+    val resourceKey: ResourceKey,
+    val content: ResolvedResourceContent,
+) {
+    init {
+        require(resourceKey == content.resourceKey) {
+            "a visible resource must carry its own content identity"
+        }
+    }
+}
+
+internal class OwnerResourceSet(
+    val ownerId: ResourceOwnerId,
+    resources: List<VisibleResource>,
+) {
+    private val resourceSnapshot: List<VisibleResource> = freshListCopy(resources)
+
+    val resources: List<VisibleResource>
+        get() = freshListCopy(resourceSnapshot)
+
+    override fun equals(other: Any?): Boolean =
+        other is OwnerResourceSet && ownerId == other.ownerId && resourceSnapshot == other.resourceSnapshot
+
+    override fun hashCode(): Int = 31 * ownerId.hashCode() + resourceSnapshot.hashCode()
+
+    override fun toString(): String =
+        "OwnerResourceSet(ownerId=$ownerId, resourceCount=${resourceSnapshot.size})"
+}
+
 internal sealed interface ResourceOperationOutcome {
+    class Success(
+        resourceSets: List<OwnerResourceSet>,
+    ) : ResourceOperationOutcome {
+        private val resourceSetSnapshot: List<OwnerResourceSet> = freshListCopy(resourceSets)
+
+        val resourceSets: List<OwnerResourceSet>
+            get() = freshListCopy(resourceSetSnapshot)
+
+        override fun equals(other: Any?): Boolean =
+            other is Success && resourceSetSnapshot == other.resourceSetSnapshot
+
+        override fun hashCode(): Int = resourceSetSnapshot.hashCode()
+
+        override fun toString(): String = "Success(resourceSetCount=${resourceSetSnapshot.size})"
+    }
+
     data class Failure(val failure: FailureDescriptor) : ResourceOperationOutcome
 
     data class Cancelled(
@@ -995,6 +1201,9 @@ internal sealed interface ResourceOperationState {
                             selected.resourceKey == record.registration.resourceKey,
                     ) { "selected content must belong to its registered route" }
                 }
+                require(!record.visibilityInstalled || lookup?.selectedContent != null) {
+                    "installed visibility requires selected content"
+                }
 
                 record.cursor?.let { cursor ->
                     val ordinal = requireNotNull(record.ordinal) {
@@ -1032,6 +1241,18 @@ internal sealed interface ResourceOperationState {
                         is PendingClassGates -> require(
                             lookup?.selectedContent == cursor.content,
                         ) { "pending class gates require matching selected content" }
+                        is AwaitingClassGate -> require(
+                            lookup?.selectedContent == cursor.content &&
+                                ordinaryResourceClassGates(cursor.content.route.resourceClass)
+                                    ?.contains(cursor.gate) == true,
+                        ) { "class gate cursor requires matching content and an ordinary class gate" }
+                        is AwaitingStoreWrite -> require(
+                            lookup?.selectedContent == cursor.content &&
+                                requiresStoreWrite(cursor.content.provenance),
+                        ) { "Store write cursor requires matching content that must be written" }
+                        is AwaitingVisibilityInstall -> require(
+                            lookup?.selectedContent == cursor.content,
+                        ) { "visibility install cursor requires matching selected content" }
                     }
                 }
                 if (record.status == ResourceRouteStatus.RUNNING && lookup != null) {
@@ -1118,6 +1339,9 @@ private fun cursorOrdinal(cursor: ResourceRouteCursor): Long = when (cursor) {
     is AwaitingTransport -> cursor.ordinal
     is AwaitingLatchedTransportReplay -> cursor.ordinal
     is PendingClassGates -> cursor.ordinal
+    is AwaitingClassGate -> cursor.ordinal
+    is AwaitingStoreWrite -> cursor.ordinal
+    is AwaitingVisibilityInstall -> cursor.ordinal
 }
 
 private fun cursorActionId(cursor: ResourceRouteCursor): ResourceActionId? = when (cursor) {
@@ -1127,6 +1351,9 @@ private fun cursorActionId(cursor: ResourceRouteCursor): ResourceActionId? = whe
     is AwaitingTransport -> cursor.actionId
     is AwaitingLatchedTransportReplay -> cursor.actionId
     is PendingClassGates -> null
+    is AwaitingClassGate -> cursor.actionId
+    is AwaitingStoreWrite -> cursor.actionId
+    is AwaitingVisibilityInstall -> cursor.actionId
 }
 
 internal class ResourceOperationTransition(

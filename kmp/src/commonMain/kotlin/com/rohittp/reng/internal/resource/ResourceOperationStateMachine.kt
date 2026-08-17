@@ -141,6 +141,10 @@ internal object ResourceOperationStateMachine {
             is StoreReadCompleted -> work.storeReadCompleted(event)
             is TransportCompleted -> work.transportCompleted(event)
             is LatchedTransportReplayCompleted -> work.latchedTransportReplayCompleted(event)
+            is AdvancePendingClassGates -> work.advancePendingClassGates(event)
+            is ResourceClassValidationCompleted -> work.classValidationCompleted(event)
+            is StoreWriteCompleted -> work.storeWriteCompleted(event)
+            is VisibilityInstallCompleted -> work.visibilityInstallCompleted(event)
             is RouteReadyForDiscovery -> work.routeReadyForDiscovery(event)
             is ChildrenDiscovered -> work.childrenDiscovered(event)
             is RouteCompleted -> work.routeCompleted(event)
@@ -505,6 +509,145 @@ internal object ResourceOperationStateMachine {
                 )
             }
         }
+
+        fun advancePendingClassGates(event: AdvancePendingClassGates) {
+            require(terminalSelection == null) { "class gates cannot advance after terminal selection" }
+            val routeIndex = requireNotNull(routeIndexByOrdinal[event.ordinal]) {
+                "class gate advancement must name an assigned route"
+            }
+            val record = routeRecords[routeIndex]
+            require(record.status == ResourceRouteStatus.RUNNING && event.ordinal in activeRouteOrdinals) {
+                "class gate advancement requires an active running route"
+            }
+            val cursor = record.cursor
+            require(cursor is PendingClassGates && cursor.ordinal == event.ordinal) {
+                "class gate advancement requires pending selected content at the same ordinal"
+            }
+            requestClassGate(routeIndex, event.ordinal, cursor.content, gateIndex = 0)
+        }
+
+        fun classValidationCompleted(event: ResourceClassValidationCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingClassGate>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val cursor = routeRecords[routeIndex].cursor as AwaitingClassGate
+
+            when (val outcome = event.outcome) {
+                SuppliedValidationOutcome.Valid -> {
+                    val gates = ordinaryClassGates(cursor.content)
+                    val nextGateIndex = gates.indexOf(cursor.gate) + 1
+                    if (nextGateIndex < gates.size) {
+                        requestClassGate(routeIndex, cursor.ordinal, cursor.content, nextGateIndex)
+                    } else {
+                        requestWriteOrVisibility(routeIndex, cursor.ordinal, cursor.content)
+                    }
+                }
+                SuppliedValidationOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(classGateFailure(cursor.content, cursor.gate)),
+                )
+                is SuppliedValidationOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        fun storeWriteCompleted(event: StoreWriteCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStoreWrite>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+            val cursor = routeRecords[routeIndex].cursor as AwaitingStoreWrite
+
+            when (val outcome = event.outcome) {
+                is SuppliedCallOutcome.Success -> requestVisibilityInstall(
+                    routeIndex,
+                    cursor.ordinal,
+                    cursor.content,
+                )
+                SuppliedCallOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(storeWriteFailure(cursor.content)),
+                )
+                is SuppliedCallOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        fun visibilityInstallCompleted(event: VisibilityInstallCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingVisibilityInstall>(event.actionId)
+            if (finishActionAfterTerminal(routeIndex)) return
+
+            when (val outcome = event.outcome) {
+                SuppliedInstallOutcome.Succeeded -> {
+                    updateRouteRecord(routeIndex, cursor = null, visibilityInstalled = true)
+                    completeLookupRoute(routeIndex, ResourceRouteOutcome.Success)
+                }
+                is SuppliedInstallOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(outcome.failure),
+                )
+                is SuppliedInstallOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        private fun requestClassGate(
+            routeIndex: Int,
+            ordinal: Long,
+            content: ResolvedResourceContent,
+            gateIndex: Int,
+        ) {
+            val gate = ordinaryClassGates(content)[gateIndex]
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingClassGate(actionId, ordinal, content, gate),
+            )
+            actions += ValidateResourceClass(actionId, ordinal, content, gate)
+        }
+
+        private fun requestWriteOrVisibility(
+            routeIndex: Int,
+            ordinal: Long,
+            content: ResolvedResourceContent,
+        ) {
+            if (!requiresStoreWrite(content.provenance)) {
+                requestVisibilityInstall(routeIndex, ordinal, content)
+                return
+            }
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingStoreWrite(actionId, ordinal, content),
+            )
+            actions += WriteStore(
+                actionId = actionId,
+                ordinal = ordinal,
+                rawKey = routeRecords[routeIndex].registration.rawKey,
+                resource = copyStored(content.stored),
+            )
+        }
+
+        private fun requestVisibilityInstall(
+            routeIndex: Int,
+            ordinal: Long,
+            content: ResolvedResourceContent,
+        ) {
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingVisibilityInstall(actionId, ordinal, content),
+            )
+            actions += InstallVisibility(actionId, ordinal, content)
+        }
+
+        private fun ordinaryClassGates(content: ResolvedResourceContent): List<ResourceClassGate> =
+            requireNotNull(ordinaryResourceClassGates(content.route.resourceClass)) {
+                "ordinary class gates require a non-sprite, non-style resource class"
+            }
 
         private fun startStoreRead(
             routeIndex: Int,
@@ -1024,7 +1167,7 @@ internal object ResourceOperationStateMachine {
         }
 
         private fun terminalOutcome(): ResourceOperationOutcome? {
-            val selected = terminalSelection ?: return null
+            val selected = terminalSelection ?: return successOutcome()
             if (activeRouteOrdinals.isNotEmpty()) return null
             return when (selected) {
                 is ResourceTerminalSelection.External ->
@@ -1036,6 +1179,40 @@ internal object ResourceOperationStateMachine {
                         ResourceOperationOutcome.Cancelled(routeOutcome.cancellation)
                 }
             }
+        }
+
+        private fun successOutcome(): ResourceOperationOutcome? {
+            if (activeRouteOrdinals.isNotEmpty()) return null
+            if (nextRetirementOrdinal != nextRouteOrdinal) return null
+            if (bufferedRouteOutcomes.isNotEmpty()) return null
+            if (eligibleFifo.isNotEmpty() || !staticContinuation.isEmpty || frontierStack.isNotEmpty()) {
+                return null
+            }
+            if (routeRecords.any { it.status != ResourceRouteStatus.RESOLVED }) return null
+
+            val visibleByRoute = mutableMapOf<ResourceRouteKey, VisibleResource>()
+            routeRecords.forEach { record ->
+                if (!record.visibilityInstalled) return@forEach
+                val content = requireNotNull(record.lookup?.selectedContent) {
+                    "installed visibility requires selected content"
+                }
+                visibleByRoute[record.registration.route] =
+                    VisibleResource(record.registration.resourceKey, content)
+            }
+
+            val ownerOrder = mutableListOf<ResourceOwnerId>()
+            val resourcesByOwner = mutableMapOf<ResourceOwnerId, MutableList<VisibleResource>>()
+            occurrences.forEach { occurrence ->
+                val visible = visibleByRoute[occurrence.registration.route] ?: return null
+                val owned = resourcesByOwner.getOrPut(occurrence.ownerId) {
+                    ownerOrder += occurrence.ownerId
+                    mutableListOf()
+                }
+                if (visible !in owned) owned += visible
+            }
+            return ResourceOperationOutcome.Success(
+                ownerOrder.map { ownerId -> OwnerResourceSet(ownerId, resourcesByOwner.getValue(ownerId)) },
+            )
         }
 
         private fun addRouteRecord(record: RouteRecord): Int {
@@ -1066,6 +1243,7 @@ internal object ResourceOperationStateMachine {
             cursor: ResourceRouteCursor? = routeRecords[index].cursor,
             status: ResourceRouteStatus = routeRecords[index].status,
             lookup: LookupProgress? = routeRecords[index].lookup,
+            visibilityInstalled: Boolean = routeRecords[index].visibilityInstalled,
         ) {
             val previous = routeRecords[index]
             cursorActionId(previous.cursor)?.let { actionId ->
@@ -1093,6 +1271,7 @@ internal object ResourceOperationStateMachine {
                 cursor = cursor,
                 status = status,
                 lookup = lookup,
+                visibilityInstalled = visibilityInstalled,
             )
         }
 
@@ -1196,6 +1375,7 @@ internal object ResourceOperationStateMachine {
                 cursor = record.cursor,
                 status = record.status,
                 lookup = record.lookup,
+                visibilityInstalled = record.visibilityInstalled,
             )
         }
     }
@@ -1305,6 +1485,73 @@ internal object ResourceOperationStateMachine {
         ),
     )
 
+    private fun storeIntegrityFailure(content: ResolvedResourceContent): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.STORE_INTEGRITY_FAILED,
+        stage = PipelineStage.STORE_VALIDATION,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.STORE_VALIDATION,
+            fieldName = DiagnosticField.RESOURCE,
+            resourceClass = content.route.resourceClass,
+            resourceKey = content.resourceKey,
+        ),
+    )
+
+    private fun storeWriteFailure(content: ResolvedResourceContent): FailureDescriptor = FailureDescriptor(
+        code = RenGErrorCode.STORE_WRITE_FAILED,
+        stage = PipelineStage.STORE_WRITE,
+        diagnostic = failureContextDiagnostic(
+            stage = PipelineStage.STORE_WRITE,
+            resourceClass = content.route.resourceClass,
+            resourceKey = content.resourceKey,
+        ),
+    )
+
+    private fun classGateFailure(
+        content: ResolvedResourceContent,
+        gate: ResourceClassGate,
+    ): FailureDescriptor {
+        if (content.provenance == ContentProvenance.STORE) return storeIntegrityFailure(content)
+        return when (gate) {
+            ResourceClassGate.PARSE_TILEJSON,
+            ResourceClassGate.PARSE_GEOJSON,
+            ResourceClassGate.PARSE_GLB,
+            -> resourceFormatFailure(
+                content,
+                RenGErrorCode.RESOURCE_PARSE_FAILED,
+                PipelineStage.RESOURCE_PARSING,
+            )
+            ResourceClassGate.DECODE_VECTOR_TILE,
+            ResourceClassGate.DECODE_PNG,
+            -> resourceFormatFailure(
+                content,
+                RenGErrorCode.RESOURCE_DECODE_FAILED,
+                PipelineStage.RESOURCE_DECODING,
+            )
+            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
+            ResourceClassGate.VALIDATE_GLB_FEATURES,
+            -> resourceFormatFailure(
+                content,
+                RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE,
+                PipelineStage.RESOURCE_PARSING,
+            )
+        }
+    }
+
+    private fun resourceFormatFailure(
+        content: ResolvedResourceContent,
+        code: RenGErrorCode,
+        stage: PipelineStage,
+    ): FailureDescriptor = FailureDescriptor(
+        code = code,
+        stage = stage,
+        diagnostic = failureContextDiagnostic(
+            stage = stage,
+            fieldName = DiagnosticField.RESOURCE,
+            resourceClass = content.route.resourceClass,
+            resourceKey = content.resourceKey,
+        ),
+    )
+
     private fun transportFailure(record: RouteRecord): FailureDescriptor = FailureDescriptor(
         code = RenGErrorCode.TRANSPORT_EXECUTION_FAILED,
         stage = PipelineStage.TRANSPORT,
@@ -1327,6 +1574,9 @@ internal object ResourceOperationStateMachine {
         is AwaitingStoreRead -> cursor.actionId
         is AwaitingTransport -> cursor.actionId
         is AwaitingLatchedTransportReplay -> cursor.actionId
+        is AwaitingClassGate -> cursor.actionId
+        is AwaitingStoreWrite -> cursor.actionId
+        is AwaitingVisibilityInstall -> cursor.actionId
     }
 
     private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(

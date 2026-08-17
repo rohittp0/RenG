@@ -562,6 +562,86 @@ class MercatorSpatialPlannerTest {
     }
 
     @Test
+    fun spatialPlanConstructorRejectsScreenEntriesOutsideDocumentedCompositingOrder() {
+        val camera = resolvedCamera()
+        val lowSticker = screenEntry(DrawnThingReference.StickerAt(0), z = 1.0, camera = camera)
+        val highSticker = screenEntry(DrawnThingReference.StickerAt(1), z = 2.0, camera = camera)
+        val tiedEarlierSticker = screenEntry(DrawnThingReference.StickerAt(2), z = 5.0, camera = camera)
+        val tiedLaterSticker = screenEntry(DrawnThingReference.StickerAt(3), z = 5.0, camera = camera)
+        val tiedModel = screenEntry(DrawnThingReference.ModelAt(2), z = 5.0, camera = camera)
+
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, screenEntries = listOf(highSticker, lowSticker))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, screenEntries = listOf(tiedModel, tiedLaterSticker))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, screenEntries = listOf(tiedLaterSticker, tiedEarlierSticker))
+        }
+
+        val ordered = listOf(lowSticker, highSticker, tiedEarlierSticker, tiedLaterSticker, tiedModel)
+        assertEquals(ordered, spatialPlanValue(camera = camera, screenEntries = ordered).screenEntries)
+    }
+
+    @Test
+    fun spatialPlanConstructorRejectsOneDrawnThingResolvedIntoMoreThanOneEntry() {
+        val camera = resolvedCamera()
+        val mapSticker = mapEntry(DrawnThingReference.StickerAt(4), camera)
+        val screenSticker = screenEntry(DrawnThingReference.StickerAt(4), z = 1.0, camera = camera)
+
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(
+                camera = camera,
+                mapEntries = listOf(mapSticker),
+                screenEntries = listOf(screenSticker),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, mapEntries = listOf(mapSticker, mapSticker))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            spatialPlanValue(camera = camera, screenEntries = listOf(screenSticker, screenSticker))
+        }
+
+        val duplicateValuesAtDistinctIndices = listOf(
+            mapEntry(DrawnThingReference.StickerAt(0), camera),
+            mapEntry(DrawnThingReference.StickerAt(2), camera),
+            mapEntry(DrawnThingReference.ModelAt(0), camera),
+            mapEntry(DrawnThingReference.ModelAt(2), camera),
+        )
+        assertEquals(
+            duplicateValuesAtDistinctIndices,
+            spatialPlanValue(camera = camera, mapEntries = duplicateValuesAtDistinctIndices).mapEntries,
+        )
+        assertEquals(
+            listOf(mapSticker, mapEntry(DrawnThingReference.ModelAt(4), camera)),
+            spatialPlanValue(
+                camera = camera,
+                mapEntries = listOf(mapSticker, mapEntry(DrawnThingReference.ModelAt(4), camera)),
+            ).mapEntries,
+        )
+    }
+
+    @Test
+    fun spatialPlanValidatesItsOwnSnapshotsRatherThanTheCallerSuppliedLists() {
+        val camera = resolvedCamera()
+        val screenSticker = screenEntry(DrawnThingReference.StickerAt(0), z = 1.0, camera = camera)
+        val mapSticker = mapEntry(DrawnThingReference.StickerAt(0), camera)
+
+        val spatialPlan = spatialPlanValue(
+            camera = camera,
+            screenEntries = ShiftingReadList(listOf(screenSticker, mapSticker)),
+        )
+
+        assertEquals(listOf(screenSticker), spatialPlan.screenEntries)
+        assertEquals(
+            DrawRegime.SCREEN_COMPOSITED,
+            spatialPlan.screenEntries.single().placement.drawRegime,
+        )
+    }
+
+    @Test
     fun spatialPlanSnapshotsConstructorListsReturnsFreshCopiesAndUsesStructuralEquality() {
         val camera = resolvedCamera()
         val mapEntry = ResolvedDrawnThing(
@@ -707,6 +787,19 @@ class MercatorSpatialPlannerTest {
         shaderProfiles = shaderProfiles,
     )
 
+    private fun screenEntry(
+        reference: DrawnThingReference,
+        z: Double,
+        camera: ResolvedMercatorCamera,
+    ): ResolvedDrawnThing =
+        ResolvedDrawnThing(reference, resolvePlacement(screenPlacement(z), camera).successValue())
+
+    private fun mapEntry(
+        reference: DrawnThingReference,
+        camera: ResolvedMercatorCamera,
+    ): ResolvedDrawnThing =
+        ResolvedDrawnThing(reference, resolvePlacement(mapPlacement(), camera).successValue())
+
     private fun resolvedCamera(): ResolvedMercatorCamera =
         assertIs<SpatialOutcome.Success<ResolvedMercatorCamera>>(
             resolveMercatorCamera(
@@ -779,5 +872,19 @@ class MercatorSpatialPlannerTest {
         assertEquals(PipelineStage.FRAME_PLANNING, diagnostic.stage)
         assertEquals(fieldName, diagnostic.fieldName)
         return failure
+    }
+
+    private class ShiftingReadList(
+        private val readsInOrder: List<ResolvedDrawnThing>,
+    ) : AbstractList<ResolvedDrawnThing>() {
+        private var reads = 0
+
+        override val size: Int get() = 1
+
+        override fun get(index: Int): ResolvedDrawnThing {
+            val value = readsInOrder[minOf(reads, readsInOrder.size - 1)]
+            reads += 1
+            return value
+        }
     }
 }

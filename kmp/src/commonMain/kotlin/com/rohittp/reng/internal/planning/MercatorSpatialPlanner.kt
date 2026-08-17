@@ -45,21 +45,47 @@ internal class MercatorSpatialPlan(
     private val shaderProfileSnapshot: ArrayList<Pair<ShaderProfilePlan, ShaderProfilePlan>>
 
     init {
+        mapEntrySnapshot = ArrayList(mapEntries)
+        screenEntrySnapshot = ArrayList(screenEntries)
+        geometrySnapshot = ArrayList(geometries)
+        shaderProfileSnapshot = ArrayList(shaderProfiles)
+
         require((footprint == null) == (tileSelection == null)) {
             "footprint and tileSelection must be jointly absent or present"
         }
-        require(geometries.size == shaderProfiles.size) {
+        require(geometrySnapshot.size == shaderProfileSnapshot.size) {
             "geometries and shaderProfiles must have equal size"
         }
-        require(mapEntries.all { it.placement.drawRegime == DrawRegime.MAP_OCCLUDED }) {
+        require(mapEntrySnapshot.all { it.placement.drawRegime == DrawRegime.MAP_OCCLUDED }) {
             "mapEntries must contain only map-occluded placements"
         }
-        require(screenEntries.all { it.placement.drawRegime == DrawRegime.SCREEN_COMPOSITED }) {
+        require(screenEntrySnapshot.all { it.placement.drawRegime == DrawRegime.SCREEN_COMPOSITED }) {
             "screenEntries must contain only screen-composited placements"
         }
-        for (index in geometries.indices) {
-            val shaderPair = geometries[index].shaderPair
-            val profiles = shaderProfiles[index]
+        for (index in 1 until screenEntrySnapshot.size) {
+            require(
+                screenCompositingOrder.compare(
+                    screenEntrySnapshot[index - 1],
+                    screenEntrySnapshot[index],
+                ) <= 0,
+            ) {
+                "screenEntries must be in ascending screen compositing order"
+            }
+        }
+        val resolvedReferences = HashSet<DrawnThingReference>()
+        for (entry in mapEntrySnapshot) {
+            require(resolvedReferences.add(entry.reference)) {
+                "each drawn thing must resolve to exactly one draw-regime entry"
+            }
+        }
+        for (entry in screenEntrySnapshot) {
+            require(resolvedReferences.add(entry.reference)) {
+                "each drawn thing must resolve to exactly one draw-regime entry"
+            }
+        }
+        for (index in geometrySnapshot.indices) {
+            val shaderPair = geometrySnapshot[index].shaderPair
+            val profiles = shaderProfileSnapshot[index]
             require(
                 shaderPair.vertexSource == profiles.first.originalSource &&
                     shaderPair.fragmentSource == profiles.second.originalSource,
@@ -67,11 +93,6 @@ internal class MercatorSpatialPlan(
                 "geometry and shader profile sources must correspond by index"
             }
         }
-
-        mapEntrySnapshot = ArrayList(mapEntries)
-        screenEntrySnapshot = ArrayList(screenEntries)
-        geometrySnapshot = ArrayList(geometries)
-        shaderProfileSnapshot = ArrayList(shaderProfiles)
     }
 
     val mapEntries: List<ResolvedDrawnThing>
@@ -147,11 +168,7 @@ internal fun planMercatorSpatial(
         if (outcome is SpatialOutcome.Failure) return outcome
         appendByDrawRegime((outcome as SpatialOutcome.Success).value, mapEntries, screenEntries)
     }
-    screenEntries.sortWith(
-        compareBy<ResolvedDrawnThing> { requireNotNull(it.placement.screenCompositeZ) }
-            .thenBy { it.reference.typeOrder }
-            .thenBy { it.reference.sourceIndex },
-    )
+    screenEntries.sortWith(screenCompositingOrder)
 
     val geometries = ArrayList<ResolvedGeometry>()
     val shaderProfiles = ArrayList<Pair<ShaderProfilePlan, ShaderProfilePlan>>()
@@ -223,6 +240,11 @@ private fun shaderProfileFailure(): SpatialOutcome.Failure = SpatialOutcome.Fail
         ),
     ),
 )
+
+private val screenCompositingOrder: Comparator<ResolvedDrawnThing> =
+    compareBy<ResolvedDrawnThing> { requireNotNull(it.placement.screenCompositeZ) }
+        .thenBy { it.reference.typeOrder }
+        .thenBy { it.reference.sourceIndex }
 
 private val DrawnThingReference.typeOrder: Int
     get() = when (this) {

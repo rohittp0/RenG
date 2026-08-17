@@ -25,7 +25,13 @@ internal data class ResolvedPlacement(
     val directionTransform: DoubleMatrix3,
     val logicalScale: Double,
     val screenCompositeZ: Double?,
-)
+) {
+    init {
+        require((screenCompositeZ != null) == (drawRegime == DrawRegime.SCREEN_COMPOSITED)) {
+            "screenCompositeZ must be present exactly for screen-composited placements"
+        }
+    }
+}
 
 internal fun resolvePlacement(
     placement: Placement,

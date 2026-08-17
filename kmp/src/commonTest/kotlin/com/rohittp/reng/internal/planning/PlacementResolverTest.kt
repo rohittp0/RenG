@@ -22,6 +22,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -336,6 +337,57 @@ class PlacementResolverTest {
             ),
             "placement.scale",
         )
+    }
+
+    @Test
+    fun resolvedPlacementRequiresScreenCompositeZExactlyForTheScreenCompositedRegime() {
+        val identity = DoubleMatrix3.rotationXyzDegrees(0.0, 0.0, 0.0)
+        val origin = DoubleVector3(0.0, 0.0, 0.0)
+
+        assertFailsWith<IllegalArgumentException> {
+            ResolvedPlacement(
+                drawRegime = DrawRegime.SCREEN_COMPOSITED,
+                logicalPosition = origin,
+                directionTransform = identity,
+                logicalScale = 1.0,
+                screenCompositeZ = null,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResolvedPlacement(
+                drawRegime = DrawRegime.MAP_OCCLUDED,
+                logicalPosition = origin,
+                directionTransform = identity,
+                logicalScale = 1.0,
+                screenCompositeZ = 3.0,
+            )
+        }
+
+        val screenComposited = ResolvedPlacement(
+            drawRegime = DrawRegime.SCREEN_COMPOSITED,
+            logicalPosition = origin,
+            directionTransform = identity,
+            logicalScale = 1.0,
+            screenCompositeZ = 0.0,
+        )
+        val mapOccluded = ResolvedPlacement(
+            drawRegime = DrawRegime.MAP_OCCLUDED,
+            logicalPosition = origin,
+            directionTransform = identity,
+            logicalScale = 1.0,
+            screenCompositeZ = null,
+        )
+
+        assertEquals(0.0, screenComposited.screenCompositeZ)
+        assertNull(mapOccluded.screenCompositeZ)
+        assertFailsWith<IllegalArgumentException> { screenComposited.copy(screenCompositeZ = null) }
+        assertFailsWith<IllegalArgumentException> { mapOccluded.copy(screenCompositeZ = 1.0) }
+        assertFailsWith<IllegalArgumentException> {
+            screenComposited.copy(drawRegime = DrawRegime.MAP_OCCLUDED)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            mapOccluded.copy(drawRegime = DrawRegime.SCREEN_COMPOSITED)
+        }
     }
 
     private fun placement(

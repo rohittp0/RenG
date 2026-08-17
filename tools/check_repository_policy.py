@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 from typing import Iterable, Sequence
 
@@ -120,6 +121,116 @@ _PLUGIN_ACCESSORS = (
     ("libs", ".", "plugins", ".", "android", ".", "kotlin", ".", "multiplatform", ".", "library"),
     ("libs", ".", "plugins", ".", "maven", ".", "publish"),
 )
+_APPROVED_R2_TEMPLATE_LITERAL = '"s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}"'
+_APPROVED_R2_TEMPLATE_ASSIGNMENT = f"url = uri({_APPROVED_R2_TEMPLATE_LITERAL})"
+_R2_TEMPLATE_PLACEHOLDER = '"s3://<r2-bucket>"'
+_EXPECTED_REPOSITORY_TOKEN_SEQUENCES = {
+    "build.gradle.kts": (
+        '''val r2Endpoint = providers.environmentVariable("R2_ENDPOINT")
+        val r2Bucket = providers.environmentVariable("R2_BUCKET")
+        r2Endpoint.orNull?.let {
+            System.setProperty("org.gradle.s3.endpoint", it)
+        }''',
+    ),
+}
+_EXPECTED_REPOSITORY_BLOCK_SOURCES = {
+    "settings.gradle.kts": (
+        (
+            "pluginManagement",
+            r'''pluginManagement {
+                repositories {
+                    google {
+                        content {
+                            includeGroupByRegex("com\\.android.*")
+                            includeGroupByRegex("com\\.google.*")
+                            includeGroupByRegex("androidx.*")
+                        }
+                    }
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }''',
+        ),
+        (
+            "dependencyResolutionManagement",
+            '''dependencyResolutionManagement {
+                repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+                repositories {
+                    exclusiveContent {
+                        forRepository {
+                            maven {
+                                name = "Rentile"
+                                url = uri("https://maven.rohittp.com")
+                            }
+                        }
+                        filter {
+                            includeGroup("com.rohittp.rentile")
+                        }
+                    }
+                    google()
+                    mavenCentral()
+                    maven {
+                        url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+                        content {
+                            includeGroup("org.jetbrains.skiko")
+                        }
+                    }
+                }
+            }''',
+        ),
+    ),
+    "build.gradle.kts": (
+        (
+            "subprojects",
+            '''subprojects {
+                plugins.withId("maven-publish") {
+                    extensions.configure<PublishingExtension> {
+                        repositories {
+                            maven {
+                                name = "R2"
+                                url = uri("s3://<r2-bucket>")
+                                credentials(AwsCredentials::class) {
+                                    accessKey = providers.environmentVariable("R2_ACCESS_KEY_ID").orNull
+                                    secretKey = providers.environmentVariable("R2_SECRET_ACCESS_KEY").orNull
+                                }
+                            }
+                        }
+                    }
+                }
+                tasks.withType(PublishToMavenRepository::class.java)
+                    .matching { it.name.endsWith("ToR2Repository") }
+                    .configureEach {
+                        notCompatibleWithConfigurationCache(
+                            "Remote Maven publishing is not configuration-cache compatible.",
+                        )
+                    }
+            }''',
+        ),
+    ),
+    "kmp/build.gradle.kts": (
+        (
+            "publishing",
+            '''publishing {
+                repositories {
+                    maven {
+                        name = "LocalTest"
+                        url = uri(rootProject.layout.buildDirectory.dir("local-maven"))
+                    }
+                }
+            }''',
+        ),
+    ),
+}
+_REPOSITORY_IDENTIFIERS = frozenset({
+    "dependencyResolutionManagement", "exclusiveContent", "flatDir", "gradlePluginPortal",
+    "ivy", "maven", "mavenCentral", "mavenLocal", "pluginManagement", "publishing",
+    "repositories", "repositoriesMode", "r2Bucket", "r2Endpoint", "subprojects",
+})
+_FORBIDDEN_BUILD_PAYLOAD_SUFFIXES = frozenset({
+    ".aar", ".apk", ".asc", ".bin", ".bz2", ".class", ".dll", ".dylib", ".exe",
+    ".gz", ".jar", ".klib", ".md5", ".module", ".pom", ".sha1", ".sha256",
+    ".sha512", ".so", ".tar", ".tgz", ".war", ".wasm", ".xz", ".zip",
+})
 _PLUGIN_CALLS = frozenset({"alias", "id", "kotlin"})
 _COMPLETION_STEP_NAMES = (
     "Verify exact public artifacts and aggregate metadata",
@@ -331,6 +442,121 @@ def _kotlin_tokens(text: str) -> tuple[_Token, ...]:
     return tuple(tokens)
 
 
+def _kotlin_template_offset(
+    text: str, allowed_ranges: Sequence[tuple[int, int]],
+) -> int | None:
+    def allowed(offset: int) -> bool:
+        return any(start <= offset < end for start, end in allowed_ranges)
+
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end == -1 else end
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            continue
+        if text.startswith('"""', index):
+            index += 3
+            while index < len(text) and not text.startswith('"""', index):
+                if text[index] == "$" and index + 1 < len(text):
+                    next_character = text[index + 1]
+                    if (
+                        next_character == "{"
+                        or next_character == "`"
+                        or next_character == "_"
+                        or next_character.isalpha()
+                    ) and not allowed(index):
+                        return index
+                index += 1
+            index = min(len(text), index + 3)
+            continue
+        if text[index] == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                if text[index] == "\\":
+                    index += 2
+                    continue
+                if text[index] == "$" and index + 1 < len(text):
+                    next_character = text[index + 1]
+                    if (
+                        next_character == "{"
+                        or next_character == "`"
+                        or next_character == "_"
+                        or next_character.isalpha()
+                    ) and not allowed(index):
+                        return index
+                index += 1
+            index = min(len(text), index + 1)
+            continue
+        if text[index] == "'":
+            index = _quoted_end(text, index, "'")
+            continue
+        index += 1
+    return None
+
+
+def _active_code_occurrences(text: str, needle: str) -> tuple[int, ...]:
+    offsets = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end == -1 else end
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            continue
+        if text.startswith(needle, index):
+            offsets.append(index)
+            index += len(needle)
+            continue
+        if text.startswith('"""', index):
+            index = _quoted_end(text, index, '"""')
+            continue
+        if text[index] in {'"', "'"}:
+            index = _quoted_end(text, index, text[index])
+            continue
+        index += 1
+    return tuple(offsets)
+
+
+def _approved_template_ranges(root: Path, path: Path, text: str) -> tuple[tuple[int, int], ...]:
+    if path.relative_to(root).as_posix() != "build.gradle.kts":
+        return ()
+    occurrences = _active_code_occurrences(
+        text, _APPROVED_R2_TEMPLATE_ASSIGNMENT,
+    )
+    if len(occurrences) != 1:
+        return ()
+    assignment_start = occurrences[0]
+    literal_start = assignment_start + _APPROVED_R2_TEMPLATE_ASSIGNMENT.index(
+        _APPROVED_R2_TEMPLATE_LITERAL
+    )
+    return ((literal_start, literal_start + len(_APPROVED_R2_TEMPLATE_LITERAL)),)
+
+
 def _call_arguments(tokens: Sequence[_Token], index: int) -> tuple[_Token, ...] | None:
     if index + 1 >= len(tokens) or tokens[index + 1].value != "(":
         return None
@@ -442,33 +668,53 @@ def _annotation_end(
     return current, annotation_name
 
 
+def _annotation_names_between(
+    tokens: Sequence[_Token], start: int, end: int,
+) -> tuple[str, ...] | None:
+    current = start
+    names = []
+    while current < end and tokens[current].value == "@":
+        parsed = _annotation_end(tokens, current)
+        if parsed is None:
+            return None
+        current, annotation_name = parsed
+        names.append(annotation_name)
+    return tuple(names) if current == end else None
+
+
 def _consistent_data_class_declarations(
     tokens: Sequence[_Token], class_name: str,
 ) -> tuple[_Token, ...]:
-    declaration = (
-        "public", "data", "class", class_name, "internal", "constructor", "(",
+    data_class = (
+        "data", "class", class_name, "internal", "constructor", "(",
     )
     matches = []
-    for declaration_index, declaration_token in enumerate(tokens):
-        if not _token_sequence_at(tokens, declaration_index, declaration):
+    for public_index, public_token in enumerate(tokens):
+        if public_token.value != "public":
             continue
-        found = False
-        for annotation_index in range(declaration_index):
+        declaration_index = public_index + 1
+        between_names = []
+        while declaration_index < len(tokens) and tokens[declaration_index].value == "@":
+            parsed = _annotation_end(tokens, declaration_index)
+            if parsed is None:
+                break
+            declaration_index, annotation_name = parsed
+            between_names.append(annotation_name)
+        if not _token_sequence_at(tokens, declaration_index, data_class):
+            continue
+
+        preceding_names = []
+        for annotation_index in range(public_index):
             if tokens[annotation_index].value != "@":
                 continue
-            current = annotation_index
-            annotation_names = []
-            while current < declaration_index and tokens[current].value == "@":
-                parsed = _annotation_end(tokens, current)
-                if parsed is None:
-                    break
-                current, annotation_name = parsed
-                annotation_names.append(annotation_name)
-            if current == declaration_index and "ConsistentCopyVisibility" in annotation_names:
-                found = True
+            names = _annotation_names_between(
+                tokens, annotation_index, public_index,
+            )
+            if names is not None:
+                preceding_names.extend(names)
                 break
-        if found:
-            matches.append(declaration_token)
+        if "ConsistentCopyVisibility" in preceding_names + between_names:
+            matches.append(public_token)
     return tuple(matches)
 
 
@@ -638,6 +884,105 @@ def _unexpected_build_logic_file(root: Path) -> Path | None:
         }:
             return path
         if path.suffix == ".kt" and kmp_sources not in path.parents:
+            return path
+    return None
+
+
+def _repository_policy_token(root: Path, path: Path, text: str) -> _Token | None:
+    relative = path.relative_to(root).as_posix()
+    sanitized = text
+    approved_templates = _approved_template_ranges(root, path, text)
+    if approved_templates:
+        template_start, template_end = approved_templates[0]
+        sanitized = (
+            sanitized[:template_start]
+            + _R2_TEMPLATE_PLACEHOLDER
+            + sanitized[template_end:]
+        )
+    tokens = _kotlin_tokens(sanitized)
+    approved_ranges = []
+    for expected_source in _EXPECTED_REPOSITORY_TOKEN_SEQUENCES.get(relative, ()):
+        expected_values = tuple(
+            token.value for token in _kotlin_tokens(expected_source)
+        )
+        sequence_starts = tuple(
+            index for index in range(len(tokens))
+            if _token_sequence_at(tokens, index, expected_values)
+        )
+        if len(sequence_starts) != 1:
+            return tokens[0] if tokens else _Token("policy", "", 0)
+        sequence_start = sequence_starts[0]
+        approved_ranges.append((sequence_start, sequence_start + len(expected_values)))
+
+    expected_blocks = _EXPECTED_REPOSITORY_BLOCK_SOURCES.get(relative, ())
+    for block_name, expected_source in expected_blocks:
+        ranges = _named_block_ranges(tokens, block_name)
+        expected_tokens = _kotlin_tokens(expected_source)
+        expected_ranges = _named_block_ranges(expected_tokens, block_name)
+        if len(ranges) != 1 or len(expected_ranges) != 1:
+            return tokens[ranges[0][0]] if ranges else tokens[0] if tokens else _Token("policy", "", 0)
+        block_index, body_start, body_end = ranges[0]
+        _, expected_start, expected_end = expected_ranges[0]
+        actual_body = tuple(token.value for token in tokens[body_start:body_end])
+        expected_body = tuple(token.value for token in expected_tokens[expected_start:expected_end])
+        if actual_body != expected_body:
+            return tokens[block_index]
+        approved_ranges.append((block_index, body_end + 1))
+
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier" or token.value not in _REPOSITORY_IDENTIFIERS:
+            continue
+        qualified_name_segment = (
+            index > 0
+            and index + 1 < len(tokens)
+            and tokens[index - 1].value == "."
+            and tokens[index + 1].value == "."
+        )
+        if token.value == "maven" and (
+            _inside_plugin_accessor(tokens, index) or qualified_name_segment
+        ):
+            continue
+        if not any(start <= index < end for start, end in approved_ranges):
+            return token
+    return None
+
+
+def _checked_in_or_fixture_files(root: Path) -> tuple[Path, ...]:
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(root), "ls-files", "-z"),
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        paths = []
+        for raw_relative in completed.stdout.split(b"\0"):
+            if not raw_relative:
+                continue
+            path = root / raw_relative.decode("utf-8")
+            if path.is_file():
+                paths.append(path)
+        return tuple(sorted(paths, key=lambda path: path.as_posix()))
+    return tuple(sorted(
+        (
+            path for path in root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(root).parts
+        ),
+        key=lambda path: path.as_posix(),
+    ))
+
+
+def _unexpected_build_payload_file(root: Path) -> Path | None:
+    approved_wrapper = root / "gradle/wrapper/gradle-wrapper.jar"
+    for path in _checked_in_or_fixture_files(root):
+        if path == approved_wrapper:
+            continue
+        if (
+            path.name.lower() == "maven-metadata.xml"
+            or path.suffix.lower() in _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES
+        ):
             return path
     return None
 
@@ -851,6 +1196,15 @@ def check_dependencies(root: Path) -> list[Violation]:
     )
 
     violations = []
+    kmp_template_offset = _kotlin_template_offset(
+        text, _approved_template_ranges(root, path, text),
+    )
+    kmp_template = (
+        _Token("template", "$", kmp_template_offset)
+        if kmp_template_offset is not None
+        else None
+    )
+    kmp_repository = _repository_policy_token(root, path, text)
     kmp_plugin = _plugin_policy_token(root, path, tokens)
     kmp_names = _dependency_name_policy_token(
         root, path, tokens, allowed_call_indices,
@@ -872,11 +1226,16 @@ def check_dependencies(root: Path) -> list[Violation]:
     if (
         not allowed
         or forbidden_token is not None
+        or kmp_template is not None
+        or kmp_repository is not None
         or kmp_plugin is not None
         or kmp_names is not None
         or kmp_indirection is not None
     ):
-        first_token = forbidden_token or kmp_plugin or kmp_names or kmp_indirection
+        first_token = (
+            forbidden_token or kmp_template or kmp_repository
+            or kmp_plugin or kmp_names or kmp_indirection
+        )
         offset = first_token.start if first_token is not None else (
             dependency_calls[0][1].start if dependency_calls else 0
         )
@@ -906,11 +1265,42 @@ def check_dependencies(root: Path) -> list[Violation]:
             _CYCLE_B_DEPENDENCY_MESSAGE,
         ))
 
+    build_payload_file = _unexpected_build_payload_file(root)
+    if build_payload_file is not None:
+        violations.append(_violation(
+            "FORBIDDEN_CYCLE_B_DEPENDENCY",
+            build_payload_file,
+            1,
+            _CYCLE_B_DEPENDENCY_MESSAGE,
+        ))
+
     for configuration_path in _kmp_gradle_configuration_files(root):
         if configuration_path == path or configuration_path.name.endswith(".versions.toml"):
             continue
         configuration_text = _read(configuration_path)
-        configuration_tokens = _kotlin_tokens(configuration_text)
+        approved_template_ranges = _approved_template_ranges(
+            root, configuration_path, configuration_text,
+        )
+        template_offset = _kotlin_template_offset(
+            configuration_text, approved_template_ranges,
+        )
+        template = (
+            _Token("template", "$", template_offset)
+            if template_offset is not None
+            else None
+        )
+        repository = _repository_policy_token(
+            root, configuration_path, configuration_text,
+        )
+        token_text = configuration_text
+        if approved_template_ranges:
+            template_start, template_end = approved_template_ranges[0]
+            token_text = (
+                token_text[:template_start]
+                + _R2_TEMPLATE_PLACEHOLDER
+                + token_text[template_end:]
+            )
+        configuration_tokens = _kotlin_tokens(token_text)
         plugin = _plugin_policy_token(root, configuration_path, configuration_tokens)
         names = _dependency_name_policy_token(
             root, configuration_path, configuration_tokens, frozenset(),
@@ -928,7 +1318,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             forbidden = _contains_forbidden(arguments)
             if forbidden is not None:
                 break
-        first_token = forbidden or plugin or names or indirection
+        first_token = forbidden or template or repository or plugin or names or indirection
         if first_token is not None:
             violations.append(_violation(
                 "FORBIDDEN_CYCLE_B_DEPENDENCY",

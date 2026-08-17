@@ -36,6 +36,91 @@ SETTINGS_PLUGIN_BLOCK = """plugins {
 }
 """
 
+PLUGIN_MANAGEMENT_BLOCK = r"""pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+"""
+
+DEPENDENCY_RESOLUTION_BLOCK = """dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "Rentile"
+                    url = uri("https://maven.rohittp.com")
+                }
+            }
+            filter {
+                includeGroup("com.rohittp.rentile")
+            }
+        }
+        google()
+        mavenCentral()
+        maven {
+            url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+            content {
+                includeGroup("org.jetbrains.skiko")
+            }
+        }
+    }
+}
+"""
+
+ROOT_R2_SUPPORT = """val r2Endpoint = providers.environmentVariable("R2_ENDPOINT")
+val r2Bucket = providers.environmentVariable("R2_BUCKET")
+
+r2Endpoint.orNull?.let {
+    System.setProperty("org.gradle.s3.endpoint", it)
+}
+"""
+
+ROOT_PUBLISHING_REPOSITORY_BLOCK = """subprojects {
+    plugins.withId("maven-publish") {
+        extensions.configure<PublishingExtension> {
+            repositories {
+                maven {
+                    name = "R2"
+                    url = uri("s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}")
+                    credentials(AwsCredentials::class) {
+                        accessKey = providers.environmentVariable("R2_ACCESS_KEY_ID").orNull
+                        secretKey = providers.environmentVariable("R2_SECRET_ACCESS_KEY").orNull
+                    }
+                }
+            }
+        }
+    }
+
+    tasks.withType(PublishToMavenRepository::class.java)
+        .matching { it.name.endsWith("ToR2Repository") }
+        .configureEach {
+            notCompatibleWithConfigurationCache(
+                "Remote Maven publishing is not configuration-cache compatible.",
+            )
+        }
+}
+"""
+
+KMP_PUBLISHING_REPOSITORY_BLOCK = """publishing {
+    repositories {
+        maven {
+            name = "LocalTest"
+            url = uri(rootProject.layout.buildDirectory.dir("local-maven"))
+        }
+    }
+}
+"""
+
 PUBLIC_SMOKE_STEP = """      - name: Resolve six targets from the public repository without credentials
         run: >-
           ./gradlew --gradle-user-home "$PUBLIC_HOME" --refresh-dependencies
@@ -100,14 +185,14 @@ def create_clean_fixture(root: Path) -> None:
     write(
         root,
         "settings.gradle.kts",
-        SETTINGS_PLUGIN_BLOCK + "repositories { mavenCentral() }\n",
+        PLUGIN_MANAGEMENT_BLOCK + SETTINGS_PLUGIN_BLOCK + DEPENDENCY_RESOLUTION_BLOCK,
     )
-    write(root, "build.gradle.kts", ROOT_PLUGIN_BLOCK + """
+    write(root, "build.gradle.kts", ROOT_PLUGIN_BLOCK + ROOT_R2_SUPPORT + """
 url.set("https://rohittp.com/reng/")
 name.set("The Apache License, Version 2.0")
 url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
 scm { url.set("https://github.com/rohittp0/RenG") }
-""")
+""" + ROOT_PUBLISHING_REPOSITORY_BLOCK)
     write(root, "gradle/libs.versions.toml", """
 [versions]
 kotlin = "2.3.21"
@@ -123,7 +208,8 @@ maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPubli
 """)
     write(root, "kmp/build.gradle.kts", KMP_PLUGIN_BLOCK + TARGETS + "\n" +
           "commonMain.dependencies { implementation(libs.rentile.kmp) }\n" +
-          "commonTest.dependencies { implementation(kotlin(\"test\")) }\n")
+          "commonTest.dependencies { implementation(kotlin(\"test\")) }\n" +
+          KMP_PUBLISHING_REPOSITORY_BLOCK)
     write(root, "consumer-smoke/build.gradle.kts", TARGETS + "\n" +
           "implementation(\"com.rohittp.reng:kmp:$rengVersion\")\n")
     write(root, "consumer-smoke/settings.gradle.kts", "rootProject.name = \"consumer-smoke\"\n")
@@ -295,6 +381,23 @@ class RepositoryPolicyTests(unittest.TestCase):
                     "@kotlin.ConsistentCopyVisibility\n"
                     "@Suppress(\"fixture\")\n"
                     "public data class Diagnostic",
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual([], check_repository(root))
+
+    def test_copy_visibility_parser_accepts_annotation_between_public_and_data_class(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            source = root / "kmp/src/commonMain/kotlin/com/rohittp/reng/Diagnostics.kt"
+            source.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    "@ConsistentCopyVisibility\npublic data class Diagnostic",
+                    "@ConsistentCopyVisibility\n"
+                    "public\n"
+                    "@kotlin.Suppress(\"fixture\")\n"
+                    "data class Diagnostic",
                 ),
                 encoding="utf-8",
             )
@@ -491,6 +594,60 @@ fun Any.kotlin(): String = "com.example:unknown-runtime:1"
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
+    def test_cycle_b_dependency_allowlist_rejects_executable_string_templates(self) -> None:
+        mutations = (
+            (
+                "kmp/build.gradle.kts",
+                '\nval hidden = "${implementation("com.example:unknown-runtime:1")}"\n',
+            ),
+            (
+                "kmp/build.gradle.kts",
+                '\nval hidden = """${jvm()}"""\n',
+            ),
+            (
+                "kmp/build.gradle.kts",
+                '\nval hidden = """${pluginManager.apply("com.example.injected")}"""\n',
+            ),
+            (
+                "settings.gradle.kts",
+                '\nval hidden = "${includeBuild("build-logic")}"\n',
+            ),
+            (
+                "build.gradle.kts",
+                '\nval hidden = "$r2Bucket"\n',
+            ),
+        )
+        for relative, mutation in mutations:
+            with self.subTest(relative=relative, mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    path = root / relative
+                    path.write_text(path.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_dependency_policy_allows_non_interpolated_string_and_comment_controls(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            build = root / "kmp/build.gradle.kts"
+            build.write_text(
+                build.read_text(encoding="utf-8")
+                + '\nval literal = "implementation(unknown) jvm() includeBuild"\n'
+                + '\nval escaped = "\\$implementation"\n'
+                + '\nval rawLiteral = """pluginManager.apply(unknown)"""\n'
+                + '\n// "${implementation("com.example:unknown-runtime:1")}"\n',
+                encoding="utf-8",
+            )
+            root_build = root / "build.gradle.kts"
+            root_build.write_text(
+                root_build.read_text(encoding="utf-8")
+                + '\n// url = uri("s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}")\n',
+                encoding="utf-8",
+            )
+            self.assertEqual([], check_repository(root))
+
     def test_cycle_b_dependency_allowlist_rejects_build_logic_and_plugin_injection(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -672,6 +829,157 @@ class InjectedPlugin : Plugin<Project> {
             )
             codes = {violation.code for violation in check_repository(root)}
             self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_repository_grammar_rejects_repointing_additions_and_filter_changes(self) -> None:
+        mutations = (
+            (
+                "settings.gradle.kts",
+                lambda text: text.replace(
+                    'url = uri("https://maven.rohittp.com")',
+                    'url = uri(rootDir.resolve("replacement-repo"))',
+                ),
+            ),
+            (
+                "settings.gradle.kts",
+                lambda text: text.replace(
+                    "        mavenCentral()",
+                    '        maven { url = file("plugin-repo") }',
+                    1,
+                ),
+            ),
+            (
+                "settings.gradle.kts",
+                lambda text: text.replace(
+                    "    repositories {",
+                    '    repositories {\n        flatDir { dirs("replacement-repo") }',
+                    1,
+                ),
+            ),
+            (
+                "settings.gradle.kts",
+                lambda text: text.replace(
+                    'includeGroup("com.rohittp.rentile")',
+                    'includeGroup("com.example.replacement")',
+                ),
+            ),
+            (
+                "settings.gradle.kts",
+                lambda text: text.replace(
+                    'includeGroupByRegex("com\\\\.android.*")',
+                    'includeGroupByRegex("com\\\\.example.*")',
+                ),
+            ),
+            (
+                "build.gradle.kts",
+                lambda text: text.replace(
+                    'providers.environmentVariable("R2_BUCKET")',
+                    'providers.environmentVariable("R2_REPLACEMENT_BUCKET")',
+                ),
+            ),
+            (
+                "build.gradle.kts",
+                lambda text: text.replace(
+                    'System.setProperty("org.gradle.s3.endpoint", it)',
+                    'System.setProperty("org.gradle.s3.endpoint", "replacement.invalid")',
+                ),
+            ),
+            (
+                "build.gradle.kts",
+                lambda text: text.replace(
+                    'url = uri("s3://${r2Bucket.orNull ?: "r2-publishing-not-configured"}")',
+                    'url = file("replacement-repo")',
+                ),
+            ),
+            (
+                "kmp/build.gradle.kts",
+                lambda text: text.replace(
+                    'url = uri(rootProject.layout.buildDirectory.dir("local-maven"))',
+                    'url = uri("file:///tmp/replacement-repo")',
+                ),
+            ),
+            (
+                "build.gradle.kts",
+                lambda text: text + '\nrepositories { maven { url = file("replacement-repo") } }\n',
+            ),
+        )
+        for relative, mutate in mutations:
+            with self.subTest(relative=relative, mutate=mutate):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    path = root / relative
+                    path.write_text(mutate(path.read_text(encoding="utf-8")), encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_repository_policy_rejects_checked_in_maven_and_build_payloads(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "gradle/wrapper/gradle-wrapper.jar", "approved wrapper payload")
+            self.assertEqual([], check_repository(root))
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "replacement-repo/com/rohittp/rentile/kmp/0.1.5/kmp-0.1.5.pom",
+                "<project/>",
+            )
+            write(
+                root,
+                "replacement-repo/com/rohittp/rentile/kmp/0.1.5/kmp-0.1.5.jar",
+                "replacement payload",
+            )
+            settings = root / "settings.gradle.kts"
+            settings.write_text(
+                settings.read_text(encoding="utf-8").replace(
+                    'url = uri("https://maven.rohittp.com")',
+                    'url = uri(rootDir.resolve("replacement-repo"))',
+                ),
+                encoding="utf-8",
+            )
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            marker = (
+                "plugin-repo/org/jetbrains/kotlin/multiplatform/"
+                "org.jetbrains.kotlin.multiplatform.gradle.plugin/2.3.21/"
+            )
+            write(root, marker + "org.jetbrains.kotlin.multiplatform.gradle.plugin-2.3.21.pom", "<project/>")
+            write(root, marker + "org.jetbrains.kotlin.multiplatform.gradle.plugin-2.3.21.jar", "plugin payload")
+            settings = root / "settings.gradle.kts"
+            settings.write_text(
+                settings.read_text(encoding="utf-8").replace(
+                    "    repositories {",
+                    '    repositories {\n        maven { url = uri(rootDir.resolve("plugin-repo")) }',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+        forbidden_payloads = (
+            "payload/module.module",
+            "payload/library.aar",
+            "payload/native.klib",
+            "payload/archive.zip",
+            "payload/maven-metadata.xml",
+            "build/replacement/forced-library.jar",
+        )
+        for relative in forbidden_payloads:
+            with self.subTest(relative=relative):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    write(root, relative, "replacement payload")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
     def test_each_mutation_reports_expected_policy(self) -> None:
         mutations = (

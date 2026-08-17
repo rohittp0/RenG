@@ -69,6 +69,28 @@ class MercatorProjectionTest {
         assertVectorClose(DoubleVector3(0.0, 0.0, 1.0), equator.basisEastNorthUp.column(1))
         assertVectorClose(DoubleVector3(1.0, 0.0, 0.0), equator.basisEastNorthUp.column(2))
 
+        val equatorAtNinetyDegrees = wgs84LocalFrame(GeographicPosition(0.0, 90.0, 0.0))
+        assertVectorClose(
+            DoubleVector3(0.0, 6378137.0, 0.0),
+            equatorAtNinetyDegrees.ecefPosition,
+            1e-8,
+        )
+        assertVectorClose(
+            DoubleVector3(-1.0, 0.0, 0.0),
+            equatorAtNinetyDegrees.basisEastNorthUp.column(0),
+            1e-12,
+        )
+        assertVectorClose(
+            DoubleVector3(0.0, 0.0, 1.0),
+            equatorAtNinetyDegrees.basisEastNorthUp.column(1),
+            1e-12,
+        )
+        assertVectorClose(
+            DoubleVector3(0.0, 1.0, 0.0),
+            equatorAtNinetyDegrees.basisEastNorthUp.column(2),
+            1e-12,
+        )
+
         val northPole = wgs84LocalFrame(GeographicPosition(90.0, 0.0, 0.0))
         assertVectorClose(DoubleVector3(0.0, 0.0, 6356752.314245179), northPole.ecefPosition, 1e-8)
         assertVectorClose(DoubleVector3(0.0, 1.0, 0.0), northPole.basisEastNorthUp.column(0), 1e-12)
@@ -91,6 +113,21 @@ class MercatorProjectionTest {
             DoubleVector3(3194919.1450605746, 3194919.145060574, 4488055.515647106),
             frame.ecefPosition,
             1e-8,
+        )
+        assertVectorClose(
+            DoubleVector3(-0.7071067811865475, 0.7071067811865475, 0.0),
+            frame.basisEastNorthUp.column(0),
+            1e-12,
+        )
+        assertVectorClose(
+            DoubleVector3(-0.5, -0.5, 0.7071067811865475),
+            frame.basisEastNorthUp.column(1),
+            1e-12,
+        )
+        assertVectorClose(
+            DoubleVector3(0.5, 0.5, 0.7071067811865475),
+            frame.basisEastNorthUp.column(2),
+            1e-12,
         )
         assertEquals(frame, copyEquivalent)
     }

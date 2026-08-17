@@ -58,6 +58,65 @@ class DoubleLinearAlgebraTest {
     }
 
     @Test
+    fun fourByFourOperationsPreserveColumnMajorOffDiagonalOrder() {
+        val left = DoubleMatrix4(
+            listOf(
+                1.0, 5.0, 9.0, 13.0,
+                2.0, 6.0, 10.0, 14.0,
+                3.0, 7.0, 11.0, 15.0,
+                4.0, 8.0, 12.0, 16.0,
+            ),
+        )
+        val right = DoubleMatrix4(
+            listOf(
+                2.0, 0.0, 0.0, 0.0,
+                0.0, 3.0, 0.0, 0.0,
+                0.0, 0.0, 5.0, 0.0,
+                0.0, 0.0, 0.0, 7.0,
+            ),
+        )
+
+        assertEquals(2.0, left[0, 1])
+        assertEquals(13.0, left[3, 0])
+        assertEquals(7.0, left[1, 2])
+        assertEquals(12.0, left[2, 3])
+        assertEquals(
+            DoubleMatrix4(
+                listOf(
+                    1.0, 2.0, 3.0, 4.0,
+                    5.0, 6.0, 7.0, 8.0,
+                    9.0, 10.0, 11.0, 12.0,
+                    13.0, 14.0, 15.0, 16.0,
+                ),
+            ),
+            left.transpose(),
+        )
+        assertEquals(
+            DoubleMatrix4(
+                listOf(
+                    2.0, 10.0, 18.0, 26.0,
+                    6.0, 18.0, 30.0, 42.0,
+                    15.0, 35.0, 55.0, 75.0,
+                    28.0, 56.0, 84.0, 112.0,
+                ),
+            ),
+            left * right,
+        )
+        assertEquals(
+            DoubleMatrix4(
+                listOf(
+                    2.0, 15.0, 45.0, 91.0,
+                    4.0, 18.0, 50.0, 98.0,
+                    6.0, 21.0, 55.0, 105.0,
+                    8.0, 24.0, 60.0, 112.0,
+                ),
+            ),
+            right * left,
+        )
+        assertNotEquals(left * right, right * left)
+    }
+
+    @Test
     fun vectorAlgebraIsRightHanded() {
         val x = DoubleVector3(1.0, 0.0, 0.0)
         val y = DoubleVector3(0.0, 1.0, 0.0)

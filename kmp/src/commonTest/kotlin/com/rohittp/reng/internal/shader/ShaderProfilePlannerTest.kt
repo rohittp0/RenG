@@ -99,6 +99,37 @@ class ShaderProfilePlannerTest {
     }
 
     @Test
+    fun rejectsUnterminatedBlockCommentsAnywhereAfterTheDirective() {
+        val invalidSources = listOf(
+            "#version 300 es\n/*",
+            "#version 300 es\nvoid main() {}\n/* unterminated",
+        )
+
+        for (source in invalidSources) {
+            assertNull(scanShaderProfile(source), "unexpectedly accepted: ${source.escapeForAssertion()}")
+        }
+    }
+
+    @Test
+    fun rejectsMultilineUnterminatedBodyCommentsForEveryPhysicalTerminator() {
+        for (terminator in listOf("\n", "\r\n", "\r")) {
+            val source = "#version 300 es${terminator}/* open${terminator}still open"
+
+            assertNull(
+                scanShaderProfile(source),
+                "unexpectedly accepted terminator with ${terminator.length} code units",
+            )
+        }
+    }
+
+    @Test
+    fun acceptsProperlyClosedNonnestingBodyBlockComment() {
+        val source = "#version 300 es\r\n/* outer /* nested marker */\nvoid main() {}"
+
+        assertNotNull(scanShaderProfile(source))
+    }
+
+    @Test
     fun rejectsMissingAlternateMisplacedMalformedAndDuplicateDirectives() {
         val invalidSources = listOf(
             "",

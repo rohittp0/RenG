@@ -22,7 +22,7 @@ internal fun scanShaderProfile(source: String): ShaderProfilePlan? {
     while (lineStart <= source.length) {
         val lineEnd = source.findPhysicalLineEnd(lineStart)
         if (!insideBlockComment && source.lineAsciiTrimEquals(lineStart, lineEnd, GLES_DIRECTIVE)) {
-            if (source.hasAdditionalVersionDirective(lineEnd)) return null
+            if (source.hasInvalidPostDirectiveProfile(lineEnd)) return null
             return ShaderProfilePlan(
                 originalSource = source,
                 directiveStartUtf16 = lineStart,
@@ -98,7 +98,7 @@ private fun String.scanPrefixLine(
     return insideBlockComment
 }
 
-private fun String.hasAdditionalVersionDirective(start: Int): Boolean {
+private fun String.hasInvalidPostDirectiveProfile(start: Int): Boolean {
     var index = start
     var insideBlockComment = false
     var insideLineComment = false
@@ -146,7 +146,7 @@ private fun String.hasAdditionalVersionDirective(start: Int): Boolean {
         }
     }
 
-    return false
+    return insideBlockComment
 }
 
 private fun String.hasVersionKeywordAfterHash(hashIndex: Int): Boolean {

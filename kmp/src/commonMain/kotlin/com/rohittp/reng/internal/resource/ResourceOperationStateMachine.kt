@@ -120,6 +120,9 @@ internal object ResourceOperationStateMachine {
         when (event) {
             is RouteReadyForDiscovery -> work.routeReadyForDiscovery(event)
             is ChildrenDiscovered -> work.childrenDiscovered(event)
+            is RouteCompleted -> work.routeCompleted(event)
+            is ExternalCancellationRequested -> work.externalCancellationRequested(event)
+            is CleanupCancellationObserved -> work.cleanupCancellationObserved(event)
         }
         return work.toTransition()
     }
@@ -146,10 +149,13 @@ internal object ResourceOperationStateMachine {
         private val frontierStack: MutableList<DiscoveryFrontier> =
             initial.traversal.frontierStack.toMutableList()
         private val activeRouteOrdinals: MutableList<Long> = initial.activeRouteOrdinals.toMutableList()
+        private val bufferedRouteOutcomes: MutableList<BufferedRouteOutcome> =
+            initial.bufferedRouteOutcomes.toMutableList()
         private val actions: MutableList<ResourceOperationAction> = mutableListOf()
         private var nextRouteOrdinal: Long = initial.nextRouteOrdinal
-        private var failure: FailureDescriptor? = null
-        private var failureOrdinal: Long? = null
+        private var nextRetirementOrdinal: Long = initial.nextRetirementOrdinal
+        private var startCeilingOrdinal: Long? = initial.startCeilingOrdinal
+        private var terminalSelection: ResourceTerminalSelection? = initial.terminalSelection
 
         init {
             initial.traversal.eligibleFifo.forEach(eligibleFifo::addLast)
@@ -238,8 +244,50 @@ internal object ResourceOperationStateMachine {
                 "route discovery readiness requires an active route"
             }
             updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
-            actions += DiscoverChildren(event.ordinal, parent.id)
-            startEligibleRoutes()
+            bufferRouteOutcome(event.ordinal, ResourceRouteOutcome.Success)
+            if (terminalSelection == null) {
+                actions += DiscoverChildren(event.ordinal, parent.id)
+                startEligibleRoutes()
+            }
+        }
+
+        fun routeCompleted(event: RouteCompleted) {
+            val routeIndex = routeIndexByOrdinal[event.ordinal]
+            require(routeIndex != null) { "route completion must name an assigned route" }
+            val record = routeRecords[routeIndex]
+            require(record.status == ResourceRouteStatus.RUNNING) {
+                "route completion requires a running route"
+            }
+            require(activeRouteOrdinals.remove(event.ordinal)) {
+                "route completion requires an active route"
+            }
+            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
+
+            if (terminalSelection == null) {
+                bufferRouteOutcome(event.ordinal, event.outcome)
+                if (terminalSelection == null) startEligibleRoutes()
+            }
+        }
+
+        fun externalCancellationRequested(event: ExternalCancellationRequested) {
+            if (terminalSelection != null) return
+            terminalSelection = ResourceTerminalSelection.External(event.cancellation)
+            cancelActiveRoutes(activeRouteOrdinals.toList())
+        }
+
+        fun cleanupCancellationObserved(event: CleanupCancellationObserved) {
+            require(terminalSelection != null) {
+                "cleanup cancellation requires a selected terminal"
+            }
+            require(activeRouteOrdinals.remove(event.ordinal)) {
+                "cleanup cancellation must name an active route"
+            }
+            val routeIndex = routeIndexByOrdinal[event.ordinal]
+            require(routeIndex != null) { "cleanup cancellation must name an assigned route" }
+            require(routeRecords[routeIndex].status == ResourceRouteStatus.RUNNING) {
+                "cleanup cancellation requires a running route"
+            }
+            updateRouteRecord(routeIndex, status = ResourceRouteStatus.RESOLVED)
         }
 
         fun childrenDiscovered(event: ChildrenDiscovered) {
@@ -322,7 +370,7 @@ internal object ResourceOperationStateMachine {
         }
 
         fun scheduleEligibleOccurrences() {
-            while (eligibleFifo.isNotEmpty() && failure == null) {
+            while (eligibleFifo.isNotEmpty() && terminalSelection == null) {
                 val occurrenceId = eligibleFifo.removeFirst()
                 makeOccurrenceEligible(occurrence(occurrenceId))
             }
@@ -354,6 +402,11 @@ internal object ResourceOperationStateMachine {
             val claimIndex = claimIndex(occurrence.registration.privateRentileKey)
             if (claimIndex >= 0) {
                 val claim = privateRentileKeyClaims[claimIndex]
+                val invalidatedEligibleOrdinal = routeIndex(claim.firstRoute)
+                    .takeIf { it >= 0 }
+                    ?.let(routeRecords::get)
+                    ?.takeIf { it.status == ResourceRouteStatus.ELIGIBLE }
+                    ?.ordinal
                 privateRentileKeyClaims[claimIndex] = claim.copy(usable = false)
                 addRouteRecord(
                     RouteRecord(
@@ -364,8 +417,8 @@ internal object ResourceOperationStateMachine {
                         status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
                     ),
                 )
-                failure = ambiguousRouteFailure()
-                failureOrdinal = ordinal
+                val failureOutcome = ResourceRouteOutcome.Failure(ambiguousRouteFailure())
+                bufferRouteOutcome(invalidatedEligibleOrdinal ?: ordinal, failureOutcome)
                 return
             }
 
@@ -428,12 +481,15 @@ internal object ResourceOperationStateMachine {
                     status = ResourceRouteStatus.BLOCKED_BY_COLLISION,
                 ),
             )
-            failure = identityCollisionFailure(established)
-            failureOrdinal = ordinal
+            bufferRouteOutcome(
+                ordinal,
+                ResourceRouteOutcome.Failure(identityCollisionFailure(established)),
+            )
         }
 
         private fun startEligibleRoutes() {
-            val ceiling = failureOrdinal
+            if (terminalSelection != null) return
+            val ceiling = startCeilingOrdinal
             val candidates = routeRecords.withIndex()
                 .filter { (_, record) ->
                     val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
@@ -451,6 +507,81 @@ internal object ResourceOperationStateMachine {
                 updateRouteRecord(index, status = ResourceRouteStatus.RUNNING)
                 activeRouteOrdinals += ordinal
                 actions += StartRoute(ordinal, record.registration)
+            }
+        }
+
+        private fun bufferRouteOutcome(
+            ordinal: Long,
+            outcome: ResourceRouteOutcome,
+        ) {
+            require(ordinal >= nextRetirementOrdinal && ordinal < nextRouteOrdinal) {
+                "route completion must name an unretired assigned ordinal"
+            }
+            val insertionPoint = bufferedRouteOutcomes.binarySearch { buffered ->
+                buffered.ordinal.compareTo(ordinal)
+            }
+            require(insertionPoint < 0) { "route outcome must be observed exactly once" }
+            bufferedRouteOutcomes.add(
+                index = -insertionPoint - 1,
+                element = BufferedRouteOutcome(ordinal, outcome),
+            )
+            if (outcome !is ResourceRouteOutcome.Success) {
+                startCeilingOrdinal = minOf(startCeilingOrdinal ?: ordinal, ordinal)
+            }
+            retireBufferedPrefix()
+        }
+
+        private fun retireBufferedPrefix() {
+            var retiredCount = 0
+            while (terminalSelection == null && retiredCount < bufferedRouteOutcomes.size) {
+                val retired = bufferedRouteOutcomes[retiredCount]
+                if (retired.ordinal != nextRetirementOrdinal) break
+                retiredCount += 1
+                check(nextRetirementOrdinal < Long.MAX_VALUE) {
+                    "route retirement ordinal space exhausted"
+                }
+                nextRetirementOrdinal += 1L
+                when (retired.outcome) {
+                    ResourceRouteOutcome.Success -> Unit
+                    is ResourceRouteOutcome.Failure,
+                    is ResourceRouteOutcome.Cancelled,
+                    -> {
+                        terminalSelection = ResourceTerminalSelection.Route(
+                            retired.ordinal,
+                            retired.outcome,
+                        )
+                        cancelActiveRoutes(
+                            activeRouteOrdinals.filter { it > retired.ordinal },
+                        )
+                    }
+                }
+            }
+            if (retiredCount > 0) {
+                val retained = bufferedRouteOutcomes.subList(
+                    retiredCount,
+                    bufferedRouteOutcomes.size,
+                ).toList()
+                bufferedRouteOutcomes.clear()
+                bufferedRouteOutcomes.addAll(retained)
+            }
+        }
+
+        private fun cancelActiveRoutes(ordinals: List<Long>) {
+            ordinals.sorted().forEach { ordinal -> actions += CancelRoute(ordinal) }
+        }
+
+        private fun terminalOutcome(): ResourceOperationOutcome? {
+            val selected = terminalSelection ?: return null
+            if (activeRouteOrdinals.isNotEmpty()) return null
+            return when (selected) {
+                is ResourceTerminalSelection.External ->
+                    ResourceOperationOutcome.Cancelled(selected.cancellation)
+                is ResourceTerminalSelection.Route -> when (val routeOutcome = selected.outcome) {
+                    ResourceRouteOutcome.Success -> error("successful route cannot occupy the terminal slot")
+                    is ResourceRouteOutcome.Failure -> ResourceOperationOutcome.Failure(routeOutcome.failure)
+                    is ResourceRouteOutcome.Cancelled ->
+                        ResourceOperationOutcome.Cancelled(routeOutcome.cancellation)
+                }
             }
         }
 
@@ -524,9 +655,13 @@ internal object ResourceOperationStateMachine {
                 ),
                 nextRouteOrdinal = nextRouteOrdinal,
                 activeRouteOrdinals = activeRouteOrdinals,
+                nextRetirementOrdinal = nextRetirementOrdinal,
+                bufferedRouteOutcomes = bufferedRouteOutcomes,
+                startCeilingOrdinal = startCeilingOrdinal,
+                terminalSelection = terminalSelection,
             ),
             actions = actions,
-            outcome = failure?.let(ResourceOperationOutcome::Failure),
+            outcome = terminalOutcome(),
         )
     }
 
@@ -584,6 +719,10 @@ internal object ResourceOperationStateMachine {
         traversal: TraversalState = TraversalState(emptyList(), emptyList(), emptyList()),
         nextRouteOrdinal: Long = 0L,
         activeRouteOrdinals: List<Long> = emptyList(),
+        nextRetirementOrdinal: Long = 0L,
+        bufferedRouteOutcomes: List<BufferedRouteOutcome> = emptyList(),
+        startCeilingOrdinal: Long? = null,
+        terminalSelection: ResourceTerminalSelection? = null,
     ): ResourceOperationState.Running = ResourceOperationState.Running(
         definition = definition,
         occurrences = occurrences,
@@ -593,6 +732,10 @@ internal object ResourceOperationStateMachine {
         traversal = traversal,
         nextRouteOrdinal = nextRouteOrdinal,
         activeRouteOrdinals = activeRouteOrdinals,
+        nextRetirementOrdinal = nextRetirementOrdinal,
+        bufferedRouteOutcomes = bufferedRouteOutcomes,
+        startCeilingOrdinal = startCeilingOrdinal,
+        terminalSelection = terminalSelection,
     )
 
     private fun ambiguousRouteFailure(): FailureDescriptor = FailureDescriptor(

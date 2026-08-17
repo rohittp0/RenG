@@ -434,6 +434,40 @@ internal data class CanonicalIdentityRecord(
     val canonicalBytes: CanonicalBytes,
 )
 
+internal sealed interface ResourceRouteOutcome {
+    data object Success : ResourceRouteOutcome
+
+    data class Failure(val failure: FailureDescriptor) : ResourceRouteOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : ResourceRouteOutcome
+}
+
+internal data class BufferedRouteOutcome(
+    val ordinal: Long,
+    val outcome: ResourceRouteOutcome,
+) {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal sealed interface ResourceTerminalSelection {
+    data class Route(
+        val ordinal: Long,
+        val outcome: ResourceRouteOutcome,
+    ) : ResourceTerminalSelection {
+        init {
+            require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        }
+    }
+
+    data class External(
+        val cancellation: CancellationSelection,
+    ) : ResourceTerminalSelection
+}
+
 internal sealed interface ResourceOperationEvent
 
 internal class ChildrenDiscovered(
@@ -464,6 +498,27 @@ internal data class RouteReadyForDiscovery(
     }
 }
 
+internal data class RouteCompleted(
+    val ordinal: Long,
+    val outcome: ResourceRouteOutcome,
+) : ResourceOperationEvent {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class ExternalCancellationRequested(
+    val cancellation: CancellationSelection,
+) : ResourceOperationEvent
+
+internal data class CleanupCancellationObserved(
+    val ordinal: Long,
+) : ResourceOperationEvent {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
 internal sealed interface ResourceOperationAction
 
 internal data class StartRoute(
@@ -478,6 +533,14 @@ internal data class StartRoute(
 internal data class DiscoverChildren(
     val ordinal: Long,
     val parentOccurrenceId: ResourceOccurrenceId,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal data class CancelRoute(
+    val ordinal: Long,
 ) : ResourceOperationAction {
     init {
         require(ordinal >= 0L) { "route ordinal must be non-negative" }
@@ -590,6 +653,10 @@ internal sealed interface ResourceOperationState {
         val traversal: TraversalState = TraversalState(emptyList(), emptyList(), emptyList()),
         val nextRouteOrdinal: Long = 0L,
         activeRouteOrdinals: List<Long> = emptyList(),
+        val nextRetirementOrdinal: Long = 0L,
+        bufferedRouteOutcomes: List<BufferedRouteOutcome> = emptyList(),
+        val startCeilingOrdinal: Long? = null,
+        val terminalSelection: ResourceTerminalSelection? = null,
     ) : ResourceOperationState {
         private val occurrenceSnapshot: List<ResourceOccurrence> = freshListCopy(occurrences)
         private val routeRecordSnapshot: List<RouteRecord> = freshListCopy(routeRecords)
@@ -597,9 +664,14 @@ internal sealed interface ResourceOperationState {
             freshListCopy(privateRentileKeyClaims)
         private val identityRecordSnapshot: List<CanonicalIdentityRecord> = freshListCopy(identityRecords)
         private val activeRouteOrdinalSnapshot: List<Long> = freshListCopy(activeRouteOrdinals)
+        private val bufferedRouteOutcomeSnapshot: List<BufferedRouteOutcome> =
+            freshListCopy(bufferedRouteOutcomes)
 
         init {
             require(nextRouteOrdinal >= 0L) { "next route ordinal must be non-negative" }
+            require(nextRetirementOrdinal in 0L..nextRouteOrdinal) {
+                "next retirement ordinal must not exceed assigned route ordinals"
+            }
 
             val occurrenceIds = mutableSetOf<ResourceOccurrenceId>()
             require(occurrenceSnapshot.all { occurrenceIds.add(it.id) }) {
@@ -649,6 +721,30 @@ internal sealed interface ResourceOperationState {
             require(activeOrdinalSet == runningOrdinals) {
                 "active route ordinals must correspond exactly to running routes"
             }
+
+            val bufferedOrdinals = mutableSetOf<Long>()
+            require(bufferedRouteOutcomeSnapshot.all { buffered ->
+                buffered.ordinal >= nextRetirementOrdinal &&
+                    buffered.ordinal < nextRouteOrdinal &&
+                    bufferedOrdinals.add(buffered.ordinal)
+            }) { "buffered route outcomes must be distinct unretired assigned ordinals" }
+            require(activeOrdinalSet.none(bufferedOrdinals::contains)) {
+                "active routes cannot already have buffered outcomes"
+            }
+
+            startCeilingOrdinal?.let { ceiling ->
+                require(ceiling >= 0L && ceiling < nextRouteOrdinal) {
+                    "start ceiling must name an assigned route ordinal"
+                }
+            }
+            if (terminalSelection is ResourceTerminalSelection.Route) {
+                require(terminalSelection.ordinal < nextRetirementOrdinal) {
+                    "selected route terminal must already be retired"
+                }
+                require(activeOrdinalSet.all { it > terminalSelection.ordinal }) {
+                    "selected route terminal may clean up only higher active routes"
+                }
+            }
         }
 
         val occurrences: List<ResourceOccurrence>
@@ -665,6 +761,9 @@ internal sealed interface ResourceOperationState {
 
         val activeRouteOrdinals: List<Long>
             get() = freshListCopy(activeRouteOrdinalSnapshot)
+
+        val bufferedRouteOutcomes: List<BufferedRouteOutcome>
+            get() = freshListCopy(bufferedRouteOutcomeSnapshot)
     }
 }
 

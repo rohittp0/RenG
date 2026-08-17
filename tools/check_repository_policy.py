@@ -54,7 +54,10 @@ _RENG_COORDINATE_VERSION = re.compile(
 _RENG_VERSION_LITERAL = re.compile(
     rf"\brengVersion\b\s*(?:=|:)\s*[\"']?{_SEMANTIC_LITERAL}", re.IGNORECASE
 )
-_FORBIDDEN_DEPENDENCY = re.compile(r"\b(?:wire|serialization|skiko|ktor|corpus)\b", re.IGNORECASE)
+_FORBIDDEN_DEPENDENCY = re.compile(
+    r"\b(?:wire|serialization|skiko|ktor|corpus|coroutines?|crypto|hash)\b",
+    re.IGNORECASE,
+)
 _CONFLICTING_LICENSE = re.compile(
     r"\b(?:mit|bsd|gpl|lgpl|agpl|mozilla\s+public\s+license|eclipse\s+public\s+license|isc|unlicense|cc0)\b",
     re.IGNORECASE,
@@ -281,6 +284,44 @@ def _call_arguments(tokens: Sequence[_Token], index: int) -> tuple[_Token, ...] 
     return None
 
 
+def _block_end(tokens: Sequence[_Token], opening_index: int) -> int | None:
+    if opening_index >= len(tokens) or tokens[opening_index].value != "{":
+        return None
+    depth = 1
+    for current in range(opening_index + 1, len(tokens)):
+        if tokens[current].value == "{":
+            depth += 1
+        elif tokens[current].value == "}":
+            depth -= 1
+            if depth == 0:
+                return current
+    return None
+
+
+def _source_set_dependency_ranges(
+    tokens: Sequence[_Token], source_set: str,
+) -> tuple[tuple[int, int], ...]:
+    ranges = []
+    for index, token in enumerate(tokens):
+        expected_prefix = (
+            index + 3 < len(tokens)
+            and token.value == source_set
+            and tokens[index + 1].value == "."
+            and tokens[index + 2].value == "dependencies"
+            and tokens[index + 3].value == "{"
+        )
+        if not expected_prefix:
+            continue
+        end = _block_end(tokens, index + 3)
+        if end is not None:
+            ranges.append((index + 4, end))
+    return tuple(ranges)
+
+
+def _inside_ranges(index: int, ranges: Sequence[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in ranges)
+
+
 def _has_empty_call(tokens: Sequence[_Token], name: str) -> _Token | None:
     for index, token in enumerate(tokens):
         if token.value == name and _call_arguments(tokens, index) == ():
@@ -389,53 +430,70 @@ def check_targets(root: Path) -> list[Violation]:
     return violations
 
 
-def _direct_rentile_implementation(tokens: Sequence[_Token]) -> bool:
-    expected = ("libs", ".", "rentile", ".", "kmp")
-    for index, token in enumerate(tokens):
-        if token.value == "implementation" and _call_arguments(tokens, index) is not None:
-            arguments = _call_arguments(tokens, index)
-            if arguments is not None and tuple(item.value for item in arguments) == expected:
-                return True
-    return False
+_CYCLE_B_DEPENDENCY_MESSAGE = (
+    "Cycle B :kmp dependencies must be exactly commonMain "
+    "implementation(libs.rentile.kmp) and commonTest implementation(kotlin(\"test\"))"
+)
 
 
 def check_dependencies(root: Path) -> list[Violation]:
     path = root / "kmp/build.gradle.kts"
     if not path.is_file():
         return [_violation(
-            "RENTILE_IMPLEMENTATION_DEPENDENCY", path, 1,
-            "KMP build script must declare implementation(libs.rentile.kmp)",
+            "FORBIDDEN_CYCLE_B_DEPENDENCY", path, 1, _CYCLE_B_DEPENDENCY_MESSAGE,
         )]
 
     text = _read(path)
     tokens = _kotlin_tokens(text)
-    violations = []
-    if not _direct_rentile_implementation(tokens):
-        violations.append(_violation(
-            "RENTILE_IMPLEMENTATION_DEPENDENCY", path, 1,
-            "KMP build script must declare implementation(libs.rentile.kmp)",
-        ))
+    common_main_ranges = _source_set_dependency_ranges(tokens, "commonMain")
+    common_test_ranges = _source_set_dependency_ranges(tokens, "commonTest")
+    dependency_calls = [
+        (index, token, arguments)
+        for index, token in enumerate(tokens)
+        if token.value in _DEPENDENCY_CALLS
+        and (arguments := _call_arguments(tokens, index)) is not None
+    ]
 
-    for index, token in enumerate(tokens):
-        arguments = _call_arguments(tokens, index)
-        if token.value == "api" and arguments is not None:
-            violations.append(_violation(
-                "RENTILE_API_DEPENDENCY", path, _line(text, token.start),
-                "Cycle A must not expose dependencies through api(...)",
-            ))
-            break
+    expected_main = ("libs", ".", "rentile", ".", "kmp")
+    expected_test = ("kotlin", "(", "test", ")")
+    main_calls = [
+        (token.value, tuple(item.value for item in arguments))
+        for index, token, arguments in dependency_calls
+        if _inside_ranges(index, common_main_ranges)
+    ]
+    test_calls = [
+        (token.value, tuple(item.value for item in arguments))
+        for index, token, arguments in dependency_calls
+        if _inside_ranges(index, common_test_ranges)
+    ]
+    allowed = (
+        len(common_main_ranges) == 1
+        and len(common_test_ranges) == 1
+        and main_calls == [("implementation", expected_main)]
+        and test_calls == [("implementation", expected_test)]
+        and len(dependency_calls) == 2
+    )
 
+    forbidden_token = None
     for index, token in enumerate(tokens):
         arguments = _call_arguments(tokens, index)
         if arguments is None or token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
             continue
-        forbidden = _contains_forbidden(arguments)
-        if forbidden is not None:
-            violations.append(_violation(
-                "FORBIDDEN_CYCLE_A_DEPENDENCY", path, _line(text, forbidden.start),
-                "Cycle A must not declare Wire, serialization, Skiko, Ktor, or corpus dependencies or plugins",
-            ))
+        forbidden_token = _contains_forbidden(arguments)
+        if forbidden_token is not None:
             break
+
+    violations = []
+    if not allowed or forbidden_token is not None:
+        offset = forbidden_token.start if forbidden_token is not None else (
+            dependency_calls[0][1].start if dependency_calls else 0
+        )
+        violations.append(_violation(
+            "FORBIDDEN_CYCLE_B_DEPENDENCY",
+            path,
+            _line(text, offset),
+            _CYCLE_B_DEPENDENCY_MESSAGE,
+        ))
 
     catalog = root / "gradle/libs.versions.toml"
     if catalog.is_file():
@@ -443,8 +501,10 @@ def check_dependencies(root: Path) -> list[Violation]:
         match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))
         if match is not None:
             violations.append(_violation(
-                "FORBIDDEN_CYCLE_A_DEPENDENCY", catalog, _line(catalog_text, match.start()),
-                "Cycle A must not declare Wire, serialization, Skiko, Ktor, or corpus dependencies or plugins",
+                "FORBIDDEN_CYCLE_B_DEPENDENCY",
+                catalog,
+                _line(catalog_text, match.start()),
+                "Cycle B must not declare coroutine, crypto/hash, serialization, Ktor, Skiko, Wire, or corpus dependencies",
             ))
     return violations
 
@@ -454,27 +514,54 @@ def check_abi(root: Path) -> list[Violation]:
     api_file = api_directory / "kmp.klib.api"
     violations = []
     if not api_file.is_file():
-        violations.append(_violation("KLIB_ABI", api_file, 1, "Cycle A requires kmp/api/kmp.klib.api"))
+        violations.append(_violation(
+            "KLIB_ABI", api_file, 1, "Cycle B requires kmp/api/kmp.klib.api",
+        ))
     else:
         text = _read(api_file)
-        rentile = re.search(r"com\.rohittp\.rentile", text)
-        if rentile is not None:
+        declarations = [
+            (number, source_line)
+            for number, source_line in enumerate(text.splitlines(), start=1)
+            if source_line.strip() and not source_line.lstrip().startswith("//")
+        ]
+        has_reng_declaration = any(
+            re.search(r"\bcom\.rohittp\.reng(?:[/.])", source_line)
+            for _, source_line in declarations
+        )
+        if not has_reng_declaration:
             violations.append(_violation(
-                "ABI_RENTILE_LEAK", api_file, _line(text, rentile.start()),
-                "Cycle A ABI must not expose Rentile types",
+                "CYCLE_B_PUBLIC_ABI",
+                api_file,
+                declarations[0][0] if declarations else 1,
+                "Cycle B ABI must contain a com.rohittp.reng declaration",
             ))
-        for number, source_line in enumerate(text.splitlines(), start=1):
-            if source_line.strip() and not source_line.lstrip().startswith("//"):
+
+        forbidden_patterns = (
+            (r"com\.rohittp\.rentile", "ABI_RENTILE_LEAK", "Cycle B ABI must not expose Rentile types"),
+            (r"\bplatform\.", "ABI_PLATFORM_LEAK", "Cycle B ABI must not expose platform types"),
+            (
+                r"\b(?:createRenderer|RendererFactory)\b|com\.rohittp\.reng[/.]RenG\b",
+                "CYCLE_B_RENDERER_CONSTRUCTION",
+                "Cycle B ABI must not expose renderer construction or a factory",
+            ),
+            (
+                r"ExposedCopyVisibility",
+                "EXPOSED_COPY_VISIBILITY",
+                "Cycle B ABI must use ConsistentCopyVisibility for internal-constructor data classes",
+            ),
+        )
+        for pattern, code, message in forbidden_patterns:
+            match = re.search(pattern, text)
+            if match is not None:
                 violations.append(_violation(
-                    "CYCLE_A_PUBLIC_ABI", api_file, number,
-                    "Cycle A ABI must contain comments only",
+                    code, api_file, _line(text, match.start()), message,
                 ))
-                break
+
     if api_directory.is_dir():
         for path in sorted(api_directory.glob("jvm*"), key=lambda item: item.as_posix()):
             violations.append(_violation(
                 "JVM_ABI", path, 1,
-                "Cycle A must not publish a JVM ABI dump",
+                "Cycle B must not publish a JVM ABI dump",
             ))
     return violations
 
@@ -851,7 +938,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{relative}:{item.line}:{item.code}:{item.message}")
     if violations:
         return 1
-    print("Cycle A repository policy passed")
+    print("Cycle B repository policy passed")
     return 0
 
 

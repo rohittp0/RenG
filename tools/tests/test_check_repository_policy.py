@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tools.check_repository_policy import check_repository
+from tools.check_repository_policy import check_repository, main
 
 TARGETS = """
 android { compileSdk = 37; minSdk = 30 }
@@ -83,10 +85,16 @@ rentile = "0.1.5"
 rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
 """)
     write(root, "kmp/build.gradle.kts", TARGETS + "\n" +
-          "commonMain.dependencies { implementation(libs.rentile.kmp) }\n")
+          "commonMain.dependencies { implementation(libs.rentile.kmp) }\n" +
+          "commonTest.dependencies { implementation(kotlin(\"test\")) }\n")
     write(root, "consumer-smoke/build.gradle.kts", TARGETS + "\n" +
           "implementation(\"com.rohittp.reng:kmp:$rengVersion\")\n")
-    write(root, "kmp/api/kmp.klib.api", "// Targets: [iosArm64, iosSimulatorArm64, linuxArm64, linuxX64, macosArm64]\n")
+    write(
+        root,
+        "kmp/api/kmp.klib.api",
+        "// Targets: [iosArm64, iosSimulatorArm64, linuxArm64, linuxX64, macosArm64]\n"
+        "final class com.rohittp.reng/Public\n",
+    )
     write(root, "README.md", "RenG Apache-2.0 com.rohittp.reng:kmp:<version>\n")
     write(root, "LICENSE", "Apache License\nVersion 2.0, January 2004\n")
     for name in (".nojekyll", "robots.txt", "sitemap.xml", "llms.txt"):
@@ -118,16 +126,116 @@ class RepositoryPolicyTests(unittest.TestCase):
             create_clean_fixture(root)
             self.assertEqual([], check_repository(root))
 
+    def test_clean_fixture_cli_reports_cycle_b_success_exactly(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            output = StringIO()
+            with redirect_stdout(output):
+                status = main(["--root", str(root)])
+            self.assertEqual(0, status)
+            self.assertEqual("Cycle B repository policy passed\n", output.getvalue())
+
+    def test_cycle_b_abi_mutations_fail_closed(self) -> None:
+        replacement_cases = (
+            ("", "CYCLE_B_PUBLIC_ABI"),
+            ("// comments only\n", "CYCLE_B_PUBLIC_ABI"),
+        )
+        for contents, expected in replacement_cases:
+            with self.subTest(contents=contents):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    write(root, "kmp/api/kmp.klib.api", contents)
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn(expected, codes)
+
+        append_cases = (
+            ("com.rohittp.rentile/RenderOptions\n", "ABI_RENTILE_LEAK"),
+            ("final class platform.posix/FILE\n", "ABI_PLATFORM_LEAK"),
+            ("final fun com.rohittp.reng/createRenderer(): com.rohittp.reng/Renderer\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
+            ("final class com.rohittp.reng/RendererFactory\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
+            ("final object com.rohittp.reng/RenG\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
+            ("@ExposedCopyVisibility\n", "EXPOSED_COPY_VISIBILITY"),
+        )
+        for mutation, expected in append_cases:
+            with self.subTest(expected=expected, mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    abi = root / "kmp/api/kmp.klib.api"
+                    abi.write_text(abi.read_text(encoding="utf-8") + mutation, encoding="utf-8")
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn(expected, codes)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/api/jvm.api", "final class com.rohittp.reng/JvmOnly\n")
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("JVM_ABI", codes)
+
+    def test_cycle_b_dependency_allowlist_rejects_every_addition(self) -> None:
+        mutations = (
+            ("commonMain", 'implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1")'),
+            ("commonMain", 'implementation("org.kotlincrypto.hash:sha2:1")'),
+            ("commonMain", 'implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1")'),
+            ("commonMain", 'implementation("io.ktor:ktor-client-core:1")'),
+            ("commonMain", 'implementation("org.jetbrains.skiko:skiko:1")'),
+            ("commonMain", 'implementation("com.squareup.wire:wire-runtime:1")'),
+            ("commonMain", 'implementation("example:corpus:1")'),
+            ("commonMain", 'runtimeOnly("com.example:unknown-runtime:1")'),
+            ("commonTest", 'implementation("com.example:test-helper:1")'),
+        )
+        for source_set, mutation in mutations:
+            with self.subTest(source_set=source_set, mutation=mutation):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "kmp/build.gradle.kts"
+                    marker = f"{source_set}.dependencies {{ "
+                    build.write_text(
+                        build.read_text(encoding="utf-8").replace(
+                            marker,
+                            marker + mutation + " ",
+                        ),
+                        encoding="utf-8",
+                    )
+                    violations = check_repository(root)
+                    matching = [
+                        violation for violation in violations
+                        if violation.code == "FORBIDDEN_CYCLE_B_DEPENDENCY"
+                    ]
+                    self.assertTrue(matching)
+                    self.assertTrue(all("Cycle B" in violation.message for violation in matching))
+
+    def test_cycle_b_dependency_allowlist_requires_both_exact_entries(self) -> None:
+        removals = (
+            "commonMain.dependencies { implementation(libs.rentile.kmp) }\n",
+            'commonTest.dependencies { implementation(kotlin("test")) }\n',
+        )
+        for removal in removals:
+            with self.subTest(removal=removal):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    create_clean_fixture(root)
+                    build = root / "kmp/build.gradle.kts"
+                    build.write_text(
+                        build.read_text(encoding="utf-8").replace(removal, ""),
+                        encoding="utf-8",
+                    )
+                    codes = {violation.code for violation in check_repository(root)}
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
     def test_each_mutation_reports_expected_policy(self) -> None:
         mutations = (
             ("settings.gradle.kts", "\nmavenLocal()\n", "MAVEN_LOCAL"),
             ("gradle.properties", "VERSION_NAME=0.1.0-SNAPSHOT\n", "RENG_SNAPSHOT"),
             ("other.properties", "VERSION_NAME=0.2.0\n", "DUPLICATE_VERSION_INPUT"),
             ("kmp/build.gradle.kts", "\njvm()\n", "TARGET_SET"),
-            ("kmp/api/kmp.klib.api", "final class com.rohittp.reng/Public\n", "CYCLE_A_PUBLIC_ABI"),
             ("kmp/api/kmp.klib.api", "com.rohittp.rentile/RenderOptions\n", "ABI_RENTILE_LEAK"),
-            ("kmp/build.gradle.kts", "\nimplementation(\"org.jetbrains.skiko:skiko:1\")\n", "FORBIDDEN_CYCLE_A_DEPENDENCY"),
-            ("kmp/build.gradle.kts", "\napi(libs.rentile.kmp)\n", "RENTILE_API_DEPENDENCY"),
+            ("kmp/build.gradle.kts", "\nimplementation(\"org.jetbrains.skiko:skiko:1\")\n", "FORBIDDEN_CYCLE_B_DEPENDENCY"),
+            ("kmp/build.gradle.kts", "\napi(libs.rentile.kmp)\n", "FORBIDDEN_CYCLE_B_DEPENDENCY"),
             ("kmp/build.gradle.kts", "\nsignAllPublications()\n", "ARTIFACT_SIGNING"),
             (".github/workflows/publish.yml", "\nSIGNING_KEY: configured\n", "ARTIFACT_SIGNING"),
             ("tools/verify_publication.py", "--require-signed-poms\n", "ARTIFACT_SIGNING"),
@@ -301,7 +409,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             codes = {violation.code for violation in check_repository(root)}
-            self.assertIn("RENTILE_IMPLEMENTATION_DEPENDENCY", codes)
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -313,7 +421,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             codes = {violation.code for violation in check_repository(root)}
-            self.assertIn("RENTILE_API_DEPENDENCY", codes)
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
         forbidden_shapes = (
             "\nval serializationPlugin = kotlin(\"plugin.serialization\")\n",
@@ -327,7 +435,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                     build = root / "kmp/build.gradle.kts"
                     build.write_text(build.read_text(encoding="utf-8") + mutation, encoding="utf-8")
                     codes = {violation.code for violation in check_repository(root)}
-                    self.assertIn("FORBIDDEN_CYCLE_A_DEPENDENCY", codes)
+                    self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -3,6 +3,7 @@ package com.rohittp.reng.internal.resource
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceAccessMode
+import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
 import com.rohittp.reng.TransportRequest
@@ -146,6 +147,11 @@ internal object ResourceOperationStateMachine {
             is StoreWriteCompleted -> work.storeWriteCompleted(event)
             is VisibilityInstallCompleted -> work.visibilityInstallCompleted(event)
             is AdvancePendingSpriteCommit -> work.advancePendingSpriteCommit(event)
+            is AdvancePendingStyleCommit -> work.advancePendingStyleCommit(event)
+            is BasemapStyleValidationCompleted -> work.basemapStyleValidationCompleted(event)
+            is BasemapStyleCompilationCompleted -> work.basemapStyleCompilationCompleted(event)
+            is BasemapStyleWriteCompleted -> work.basemapStyleWriteCompleted(event)
+            is BasemapStyleVisibilityInstallCompleted -> work.basemapStyleVisibilityInstallCompleted(event)
             is SpritePairValidationCompleted -> work.spritePairValidationCompleted(event)
             is SpriteMemberWriteCompleted -> work.spriteMemberWriteCompleted(event)
             is SpriteVisibilityInstallCompleted -> work.spriteVisibilityInstallCompleted(event)
@@ -189,6 +195,11 @@ internal object ResourceOperationStateMachine {
             initial.spriteCommitStates.toMutableList()
         private val spriteStateIndexByGroup: MutableMap<SpriteGroupId, Int> = mutableMapOf()
         private val parkedRoutes: MutableList<ParkedRoute> = initial.parkedRoutes.toMutableList()
+        private val styleCommitStates: MutableList<StyleCommitState> =
+            initial.styleCommitStates.toMutableList()
+        private val styleStateIndexByGroup: MutableMap<StyleGroupId, Int> = mutableMapOf()
+        private val staticOccurrenceIds: Set<ResourceOccurrenceId> =
+            initial.definition.staticOccurrences.mapTo(mutableSetOf(), ResourceOccurrence::id)
         private val actions: MutableList<ResourceOperationAction> = mutableListOf()
         private var nextActionId: Long = initial.nextActionId
         private var nextRouteOrdinal: Long = initial.nextRouteOrdinal
@@ -279,6 +290,11 @@ internal object ResourceOperationStateMachine {
             spriteCommitStates.forEachIndexed { index, group ->
                 require(spriteStateIndexByGroup.put(group.groupId, index) == null) {
                     "sprite commit group IDs must be unique"
+                }
+            }
+            styleCommitStates.forEachIndexed { index, group ->
+                require(styleStateIndexByGroup.put(group.groupId, index) == null) {
+                    "style commit group IDs must be unique"
                 }
             }
         }
@@ -748,6 +764,386 @@ internal object ResourceOperationStateMachine {
             }
         }
 
+        fun advancePendingStyleCommit(event: AdvancePendingStyleCommit) {
+            require(terminalSelection == null) { "style commit cannot advance after terminal selection" }
+            val routeIndex = requireNotNull(routeIndexByOrdinal[event.ordinal]) {
+                "style commit advancement must name an assigned route"
+            }
+            val record = routeRecords[routeIndex]
+            require(record.status == ResourceRouteStatus.RUNNING && event.ordinal in activeRouteOrdinals) {
+                "style commit advancement requires an active running route"
+            }
+            val cursor = record.cursor
+            require(cursor is PendingClassGates && cursor.ordinal == event.ordinal) {
+                "style commit advancement requires pending selected content at the same ordinal"
+            }
+            val binding = styleCommitBinding(routeIndex)
+            require(styleStateIndexByGroup[binding.groupId] == null) {
+                "basemap style validation may be requested only once"
+            }
+
+            val ceiling = startCeilingOrdinal
+            if (ceiling != null && event.ordinal < ceiling) {
+                closeRouteWithoutRemainingWork(routeIndex, event.ordinal)
+                return
+            }
+
+            val referencingOwnerIds = styleReferencingOwnerIds(routeIndex)
+            val staged = StyleCommitState(
+                groupId = binding.groupId,
+                ordinal = event.ordinal,
+                stagedContent = cursor.content,
+                compilationStatus = if (requiresStyleCompilation(cursor.content.provenance)) {
+                    StyleCompilationStatus.WAITING
+                } else {
+                    StyleCompilationStatus.NOT_REQUIRED
+                },
+                referencingOwnerIds = referencingOwnerIds,
+                ownersWithCompletedNonStyleWork = referencingOwnerIds.filter(::ownerNonStyleWorkComplete),
+                writeAcknowledged = false,
+                visible = false,
+            )
+            addStyleCommitState(staged)
+            requestStyleValidation(routeIndex, staged)
+        }
+
+        fun basemapStyleValidationCompleted(event: BasemapStyleValidationCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStyleValidation>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingStyleValidation
+            if (finishActionAfterTerminal(routeIndex)) return
+            refreshStyleCommitStates()
+            val style = styleCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                is BasemapStyleValidationOutcome.Valid -> {
+                    if (closeStyleBelowStartCeiling(routeIndex, style)) return
+                    updateRouteRecord(
+                        routeIndex,
+                        cursor = PendingClassGates(cursor.ordinal, cursor.content),
+                    )
+                    parkRoute(routeIndex, cursor.ordinal, ParkedRouteBarrier.StyleChildren(style.groupId))
+                    registerStyleChildren(routeIndex, outcome.children)
+                }
+                is BasemapStyleValidationOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(styleFailure(style.stagedContent, outcome.kind)),
+                )
+                is BasemapStyleValidationOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        fun basemapStyleCompilationCompleted(event: BasemapStyleCompilationCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStyleCompilation>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingStyleCompilation
+            if (finishActionAfterTerminal(routeIndex)) return
+            refreshStyleCommitStates()
+            val style = styleCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                BasemapStyleCompilationOutcome.Succeeded -> {
+                    val compiled = style.withCompilationStatus(StyleCompilationStatus.SUCCEEDED)
+                    putStyleCommitState(compiled)
+                    advanceStyleAfterCompilation(routeIndex, compiled, reschedule = true)
+                }
+                is BasemapStyleCompilationOutcome.Failed -> {
+                    putStyleCommitState(style.withCompilationStatus(StyleCompilationStatus.FAILED))
+                    completeLookupRoute(
+                        routeIndex,
+                        ResourceRouteOutcome.Failure(styleFailure(style.stagedContent, outcome.kind)),
+                    )
+                }
+                is BasemapStyleCompilationOutcome.Cancelled -> {
+                    putStyleCommitState(style.withCompilationStatus(StyleCompilationStatus.FAILED))
+                    completeLookupRoute(
+                        routeIndex,
+                        ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                    )
+                }
+            }
+        }
+
+        fun basemapStyleWriteCompleted(event: BasemapStyleWriteCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStyleWrite>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingStyleWrite
+            require(cursor.groupId == event.groupId) {
+                "style write acknowledgement must match its complete binding cursor"
+            }
+            if (finishActionAfterTerminal(routeIndex)) return
+            refreshStyleCommitStates()
+            val style = styleCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                is SuppliedCallOutcome.Success -> {
+                    val acknowledged = style.withWriteAcknowledged()
+                    putStyleCommitState(acknowledged)
+                    requestStyleWriteOrInstall(routeIndex, acknowledged)
+                }
+                SuppliedCallOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(storeWriteFailure(cursor.content)),
+                )
+                is SuppliedCallOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        fun basemapStyleVisibilityInstallCompleted(event: BasemapStyleVisibilityInstallCompleted) {
+            val routeIndex = routeIndexForAction<AwaitingStyleVisibilityInstall>(event.actionId)
+            val cursor = routeRecords[routeIndex].cursor as AwaitingStyleVisibilityInstall
+            require(cursor.groupId == event.groupId) {
+                "style visibility acknowledgement must match its complete binding cursor"
+            }
+            if (finishActionAfterTerminal(routeIndex)) return
+            refreshStyleCommitStates()
+            val style = styleCommitState(cursor.groupId)
+
+            when (val outcome = event.outcome) {
+                SuppliedInstallOutcome.Succeeded -> installStyleVisibility(routeIndex, style)
+                is SuppliedInstallOutcome.Failed -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Failure(outcome.failure),
+                )
+                is SuppliedInstallOutcome.Cancelled -> completeLookupRoute(
+                    routeIndex,
+                    ResourceRouteOutcome.Cancelled(outcome.cancellation),
+                )
+            }
+        }
+
+        private fun requestStyleValidation(routeIndex: Int, style: StyleCommitState) {
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingStyleValidation(
+                    actionId = actionId,
+                    ordinal = style.ordinal,
+                    groupId = style.groupId,
+                    content = style.stagedContent,
+                ),
+            )
+            actions += ValidateBasemapStyle(actionId, style.ordinal, style.groupId, style.stagedContent)
+        }
+
+        private fun registerStyleChildren(
+            routeIndex: Int,
+            children: List<DiscoveredResourceChild>,
+        ) {
+            val frontier = frontierStack.lastOrNull()
+            val parentId = frontier?.parentOccurrenceId
+            val ownsFrontier = parentId != null &&
+                parentId in joinedOccurrenceIdSetsByRouteIndex[routeIndex] &&
+                occurrence(parentId).discoveryRequired
+            require(ownsFrontier || children.isEmpty()) {
+                "discovered style children require the active depth-first frontier"
+            }
+            if (!ownsFrontier) {
+                startEligibleRoutes()
+                return
+            }
+
+            val discoveredIds = mutableSetOf<ResourceOccurrenceId>()
+            require(
+                children.all { child ->
+                    child.occurrence.id !in occurrenceById && discoveredIds.add(child.occurrence.id)
+                },
+            ) { "discovered resource occurrence IDs must be unique" }
+
+            children.forEach { child ->
+                occurrences += child.occurrence
+                occurrenceById[child.occurrence.id] = child.occurrence
+            }
+            frontierStack[frontierStack.lastIndex] = requireNotNull(frontier).withChildren(
+                children.map { it.occurrence.id },
+            )
+            releaseKnownTraversal()
+            scheduleEligibleOccurrences()
+        }
+
+        private fun resumeStyleChildren(routeIndex: Int, style: StyleCommitState) {
+            if (style.compilationStatus == StyleCompilationStatus.NOT_REQUIRED) {
+                advanceStyleAfterCompilation(routeIndex, style, reschedule = false)
+                return
+            }
+            val requested = style.withCompilationStatus(StyleCompilationStatus.REQUESTED)
+            putStyleCommitState(requested)
+            val actionId = takeNextActionId()
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingStyleCompilation(
+                    actionId = actionId,
+                    ordinal = style.ordinal,
+                    groupId = style.groupId,
+                    content = style.stagedContent,
+                ),
+            )
+            actions += CompileBasemapStyle(actionId, style.ordinal, style.groupId, style.stagedContent)
+        }
+
+        private fun advanceStyleAfterCompilation(
+            routeIndex: Int,
+            style: StyleCommitState,
+            reschedule: Boolean,
+        ) {
+            if (styleOwnerBarrierComplete(style)) {
+                requestStyleWriteOrInstall(routeIndex, style)
+                return
+            }
+            if (closeStyleBelowStartCeiling(routeIndex, style)) return
+            updateRouteRecord(
+                routeIndex,
+                cursor = PendingClassGates(style.ordinal, style.stagedContent),
+            )
+            parkRoute(routeIndex, style.ordinal, ParkedRouteBarrier.StyleOwners(style.groupId))
+            if (reschedule) startEligibleRoutes()
+        }
+
+        private fun requestStyleWriteOrInstall(routeIndex: Int, style: StyleCommitState) {
+            val actionId = takeNextActionId()
+            if (style.requiresWrite && !style.writeAcknowledged) {
+                updateRouteRecord(
+                    routeIndex,
+                    cursor = AwaitingStyleWrite(
+                        actionId = actionId,
+                        ordinal = style.ordinal,
+                        groupId = style.groupId,
+                        content = style.stagedContent,
+                    ),
+                )
+                actions += WriteBasemapStyle(
+                    actionId = actionId,
+                    ordinal = style.ordinal,
+                    groupId = style.groupId,
+                    rawKey = routeRecords[routeIndex].registration.rawKey,
+                    resource = copyStored(style.stagedContent.stored),
+                )
+                return
+            }
+            updateRouteRecord(
+                routeIndex,
+                cursor = AwaitingStyleVisibilityInstall(
+                    actionId = actionId,
+                    ordinal = style.ordinal,
+                    groupId = style.groupId,
+                    content = style.stagedContent,
+                    referencingOwnerIds = style.referencingOwnerIds,
+                ),
+            )
+            actions += InstallBasemapStyleVisibility(
+                actionId = actionId,
+                ordinal = style.ordinal,
+                groupId = style.groupId,
+                content = style.stagedContent,
+                referencingOwnerIds = style.referencingOwnerIds,
+            )
+        }
+
+        private fun installStyleVisibility(routeIndex: Int, style: StyleCommitState) {
+            require(activeRouteOrdinals.remove(style.ordinal)) {
+                "style group work requires its active style route"
+            }
+            putStyleCommitState(style.withVisible())
+            updateRouteRecord(
+                routeIndex,
+                cursor = null,
+                status = ResourceRouteStatus.RESOLVED,
+                visibilityInstalled = true,
+            )
+            bufferRouteOutcome(style.ordinal, ResourceRouteOutcome.Success)
+            if (terminalSelection == null) startEligibleRoutes()
+        }
+
+        private fun closeStyleBelowStartCeiling(routeIndex: Int, style: StyleCommitState): Boolean {
+            val ceiling = startCeilingOrdinal ?: return false
+            if (style.ordinal >= ceiling) return false
+            closeRouteWithoutRemainingWork(routeIndex, style.ordinal)
+            return true
+        }
+
+        private fun styleCommitBinding(routeIndex: Int): ResourceCommitBinding.BasemapStyle {
+            val binding = joinedOccurrenceIdsByRouteIndex[routeIndex]
+                .map { occurrence(it).commitBinding }
+                .distinct()
+                .singleOrNull()
+            require(binding is ResourceCommitBinding.BasemapStyle) {
+                "style commit requires exactly one basemap style commit binding"
+            }
+            require(
+                routeRecords[routeIndex].registration.route.resourceClass == ResourceClass.BASEMAP_STYLE,
+            ) { "a style route must carry basemap style content" }
+            return binding
+        }
+
+        private fun styleReferencingOwnerIds(routeIndex: Int): List<ResourceOwnerId> =
+            joinedOccurrenceIdsByRouteIndex[routeIndex]
+                .map { occurrence(it).ownerId }
+                .distinct()
+
+        private fun ownerNonStyleWorkComplete(ownerId: ResourceOwnerId): Boolean =
+            occurrences.none { candidate ->
+                candidate.ownerId == ownerId &&
+                    candidate.commitBinding !is ResourceCommitBinding.BasemapStyle &&
+                    !visibilityInstalled(candidate)
+            }
+
+        private fun visibilityInstalled(occurrence: ResourceOccurrence): Boolean {
+            val routeIndex = routeIndex(occurrence.registration.route)
+            return routeIndex >= 0 && routeRecords[routeIndex].visibilityInstalled
+        }
+
+        private fun styleOwnerBarrierComplete(style: StyleCommitState): Boolean =
+            style.referencingOwnerIds.all(::ownerNonStyleWorkComplete)
+
+        private fun styleChildrenComplete(): Boolean {
+            if (frontierStack.isNotEmpty() || eligibleFifo.isNotEmpty()) return false
+            return occurrences.all { candidate ->
+                if (candidate.id in staticOccurrenceIds) return@all true
+                val routeIndex = routeIndex(candidate.registration.route)
+                routeIndex >= 0 &&
+                    routeRecords[routeIndex].ordinal != null &&
+                    routeRecords[routeIndex].status == ResourceRouteStatus.RESOLVED
+            }
+        }
+
+        private fun refreshStyleCommitStates() {
+            if (styleCommitStates.isEmpty()) return
+            styleCommitStates.forEachIndexed { index, style ->
+                val routeIndex = routeIndexByOrdinal[style.ordinal] ?: return@forEachIndexed
+                val referencingOwnerIds = styleReferencingOwnerIds(routeIndex)
+                styleCommitStates[index] = style.withOwners(
+                    referencingOwnerIds = referencingOwnerIds,
+                    ownersWithCompletedNonStyleWork = referencingOwnerIds
+                        .filter(::ownerNonStyleWorkComplete),
+                )
+            }
+        }
+
+        private fun styleCommitState(groupId: StyleGroupId): StyleCommitState {
+            val index = requireNotNull(styleStateIndexByGroup[groupId]) {
+                "style commit work requires its group commit state"
+            }
+            return styleCommitStates[index]
+        }
+
+        private fun putStyleCommitState(style: StyleCommitState) {
+            val index = requireNotNull(styleStateIndexByGroup[style.groupId]) {
+                "style commit work requires its group commit state"
+            }
+            styleCommitStates[index] = style
+        }
+
+        private fun addStyleCommitState(style: StyleCommitState) {
+            require(styleStateIndexByGroup[style.groupId] == null) {
+                "style commit group IDs must be unique"
+            }
+            styleStateIndexByGroup[style.groupId] = styleCommitStates.size
+            styleCommitStates += style
+        }
+
         private fun requestSpritePairValidation(routeIndex: Int, group: SpriteCommitState) {
             val json = requireNotNull(group.jsonCandidate) {
                 "joint sprite validation requires its JSON candidate"
@@ -924,6 +1320,7 @@ internal object ResourceOperationStateMachine {
 
         private fun resumeReadyParkedRoutes() {
             while (activeRouteOrdinals.size < initial.definition.maximumConcurrentRoutes) {
+                if (terminalSelection != null) return
                 val ceiling = startCeilingOrdinal
                 val resumable = parkedRoutes
                     .filter { parked ->
@@ -940,6 +1337,14 @@ internal object ResourceOperationStateMachine {
                         routeIndex,
                         spriteCommitState(barrier.groupId),
                     )
+                    is ParkedRouteBarrier.StyleChildren -> resumeStyleChildren(
+                        routeIndex,
+                        styleCommitState(barrier.groupId),
+                    )
+                    is ParkedRouteBarrier.StyleOwners -> requestStyleWriteOrInstall(
+                        routeIndex,
+                        styleCommitState(barrier.groupId),
+                    )
                 }
             }
         }
@@ -952,6 +1357,14 @@ internal object ResourceOperationStateMachine {
                         group.jsonCandidate != null &&
                         group.imageCandidate != null &&
                         group.jointValidationStatus == SpriteJointValidationStatus.WAITING
+                }
+                is ParkedRouteBarrier.StyleChildren -> {
+                    val style = styleCommitState(barrier.groupId)
+                    parked.ordinal == style.ordinal && styleChildrenComplete()
+                }
+                is ParkedRouteBarrier.StyleOwners -> {
+                    val style = styleCommitState(barrier.groupId)
+                    parked.ordinal == style.ordinal && styleOwnerBarrierComplete(style)
                 }
             }
 
@@ -1543,6 +1956,7 @@ internal object ResourceOperationStateMachine {
 
         private fun startEligibleRoutes() {
             if (terminalSelection != null) return
+            refreshStyleCommitStates()
             resumeReadyParkedRoutes()
             startNotYetStartedRoutes()
         }
@@ -1663,6 +2077,12 @@ internal object ResourceOperationStateMachine {
             }
             if (routeRecords.any { it.status != ResourceRouteStatus.RESOLVED }) return null
 
+            val visibleByRoute = visibleResourcesByRoute()
+            if (occurrences.any { it.registration.route !in visibleByRoute }) return null
+            return ResourceOperationOutcome.Success(deriveVisibleResourcesByOwner())
+        }
+
+        private fun visibleResourcesByRoute(): Map<ResourceRouteKey, VisibleResource> {
             val visibleByRoute = mutableMapOf<ResourceRouteKey, VisibleResource>()
             routeRecords.forEach { record ->
                 if (!record.visibilityInstalled) return@forEach
@@ -1672,20 +2092,23 @@ internal object ResourceOperationStateMachine {
                 visibleByRoute[record.registration.route] =
                     VisibleResource(record.registration.resourceKey, content)
             }
+            return visibleByRoute
+        }
 
+        private fun deriveVisibleResourcesByOwner(): List<OwnerResourceSet> {
+            val visibleByRoute = visibleResourcesByRoute()
+            if (visibleByRoute.isEmpty()) return emptyList()
             val ownerOrder = mutableListOf<ResourceOwnerId>()
             val resourcesByOwner = mutableMapOf<ResourceOwnerId, MutableList<VisibleResource>>()
             occurrences.forEach { occurrence ->
-                val visible = visibleByRoute[occurrence.registration.route] ?: return null
+                val visible = visibleByRoute[occurrence.registration.route] ?: return@forEach
                 val owned = resourcesByOwner.getOrPut(occurrence.ownerId) {
                     ownerOrder += occurrence.ownerId
                     mutableListOf()
                 }
                 if (visible !in owned) owned += visible
             }
-            return ResourceOperationOutcome.Success(
-                ownerOrder.map { ownerId -> OwnerResourceSet(ownerId, resourcesByOwner.getValue(ownerId)) },
-            )
+            return ownerOrder.map { ownerId -> OwnerResourceSet(ownerId, resourcesByOwner.getValue(ownerId)) }
         }
 
         private fun addRouteRecord(record: RouteRecord): Int {
@@ -1821,6 +2244,8 @@ internal object ResourceOperationStateMachine {
                 terminalSelection = terminalSelection,
                 spriteCommitStates = spriteCommitStates,
                 parkedRoutes = parkedRoutes,
+                styleCommitStates = styleCommitStates,
+                visibleResourcesByOwner = deriveVisibleResourcesByOwner(),
             ),
             actions = actions,
             outcome = terminalOutcome(),
@@ -1891,6 +2316,8 @@ internal object ResourceOperationStateMachine {
         terminalSelection: ResourceTerminalSelection? = null,
         spriteCommitStates: List<SpriteCommitState> = emptyList(),
         parkedRoutes: List<ParkedRoute> = emptyList(),
+        styleCommitStates: List<StyleCommitState> = emptyList(),
+        visibleResourcesByOwner: List<OwnerResourceSet> = emptyList(),
     ): ResourceOperationState.Running = ResourceOperationState.Running(
         definition = definition,
         occurrences = occurrences,
@@ -1908,6 +2335,8 @@ internal object ResourceOperationStateMachine {
         terminalSelection = terminalSelection,
         spriteCommitStates = spriteCommitStates,
         parkedRoutes = parkedRoutes,
+        styleCommitStates = styleCommitStates,
+        visibleResourcesByOwner = visibleResourcesByOwner,
     )
 
     private fun ambiguousRouteFailure(): FailureDescriptor = FailureDescriptor(
@@ -2040,6 +2469,25 @@ internal object ResourceOperationStateMachine {
         }
     }
 
+    private fun styleFailure(
+        content: ResolvedResourceContent,
+        kind: StyleFailureKind,
+    ): FailureDescriptor {
+        if (content.provenance == ContentProvenance.STORE) return storeIntegrityFailure(content)
+        return when (kind) {
+            StyleFailureKind.PARSE -> resourceFormatFailure(
+                content,
+                RenGErrorCode.RESOURCE_PARSE_FAILED,
+                PipelineStage.RESOURCE_PARSING,
+            )
+            StyleFailureKind.UNSUPPORTED_FEATURE -> resourceFormatFailure(
+                content,
+                RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE,
+                PipelineStage.RESOURCE_PARSING,
+            )
+        }
+    }
+
     private fun resourceFormatFailure(
         content: ResolvedResourceContent,
         code: RenGErrorCode,
@@ -2083,6 +2531,10 @@ internal object ResourceOperationStateMachine {
         is AwaitingSpritePairValidation -> cursor.actionId
         is AwaitingSpriteMemberWrite -> cursor.actionId
         is AwaitingSpriteVisibilityInstall -> cursor.actionId
+        is AwaitingStyleValidation -> cursor.actionId
+        is AwaitingStyleCompilation -> cursor.actionId
+        is AwaitingStyleWrite -> cursor.actionId
+        is AwaitingStyleVisibilityInstall -> cursor.actionId
     }
 
     private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(

@@ -676,8 +676,34 @@ internal fun spriteMemberResourceClass(member: SpriteMember): ResourceClass =
         SpriteMember.IMAGE -> ResourceClass.BASEMAP_SPRITE_IMAGE
     }
 
+internal enum class StyleCompilationStatus {
+    NOT_REQUIRED,
+    WAITING,
+    REQUESTED,
+    SUCCEEDED,
+    FAILED,
+}
+
+internal enum class StyleFailureKind {
+    PARSE,
+    UNSUPPORTED_FEATURE,
+}
+
+internal fun requiresStyleCompilation(provenance: ContentProvenance): Boolean =
+    when (provenance) {
+        ContentProvenance.RESIDENT -> false
+        ContentProvenance.STORE,
+        ContentProvenance.TRANSPORT_200,
+        ContentProvenance.TRANSPORT_304_MERGED,
+        -> true
+    }
+
 internal sealed interface ParkedRouteBarrier {
     data class SpritePair(val groupId: SpriteGroupId) : ParkedRouteBarrier
+
+    data class StyleChildren(val groupId: StyleGroupId) : ParkedRouteBarrier
+
+    data class StyleOwners(val groupId: StyleGroupId) : ParkedRouteBarrier
 }
 
 internal data class ParkedRoute(
@@ -868,6 +894,235 @@ internal data class AwaitingSpriteVisibilityInstall(
 ) : ResourceRouteCursor {
     init {
         requireSpriteMemberClasses(json, image)
+    }
+}
+
+internal class StyleCommitState(
+    val groupId: StyleGroupId,
+    val ordinal: Long,
+    val stagedContent: ResolvedResourceContent,
+    val compilationStatus: StyleCompilationStatus,
+    referencingOwnerIds: List<ResourceOwnerId>,
+    ownersWithCompletedNonStyleWork: List<ResourceOwnerId>,
+    val writeAcknowledged: Boolean,
+    val visible: Boolean,
+) {
+    private val referencingOwnerIdSnapshot: List<ResourceOwnerId> = freshListCopy(referencingOwnerIds)
+    private val completedOwnerIdSnapshot: List<ResourceOwnerId> =
+        freshListCopy(ownersWithCompletedNonStyleWork)
+
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(stagedContent)
+        require(referencingOwnerIdSnapshot.isNotEmpty()) {
+            "a style commit requires at least one referencing owner"
+        }
+        require(referencingOwnerIdSnapshot.toSet().size == referencingOwnerIdSnapshot.size) {
+            "referencing style owner IDs must be distinct"
+        }
+        require(
+            completedOwnerIdSnapshot ==
+                referencingOwnerIdSnapshot.filter(completedOwnerIdSnapshot.toSet()::contains) &&
+                completedOwnerIdSnapshot.toSet().size == completedOwnerIdSnapshot.size,
+        ) { "completed style owners must be a referencing-owner subsequence" }
+        require(
+            when (compilationStatus) {
+                StyleCompilationStatus.NOT_REQUIRED -> !compilationRequired
+                StyleCompilationStatus.WAITING,
+                StyleCompilationStatus.REQUESTED,
+                StyleCompilationStatus.SUCCEEDED,
+                StyleCompilationStatus.FAILED,
+                -> compilationRequired
+            },
+        ) { "style compilation status must agree with its staged provenance" }
+        require(!writeAcknowledged || (requiresWrite && compilationSettled)) {
+            "an acknowledged style write requires written provenance after compilation"
+        }
+        require(!visible || (compilationSettled && writeAcknowledged == requiresWrite)) {
+            "style visibility requires settled compilation and its required write"
+        }
+    }
+
+    val referencingOwnerIds: List<ResourceOwnerId>
+        get() = freshListCopy(referencingOwnerIdSnapshot)
+
+    val ownersWithCompletedNonStyleWork: List<ResourceOwnerId>
+        get() = freshListCopy(completedOwnerIdSnapshot)
+
+    internal val compilationRequired: Boolean
+        get() = requiresStyleCompilation(stagedContent.provenance)
+
+    internal val compilationSettled: Boolean
+        get() = compilationStatus == StyleCompilationStatus.SUCCEEDED ||
+            compilationStatus == StyleCompilationStatus.NOT_REQUIRED
+
+    internal val requiresWrite: Boolean
+        get() = requiresStoreWrite(stagedContent.provenance)
+
+    internal val allReferencingOwnersComplete: Boolean
+        get() = completedOwnerIdSnapshot.size == referencingOwnerIdSnapshot.size
+
+    internal fun withCompilationStatus(status: StyleCompilationStatus): StyleCommitState =
+        copyStyle(compilationStatus = status)
+
+    internal fun withOwners(
+        referencingOwnerIds: List<ResourceOwnerId>,
+        ownersWithCompletedNonStyleWork: List<ResourceOwnerId>,
+    ): StyleCommitState = copyStyle(
+        referencingOwnerIds = referencingOwnerIds,
+        ownersWithCompletedNonStyleWork = ownersWithCompletedNonStyleWork,
+    )
+
+    internal fun withWriteAcknowledged(): StyleCommitState = copyStyle(writeAcknowledged = true)
+
+    internal fun withVisible(): StyleCommitState = copyStyle(visible = true)
+
+    private fun copyStyle(
+        compilationStatus: StyleCompilationStatus = this.compilationStatus,
+        referencingOwnerIds: List<ResourceOwnerId> = this.referencingOwnerIdSnapshot,
+        ownersWithCompletedNonStyleWork: List<ResourceOwnerId> = this.completedOwnerIdSnapshot,
+        writeAcknowledged: Boolean = this.writeAcknowledged,
+        visible: Boolean = this.visible,
+    ): StyleCommitState = StyleCommitState(
+        groupId = groupId,
+        ordinal = ordinal,
+        stagedContent = stagedContent,
+        compilationStatus = compilationStatus,
+        referencingOwnerIds = referencingOwnerIds,
+        ownersWithCompletedNonStyleWork = ownersWithCompletedNonStyleWork,
+        writeAcknowledged = writeAcknowledged,
+        visible = visible,
+    )
+
+    override fun equals(other: Any?): Boolean =
+        other is StyleCommitState &&
+            groupId == other.groupId &&
+            ordinal == other.ordinal &&
+            stagedContent == other.stagedContent &&
+            compilationStatus == other.compilationStatus &&
+            referencingOwnerIdSnapshot == other.referencingOwnerIdSnapshot &&
+            completedOwnerIdSnapshot == other.completedOwnerIdSnapshot &&
+            writeAcknowledged == other.writeAcknowledged &&
+            visible == other.visible
+
+    override fun hashCode(): Int {
+        var result = groupId.hashCode()
+        result = 31 * result + ordinal.hashCode()
+        result = 31 * result + stagedContent.hashCode()
+        result = 31 * result + compilationStatus.hashCode()
+        result = 31 * result + referencingOwnerIdSnapshot.hashCode()
+        result = 31 * result + completedOwnerIdSnapshot.hashCode()
+        result = 31 * result + writeAcknowledged.hashCode()
+        result = 31 * result + visible.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "StyleCommitState(" +
+            "groupId=$groupId, " +
+            "ordinal=$ordinal, " +
+            "compilationStatus=$compilationStatus, " +
+            "referencingOwnerCount=${referencingOwnerIdSnapshot.size}, " +
+            "completedOwnerCount=${completedOwnerIdSnapshot.size}, " +
+            "writeAcknowledged=$writeAcknowledged, " +
+            "visible=$visible)"
+}
+
+internal data class AwaitingStyleValidation(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+    }
+}
+
+internal data class AwaitingStyleCompilation(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+        require(requiresStyleCompilation(content.provenance)) {
+            "only uncompiled style content is compiled"
+        }
+    }
+}
+
+internal data class AwaitingStyleWrite(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+) : ResourceRouteCursor {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+        require(requiresStoreWrite(content.provenance)) { "only transported style content is written" }
+    }
+}
+
+internal class AwaitingStyleVisibilityInstall(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+    referencingOwnerIds: List<ResourceOwnerId>,
+) : ResourceRouteCursor {
+    private val referencingOwnerIdSnapshot: List<ResourceOwnerId> = freshListCopy(referencingOwnerIds)
+
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+        requireReferencingStyleOwners(referencingOwnerIdSnapshot)
+    }
+
+    val referencingOwnerIds: List<ResourceOwnerId>
+        get() = freshListCopy(referencingOwnerIdSnapshot)
+
+    override fun equals(other: Any?): Boolean =
+        other is AwaitingStyleVisibilityInstall &&
+            actionId == other.actionId &&
+            ordinal == other.ordinal &&
+            groupId == other.groupId &&
+            content == other.content &&
+            referencingOwnerIdSnapshot == other.referencingOwnerIdSnapshot
+
+    override fun hashCode(): Int {
+        var result = actionId.hashCode()
+        result = 31 * result + ordinal.hashCode()
+        result = 31 * result + groupId.hashCode()
+        result = 31 * result + content.hashCode()
+        result = 31 * result + referencingOwnerIdSnapshot.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "AwaitingStyleVisibilityInstall(" +
+            "actionId=$actionId, " +
+            "ordinal=$ordinal, " +
+            "groupId=$groupId, " +
+            "referencingOwnerCount=${referencingOwnerIdSnapshot.size})"
+}
+
+private fun requireBasemapStyleContent(content: ResolvedResourceContent) {
+    require(content.route.resourceClass == ResourceClass.BASEMAP_STYLE) {
+        "a style commit requires basemap style content"
+    }
+}
+
+private fun requireReferencingStyleOwners(referencingOwnerIds: List<ResourceOwnerId>) {
+    require(referencingOwnerIds.isNotEmpty()) {
+        "a style commit requires at least one referencing owner"
+    }
+    require(referencingOwnerIds.toSet().size == referencingOwnerIds.size) {
+        "referencing style owner IDs must be distinct"
     }
 }
 
@@ -1067,6 +1322,94 @@ internal data class SpriteVisibilityInstallCompleted(
     val outcome: SuppliedInstallOutcome,
 ) : ResourceOperationEvent
 
+internal data class AdvancePendingStyleCommit(
+    val ordinal: Long,
+) : ResourceOperationEvent {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+    }
+}
+
+internal sealed interface BasemapStyleValidationOutcome {
+    class Valid(
+        children: List<DiscoveredResourceChild>,
+    ) : BasemapStyleValidationOutcome {
+        private val childSnapshot: List<DiscoveredResourceChild> =
+            freshListCopy(children).sortedWith(resourceChildComparator)
+
+        init {
+            for (index in 1 until childSnapshot.size) {
+                require(
+                    resourceChildComparator.compare(childSnapshot[index - 1], childSnapshot[index]) != 0,
+                ) { "discovered child traversal descriptors must be distinguishable" }
+            }
+        }
+
+        val children: List<DiscoveredResourceChild>
+            get() = freshListCopy(childSnapshot)
+
+        override fun equals(other: Any?): Boolean = other is Valid && childSnapshot == other.childSnapshot
+
+        override fun hashCode(): Int = childSnapshot.hashCode()
+
+        override fun toString(): String = "Valid(childCount=${childSnapshot.size})"
+    }
+
+    data class Failed(
+        val kind: StyleFailureKind,
+    ) : BasemapStyleValidationOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : BasemapStyleValidationOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "supplied style validation cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
+internal sealed interface BasemapStyleCompilationOutcome {
+    data object Succeeded : BasemapStyleCompilationOutcome
+
+    data class Failed(
+        val kind: StyleFailureKind,
+    ) : BasemapStyleCompilationOutcome
+
+    data class Cancelled(
+        val cancellation: CancellationSelection,
+    ) : BasemapStyleCompilationOutcome {
+        init {
+            require(cancellation.cause == CancellationCause.ADAPTER) {
+                "supplied style compilation cancellation must originate from an adapter"
+            }
+        }
+    }
+}
+
+internal data class BasemapStyleValidationCompleted(
+    val actionId: ResourceActionId,
+    val outcome: BasemapStyleValidationOutcome,
+) : ResourceOperationEvent
+
+internal data class BasemapStyleCompilationCompleted(
+    val actionId: ResourceActionId,
+    val outcome: BasemapStyleCompilationOutcome,
+) : ResourceOperationEvent
+
+internal data class BasemapStyleWriteCompleted(
+    val actionId: ResourceActionId,
+    val groupId: StyleGroupId,
+    val outcome: SuppliedCallOutcome<Unit>,
+) : ResourceOperationEvent
+
+internal data class BasemapStyleVisibilityInstallCompleted(
+    val actionId: ResourceActionId,
+    val groupId: StyleGroupId,
+    val outcome: SuppliedInstallOutcome,
+) : ResourceOperationEvent
+
 internal class ChildrenDiscovered(
     val parentOccurrenceId: ResourceOccurrenceId,
     children: List<DiscoveredResourceChild>,
@@ -1257,6 +1600,91 @@ internal data class InstallSpriteVisibility(
     init {
         requireSpriteMemberClasses(json, image)
     }
+}
+
+internal data class ValidateBasemapStyle(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+    }
+}
+
+internal data class CompileBasemapStyle(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+        require(requiresStyleCompilation(content.provenance)) {
+            "only uncompiled style content is compiled"
+        }
+    }
+}
+
+internal data class WriteBasemapStyle(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val rawKey: RawResourceKey,
+    val resource: StoredRawResource,
+) : ResourceOperationAction {
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        require(rawKey.resourceClass == ResourceClass.BASEMAP_STYLE) {
+            "a style write must name its basemap style Store key class"
+        }
+    }
+}
+
+internal class InstallBasemapStyleVisibility(
+    val actionId: ResourceActionId,
+    val ordinal: Long,
+    val groupId: StyleGroupId,
+    val content: ResolvedResourceContent,
+    referencingOwnerIds: List<ResourceOwnerId>,
+) : ResourceOperationAction {
+    private val referencingOwnerIdSnapshot: List<ResourceOwnerId> = freshListCopy(referencingOwnerIds)
+
+    init {
+        require(ordinal >= 0L) { "route ordinal must be non-negative" }
+        requireBasemapStyleContent(content)
+        requireReferencingStyleOwners(referencingOwnerIdSnapshot)
+    }
+
+    val referencingOwnerIds: List<ResourceOwnerId>
+        get() = freshListCopy(referencingOwnerIdSnapshot)
+
+    override fun equals(other: Any?): Boolean =
+        other is InstallBasemapStyleVisibility &&
+            actionId == other.actionId &&
+            ordinal == other.ordinal &&
+            groupId == other.groupId &&
+            content == other.content &&
+            referencingOwnerIdSnapshot == other.referencingOwnerIdSnapshot
+
+    override fun hashCode(): Int {
+        var result = actionId.hashCode()
+        result = 31 * result + ordinal.hashCode()
+        result = 31 * result + groupId.hashCode()
+        result = 31 * result + content.hashCode()
+        result = 31 * result + referencingOwnerIdSnapshot.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "InstallBasemapStyleVisibility(" +
+            "actionId=$actionId, " +
+            "ordinal=$ordinal, " +
+            "groupId=$groupId, " +
+            "referencingOwnerCount=${referencingOwnerIdSnapshot.size})"
 }
 
 internal data class StartRoute(
@@ -1450,6 +1878,8 @@ internal sealed interface ResourceOperationState {
         val terminalSelection: ResourceTerminalSelection? = null,
         spriteCommitStates: List<SpriteCommitState> = emptyList(),
         parkedRoutes: List<ParkedRoute> = emptyList(),
+        styleCommitStates: List<StyleCommitState> = emptyList(),
+        visibleResourcesByOwner: List<OwnerResourceSet> = emptyList(),
     ) : ResourceOperationState {
         private val occurrenceSnapshot: List<ResourceOccurrence> = freshListCopy(occurrences)
         private val routeRecordSnapshot: List<RouteRecord> = freshListCopy(routeRecords)
@@ -1462,6 +1892,9 @@ internal sealed interface ResourceOperationState {
             freshListCopy(bufferedRouteOutcomes)
         private val spriteCommitStateSnapshot: List<SpriteCommitState> = freshListCopy(spriteCommitStates)
         private val parkedRouteSnapshot: List<ParkedRoute> = freshListCopy(parkedRoutes)
+        private val styleCommitStateSnapshot: List<StyleCommitState> = freshListCopy(styleCommitStates)
+        private val visibleResourcesByOwnerSnapshot: List<OwnerResourceSet> =
+            freshListCopy(visibleResourcesByOwner)
 
         init {
             require(nextRouteOrdinal >= 0L) { "next route ordinal must be non-negative" }
@@ -1493,6 +1926,16 @@ internal sealed interface ResourceOperationState {
                     spriteStateByGroup.put(group.groupId, group) == null
                 },
             ) { "sprite commit group IDs must be unique" }
+            val styleStateByGroup = mutableMapOf<StyleGroupId, StyleCommitState>()
+            require(
+                styleCommitStateSnapshot.all { group ->
+                    styleStateByGroup.put(group.groupId, group) == null
+                },
+            ) { "style commit group IDs must be unique" }
+            val visibleOwnerIds = mutableSetOf<ResourceOwnerId>()
+            require(visibleResourcesByOwnerSnapshot.all { visibleOwnerIds.add(it.ownerId) }) {
+                "visible resource owner IDs must be unique"
+            }
 
             val assignedOrdinals = mutableSetOf<Long>()
             val runningOrdinals = mutableSetOf<Long>()
@@ -1622,6 +2065,52 @@ internal sealed interface ResourceOperationState {
                                     !group.visible,
                             ) { "sprite install cursor requires every acknowledged member write" }
                         }
+                        is AwaitingStyleValidation -> {
+                            val group = styleGroupForCursor(styleStateByGroup, cursor.groupId, ordinal)
+                            require(
+                                lookup?.selectedContent == cursor.content &&
+                                    group.stagedContent == cursor.content &&
+                                    !group.writeAcknowledged &&
+                                    !group.visible &&
+                                    (
+                                        group.compilationStatus == StyleCompilationStatus.WAITING ||
+                                            group.compilationStatus == StyleCompilationStatus.NOT_REQUIRED
+                                        ),
+                            ) { "style validation cursor requires its unvalidated staged content" }
+                        }
+                        is AwaitingStyleCompilation -> {
+                            val group = styleGroupForCursor(styleStateByGroup, cursor.groupId, ordinal)
+                            require(
+                                lookup?.selectedContent == cursor.content &&
+                                    group.stagedContent == cursor.content &&
+                                    group.compilationStatus == StyleCompilationStatus.REQUESTED &&
+                                    !group.writeAcknowledged &&
+                                    !group.visible,
+                            ) { "style compilation cursor requires its requested staged content" }
+                        }
+                        is AwaitingStyleWrite -> {
+                            val group = styleGroupForCursor(styleStateByGroup, cursor.groupId, ordinal)
+                            require(
+                                lookup?.selectedContent == cursor.content &&
+                                    group.stagedContent == cursor.content &&
+                                    group.compilationSettled &&
+                                    !group.writeAcknowledged &&
+                                    !group.visible &&
+                                    group.allReferencingOwnersComplete,
+                            ) { "style write cursor requires compilation and every referencing owner" }
+                        }
+                        is AwaitingStyleVisibilityInstall -> {
+                            val group = styleGroupForCursor(styleStateByGroup, cursor.groupId, ordinal)
+                            require(
+                                lookup?.selectedContent == cursor.content &&
+                                    group.stagedContent == cursor.content &&
+                                    group.compilationSettled &&
+                                    group.writeAcknowledged == group.requiresWrite &&
+                                    !group.visible &&
+                                    group.allReferencingOwnersComplete &&
+                                    cursor.referencingOwnerIds == group.referencingOwnerIds,
+                            ) { "style install cursor requires the complete referencing owner set" }
+                        }
                     }
                 }
                 if (record.status == ResourceRouteStatus.RUNNING && lookup != null) {
@@ -1695,6 +2184,35 @@ internal sealed interface ResourceOperationState {
                             "a parked sprite member requires its validated candidate"
                         }
                     }
+                    is ParkedRouteBarrier.StyleChildren -> {
+                        val group = parkedStyleGroup(styleStateByGroup, barrier.groupId, parked.ordinal)
+                        require(
+                            !group.visible &&
+                                !group.writeAcknowledged &&
+                                (
+                                    group.compilationStatus == StyleCompilationStatus.WAITING ||
+                                        group.compilationStatus == StyleCompilationStatus.NOT_REQUIRED
+                                    ),
+                        ) { "a style parked for children awaits its compilation" }
+                    }
+                    is ParkedRouteBarrier.StyleOwners -> {
+                        val group = parkedStyleGroup(styleStateByGroup, barrier.groupId, parked.ordinal)
+                        require(group.compilationSettled && !group.visible) {
+                            "a style parked for owners has already settled its compilation"
+                        }
+                    }
+                }
+            }
+
+            styleCommitStateSnapshot.forEach { group ->
+                require(group.ordinal in assignedOrdinals) {
+                    "a style commit ordinal must name an assigned route"
+                }
+                require(selectedContentByOrdinal[group.ordinal] == group.stagedContent) {
+                    "a style commit stages its route's selected content"
+                }
+                require(group.visible == (group.ordinal in visibleOrdinals)) {
+                    "style visibility must match its route"
                 }
             }
 
@@ -1758,7 +2276,37 @@ internal sealed interface ResourceOperationState {
 
         val parkedRoutes: List<ParkedRoute>
             get() = freshListCopy(parkedRouteSnapshot)
+
+        val styleCommitStates: List<StyleCommitState>
+            get() = freshListCopy(styleCommitStateSnapshot)
+
+        val visibleResourcesByOwner: List<OwnerResourceSet>
+            get() = freshListCopy(visibleResourcesByOwnerSnapshot)
     }
+}
+
+private fun styleGroupForCursor(
+    styleStateByGroup: Map<StyleGroupId, StyleCommitState>,
+    groupId: StyleGroupId,
+    ordinal: Long,
+): StyleCommitState {
+    val group = requireNotNull(styleStateByGroup[groupId]) {
+        "a style cursor requires its group commit state"
+    }
+    require(group.ordinal == ordinal) { "style group work belongs to its style route ordinal" }
+    return group
+}
+
+private fun parkedStyleGroup(
+    styleStateByGroup: Map<StyleGroupId, StyleCommitState>,
+    groupId: StyleGroupId,
+    ordinal: Long,
+): StyleCommitState {
+    val group = requireNotNull(styleStateByGroup[groupId]) {
+        "a parked style barrier requires its group commit state"
+    }
+    require(group.ordinal == ordinal) { "a parked style barrier must name its style route ordinal" }
+    return group
 }
 
 private fun spriteGroupForCursor(
@@ -1785,6 +2333,10 @@ private fun cursorOrdinal(cursor: ResourceRouteCursor): Long? = when (cursor) {
     is AwaitingClassGate -> cursor.ordinal
     is AwaitingStoreWrite -> cursor.ordinal
     is AwaitingVisibilityInstall -> cursor.ordinal
+    is AwaitingStyleValidation -> cursor.ordinal
+    is AwaitingStyleCompilation -> cursor.ordinal
+    is AwaitingStyleWrite -> cursor.ordinal
+    is AwaitingStyleVisibilityInstall -> cursor.ordinal
     is AwaitingSpritePairValidation,
     is AwaitingSpriteMemberWrite,
     is AwaitingSpriteVisibilityInstall,
@@ -1804,6 +2356,10 @@ private fun cursorActionId(cursor: ResourceRouteCursor): ResourceActionId? = whe
     is AwaitingSpritePairValidation -> cursor.actionId
     is AwaitingSpriteMemberWrite -> cursor.actionId
     is AwaitingSpriteVisibilityInstall -> cursor.actionId
+    is AwaitingStyleValidation -> cursor.actionId
+    is AwaitingStyleCompilation -> cursor.actionId
+    is AwaitingStyleWrite -> cursor.actionId
+    is AwaitingStyleVisibilityInstall -> cursor.actionId
 }
 
 internal class ResourceOperationTransition(

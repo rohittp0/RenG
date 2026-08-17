@@ -1,0 +1,253 @@
+package com.rohittp.reng.internal.projection
+
+import com.rohittp.reng.Camera
+import com.rohittp.reng.OutputPixelSize
+import com.rohittp.reng.PipelineStage
+import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.internal.math.DoubleMatrix4
+import com.rohittp.reng.internal.math.DoubleVector3
+import com.rohittp.reng.internal.planning.SpatialOutcome
+import kotlin.math.abs
+import kotlin.math.sqrt
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+
+class CameraMatricesTest {
+    @Test
+    fun zeroBearingAndPitchResolveNorthUpStraightDownView() {
+        val outputSize = OutputPixelSize(width = 640, height = 480)
+        val resolved = resolve(camera = camera(bearing = 0.0, pitch = 0.0), outputPixelSize = outputSize)
+        val expectedDistance = 240.0 * (1.0 + sqrt(2.0))
+
+        assertEquals(outputSize, resolved.outputPixelSize)
+        assertEquals(MercatorPosition(0.5, 0.5, 0.0), resolved.mercatorAnchor)
+        assertEquals(512.0, resolved.worldSizeLogicalPixels)
+        assertVectorClose(DoubleVector3(1.0, 0.0, 0.0), resolved.right)
+        assertVectorClose(DoubleVector3(0.0, 1.0, 0.0), resolved.cameraUp)
+        assertVectorClose(DoubleVector3(0.0, 0.0, 1.0), resolved.cameraBack)
+        assertClose(expectedDistance, resolved.cameraDistanceLogicalPixels)
+        assertMatrixClose(
+            listOf(
+                listOf(1.0, 0.0, 0.0, 0.0),
+                listOf(0.0, 1.0, 0.0, 0.0),
+                listOf(0.0, 0.0, 1.0, -expectedDistance),
+                listOf(0.0, 0.0, 0.0, 1.0),
+            ),
+            resolved.viewMatrix,
+        )
+    }
+
+    @Test
+    fun ninetyDegreeBearingAndNearHorizonPitchUseExactRightHandedBasis() {
+        val eastAtTop = resolve(camera = camera(bearing = 90.0, pitch = 0.0))
+
+        assertVectorClose(DoubleVector3(0.0, -1.0, 0.0), eastAtTop.right)
+        assertVectorClose(DoubleVector3(1.0, 0.0, 0.0), eastAtTop.cameraUp)
+        assertVectorClose(DoubleVector3(0.0, 0.0, 1.0), eastAtTop.cameraBack)
+        assertVectorClose(eastAtTop.cameraBack, eastAtTop.right.cross(eastAtTop.cameraUp))
+
+        val nearHorizon = resolve(camera = camera(bearing = 0.0, pitch = 89.0))
+        assertVectorClose(
+            DoubleVector3(0.0, 0.0174524064372836, 0.9998476951563913),
+            nearHorizon.cameraUp,
+        )
+        assertVectorClose(
+            DoubleVector3(0.0, -0.9998476951563913, 0.0174524064372836),
+            nearHorizon.cameraBack,
+        )
+        assertVectorClose(nearHorizon.cameraBack, nearHorizon.right.cross(nearHorizon.cameraUp))
+    }
+
+    @Test
+    fun nonSquareProjectionUsesFortyFiveDegreeVerticalFovAndInfiniteFarReverseZ() {
+        val resolved = resolve(
+            camera = camera(),
+            outputPixelSize = OutputPixelSize(width = 800, height = 400),
+        )
+        val f = 1.0 + sqrt(2.0)
+
+        assertMatrixClose(
+            listOf(
+                listOf(f / 2.0, 0.0, 0.0, 0.0),
+                listOf(0.0, f, 0.0, 0.0),
+                listOf(0.0, 0.0, 1.0, 2.0),
+                listOf(0.0, 0.0, -1.0, 0.0),
+            ),
+            resolved.projectionMatrix,
+        )
+        assertClose(1.0, windowDepthAtViewDepth(resolved.projectionMatrix, 1.0))
+        assertClose(0.5, windowDepthAtViewDepth(resolved.projectionMatrix, 2.0))
+        assertClose(0.1, windowDepthAtViewDepth(resolved.projectionMatrix, 10.0))
+    }
+
+    @Test
+    fun raysUsePhysicalHalfIntegerPixelCentresAndReturnFiniteGroundHits() {
+        val resolved = resolve(
+            camera = camera(),
+            outputPixelSize = OutputPixelSize(width = 2, height = 2),
+        )
+        val topLeft = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(resolved, 0, 0))
+        val bottomRight = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(resolved, 1, 1))
+        val f = 1.0 + sqrt(2.0)
+
+        assertClose(1.0, topLeft.q)
+        assertClose(f, topLeft.t)
+        assertClose(0.4990234375, topLeft.point.x)
+        assertClose(0.4990234375, topLeft.point.y)
+        assertClose(1.0, bottomRight.q)
+        assertClose(f, bottomRight.t)
+        assertClose(0.5009765625, bottomRight.point.x)
+        assertClose(0.5009765625, bottomRight.point.y)
+        assertTrue(topLeft.point.x.isFinite())
+        assertTrue(topLeft.point.y.isFinite())
+        assertTrue(bottomRight.point.x.isFinite())
+        assertTrue(bottomRight.point.y.isFinite())
+    }
+
+    @Test
+    fun exactHorizonQZeroAndNearBoundaryTOneUseClosedClassifications() {
+        val f = 1.0 + sqrt(2.0)
+        val topCentreV = 0.5 / f
+        val exactHorizon = syntheticCamera(
+            outputPixelSize = OutputPixelSize(width = 1, height = 2),
+            cameraUp = DoubleVector3(0.0, 0.0, 1.0),
+            cameraBack = DoubleVector3(0.0, 0.0, topCentreV),
+            cameraDistanceLogicalPixels = 1.0,
+        )
+
+        assertEquals(GroundRayResult.HorizonOrSky, physicalPixelGroundRay(exactHorizon, 0, 0))
+
+        val nearBoundary = syntheticCamera(
+            outputPixelSize = OutputPixelSize(width = 1, height = 1),
+            cameraUp = DoubleVector3(0.0, 1.0, 0.0),
+            cameraBack = DoubleVector3(0.0, 0.0, 1.0),
+            cameraDistanceLogicalPixels = 1.0,
+        )
+        val hit = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(nearBoundary, 0, 0))
+
+        assertEquals(1.0, hit.q)
+        assertEquals(1.0, hit.t)
+        assertEquals(MercatorGroundPoint(0.5, 0.5), hit.point)
+    }
+
+    @Test
+    fun highPitchRaysClassifySkyGroundAndNearClipWithoutAThresholdFallback() {
+        val pitched = resolve(
+            camera = camera(pitch = 80.0),
+            outputPixelSize = OutputPixelSize(width = 1, height = 1000),
+        )
+
+        assertEquals(GroundRayResult.HorizonOrSky, physicalPixelGroundRay(pitched, 0, 0))
+        val finiteHit = assertIs<GroundRayResult.Hit>(physicalPixelGroundRay(pitched, 0, 999))
+        assertTrue(finiteHit.q > 0.0)
+        assertTrue(finiteHit.t >= 1.0)
+        assertTrue(finiteHit.point.x.isFinite())
+        assertTrue(finiteHit.point.y.isFinite())
+
+        val almostHorizontal = resolve(
+            camera = camera(pitch = 89.9999),
+            outputPixelSize = OutputPixelSize(width = 1, height = 2),
+        )
+        assertEquals(GroundRayResult.NearClipped, physicalPixelGroundRay(almostHorizontal, 0, 1))
+    }
+
+    @Test
+    fun rayIndicesAreCheckedAgainstTheResolvedOutputSize() {
+        val resolved = resolve(
+            camera = camera(),
+            outputPixelSize = OutputPixelSize(width = 3, height = 2),
+        )
+
+        assertFailsWith<IllegalArgumentException> { physicalPixelGroundRay(resolved, -1, 0) }
+        assertFailsWith<IllegalArgumentException> { physicalPixelGroundRay(resolved, 3, 0) }
+        assertFailsWith<IllegalArgumentException> { physicalPixelGroundRay(resolved, 0, -1) }
+        assertFailsWith<IllegalArgumentException> { physicalPixelGroundRay(resolved, 0, 2) }
+    }
+
+    @Test
+    fun cameraResolutionPreservesMercatorLatitudeThenWorldCopyFailureMapping() {
+        val invalidLatitude = resolveMercatorCamera(
+            camera = camera(latitude = MERCATOR_MAXIMUM_LATITUDE_DEGREES + 1.0),
+            outputPixelSize = OutputPixelSize(1, 1),
+        )
+        val invalidCopy = resolveMercatorCamera(
+            camera = camera(unwrappedLongitude = 16385.0 * 360.0 - 180.0),
+            outputPixelSize = OutputPixelSize(1, 1),
+        )
+
+        assertSpatialFailure(invalidLatitude, "camera.latitude")
+        assertSpatialFailure(invalidCopy, "camera.unwrappedLongitude")
+    }
+
+    private fun resolve(
+        camera: Camera,
+        outputPixelSize: OutputPixelSize = OutputPixelSize(width = 1, height = 1),
+    ): ResolvedMercatorCamera =
+        assertIs<SpatialOutcome.Success<ResolvedMercatorCamera>>(
+            resolveMercatorCamera(camera, outputPixelSize),
+        ).value
+
+    private fun camera(
+        latitude: Double = 0.0,
+        unwrappedLongitude: Double = 0.0,
+        zoom: Double = 0.0,
+        bearing: Double = 0.0,
+        pitch: Double = 0.0,
+    ): Camera = Camera(latitude, unwrappedLongitude, zoom, bearing, pitch)
+
+    private fun syntheticCamera(
+        outputPixelSize: OutputPixelSize,
+        cameraUp: DoubleVector3,
+        cameraBack: DoubleVector3,
+        cameraDistanceLogicalPixels: Double,
+    ): ResolvedMercatorCamera = ResolvedMercatorCamera(
+        outputPixelSize = outputPixelSize,
+        mercatorAnchor = MercatorPosition(0.5, 0.5, 0.0),
+        worldSizeLogicalPixels = 512.0,
+        right = DoubleVector3(1.0, 0.0, 0.0),
+        cameraUp = cameraUp,
+        cameraBack = cameraBack,
+        cameraDistanceLogicalPixels = cameraDistanceLogicalPixels,
+        viewMatrix = DoubleMatrix4.identity,
+        projectionMatrix = DoubleMatrix4.identity,
+    )
+
+    private fun windowDepthAtViewDepth(projection: DoubleMatrix4, depth: Double): Double {
+        val viewZ = -depth
+        val clipZ = projection[2, 2] * viewZ + projection[2, 3]
+        val clipW = projection[3, 2] * viewZ + projection[3, 3]
+        return (clipZ / clipW + 1.0) / 2.0
+    }
+
+    private fun assertSpatialFailure(outcome: SpatialOutcome<*>, fieldName: String) {
+        val failure = assertIs<SpatialOutcome.Failure>(outcome).failure
+        assertEquals(RenGErrorCode.INVALID_VALUE, failure.code)
+        assertEquals(PipelineStage.FRAME_PLANNING, failure.stage)
+        assertEquals(fieldName, requireNotNull(failure.diagnostic).fieldName)
+    }
+
+    private fun assertMatrixClose(expectedRows: List<List<Double>>, actual: DoubleMatrix4) {
+        expectedRows.forEachIndexed { row, expectedRow ->
+            expectedRow.forEachIndexed { column, expected ->
+                assertClose(expected, actual[row, column])
+            }
+        }
+    }
+
+    private fun assertVectorClose(
+        expected: DoubleVector3,
+        actual: DoubleVector3,
+        tolerance: Double = 1e-12,
+    ) {
+        assertClose(expected.x, actual.x, tolerance)
+        assertClose(expected.y, actual.y, tolerance)
+        assertClose(expected.z, actual.z, tolerance)
+    }
+
+    private fun assertClose(expected: Double, actual: Double, tolerance: Double = 1e-12) {
+        assertTrue(abs(expected - actual) <= tolerance, "Expected $expected but was $actual")
+    }
+}

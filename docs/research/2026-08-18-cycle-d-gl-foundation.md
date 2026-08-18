@@ -375,6 +375,55 @@ Gradle-level behaviour and no cinterop is planned for Cycle D anyway, so it matt
 conformance fixture needs one. Since the Linux fixture can reach EGL through `dlopen` from
 `platform.posix`, as the spike demonstrates, it should not need one at all.
 
+## The Apple context in continuous integration
+
+ADR 0011 requires the conformance suite to run against real contexts on `macosArm64`, and continuous
+integration is where that has to happen, since no Apple hardware is otherwise available to this project.
+Whether a hosted runner can produce a context at all was untested. It can, with one caveat that matters
+more than the answer.
+
+A probe compiled on a `macos-latest` runner (Xcode 26.6) walked a ladder of pixel format requests from the
+strongest to the weakest. The first candidate demanded an accelerated renderer and failed at
+`CGLChoosePixelFormat` with `kCGLBadPixelFormat`; dropping that single requirement succeeded immediately:
+
+| Candidate | Result |
+|---|---|
+| accelerated, 4.1 core | `CGLChoosePixelFormat` fails, `cgl=10002 (invalid pixel format)` |
+| 4.1 core, acceleration not required | pixel format chosen, context created, `npix=1` |
+
+The context reports `GL_VERSION=4.1 APPLE-23.1.1`, `GL_RENDERER=Apple Software Renderer`,
+`GL_VENDOR=Apple Inc.`, `GL_SHADING_LANGUAGE_VERSION=4.10`. So the conformance suite can run in continuous
+integration, provided it never asks for acceleration. A suite that requests an accelerated pixel format
+will not fail a draw comparison; it will fail to obtain a context at all, and the failure names an invalid
+pixel format rather than the absence of a GPU. That is worth writing into the suite's setup code as a
+comment, because the error is not self-explanatory.
+
+ADR 0008's rule reproduces exactly on that runner, which extends the evidence from one developer's machine
+to the platform the gate will actually run on: the GLSL ES 3.00 body fails under `#version 300 es` with
+`version '300' is not supported`, the identical body compiles under `#version 330 core`. Combined with the
+llvmpipe measurements above, the substitution rule is now confirmed on both an Apple software renderer and
+a Mesa desktop context, and contradicted on a Mesa ES context — which is the case that forces the trigger
+to be a runtime dialect query.
+
+The state RenG must restore is queryable there, and two initial values are worth noting. Pixel store pack
+and unpack alignment both read `4`, confirming the correction above. The viewport reads `0,0,0,0`, because
+a context created without a drawable has no default framebuffer dimensions — so a renderer must set the
+viewport from its own surface rather than trusting the initial value, and a conformance test that saves and
+restores the viewport will be comparing zeroes unless it sets one first.
+
+**The renderer string is the finding with the longest reach.** A hosted runner gives
+`Apple Software Renderer`, not the `4.1 Metal - 90.5` that real Apple Silicon reports. Cycle E's golden
+baselines and Cycle J's corpus gate are already specified as per-platform with a tolerance rather than
+cross-platform equality, but per-platform is not a fine enough key: the same target produces different
+pixels under a software renderer in continuous integration than under Metal on a developer's machine.
+Baselines should be keyed by the reported renderer, not by the target, or the corpus gate will fail the
+first time it is run somewhere other than where its baselines were recorded.
+
+One thing the runner could not supply: it carries no Kotlin/Native toolchain (`~/.konan` is absent until a
+Gradle invocation downloads one), so the klib inventory cross-check on a real macOS host did not run. The
+inventory in this document was measured from a Linux host, where the Apple platform klibs are present and
+identical in content.
+
 ## Confirmed, corrected, and still unverified
 
 **Confirmed by measurement.** `platform.OpenGL3` at 509 functions and `platform.OpenGLCommon` at 52 CGL

@@ -1,255 +1,240 @@
-# RenG Cycle B handoff — 2026-08-17
+# RenG handoff — 2026-08-18
 
-This is the durable recovery point for the next agent. Cycle A is publicly complete. **Cycle B's
-owner-approved public-API and pure-core implementation is complete on branch
-`docs/cycle-b-resource-contract`** and pushed to `origin`. It is not merged, not released, and awaits
-integration review.
+The recovery point for whoever picks RenG up next. Cycle A is publicly released. **Cycle B is implemented
+on branch `docs/cycle-b-resource-contract` and awaits integration review.** Cycles C and D have had their
+open technical questions researched and spiked; their findings are in `docs/research/` and are summarised
+below with what each remaining cycle still needs.
 
-Every plan task is implemented, and every task was independently reviewed with its findings fixed. RenG
-still renders nothing and exposes no public runtime API.
+RenG still renders nothing and exposes no public runtime API.
 
 ## Read first
 
-1. `CLAUDE.md` — repository constraints, purity contract, six targets, commands, and publication rules.
-2. `CONTEXT.md` — canonical vocabulary.
+1. `CLAUDE.md` — repository constraints, purity contract, six targets, commands, publication rules.
+2. `CONTEXT.md` — canonical vocabulary. Read it before naming anything.
 3. `docs/adr/0001`–`0018` — newer ADRs override older prose.
-4. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` — owner-approved Cycle B
-   authority, approved at `11d7a03`.
-5. `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md` — independently reviewed
-   implementation plan, committed with its canonical fixture at `4ff05ee`.
-6. This handoff, then the relevant implementation and tests.
+4. `docs/decomposition.md` — the cycle sequence and each cycle's gates.
+5. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and its plan alongside — the
+   approved Cycle B authority. The Cycle A pair in the same directories are historical decision records.
+6. `docs/research/` — the four Cycle C and D findings documents. Read the relevant one before writing
+   either cycle's specification; each ends with a checklist of what its spec must decide.
 
-The specification and plan are approved. Do not re-run grilling or write another plan unless
-repository-owner review explicitly reopens a contract.
+Approved specifications and plans are not reopened without repository-owner review.
 
-## Binding scope
+## Cycle B, as implemented
 
-Cycle B is pure core only: public immutable values, protocols and sanitized failures, canonical identities
-and SHA-256, spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven by
-supplied values.
+Pure core only: public immutable values, protocols and sanitized failures, canonical identities and
+SHA-256, spatial and diff planning, and pure lifecycle, resource and preparation reducers driven entirely
+by supplied values. Every plan task is complete, including the cross-engine contract proof, and every task
+was independently reviewed with its findings fixed.
 
-Do not add a renderer factory, consumer adapter call, Rentile acquisition, decoder or parser, production
-cache, platform-context or GL call, shader compilation, pixels, retry, repair, fallback, or repeated
-consumer exchange. Never forward injected adapter messages or causes. Preserve selected cancellation as an
-opaque, unwrapped cancellation identifier and cause.
+There is no renderer factory, consumer adapter call, Rentile acquisition, decoder, parser, production
+cache, GL call, shader compilation or pixel. The public ABI dump contains no Rentile type, platform binding
+or renderer factory, and was frozen by Task 5 — nothing since has changed it.
 
-The branch retains exactly six published targets: Android, iOS Arm64, iOS Simulator Arm64, macOS Arm64,
-Linux x64, and Linux Arm64. No JVM publication, `macosX64`, or `iosX64`. Never commit `mavenLocal()`, a
-`-SNAPSHOT`, or `local.properties`.
+Verified on Linux with forced task re-execution: `checkKotlinAbi` clean; `testAndroidHostTest` 432 tests
+and `linuxX64Test` 428 tests, no failures; Linux Arm64 compilation and the Android archive gate pass; all
+seven publications resolve at `0.1.0` into a local repository, and a fresh-Gradle-home consumer resolves
+the three Linux-executable targets with no credentials; 73 Python tests and `Cycle B repository policy
+passed`. The Apple gates cannot run on Linux and were observed in continuous integration instead: runs
+`32055118061` and `32058579004` each passed both the Ubuntu job and the macOS job, the latter compiling
+both iOS targets, running `macosArm64Test`, publishing all seven publications and resolving a clean
+six-target consumer.
 
-## Implementation status
+Not observed, and not to be claimed: exact merged-commit CI, publication, `linuxX64Test` on macOS, or
+`macosArm64Test` on Linux. `VERSION_NAME` remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+One test-only commit landed after the last CI run, so its 432nd test has not run on Apple hardware.
 
-All plan tasks are complete: Task 0; Tasks 1–3; Tasks 4A–4C; Task 5; Tasks 6–7; Tasks 8A–8C; Tasks 9A–9D;
-Task 10; Task 11; Tasks 12A–12C; Task 13; Tasks 14A–14C; Task 15; Task 16; and this documentation task.
+### What review caught, and the lesson worth keeping
 
-The commits added after the previous handoff (`e4f2ace`) are:
+Six of eight independent reviews returned changes required — seven major and thirteen minor findings, all
+fixed. Two were serious, and both lived in code whose own full suite passed.
 
-| Commit | Content |
-|---|---|
-| `143ab67` | Task 9D review fix — screen compositing placement invariants |
-| `afed63d` | Task 13 review fix — route cursor clearing and response controls |
-| `c134e90` | Task 10 — integrated pure frame planning |
-| `db74e8a` | Task 14A — ordinary resource class gates, writes, visibility |
-| `d0bca59` | Task 14B — atomic sprite pair commit and parked scheduler |
-| `c42caa3` | Task 14C — basemap style staging behind its owner barrier |
-| `5949575` | Task 15 — ordered preparation reducer |
-| `30b92b3` | Task 10 review fixes |
-| `9bdbeeb` | Discovery-parent install and sprite closure fixes |
-| `6eeb752` | Remaining review fixes — contradictory commit states rejected |
-| `b91dbbb` | Task 16 — cross-engine pure-core contract proof |
+A discovery parent never recorded installed visibility, so any plan carrying a discovery source produced no
+outcome at all and a style waiting on that owner parked forever. Install and discovery readiness had been
+mutually exclusive terminals, yet such a parent needs both. Two reviewers found it independently from
+different symptoms. And arbitration closed a parked sprite member while its group owner still had work in
+flight, after which the group wrote into a resolved route and the reducer threw; the existing trace missed
+it only because it placed the unrelated route at a lower ordinal.
 
-## What independent review found, and why it mattered
+Most of the rest were the same shape: values whose constructors accepted self-contradictory combinations the
+reducer never produced. **When a reducer's own state type is the boundary that makes an illegal state
+impossible, write the invariant into the type, not only into the paths that build it.**
 
-Every implemented task was reviewed by an independent reviewer that read the code rather than trusting the
-suite. Six of eight reviews returned changes required, totalling seven major and thirteen minor findings,
-all now fixed. Two were serious enough to record permanently, because both lived in code whose own full
-suite passed:
+### Open decisions for the repository owner
 
-**Discovery parents never installed, so operations hung silently.** Route success requires every occurrence
-installed and the style barrier requires every non-style occurrence installed, but discovery readiness
-resolved a route without recording installed visibility. Any plan carrying a `BASEMAP_TILE_JSON` discovery
-source produced no outcome at all, and a style waiting on that owner parked forever. Install and discovery
-readiness had been mutually exclusive terminals. A discovery parent now installs its own content, stays
-running under a child-discovery cursor, and retires only at readiness. Two reviewers found this
-independently from different symptoms.
-
-**Arbitration crashed a sprite group at concurrency two.** A buffered failure above a parked sprite image
-member closed that member while its group owner still had validation, write, or install work in flight; the
-group then wrote and installed into a resolved route and the reducer threw. The pre-existing trace missed it
-only because it placed the unrelated route at a lower ordinal. Arbitration now skips a parked member whose
-group has work outstanding, and the owner is not aborted, because its in-flight work may still report a
-lower-ordinal failure that must win arbitration.
-
-The rest were state-admission gaps: values whose constructors accepted self-contradictory combinations that
-the reducer never produced. The pattern recurred often enough to be worth stating as guidance — **when a
-reducer's own state type is the boundary that makes an illegal state impossible, write the invariant into
-the type, not only into the paths that build it.**
-
-## Verification record
-
-Verified on Linux with forced task re-execution at `b91dbbb`:
-
-- `:kmp:checkKotlinAbi` — clean. Cycle B's public surface was frozen earlier by Task 5 at `817f917`, and
-  `kmp/api/kmp.klib.api` is byte-identical from the previous handoff `e4f2ace` through `b91dbbb` — every
-  addition in this session is `internal`. The dump contains no Rentile type, platform binding, or renderer
-  factory.
-- `:kmp:testAndroidHostTest` — 431 tests, 0 failures.
-- `:kmp:linuxX64Test` — 427 tests, 0 failures.
-- `:kmp:compileKotlinLinuxX64`, `:kmp:compileKotlinLinuxArm64`, `:kmp:bundleAndroidMainAar` — pass.
-- `:kmp:publishAllPublicationsToLocalTestRepository` — all seven publications at `0.1.0` under
-  `build/local-maven/com/rohittp/reng/`: the aggregate `kmp` plus `kmp-android`, `kmp-iosarm64`,
-  `kmp-iossimulatorarm64`, `kmp-macosarm64`, `kmp-linuxx64`, and `kmp-linuxarm64`, each with its POM,
-  Gradle module metadata, sources, javadoc, `maven-metadata.xml`, and md5/sha1/sha256/sha512 checksums.
-- `consumer-smoke` with a fresh Gradle home and `--refresh-dependencies` — resolves
-  `com.rohittp.reng:kmp-android`, `kmp-linuxx64`, and `kmp-linuxarm64` at `0.1.0` plus
-  `com.rohittp.rentile:kmp:0.1.5` with no credentials. Its three Apple targets were not attempted here.
-- 73 Python tests pass; `tools/check_repository_policy.py --root .` prints `Cycle B repository policy passed`.
-- `git diff --check 11d7a03..HEAD` is clean, and `kmp/api/kmp.klib.api` (772 lines) contains no match for
-  `com.rohittp.rentile`, `platform.`, `createRenderer`, or `RendererFactory`.
-
-Note when re-running the workflow parse: `CLAUDE.md` gives the macOS Ruby 2.6 positional form
-`YAML.safe_load(text, [], [], true)`, which modern Psych rejects with `wrong number of arguments`. On Ruby 3
-use the keyword form instead, which parses both workflow files:
-
-```bash
-ruby -e 'require "yaml"; ["ci","publish"].each { |w| YAML.safe_load(File.read(".github/workflows/#{w}.yml"), aliases: true) }'
-```
-
-The Apple gates cannot execute on Linux, so they were verified in GitHub Actions rather than claimed. Two CI
-runs passed both jobs — `Android and Linux` on `ubuntu-latest` and `Apple and publication metadata` on
-`macos-latest`:
-
-| Run | Source commit | Result |
-|---|---|---|
-| `32055118061` | `9bdbeeb` | both jobs success |
-| `32058579004` | `b91dbbb` | both jobs success |
-
-The `macos-latest` job compiled both iOS targets, ran `macosArm64Test`, published all seven publications
-locally, and resolved the aggregate coordinate from a clean six-target consumer with a fresh Gradle home. So
-every gate in this task's list has now been observed on the final code commit, on the platform that owns it.
-
-Those runs came from a temporary branch `ci/cycle-b-apple-verification` and draft pull request #2, which
-existed only to borrow macOS hardware. The pull request is closed without merging. **The temporary branch
-still exists on `origin` and should be deleted** — the development environment's git proxy refused both
-delete refspecs, so it could not be removed from here. It is pinned at `b91dbbb` and carries no unique
-work.
-
-**Not observed, and not to be claimed:** exact merged-commit CI, publication, `linuxX64Test` on macOS, or
-`macosArm64Test` on Linux. Cycle B is unreleased; `VERSION_NAME` remains `0.1.0` and the public `0.1.0`
-record remains Cycle A's.
-
-## Open decisions for the repository owner
-
-None of these block integration review. All were found by independent review and deliberately left
-unfixed, because each changes approved code or approved contracts.
+None block integration review. Each changes approved code or an approved contract, so each was left alone.
 
 1. **Transport response copy amplification.** A successful 200 duplicates its body four to five times and
-   retains three simultaneously. With `maximumModelGlbBytes` at 256 MiB the peak live set approaches 1.75 GB
-   for one GLB, before any concurrency multiplier. Latch retention is required by ADR 0016; the
-   copy-then-latch-copy and the digest copy are not. `TransportResponse` already snapshots on construction
-   and copies on every read, so the extra copies are removable without weakening purity.
+   retains three at once; at the 256 MiB model limit the peak live set approaches 1.75 GB for one file.
+   Latch retention is required by ADR 0016, the extra copies are not, and `TransportResponse` already
+   snapshots on construction and copies on every read.
 2. **`ShaderProfilePlan` validates nothing.** A directly constructed profile can claim a source it does not
-   describe, and desktop substitution then emits `#version 330 core#version 300 es`, which will not compile.
-   That breaks ADR 0008's substitution contract. The fix belongs in Task 9C's construction surface, which is
-   approved, so it was not changed.
-3. **Scheduling cost across distinct routes.** Per-event work is proportional to total registry size, so a
-   full run over R distinct routes is quadratic. This is pre-existing from Task 12B, and Cycle B multiplies
-   the event count per route. The plan's stated case — 4,096 joined occurrences on one route — is linear and
-   passes.
-4. **The plan omits advancement events.** Tasks 14A, 14B, and 14C each required a driving event to preserve
-   Task 13's zero-action lookup boundary, but only `AdvancePendingClassGates` is specified. The three
-   implementations added `AdvancePendingClassGates`, `AdvancePendingSpriteCommit`, and
-   `AdvancePendingStyleCommit` consistently. Worth folding into the plan or an ADR so the next cycle does not
-   rediscover it.
-5. **Two guards proved unkillable by test.** `successOutcome`'s buffered-outcome guard and the
-   `gates.indexOf`-versus-`gateIndex` distinction survive mutation because no admissible state distinguishes
-   them. They were kept and documented rather than removed or covered by a vacuous test.
+   describe, and desktop substitution then emits `#version 330 core#version 300 es`, which will not
+   compile. The fix belongs in Task 9C's construction surface.
+3. **Scheduling cost across distinct routes** is quadratic in the number of routes, pre-existing from Task
+   12B. The specified case — 4,096 joined occurrences on one route — is linear and passes.
+4. **The plan omits advancement events.** Tasks 14A, 14B and 14C each needed one to preserve the
+   zero-action lookup boundary; only the first is specified. Worth folding into the plan or an ADR.
+5. **Two guards proved unkillable by test** — the buffered-outcome guard in route success, and the
+   gate-index distinction — because no admissible state distinguishes them. Kept and documented rather
+   than removed or covered by a vacuous test.
 
-## Fresh-device checkout and environment setup
+## Cycle C — resource layer
 
-Start from a fresh clone:
+Acquisition through the consumer's adapters, proxying basemap resources to Rentile and fetching RenG's own;
+PNG decode; GLB parse; the content-keyed cache with refcounted lifetime across live prepared frames; the
+reload-on-access path; cancellation of everything in flight. Cycle B already decided every pure action this
+cycle executes, so Cycle C connects real observations rather than inventing policy.
 
-```bash
-git clone --branch docs/cycle-b-resource-contract --single-branch \
-  https://github.com/rohittp0/RenG.git
-cd RenG
-git status --short
-git rev-parse HEAD
-```
+Its two open questions are now settled, and a third emerged.
 
-`git status --short` must be empty. If the repository already exists, stop if it has local changes, then:
+**PNG decode — `docs/research/2026-08-18-cycle-c-png-decode.md`.** Own the container in common Kotlin and
+delegate only decompression and checksum to the platform: the bundled `zlib` binding on the five native
+targets, `java.util.zip` on Android. A spike walking chunks, validating checksums, streaming across split
+image data and unfiltering produced byte-exact output on a Linux host and as an emulated aarch64 binary, and
+the same source compiles for the Apple targets. Skia is rejected on measured behaviour, not weight: it
+silently truncates sixteen-bit grayscale to eight bits, silently accepts a stream truncated mid-image-data
+with no end marker, collapses a checksum mismatch and a corrupt payload into one opaque message, and is not
+faster. Repairing malformed input contradicts RenG's contract outright. Note also that Rentile returns
+rendered tiles as encoded bytes, so RenG decodes PNG even for vector basemaps, and both of its terrain
+encodings are eight-bit, so sixteen-bit support is a choice rather than a requirement.
 
-```bash
-git fetch origin
-git switch docs/cycle-b-resource-contract 2>/dev/null || \
-  git switch --create docs/cycle-b-resource-contract \
-    --track origin/docs/cycle-b-resource-contract
-git pull --ff-only
-```
+**GLB parse — `docs/research/2026-08-18-cycle-c-glb-parse.md`.** The accept and reject table is written
+down rather than left to discovery, and a pure-Kotlin container reader classified forty-one deliberately
+malformed fixtures exactly as intended. Two consequences bind the design: padding is not verifiable at the
+container layer, because a chunk's declared length includes its padding, so a padding policy is an explicit
+choice; and parsing must tolerate an accessor without a buffer view so that the feature gate reports an
+unsupported feature rather than the parse gate reporting malformed input — a compressed model is
+unsupported, not corrupt, and Cycle B's two gates already model that distinction.
 
-Required local tools:
+**Cycle C needs its own JSON reader, and this is the finding that was not anticipated.** The serialization
+library is already resolved transitively but is compile-visible only on the native targets, and the
+repository policy forbids declaring it directly. A reader is therefore required rather than chosen. The
+spike's version is the feasibility proof, and measured allocation behaviour shows the JSON chunk needs its
+own ceiling separate from the model byte limit, since a chunk at that limit would demand several gigabytes.
 
-- Git; a 64-bit JDK 21; Python 3 (standard library only); the checked-in Gradle 9.5.0 wrapper — do not
-  substitute a system Gradle.
-- **Android SDK Platform 37.0.** The package identifier is `platforms;android-37.0`, not
-  `platforms;android-37`, and on older `cmdline-tools` it resolves only from the canary channel. Installing
-  it on a bare Linux host looks like:
+**Rentile's real surface — `docs/research/2026-08-18-cycle-c-rentile-surface.md`.** Read this before
+writing the adapter; it was taken from the published artifact because the source tree is not on this
+machine. The adapter must absorb a `remove` that RenG's own store does not have, because Rentile removes a
+stored record on digest mismatch or parse failure. Rentile's raw key is a hash of the URL with
+authentication query parameters redacted, and that derivation is what the real private-key resolver must
+reproduce — Cycle B wired a deterministic fake. Rentile always sends null conditional headers, so every
+conditional and accept decision is RenG's. Its response metadata carries nine fields against RenG's four.
+Its retry is bounded to one extra call on specific statuses with a clamped delay, and it rethrows
+cancellation unchanged. Credential and session providers are never invoked in `0.1.5`. And
+`RawResourceKey.toString()` prints its identifier in the clear, so a Rentile key must never reach a RenG
+diagnostic.
 
-  ```bash
-  sdkmanager --sdk_root="$ANDROID_HOME" --channel=3 \
-    "platforms;android-37.0" "build-tools;37.0.0" "platform-tools"
-  ```
+What the artifact cannot show is behaviour: threading, actual exchange counts, per-class store ordering,
+revalidation, cancellation depth. The document prescribes a counting-stub spike against a real Rentile
+call to close those before the specification is final.
 
-  Then point untracked `local.properties` at it with `sdk.dir=/absolute/path/to/Android/sdk`. Without the
-  SDK, AGP fails at configuration time and **every** Gradle task is blocked, including `linuxX64Test`.
-- Network access on the first build for the Gradle distribution, the Kotlin/Native toolchain, Google Maven,
-  Maven Central, and `https://maven.rohittp.com`.
-- For the complete Apple gates: Apple Silicon macOS with Xcode and Command Line Tools. Alternatively, push a
-  temporary branch and open a **draft** pull request; `ci.yml` runs on every pull request and its
-  `apple-publication` job covers `macosArm64Test`, both iOS targets, local publication, and the clean
-  six-target consumer. `publish.yml` triggers only on push to `main` or explicit dispatch, so a pull request
-  cannot consume a version or reach R2.
+## Cycle D — GL foundation
 
-No Docker, R2 or AWS credentials, signing key, publication secret, or `mavenLocal()` entry is needed for any
-Cycle B work.
+The internal GL seam and its three implementations, context and dialect detection at setup, the offscreen
+surface and composite pass, the documented save-and-restore set, and shader compilation with version
+substitution and program caching. The conformance suite lands here and is what makes ADRs 0006 and 0008
+claims rather than hopes. Read `docs/research/2026-08-18-cycle-d-gl-foundation.md` first; it corrects
+three things.
 
-On Linux, the host-executable gate is:
+**The substitution trigger must be the context's queried shading language, never the target platform.** On
+a real llvmpipe ES context the unsubstituted source compiles and the substituted one fails; on a desktop
+context both compile; on Apple only the substituted one does. Because the consumer creates the context, one
+Linux target serves either kind, so platform-keying would inject a desktop directive into an ES context,
+which is fatal — and that is the more likely Linux case. Substituting on every desktop context is confirmed
+safe rather than merely assumed.
 
-```bash
-./gradlew --no-configuration-cache \
-  :kmp:checkKotlinAbi \
-  :kmp:testAndroidHostTest \
-  :kmp:linuxX64Test \
-  :kmp:compileKotlinLinuxArm64 \
-  :kmp:bundleAndroidMainAar
-```
+**The documented restore set was incomplete**, missing the colour write mask, pixel store alignment and row
+length, clear values, the array buffer binding and pack alignment; the pixel store alignment default is
+four, not one. A full save, perturb and restore round trip is now byte-exact on both a real ES and a real
+desktop context. The error queue is the one piece of state that cannot be preserved, because reading it
+clears it — a real exception to the no-modification guarantee, and one to state rather than discover.
 
-On Apple Silicon macOS, run the locally complete implementation gate instead:
+**The binding inventory is measured, not remembered**, and the earlier counts were right. An eighty-four
+name checklist of the entry points a renderer needs has no gap on any of the four implementations. Linux
+ships no GL or EGL headers at all, and the `dlsym` seam now compiles for both Linux targets from one source
+and runs against a surfaceless llvmpipe context created with no display server, including the array-based
+uploads the Android side must mirror.
 
-```bash
-./gradlew --no-configuration-cache \
-  :kmp:checkKotlinAbi \
-  :kmp:testAndroidHostTest \
-  :kmp:macosArm64Test \
-  :kmp:compileKotlinIosArm64 \
-  :kmp:compileKotlinIosSimulatorArm64 \
-  :kmp:compileKotlinLinuxX64 \
-  :kmp:compileKotlinLinuxArm64 \
-  :kmp:bundleAndroidMainAar
-```
+**The conformance suite can run on a hosted macOS runner, provided it never requests acceleration.** A
+context is created only when the accelerated pixel format requirement is dropped, and it then reports
+`Apple Software Renderer` rather than Metal. A suite that asks for acceleration fails to obtain a context
+at all, with an error that names an invalid pixel format rather than the absence of a GPU.
 
-Do not claim `linuxX64Test` from macOS or `macosArm64Test` from Linux. Gradle reports `UP-TO-DATE` for test
-tasks whose inputs have not changed, so pass `--rerun-tasks` when a run is meant to be evidence.
+The seam's central design problem remains, and no research settles it: one interface must be implementable
+by pointer-based Kotlin/Native sides and by Android's JVM-array-based `GLES30`. The research document
+sketches signatures for representative calls; the specification has to choose.
 
-## Next work
+## Cycles E through J
 
-Cycle B awaits integration review. After it is approved and merged, the decomposition's next cycles are C
-(resource acquisition, decode, parse, caching) and D (the GL seam and its three implementations), which are
-genuinely independent and the natural place to work in parallel. Both connect real observations and execute
-the actions Cycle B's pure engines already decide.
+**E — basemap.** Rentile tiles decoded, uploaded and drawn as the mercator ground, with texture residency
+and eviction driven by the prepared frames that are alive, which connects directly to Cycle B's lease
+machinery. First pixels, so per-platform golden baselines start here.
+
+Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
+while a developer's machine renders through Metal, so the reported renderer string — not the target —
+should key a baseline, or the first run somewhere new will fail on a difference that is not a regression.
+
+**F — drawn things.** Stickers, models with textures and animation-track time sampling, and geometries
+painted by consumer shader pairs. Owns the decision `CLAUDE.md` flags as ADR-worthy and still unmade: how
+the two draw regimes order within one frame, given screen-anchored things composite by z-index with no
+depth test while map-anchored things are occlusion-tested. That would be **ADR 0019**. This cycle also
+fixes the documented uniform and attribute names a shader pair may declare.
+
+**G — globe projection.** The second projection mode, re-projecting mercator tiles and every placement.
+Deliberately after F so it re-projects a complete scene.
+
+**H — Android and iOS bring-up.** The one cycle no continuous integration can cover. A draft pull request
+borrows macOS and Linux hardware, but not a device; Android GL remains manual.
+
+**I — macOS harness.** A consumer living in this repository under its own build, resolving the published
+coordinate. It owns everything RenG refuses: creating the headless context, driving a capture framebuffer,
+reading back frames, encoding MP4.
+
+**`FramePlan` serialization is an unowned prerequisite for this cycle.** The decomposition states that the
+harness consumes `FramePlan` JSON documents, "which means plan serialization is settled by then" — but
+nothing has settled it. RenG has no serialization surface in its public ABI and no serialization dependency
+or plugin anywhere in the build. Two candidate owners: a public serialization API in RenG, which adds
+public surface and probably a dependency the repository policy currently forbids; or harness-side parsing
+that constructs plans through the existing public constructors, which keeps RenG dependency-free but
+duplicates the schema. Decide before Cycle I, and note that Cycle F fixes shader uniform names that a
+serialized plan would have to name.
+
+**J — golden-image corpus.** The gate that proves RenG still draws what it drew, wired into the same two
+places Rentile's is: a job in `ci.yml` and a step in `publish.yml` before upload. Rentile's two
+credential-bearing corpus gates have no RenG analogue and were deliberately not ported.
+
+## Environment notes
+
+Established on a fresh Linux container today, and each cost time to discover.
+
+- **Android SDK Platform 37.0** is the package `platforms;android-37.0`, not `platforms;android-37`, and on
+  older `cmdline-tools` it resolves only from the canary channel:
+  `sdkmanager --sdk_root="$ANDROID_HOME" --channel=3 "platforms;android-37.0" "build-tools;37.0.0"`. Point
+  untracked `local.properties` at it with `sdk.dir=…`. Without the SDK, AGP fails at configuration time and
+  **every** Gradle task is blocked, including `linuxX64Test`.
+- **All Kotlin/Native platform klibs, including the Apple ones, are present on a Linux host** under
+  `~/.konan/kotlin-native-prebuilt-linux-x86_64-<version>/klib/platform/`. Apple bindings can therefore be
+  inspected without a Mac: `klib dump-metadata <path>` (`klib contents` does not exist).
+- **A real GL context is available on Linux.** Install `libegl1 libegl-mesa0 libgles2` after
+  `apt-get update`, then create a surfaceless context via `EGL_PLATFORM_SURFACELESS_MESA` — no display
+  server needed. Both an ES 3.2 and a 4.5 core profile context are reachable on llvmpipe.
+- **Gradle reports `UP-TO-DATE` for unchanged test tasks.** A green build off cached test tasks is not
+  evidence; pass `--rerun-tasks` when a run is meant to prove something.
+- **The workflow parse command in `CLAUDE.md` uses the macOS Ruby 2.6 positional form**, which modern
+  Psych rejects with `wrong number of arguments`. On Ruby 3 use
+  `YAML.safe_load(File.read(path), aliases: true)`.
+- **Borrowing Apple hardware:** push a temporary branch and open a **draft** pull request. `ci.yml` runs on
+  every pull request and its `apple-publication` job covers `macosArm64Test`, both iOS targets, local
+  publication and the clean six-target consumer. `publish.yml` triggers only on push to `main` or explicit
+  dispatch, so a pull request cannot consume a version or reach R2. Such branches are disposable; say so in
+  the pull request body.
+
+Spike code is deliberately throwaway and lives outside the repository. The findings documents in
+`docs/research/` are the durable record; if a spike needs re-running, they say what it did.
 
 ## Publication boundary
 
-Pushing this development branch is authorized as a recovery checkpoint. It is not permission to merge,
-dispatch publication, upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record
-remains historical; Cycle B is neither complete as a released cycle nor published.
+Pushing a development branch is a recovery checkpoint, not permission to merge, dispatch publication,
+upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record remains historical.
+Cycle B is neither released nor complete as a released cycle.

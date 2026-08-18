@@ -1047,6 +1047,16 @@ class OrderedPreparationStateMachineTest {
         )
     }
 
+    @Test
+    fun committedHistoryRejectsAFrameIndexOrLodOutsideItsRange() {
+        assertEquals(0, committedHistory(frameIndex = 0L, selectedLod = 0).selectedLod)
+        assertEquals(22, committedHistory(frameIndex = 7L, selectedLod = 22).selectedLod)
+
+        assertFailsWith<IllegalArgumentException> { committedHistory(frameIndex = 0L, selectedLod = -1) }
+        assertFailsWith<IllegalArgumentException> { committedHistory(frameIndex = 0L, selectedLod = 23) }
+        assertFailsWith<IllegalArgumentException> { committedHistory(frameIndex = -1L, selectedLod = 0) }
+    }
+
     private fun assertRejectedClear(transition: OrderedPreparationTransition) {
         assertFailureOutcome(
             transition = transition,

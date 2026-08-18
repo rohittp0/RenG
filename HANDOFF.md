@@ -1,11 +1,15 @@
 # RenG handoff — 2026-08-18
 
-The recovery point for whoever picks RenG up next. Cycle A is publicly released. **Cycle B is implemented
-on branch `docs/cycle-b-resource-contract` and awaits integration review.** Cycles C and D have had their
-open technical questions researched and spiked; their findings are in `docs/research/` and are summarised
-below with what each remaining cycle still needs.
+The recovery point for whoever picks RenG up next. Cycle A is publicly released. **Cycle B is complete and
+merged to `main` locally**, with its five open decisions resolved and every local gate green — but `main` is
+unpushed, so its exact merged-commit CI and publication have not been observed. **Cycles C and D have
+owner-approved design specifications and written implementation plans**; neither has been implemented.
 
 RenG still renders nothing and exposes no public runtime API.
+
+**Pushing `main` releases Cycle B.** `publish.yml` runs on every non-documentation push to `main`, and since
+`0.1.0` already has a valid public completion record, the resolver advances to `0.1.1` and publishes it to R2
+immutably. Nothing about that has happened.
 
 ## Read first
 
@@ -13,8 +17,10 @@ RenG still renders nothing and exposes no public runtime API.
 2. `CONTEXT.md` — canonical vocabulary. Read it before naming anything.
 3. `docs/adr/0001`–`0018` — newer ADRs override older prose.
 4. `docs/decomposition.md` — the cycle sequence and each cycle's gates.
-5. `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and its plan alongside — the
-   approved Cycle B authority. The Cycle A pair in the same directories are historical decision records.
+5. `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and
+   `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` — the approved specifications for the
+   next two cycles, each with a written plan alongside in `docs/superpowers/plans/`. The Cycle A and Cycle B
+   pairs in the same directories are historical decision records.
 6. `docs/research/` — the four Cycle C and D findings documents. Read the relevant one before writing
    either cycle's specification; each ends with a checklist of what its spec must decide.
 

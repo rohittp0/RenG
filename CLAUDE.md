@@ -11,7 +11,7 @@ library module; Android Studio's placeholder `:app` has been deleted. `:kmp` is 
 skeleton with no public runtime API and no rendering behavior yet. `consumer-smoke`, the dependency-free
 static site, publication tooling, repository-policy tooling, and `VERSION_NAME=0.1.0` exist.
 
-**Cycle B is implemented on branch `docs/cycle-b-resource-contract` and awaits integration review.** Its
+**Cycle B is complete and merged to `main` locally, unpushed.** Its
 owner-approved design is `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and its
 reviewed plan is `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md`; every plan task
 including the cross-engine contract proof is complete, and each was independently reviewed with its findings

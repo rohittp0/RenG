@@ -32,8 +32,24 @@ whereas `Int` to `UInt` on the native side is free. All marshalling asymmetry �
 `usePinned`, copy-back of output arrays — stays inside the implementations, and every representative call
 in that mapping was executed against a real llvmpipe context with `glGetError` returning zero afterwards.
 
-One caveat is deliberately left open rather than closed by this record. The probe resolved a single
-zero-argument entry point. That a shared source set also resolves `memScoped`, `CValuesRef` marshalling
-and the pointer-output calls is likely but unproven, so Cycle D re-verifies with a real translation object
-compiled for both iOS targets before the layout is committed. If that fails, the fallback is ADR 0009's
-original leaf-source-set arrangement, at the cost of one duplicated file kept in sync by review.
+The layout is confirmed by a full translation object, not by the original one-line probe. A twelve-method
+seam in `iosMain` compiled for both iOS targets, and its class appears in both produced klibs from that one
+shared file. It exercised `memScoped`; `allocArray` over `IntVar`, `UByteVar`, `ByteVar` and
+`CPointerVar<ByteVar>`; `usePinned` with `addressOf` on `IntArray` and `ByteArray`; `.cstr` with `ptr`
+against the enclosing scope; `toKString` on both an allocated buffer and a reinterpreted `glGetString`
+return; `reinterpret` in both directions the seam needs; `Int`-to-`UInt` and `UByte`-to-`Boolean`
+conversion; and null pass-through for an optional pointer. `compileIosMainKotlinMetadata` passed too, which
+matters because the shared-source-set metadata compilation resolves against commonized cinterop libraries
+and is the compilation most likely to reject platform GL. The same body compiles from `linuxMain` over
+`platform.posix`, and `macosMain` resolves `platform.OpenGL3`, so each implementation sits in the shared set
+above its targets rather than in a leaf.
+
+`appleMain` was measured in both directions and can host neither: a `platform.gles3` file there compiles for
+both iOS targets and fails only at `compileKotlinMacosArm64`, and a `platform.OpenGL3` file fails at
+`compileKotlinIosArm64`. The klibs confirm it — `ios_arm64` ships the `OpenGLES*` family and no `OpenGL3`,
+`macos_arm64` ships `OpenGL3` and no GLES. The iOS and macOS near-duplication is therefore irreducible.
+
+That measurement also exposes a trap worth carrying forward: platform-library resolution for a shared source
+set is enforced per leaf compilation rather than by pre-computing an intersection, so a misplaced GL file
+fails at one specific target's compile task and a partial compile can look green. Every target must be
+compiled to trust the layout.

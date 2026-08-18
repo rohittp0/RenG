@@ -4,11 +4,14 @@ package com.rohittp.reng.internal.gl
  * A programmable, non-native fake for [GlBinding] driven entirely from Kotlin state.
  *
  * Every call is appended to [log] as `"<methodName>(<args>)"`, with enum-typed arguments
- * rendered as uppercase hex and array/bulk-payload arguments (names, pixel data, vertex
- * data, matrices, shader source) omitted since they carry no stable string form. Query
- * results are driven by the public mutable fields below, which tests set up before
- * exercising a binding consumer. This class lives only in `commonTest` and is never part
- * of production source.
+ * rendered as uppercase hex; array/bulk-payload arguments (names, pixel data, vertex data,
+ * matrices, shader source) are omitted from the log line itself since they carry no stable
+ * string form, but every one of them is still recoverable from a dedicated backing field
+ * ([deletedNames], [lastDrawBuffers], [bufferDataPayloads], [bufferSubDataPayloads],
+ * [uniformMatrix4fvValues], [shaderSources], [pixels]) so a test can assert on exactly what
+ * was passed, not merely that something of a given size was passed. Query results are driven
+ * by the public mutable fields below, which tests set up before exercising a binding
+ * consumer. This class lives only in `commonTest` and is never part of production source.
  */
 internal class RecordingGlBinding : GlBinding {
     val log: MutableList<String> = mutableListOf()
@@ -27,6 +30,12 @@ internal class RecordingGlBinding : GlBinding {
     var uniformLocation: Int = 0
     val shaderSources: MutableMap<Int, String> = mutableMapOf()
     private var nextName: Int = 1
+    val deletedNames: MutableList<Int> = mutableListOf()
+    var lastDrawBuffers: IntArray = IntArray(0)
+    val bufferDataPayloads: MutableMap<Int, ByteArray?> = mutableMapOf()
+    val bufferSubDataPayloads: MutableMap<Int, ByteArray> = mutableMapOf()
+    val uniformMatrix4fvValues: MutableMap<Int, FloatArray> = mutableMapOf()
+    val pixels: MutableMap<Int, ByteArray> = mutableMapOf()
 
     private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
 
@@ -69,6 +78,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun deleteFramebuffers(count: Int, names: IntArray) {
         log += "deleteFramebuffers($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindFramebuffer(target: Int, framebuffer: Int) {
@@ -97,6 +107,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun deleteRenderbuffers(count: Int, names: IntArray) {
         log += "deleteRenderbuffers($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindRenderbuffer(target: Int, renderbuffer: Int) {
@@ -118,6 +129,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun drawBuffers(count: Int, buffers: IntArray) {
         log += "drawBuffers($count)"
+        lastDrawBuffers = buffers.copyOfRange(0, count)
     }
 
     override fun readBuffer(mode: Int) {
@@ -128,6 +140,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun deleteTextures(count: Int, names: IntArray) {
         log += "deleteTextures($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindTexture(target: Int, texture: Int) {
@@ -161,6 +174,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun deleteSamplers(count: Int, names: IntArray) {
         log += "deleteSamplers($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindSampler(unit: Int, sampler: Int) {
@@ -176,13 +190,16 @@ internal class RecordingGlBinding : GlBinding {
     }
 
     override fun readPixels(x: Int, y: Int, width: Int, height: Int, format: Int, type: Int, out: ByteArray) {
+        require(out.isNotEmpty()) { "a pixel read needs a destination" }
         log += "readPixels($x,$y,$width,$height,${hex(format)},${hex(type)})"
+        pixels[format]?.copyInto(out, endIndex = minOf(out.size, pixels.getValue(format).size))
     }
 
     override fun genBuffers(count: Int, out: IntArray) = generate("genBuffers", count, out)
 
     override fun deleteBuffers(count: Int, names: IntArray) {
         log += "deleteBuffers($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindBuffer(target: Int, buffer: Int) {
@@ -191,16 +208,19 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun bufferData(target: Int, size: Int, data: ByteArray?, usage: Int) {
         log += "bufferData(${hex(target)},$size,${hex(usage)})"
+        bufferDataPayloads[target] = data
     }
 
     override fun bufferSubData(target: Int, offset: Int, size: Int, data: ByteArray) {
         log += "bufferSubData(${hex(target)},$offset,$size)"
+        bufferSubDataPayloads[target] = data
     }
 
     override fun genVertexArrays(count: Int, out: IntArray) = generate("genVertexArrays", count, out)
 
     override fun deleteVertexArrays(count: Int, names: IntArray) {
         log += "deleteVertexArrays($count)"
+        deletedNames += names.take(count)
     }
 
     override fun bindVertexArray(array: Int) {
@@ -308,6 +328,7 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray) {
         log += "uniformMatrix4fv($location,$count,$transpose)"
+        uniformMatrix4fvValues[location] = value
     }
 
     override fun enable(cap: Int) {

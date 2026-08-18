@@ -115,14 +115,24 @@ use the keyword form instead, which parses both workflow files:
 ruby -e 'require "yaml"; ["ci","publish"].each { |w| YAML.safe_load(File.read(".github/workflows/#{w}.yml"), aliases: true) }'
 ```
 
-The Apple gates cannot execute on Linux, so they were verified in GitHub Actions rather than claimed. CI run
-`32055118061` on source commit `9bdbeeb` passed both jobs: `Android and Linux` on `ubuntu-latest`, and
-`Apple and publication metadata` on `macos-latest`, which compiled both iOS targets, ran `macosArm64Test`,
-published all seven publications locally, and resolved the aggregate coordinate from a clean six-target
-consumer with a fresh Gradle home. A second run, `32058579004`, was started on the final commit `b91dbbb`;
-confirm its result before relying on it. Those runs came from a temporary branch
-`ci/cycle-b-apple-verification` and draft pull request #2, which exist only to borrow macOS hardware and
-must not be merged.
+The Apple gates cannot execute on Linux, so they were verified in GitHub Actions rather than claimed. Two CI
+runs passed both jobs — `Android and Linux` on `ubuntu-latest` and `Apple and publication metadata` on
+`macos-latest`:
+
+| Run | Source commit | Result |
+|---|---|---|
+| `32055118061` | `9bdbeeb` | both jobs success |
+| `32058579004` | `b91dbbb` | both jobs success |
+
+The `macos-latest` job compiled both iOS targets, ran `macosArm64Test`, published all seven publications
+locally, and resolved the aggregate coordinate from a clean six-target consumer with a fresh Gradle home. So
+every gate in this task's list has now been observed on the final code commit, on the platform that owns it.
+
+Those runs came from a temporary branch `ci/cycle-b-apple-verification` and draft pull request #2, which
+existed only to borrow macOS hardware. The pull request is closed without merging. **The temporary branch
+still exists on `origin` and should be deleted** — the development environment's git proxy refused both
+delete refspecs, so it could not be removed from here. It is pinned at `b91dbbb` and carries no unique
+work.
 
 **Not observed, and not to be claimed:** exact merged-commit CI, publication, `linuxX64Test` on macOS, or
 `macosArm64Test` on Linux. Cycle B is unreleased; `VERSION_NAME` remains `0.1.0` and the public `0.1.0`

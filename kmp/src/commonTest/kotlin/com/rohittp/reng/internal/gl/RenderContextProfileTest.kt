@@ -88,6 +88,32 @@ class RenderContextProfileTest {
         assertTrue(binding.log.any { it.startsWith("getStringi(0x1F03") })
     }
 
+    @Test fun anOwnGlErrorDuringTheExtensionReadYieldsNoExtensions() {
+        val binding = RecordingGlBinding()
+        binding.integers[GL_NUM_EXTENSIONS] = intArrayOf(2)
+        binding.indexedStrings += listOf("GL_EXT_sRGB_write_control", "GL_OES_texture_float")
+        // Without the GL_NO_ERROR sentinel, GlErrorQueue would drain straight through to this
+        // flag and firstOwnError would report it, so readExtensionNames must bail to emptySet()
+        // rather than reading the two names indexedStrings holds. If that guard were removed the
+        // function would return both names instead, and this assertion would fail.
+        binding.errorQueue = mutableListOf(GL_INVALID_ENUM, GL_NO_ERROR)
+        assertEquals(emptySet(), readExtensionNames(binding))
+    }
+
+    @Test fun anOwnGlErrorAfterTheLimitReadsRejectsAnOtherwiseValidContext() {
+        val binding = desktopContextBinding()
+        // adoptRenderContext drains the error queue twice before the final gate: once on entry
+        // (GlErrorQueue.drainOnEntry) and once inside readExtensionNames (GlErrorQueue.firstOwnError).
+        // Each of those calls stops draining at the first GL_NO_ERROR it sees, so one leading
+        // GL_NO_ERROR per earlier call leaves the real error untouched for the final gate at the
+        // end of adoptRenderContext to find. If that final guard were removed, this would return
+        // Adopted instead of Rejected.
+        binding.errorQueue = mutableListOf(GL_NO_ERROR, GL_NO_ERROR, GL_INVALID_OPERATION, GL_NO_ERROR)
+        val rejection = adoptRenderContext(binding) as RenderContextAdoption.Rejected
+        assertEquals(RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT, rejection.failure.code)
+        assertEquals(PipelineStage.CONTEXT_ADOPTION, rejection.failure.stage)
+    }
+
     private fun esContextBinding(): RecordingGlBinding = RecordingGlBinding().apply {
         strings[GL_SHADING_LANGUAGE_VERSION] = "OpenGL ES GLSL ES 3.20"
         strings[GL_VERSION] = "OpenGL ES 3.2 Mesa 25.2.8-0ubuntu0.24.04.2"

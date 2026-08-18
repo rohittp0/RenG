@@ -26,6 +26,20 @@ class GlErrorQueueTest {
         assertEquals(GL_OUT_OF_MEMORY, GlErrorQueue.drainOnEntry(binding))
     }
 
+    @Test fun aPreExistingFlagIsDiscardedButARengProvokedFlagIsReportedAsRengsOwn() {
+        val binding = RecordingGlBinding()
+
+        // A flag already waiting when RenG arrives belongs to the consumer: drainOnEntry
+        // reports it once so it can be discarded, never turned into a RenG failure.
+        binding.errorQueue = mutableListOf(GL_INVALID_ENUM, GL_NO_ERROR)
+        assertEquals(GL_INVALID_ENUM, GlErrorQueue.drainOnEntry(binding))
+
+        // A flag that appears afterwards, provoked by RenG's own GL calls, belongs to RenG:
+        // firstOwnError must surface it rather than silently discarding it.
+        binding.errorQueue = mutableListOf(GL_INVALID_VALUE, GL_NO_ERROR)
+        assertEquals(GL_INVALID_VALUE, GlErrorQueue.firstOwnError(binding))
+    }
+
     @Test fun rengOwnFailuresCarryARedactedGpuDiagnostic() {
         val failure = glOperationFailure(PipelineStage.DRAW, resourceKey = null)
         assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, failure.code)

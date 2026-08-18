@@ -796,6 +796,36 @@ def _toml_tokens(text: str) -> tuple[_Token, ...]:
     return tuple(tokens)
 
 
+def _toml_entry_span(tokens: Sequence[_Token], key: str) -> tuple[int, int] | None:
+    """Locate the exact [start, end) character span of a `key = { ... }` inline-table entry in
+    a tokenized TOML document, matched by an *exact* bare-token equality on `key` (never a
+    substring/prefix match), so a longer, differently-named key that merely shares a text prefix
+    or suffix with `key` (e.g. `kotlinx-coroutines-core-jvm` sharing a prefix with
+    `kotlinx-coroutines-core`) is a distinct token and is never matched or touched. Returns None
+    if that exact shape isn't found, so callers never guess at a span to exempt."""
+    for index, token in enumerate(tokens):
+        if not (
+            token.kind == "bare"
+            and token.value == key
+            and index + 2 < len(tokens)
+            and tokens[index + 1].value == "="
+            and tokens[index + 2].value == "{"
+        ):
+            continue
+        depth = 1
+        cursor = index + 3
+        while cursor < len(tokens) and depth:
+            if tokens[cursor].value == "{":
+                depth += 1
+            elif tokens[cursor].value == "}":
+                depth -= 1
+            cursor += 1
+        if depth == 0:
+            closing = tokens[cursor - 1]
+            return (token.start, closing.start + len(closing.value))
+    return None
+
+
 def _token_stream_fingerprint(tokens: Sequence[_Token]) -> str:
     digest = hashlib.sha256()
     for token in tokens:
@@ -1860,13 +1890,24 @@ def check_dependencies(root: Path) -> list[Violation]:
         # The forbidden-word scan below runs over the *raw* text (it has to, to catch a rogue
         # table dict-equality above never even looks at, such as a smuggled [bundles] section),
         # so it would flag the two permitted coroutines entries' own key/value text purely
-        # because "coroutines" is hyphen-bounded there. Strip exactly those two literal
-        # coordinate substrings first, but only once each entry has been confirmed above to be
-        # byte-for-byte the permitted shape — never a blanket exemption for the word itself.
+        # because "coroutines" is hyphen-bounded there. Blank out exactly each confirmed entry's
+        # own `key = { ... }` character span (located by exact bare-token equality via
+        # _toml_entry_span, never a substring/prefix match), so a differently-named key that
+        # merely shares text with a permitted coordinate — e.g. a smuggled
+        # `kotlinx-coroutines-core-jvm` — is untouched and still scanned.
         forbidden_scan_text = _mask_hash_comments(catalog_text)
-        for name, expected_entry in permitted_catalog_libraries.items():
-            if libraries.get(name) == expected_entry:
-                forbidden_scan_text = forbidden_scan_text.replace(name, "")
+        scan_tokens = _toml_tokens(forbidden_scan_text)
+        permitted_spans = [
+            span
+            for name, expected_entry in permitted_catalog_libraries.items()
+            if libraries.get(name) == expected_entry
+            for span in (_toml_entry_span(scan_tokens, name),)
+            if span is not None
+        ]
+        for start, end in permitted_spans:
+            forbidden_scan_text = (
+                forbidden_scan_text[:start] + " " * (end - start) + forbidden_scan_text[end:]
+            )
         forbidden_match = _FORBIDDEN_DEPENDENCY.search(forbidden_scan_text)
         if not exact or forbidden_match is not None:
             offset = forbidden_match.start() if forbidden_match is not None else 0

@@ -8,7 +8,10 @@ import struct
 import subprocess
 from tempfile import TemporaryDirectory
 
+from unittest.mock import patch
+
 from tools.check_repository_policy import (
+    _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS,
     _build_configuration_fingerprint,
     check_dependencies,
     check_repository,
@@ -379,6 +382,23 @@ def write_bytes(root: Path, relative: str, contents: bytes) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(contents)
+
+
+def _neutralized_fingerprint_overrides(root: Path) -> dict[str, frozenset[str]]:
+    """Compute the *actual* whole-file content fingerprint for each pinned production file
+    currently on disk at `root`, keyed exactly as `_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS` is,
+    so a test can `patch.dict` that mapping to always accept whatever is there. This isolates
+    one check_dependencies mechanism from the unrelated whole-file fingerprint pin, which would
+    otherwise also fire on any fixture mutation and mask the mechanism actually under test."""
+    return {
+        relative: frozenset({
+            _build_configuration_fingerprint(
+                root / relative, (root / relative).read_text(encoding="utf-8"),
+            ),
+        })
+        for relative in ("kmp/build.gradle.kts", "gradle/libs.versions.toml")
+        if (root / relative).is_file()
+    }
 
 
 def force_track_fixture(root: Path) -> None:
@@ -845,7 +865,11 @@ class RepositoryPolicyTests(unittest.TestCase):
         # Stripping the two permitted coroutines coordinates from the forbidden-word scan must
         # not become a blanket exemption: a smuggled table the versions/libraries/plugins exact
         # comparisons never look at (here, [bundles]) still has to be caught even while the
-        # catalog's known tables remain byte-for-byte the permitted with-coroutines shape.
+        # catalog's known tables remain byte-for-byte the permitted with-coroutines shape. The
+        # unrelated whole-file fingerprint pin (_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS) would
+        # also fire on this exact fixture and mask a broken scan, so it is patched here to
+        # always accept whatever is actually on disk — isolating the forbidden-scan mechanism
+        # itself as the only thing this test can observe.
         with TemporaryDirectory() as directory:
             root = Path(directory)
             create_clean_fixture(root)
@@ -854,9 +878,13 @@ class RepositoryPolicyTests(unittest.TestCase):
                 root,
                 "gradle/libs.versions.toml",
                 _VERSION_CATALOG_WITH_COROUTINES + "\n[bundles]\n"
-                'sneaky = ["org.jetbrains.kotlinx:kotlinx-coroutines-core-android:1.0"]\n',
+                'sneaky = ["org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.0"]\n',
             )
-            codes = {violation.code for violation in check_dependencies(root)}
+            with patch.dict(
+                _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS,
+                _neutralized_fingerprint_overrides(root),
+            ):
+                codes = {violation.code for violation in check_dependencies(root)}
             self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
     def test_catalog_rejects_a_third_library_entry_beyond_the_two_permitted(self) -> None:

@@ -16,7 +16,7 @@ exactly as `docs/decomposition.md` states.
 Everything remains inside the single published `:kmp` module and package `com.rohittp.reng`. Rentile stays an
 `implementation` dependency and no Rentile or platform type appears in public ABI.
 
-The public surface grows by exactly four declarations, each justified in "Public surface growth" below and
+The public surface grows by exactly five declarations, each justified in "Public surface growth" below and
 each reviewed as an explicit `checkKotlinAbi` diff: two `ResourceLimits` fields, one `RenGErrorCode` entry,
 one `PipelineStage` entry, and one `ResourceKind` entry. Nothing else public changes.
 
@@ -456,7 +456,7 @@ unwrapped cancellation, and ADR 0017's owner-wide terminal transition has to tre
 
 ## Public surface growth
 
-Four additions, each an explicit reviewed `checkKotlinAbi` diff.
+Five additions, each an explicit reviewed `checkKotlinAbi` diff.
 
 ```kotlin
 public data class ResourceLimits(
@@ -493,7 +493,7 @@ capture, encoder, renderer factory, or public runtime entry point. It adds no Gr
 
 Required gates:
 
-- `checkKotlinAbi` with a reviewed dump showing exactly the four additions above and no Rentile or platform
+- `checkKotlinAbi` with a reviewed dump showing exactly the five additions above and no Rentile or platform
   type;
 - Android host, `linuxX64Test`, and `macosArm64Test` for the driver, decoder, parser, cache, and firewall
   against fake transport and store adapters;

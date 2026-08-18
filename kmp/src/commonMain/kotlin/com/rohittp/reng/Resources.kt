@@ -55,6 +55,7 @@ public enum class ResourceKind {
     GEOMETRY_PROGRAM,
     INTERNAL_PIPELINE,
     OFFSCREEN_SURFACE,
+    BASEMAP_TILE,
 }
 
 public enum class ResourceAccessMode {
@@ -72,6 +73,8 @@ public data class ResourceLimits(
     public val maximumStickerImageBytes: Long = 32L * 1024L * 1024L,
     public val maximumModelGlbBytes: Long = 256L * 1024L * 1024L,
     public val maximumModelTextureBytes: Long = 32L * 1024L * 1024L,
+    public val maximumDecodedImageBytes: Long = 64L * 1024L * 1024L,
+    public val maximumModelJsonChunkBytes: Long = 16L * 1024L * 1024L,
 ) {
     init {
         val minimum = 1L
@@ -99,6 +102,12 @@ public data class ResourceLimits(
         }
         require(maximumModelTextureBytes in minimum..maximum) {
             "maximumModelTextureBytes must be within the supported range"
+        }
+        require(maximumDecodedImageBytes in minimum..maximum) {
+            "maximumDecodedImageBytes must be within the supported range"
+        }
+        require(maximumModelJsonChunkBytes in minimum..maximum) {
+            "maximumModelJsonChunkBytes must be within the supported range"
         }
     }
 }

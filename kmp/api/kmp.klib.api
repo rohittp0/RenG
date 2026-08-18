@@ -41,6 +41,7 @@ final enum class com.rohittp.reng/DiagnosticSeverity : kotlin/Enum<com.rohittp.r
 }
 
 final enum class com.rohittp.reng/PipelineStage : kotlin/Enum<com.rohittp.reng/PipelineStage> { // com.rohittp.reng/PipelineStage|null[0]
+    enum entry BASEMAP_RENDER // com.rohittp.reng/PipelineStage.BASEMAP_RENDER|null[0]
     enum entry CONFIGURATION // com.rohittp.reng/PipelineStage.CONFIGURATION|null[0]
     enum entry CONTEXT_ADOPTION // com.rohittp.reng/PipelineStage.CONTEXT_ADOPTION|null[0]
     enum entry DRAW // com.rohittp.reng/PipelineStage.DRAW|null[0]
@@ -80,6 +81,7 @@ final enum class com.rohittp.reng/ProjectionMode : kotlin/Enum<com.rohittp.reng/
 
 final enum class com.rohittp.reng/RenGErrorCode : kotlin/Enum<com.rohittp.reng/RenGErrorCode> { // com.rohittp.reng/RenGErrorCode|null[0]
     enum entry AMBIGUOUS_RESOURCE_ROUTE // com.rohittp.reng/RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE|null[0]
+    enum entry BASEMAP_RENDER_FAILED // com.rohittp.reng/RenGErrorCode.BASEMAP_RENDER_FAILED|null[0]
     enum entry DIFFERENT_CURRENT_RENDER_CONTEXT // com.rohittp.reng/RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT|null[0]
     enum entry FOREIGN_PREPARED_FRAME // com.rohittp.reng/RenGErrorCode.FOREIGN_PREPARED_FRAME|null[0]
     enum entry FOREIGN_RENDER_TARGET // com.rohittp.reng/RenGErrorCode.FOREIGN_RENDER_TARGET|null[0]
@@ -149,6 +151,7 @@ final enum class com.rohittp.reng/ResourceClass : kotlin/Enum<com.rohittp.reng/R
 }
 
 final enum class com.rohittp.reng/ResourceKind : kotlin/Enum<com.rohittp.reng/ResourceKind> { // com.rohittp.reng/ResourceKind|null[0]
+    enum entry BASEMAP_TILE // com.rohittp.reng/ResourceKind.BASEMAP_TILE|null[0]
     enum entry EXTERNAL // com.rohittp.reng/ResourceKind.EXTERNAL|null[0]
     enum entry GEOMETRY_PROGRAM // com.rohittp.reng/ResourceKind.GEOMETRY_PROGRAM|null[0]
     enum entry INTERNAL_PIPELINE // com.rohittp.reng/ResourceKind.INTERNAL_PIPELINE|null[0]
@@ -520,7 +523,7 @@ final class com.rohittp.reng/ResourceKey { // com.rohittp.reng/ResourceKey|null[
 }
 
 final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits|null[0]
-    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
 
     final val maximumBasemapGeoJsonBytes // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes|{}maximumBasemapGeoJsonBytes[0]
         final fun <get-maximumBasemapGeoJsonBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes.<get-maximumBasemapGeoJsonBytes>|<get-maximumBasemapGeoJsonBytes>(){}[0]
@@ -532,14 +535,19 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
         final fun <get-maximumBasemapStyleBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapStyleBytes.<get-maximumBasemapStyleBytes>|<get-maximumBasemapStyleBytes>(){}[0]
     final val maximumBasemapTileBytes // com.rohittp.reng/ResourceLimits.maximumBasemapTileBytes|{}maximumBasemapTileBytes[0]
         final fun <get-maximumBasemapTileBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapTileBytes.<get-maximumBasemapTileBytes>|<get-maximumBasemapTileBytes>(){}[0]
+    final val maximumDecodedImageBytes // com.rohittp.reng/ResourceLimits.maximumDecodedImageBytes|{}maximumDecodedImageBytes[0]
+        final fun <get-maximumDecodedImageBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumDecodedImageBytes.<get-maximumDecodedImageBytes>|<get-maximumDecodedImageBytes>(){}[0]
     final val maximumModelGlbBytes // com.rohittp.reng/ResourceLimits.maximumModelGlbBytes|{}maximumModelGlbBytes[0]
         final fun <get-maximumModelGlbBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelGlbBytes.<get-maximumModelGlbBytes>|<get-maximumModelGlbBytes>(){}[0]
+    final val maximumModelJsonChunkBytes // com.rohittp.reng/ResourceLimits.maximumModelJsonChunkBytes|{}maximumModelJsonChunkBytes[0]
+        final fun <get-maximumModelJsonChunkBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelJsonChunkBytes.<get-maximumModelJsonChunkBytes>|<get-maximumModelJsonChunkBytes>(){}[0]
     final val maximumModelTextureBytes // com.rohittp.reng/ResourceLimits.maximumModelTextureBytes|{}maximumModelTextureBytes[0]
         final fun <get-maximumModelTextureBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelTextureBytes.<get-maximumModelTextureBytes>|<get-maximumModelTextureBytes>(){}[0]
     final val maximumStickerImageBytes // com.rohittp.reng/ResourceLimits.maximumStickerImageBytes|{}maximumStickerImageBytes[0]
         final fun <get-maximumStickerImageBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumStickerImageBytes.<get-maximumStickerImageBytes>|<get-maximumStickerImageBytes>(){}[0]
 
     final fun component1(): kotlin/Long // com.rohittp.reng/ResourceLimits.component1|component1(){}[0]
+    final fun component10(): kotlin/Long // com.rohittp.reng/ResourceLimits.component10|component10(){}[0]
     final fun component2(): kotlin/Long // com.rohittp.reng/ResourceLimits.component2|component2(){}[0]
     final fun component3(): kotlin/Long // com.rohittp.reng/ResourceLimits.component3|component3(){}[0]
     final fun component4(): kotlin/Long // com.rohittp.reng/ResourceLimits.component4|component4(){}[0]
@@ -547,7 +555,8 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
     final fun component6(): kotlin/Long // com.rohittp.reng/ResourceLimits.component6|component6(){}[0]
     final fun component7(): kotlin/Long // com.rohittp.reng/ResourceLimits.component7|component7(){}[0]
     final fun component8(): kotlin/Long // com.rohittp.reng/ResourceLimits.component8|component8(){}[0]
-    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    final fun component9(): kotlin/Long // com.rohittp.reng/ResourceLimits.component9|component9(){}[0]
+    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ResourceLimits.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/ResourceLimits.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/ResourceLimits.toString|toString(){}[0]

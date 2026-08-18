@@ -74,6 +74,7 @@ private val ResourceKind.wireValue: Int
         ResourceKind.GEOMETRY_PROGRAM -> 2
         ResourceKind.INTERNAL_PIPELINE -> 3
         ResourceKind.OFFSCREEN_SURFACE -> 4
+        ResourceKind.BASEMAP_TILE -> 5
     }
 
 private val ResourceClass.wireValue: Int

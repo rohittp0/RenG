@@ -411,6 +411,8 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             PipelineStage.RESOURCE_LOOKUP -> establishedResourceRule
             else -> null
         }
+
+        RenGErrorCode.BASEMAP_RENDER_FAILED -> noDiagnosticAt(stage, PipelineStage.BASEMAP_RENDER)
     }
 
 private val establishedResourceRule: FailureRule.Context = FailureRule.Context(

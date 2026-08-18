@@ -22,6 +22,7 @@ public enum class PipelineStage {
     RESOURCE_FREE,
     RENDERER_CLOSE,
     CONTEXT_ADOPTION,
+    BASEMAP_RENDER,
 }
 
 public enum class DiagnosticSeverity {

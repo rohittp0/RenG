@@ -95,4 +95,5 @@ internal val ResourceKind.reportOrder: Int
         ResourceKind.GEOMETRY_PROGRAM -> 1
         ResourceKind.INTERNAL_PIPELINE -> 2
         ResourceKind.OFFSCREEN_SURFACE -> 3
+        ResourceKind.BASEMAP_TILE -> 4
     }

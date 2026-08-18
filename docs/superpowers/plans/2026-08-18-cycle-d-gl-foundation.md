@@ -520,6 +520,7 @@ Expected: both test runs pass and `checkKotlinAbi` reports no change.
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlBinding.kt`
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/PlatformGlBinding.kt`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/RecordingGlBinding.kt`
+- Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/RecordingGlBindingTest.kt`
 
 **Interfaces:**
 - Consumes: Task 1 tokens and roster.
@@ -1115,6 +1116,7 @@ git commit -m "feat: implement the GL seam on macOS"
 
 **Files:**
 - Create: `kmp/src/linuxMain/kotlin/com/rohittp/reng/internal/gl/LinuxGlBinding.kt`
+- Test: `kmp/src/linuxTest/kotlin/com/rohittp/reng/internal/gl/LinuxGlBindingResolutionTest.kt`
 
 **Interfaces:**
 - Consumes: Task 1's roster, whose ordinal order indexes the resolved table; Task 2's seam and `GlBindingResult`.
@@ -1955,7 +1957,7 @@ class GlStateSnapshotTest {
         val esSnapshot = captureGlState(esBinding, esProfile(), textureUnitCount = 1)
         assertNull(esSnapshot.drawBuffer)
         assertNull(esSnapshot.lineSmoothEnabled)
-        assertTrue(esBinding.log.none { it == "getIntegerv(0x0C01)" })
+        assertTrue(esBinding.log.none { it == "getIntegerv(0xC01)" })
         assertTrue(esBinding.log.none { it == "isEnabled(0xB20)" })
 
         val desktopBinding = populatedBinding()
@@ -2863,7 +2865,7 @@ class OffscreenSurfaceTest {
                 throw IllegalStateException("frame content failed")
             }
         }
-        assertEquals("bindFramebuffer(0x8CA9,0)", binding.log.first { it.startsWith("bindFramebuffer") && it.endsWith(",0)") })
+        assertTrue(binding.log.any { it == "bindFramebuffer(0x8CA9,7)" })
         assertEquals(before, captureGlState(binding, profile(), textureUnitCount = 1))
     }
 
@@ -3045,7 +3047,7 @@ git commit -m "feat: allocate RenG's offscreen colour and depth surface"
 - Consumes: Tasks 8, 9, 10, 11, 12, 13; public `FramebufferName`.
 - Produces: `COMPOSITE_VERTEX_SOURCE`, `COMPOSITE_FRAGMENT_SOURCE`, `COMPOSITE_SHADER_PAIR`, `littleEndianBytes`, `CompositePipeline`, `createCompositePipeline`, `deleteCompositePipeline`, `GlFrameContent`, `REVERSE_Z_FAR_DEPTH`, and `drawFrame`.
 
-Compositing is a blended draw rather than a framebuffer blit, because a blit does not blend and a consumer compositing RenG's output over existing content needs it to (ADR 0005). Cycle D draws no frame content: `GlFrameContent.Empty` is what production passes, and Cycle E replaces it.
+Compositing is a blended draw rather than a framebuffer blit, because a blit does not blend and a consumer compositing RenG's output over existing content needs it to (ADR 0005). Cycle D draws no frame content: `EmptyGlFrameContent` is what production passes, and Cycle E replaces it.
 
 - [ ] **Step 1: Write the pipeline and draw-order tests**
 
@@ -4565,8 +4567,8 @@ import kotlinx.cinterop.LongVar
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.invoke
+import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.nativeHeap
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
@@ -4802,7 +4804,6 @@ import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.nativeHeap
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set

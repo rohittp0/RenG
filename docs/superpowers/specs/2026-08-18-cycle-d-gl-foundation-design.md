@@ -242,9 +242,17 @@ both an ES 3.2 and a 4.5 core profile context are reachable. Context creation li
 in RenG, per ADR 0001.
 
 The suite proves: the full save, perturb, and restore round trip is byte-exact on both dialects; one GLSL ES
-3.00 source compiles unsubstituted on ES and substituted on desktop, and the wrong substitution fails on
-each; the eighty-four-name inventory resolves on every implementation; and the error queue behaviour is what
-the specification says it is.
+3.00 source compiles unsubstituted on an ES context and substituted on a desktop one; the eighty-four-name
+inventory resolves on every implementation; and the error queue behaves as this specification says.
+
+The negative half of that shader expectation must be keyed on what the driver advertises, not asserted
+symmetrically, and the measured table above is why. Substituting on an ES context fails everywhere, so the
+suite asserts that unconditionally. But leaving an ES directive **unsubstituted** on a desktop context fails
+only where `GL_ARB_ES3_compatibility` is absent: Mesa's 4.5 core profile advertises it and compiles the
+source unchanged, while Apple's 4.1 does not and rejects it. A suite asserting failure on every desktop
+context would therefore fail on Mesa against correct behaviour. This affects the test's expectation only —
+RenG still substitutes on every desktop context, per ADR 0008, because probing the extension buys no
+behavioural gain.
 
 Android and iOS device contexts are Cycle H's, as the decomposition already scopes.
 

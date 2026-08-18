@@ -1,0 +1,44 @@
+name: Spike macOS GL
+
+# TEMPORARY research workflow. Exists only on a throwaway spike branch to
+# answer two Cycle D questions on the hardware the conformance suite would
+# actually run on. Never merged to main; the branch and its PR are disposable.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-gl-probe:
+    name: Headless CGL context and shader dialect
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Runner identity
+        run: |
+          uname -m
+          sw_vers
+          xcodebuild -version || true
+
+      - name: Compile and run the headless CGL probe
+        run: |
+          cc -O0 -o cgl_probe spike/cgl_probe.c -framework OpenGL -framework CoreFoundation
+          set +e
+          ./cgl_probe
+          echo "probe_exit=$?"
+
+      - name: Apple platform klib inventory on a real macOS host
+        run: |
+          # Cross-check the inventory measured from a Linux host against macOS.
+          konan_root="$(find ~/.konan -maxdepth 1 -type d -name 'kotlin-native-prebuilt-macos-*' | head -1)"
+          echo "konan_root=${konan_root:-<none present>}"
+          if [ -n "$konan_root" ]; then
+            ls "$konan_root/klib/platform/macos_arm64" || true
+            ls "$konan_root/klib/platform/ios_arm64" || true
+          else
+            echo "No prebuilt Kotlin/Native toolchain on the runner image; a Gradle"
+            echo "invocation would download it. Inventory cross-check skipped."
+          fi

@@ -87,7 +87,7 @@ All five were worked on 2026-08-18. Four are closed in code or documentation; on
    which indexes the span. Seven contradictory constructions are now rejected with
    `IllegalArgumentException`, including the reported `#version 330 core#version 300 es` case and a
    descending span that previously duplicated text silently. Messages carry no source text.
-3. **Scheduling cost — documented, not changed, by decision.** The original note named the wrong cause.
+3. **Scheduling cost — measured, not changed, by decision.** The original note named the wrong cause.
    `startNotYetStartedRoutes` sorting every route is real but nearly irrelevant. The actual shape is a
    **Θ(routes + occurrences) floor paid by every event** — the reducer rebuilds all derived indexes,
    re-copies every route record and re-validates the whole state per transition — times roughly nine
@@ -96,13 +96,40 @@ All five were worked on 2026-08-18. Four are closed in code or documentation; on
    owners to one `StyleGroupId`; and `OwnerResourceSet` calls `toSet()` on every transition while
    `StoredRawResource.hashCode()` does a full `contentHashCode()` byte scan, so **every event re-hashes the
    complete payload of every already-installed resource** — on the order of 100 GB per frame at 512 tiles
-   of 50 KB. Extrapolated from this repository's own test timings at ~2.2 µs per occurrence per event on
-   Kotlin/Native, one frame at the **shipped default** 512-tile budget spends roughly five seconds of pure
-   CPU in the scheduler; the 4096 maximum is minutes. None of this is observable in Cycle B, which has no
-   factory and no public runtime API. **Cycle C's first task on the resource driver must land a scale
-   benchmark over a realistic multi-hundred-tile frame before any of it is optimised** — fixing this
-   without a benchmark that fails first is how a scheduling regression ships. The cheapest real win is
-   caching `StoredRawResource`'s hash at construction; the honest fix is the per-event rebuild itself.
+   of 50 KB.
+
+   **This is no longer an extrapolation.** `ResourceOperationScaleBenchmarkTest` drives many *distinct*
+   sticker routes (one occurrence each, no joining) through `ResourceOperationStateMachine.start` /
+   `beginLookup` / `transition` to a real `ResourceOperationOutcome.Success`, on the always-succeeds path,
+   and timed it on Apple Silicon macOS via
+   `./gradlew --no-configuration-cache --rerun-tasks :kmp:macosArm64Test --tests
+   "com.rohittp.reng.internal.resource.ResourceOperationScaleBenchmarkTest"`. Three independent runs:
+
+   | routes | run 1 | run 2 | run 3 |
+   |---|---|---|---|
+   | 64  | 503 ms   | 498 ms   | 501 ms   |
+   | 128 | 1838 ms  | 1724 ms  | 1705 ms  |
+   | 256 | 7274 ms  | 6975 ms  | 6824 ms  |
+   | 512 | 33622 ms | 29052 ms | 29610 ms |
+
+   Successive-doubling ratios sit at roughly 3.5–3.7, 4.0–4.1, and 4.2–4.6 — at or above the quadratic
+   signature (ratio 4), not the linear one (ratio 2, which the existing 4096-occurrence-on-one-route test
+   already shows for the joined case). The reducer's per-event O(routes + occurrences) rebuild, at ~nine
+   events per route, compounds into effectively **O(routes²) or worse**, not the O(events) a linear driver
+   would show. The observed 512-route cost (29–34 real seconds of pure CPU, no I/O) is **worse than this
+   note's own prior extrapolation of ~5 seconds** — by roughly 6x — so the extrapolation undercounted the
+   true cost. **This is not acceptable at the shipped default 512-tile budget**: 29–34 seconds of scheduler
+   CPU before a single byte is decoded, per frame, is not a viable production number, and the 4096 maximum
+   configuration is minutes. The benchmark's guard asserts the 512-route case stays under 50 real seconds —
+   anchored to the worst of the three observed runs with ~49% headroom for slower CI hardware, not for a
+   further regression: extrapolating the 256-route worst run (7274ms) at a cubic rather than the observed
+   near-quadratic doubling ratio (8x instead of ~4.2-4.6x) predicts ~58192ms for 512 routes, which this
+   ceiling still catches. A future change that makes this meaningfully worse fails a real test rather than
+   shipping silently. None of this was observable
+   in Cycle B, which has no factory and no public runtime API. **Cycle C's resource driver must fix this
+   scheduling cost before or alongside connecting real adapters** — the benchmark above is the measurement
+   any such fix must move, and the guard is what proves it worked. The cheapest real win is caching
+   `StoredRawResource`'s hash at construction; the honest fix is the per-event rebuild itself.
 4. **Advancement events — fixed in the plan.** `AdvancePendingClassGates` appeared three times in the plan
    and `AdvancePendingSpriteCommit` and `AdvancePendingStyleCommit` zero times, though the reducer
    implements all three with identical preconditions. Tasks 14B and 14C now specify theirs, including the

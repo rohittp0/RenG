@@ -7,15 +7,16 @@ verification of that commit's first public completion record.
 
 Cycle 0 is complete: the original graphics contract is recorded in ADRs 0001–0012 and `CONTEXT.md`;
 ADRs 0014–0015 supersede its preparation-ordering and exact-context deletion details, ADRs 0016–0017
-add the strict Rentile firewall and terminal renderer ownership rules, and ADR 0018 fixes canonical content
-identities. Everything below
+add the strict Rentile firewall and terminal renderer ownership rules, ADR 0018 fixes canonical content
+identities, and ADRs 0019–0022 record the coroutines dependency, PNG decode ownership, the GLB subset, and the
+corrected GL source-set visibility. Everything below
 inherits the current decisions rather than revisiting them without new evidence.
 
 ## Order
 
 ```
 A skeleton ──► B core ──┬──► C resources ──┐
-                        │                  ├──► E basemap ──► F drawn things ──┬──► G globe
+                        │                  ├──► E basemap+terrain ──► F drawn things ──┬──► G globe
                         └──► D gl foundation┘                                  ├──► H platforms
                                                                                └──► I harness ──► J corpus
 ```
@@ -29,7 +30,7 @@ work in parallel. Everything else is a chain.
 | B | Public API surface and the pure core behind it | `checkKotlinAbi`, host + `linuxX64` + `macosArm64` tests |
 | C | Resource acquisition, decode, parse, caching | Host tests against fake transport/store |
 | D | The GL seam and its three implementations | Real-context conformance on macOS and llvmpipe |
-| E | Basemap drawn from Rentile tiles | First frame with pixels; golden baseline per platform |
+| E | Basemap and terrain drawn from Rentile tiles | First frame with pixels; golden baseline per reported renderer |
 | F | Stickers, models, geometries, both draw regimes | Per-platform golden baselines |
 | G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |
@@ -115,12 +116,22 @@ The conformance suite lands here and is the reason ADR 0006 and ADR 0008 are cla
 state identical before and after a draw, and a GLSL ES 3.00 source compiling under both a substituted
 and an unsubstituted directive. It runs against real contexts on `macosArm64` and llvmpipe.
 
-## E — Basemap
+## E — Basemap and terrain
 
 Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with texture
 residency and eviction driven by the prepared frames that are alive. This is the first cycle that
 produces pixels, so it is also where per-platform golden baselines start — never cross-platform pixel
 equality, since llvmpipe and Apple's GL will not agree.
+
+Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
+while a developer's machine renders through Metal, so the reported renderer string — not the target —
+keys a baseline, or the first run on new hardware fails on a difference that is not a regression.
+
+E also draws the terrain Cycle C acquires. Cycle C takes Rentile's terrain descriptor and DEM tiles,
+decodes them, and validates their declared encoding, but nothing consumes elevation until here: this cycle
+displaces the mercator ground with it. That keeps the ground one subject rather than splitting acquisition
+from the only thing that reads it. Ground radiance, which Rentile evaluates from the style and hands over
+as a literal, belongs with the same work.
 
 ## F — Drawn things
 

@@ -82,11 +82,16 @@ resource operations, default `8` and configurable from `1` through `64`.
 _Avoid_: Coroutine dispatcher, unbounded async, transport retry count
 
 **Resource Limits**:
-The immutable configurable encoded-response ceilings supplied at setup. Every value is bytes in
-`[1, 2147483647]`. Defaults are: basemap style `8 MiB`; basemap metadata (TileJSON and sprite JSON) `4 MiB`;
-basemap vector/raster/DEM tile `32 MiB`; basemap sprite image `32 MiB`; basemap GeoJSON `64 MiB`; sticker
-image `32 MiB`; model GLB `256 MiB`; and model texture `32 MiB`. A request carries its selected ceiling and
-oversize resident, stored, or transported content fails before decode or use.
+The immutable configurable byte ceilings supplied at setup. Every value is bytes in
+`[1, 2147483647]`. Encoded-response defaults are: basemap style `8 MiB`; basemap metadata (TileJSON and
+sprite JSON) `4 MiB`; basemap vector/raster/DEM tile `32 MiB`; basemap sprite image `32 MiB`; basemap GeoJSON
+`64 MiB`; sticker image `32 MiB`; model GLB `256 MiB`; and model texture `32 MiB`. A request carries its
+selected ceiling and oversize resident, stored, or transported content fails before decode or use. Two
+further ceilings bound work an encoded ceiling cannot: a decoded-image ceiling, decided from the declared
+image dimensions before any pixel buffer is allocated rather than after decompression; and a model JSON-chunk
+ceiling bounding a GLB's JSON chunk independently of the whole-GLB ceiling, because a parsed value tree costs
+far more than its text. Structural depth bounds — JSON nesting and node-hierarchy depth — are fixed and not
+configurable.
 _Avoid_: Transport timeout, cache size, decoded-memory estimate, retry budget
 
 **Basemap Style**:
@@ -266,8 +271,20 @@ may back multiple unwrapped world-copy draw instances when repeated Mercator wor
 Mercator selection traces physical output-pixel-centre rays, excludes non-downward sky/horizon samples, and
 selects every closed tile cell intersecting the conservative closed finite ground footprint. Tile edges are
 inclusive for coverage and canonical instances are deduplicated only after unwrapped draw instances and the
-pre-acquisition **Tile Budget** are determined.
+pre-acquisition **Tile Budget** are determined. A basemap tile carries no map text: the basemap engine
+excludes text-only layers and strips text components rather than drawing them, and RenG does not draw them
+either, because text baked into a ground texture is perspective-distorted under a pitched **Camera**. Map
+text therefore needs style-evaluated label primitives from the engine and screen-space placement in RenG,
+and neither exists yet.
 _Avoid_: Output tile, source tile, map tile, raster
+
+**Terrain Sample**:
+Elevation acquired for the style-selected terrain source, encoded as eight-bit channels in one of the two
+supported DEM encodings and validated for its declared encoding before use. RenG decodes and validates
+terrain where it is acquired and displaces the ground with it where the ground is drawn; the tile's own
+decoded samples must be bit-exact, with no premultiplication, scaling, or colour transform, because any of
+those silently change elevations.
+_Avoid_: Height map, DEM image, hillshade, terrain texture
 
 ### Resources
 
@@ -320,6 +337,32 @@ An immutable request selecting all renderer-held resources, one **Resource Kind*
 **Resource Class**, or one **Resource Key** for query or free operations.
 _Avoid_: Cache predicate, mutable filter, locator query
 
+**Resource Generation**:
+One concrete loaded instance of a **Resource Key**'s content, holding its exact raw bytes and record
+metadata, its decoded or parsed product, and later its GPU allocations. Exactly one generation of a key is
+current, and only the current generation satisfies a new **Resource Operation**. A generation superseded by
+different content stays usable while leased and disappears when its last lease closes. Freeing retires every
+generation of the matched keys: those with no lease go immediately, and the rest wait for their last lease.
+A retired generation is never resurrected, even when identical bytes return, so a free result stays a
+truthful account of what happened at that instant.
+_Avoid_: Cache entry, version, revision, snapshot
+
+**Lease**:
+One live claim on one **Resource Generation**, held by a **Prepared Frame** for every distinct resource its
+plan needs and by an in-flight draw for its own duration. A generation is never deleted while any lease is
+open. Leases are counted, not owned exclusively: many prepared frames share one generation, and equal plans
+prepared after **Frame History** is cleared take independent leases.
+_Avoid_: Reference, handle, pin, checkout
+
+**Resource Reload**:
+The path that makes freeing safe. A freed **Resource Key** leaves a marker distinguishing it from one never
+loaded, so the next **Resource Operation** naming that key acquires it again, installs a new current
+**Resource Generation**, and emits exactly one `RESOURCE_RELOADED_AFTER_FREE` warning for that key. Reload
+follows the same **Resource Access Mode** rules as any other operation and may be satisfied from the
+**Store** without a network exchange; the warning reports that RenG had to reload, not that it refetched.
+Markers live until **Renderer Close**.
+_Avoid_: Cache miss, invalidation, eviction, refresh
+
 **Resource Report**:
 An immutable point-in-time account aggregated by **Resource Key**, with resident-generation count,
 retired-generation count, lease count, and reload-required flag. Each entry and the report totals contain
@@ -340,7 +383,12 @@ collision detection, with no execution order or permission to start work. Conten
 register at deterministic depth-first discovery frontiers before work on that route; later occurrences stay
 withheld until all earlier frontiers close. Distinct routes that collapse to one private Rentile Store key fail
 `AMBIGUOUS_RESOURCE_ROUTE`; no call is made for the newly colliding route, though already completed parent
-calls cannot be undone.
+calls cannot be undone. A private Rentile Store key exists only for the seven **Resource Class**es Rentile
+itself keys — TileJSON, vector tile, raster tile, DEM tile, sprite JSON, sprite image, and GeoJSON — and
+reproduces Rentile's own derivation over the locator with authentication query values redacted. Basemap
+Style, sticker image, model GLB, and model texture are never keyed by Rentile, so each takes a private key
+derived from RenG's own canonical resource identity, which is injective in locator and class and therefore
+never collides. Collision detection is uniform over routes; only the derivation differs by class.
 The first consumer **Transport** outcome is latched for that identity until the operation ends, so concurrent
 joins and repeated internal Rentile adapter calls replay the same complete response, sanitized failure, or
 unwrapped cancellation outcome rather than performing another consumer exchange. A latch never outlives its
@@ -428,7 +476,12 @@ from history clearing, resource freeing, or renderer close at that operation's s
 `limit`, and `actual`. Public value/configuration constructor violations instead throw non-sensitive
 `IllegalArgumentException` before renderer work; their implementation-defined messages are not caller
 contracts. Unexpected transport statuses, integrity failures, and deferred GPU-deletion failures remain
-distinct errors and never trigger fallback work.
+distinct errors and never trigger fallback work. Every basemap engine failure is classified into RenG's own
+closed code rather than wrapped: style failures reuse the parse and unsupported-feature codes, engine safety
+limits reuse `RESOURCE_LIMIT_EXCEEDED`, engine store failures reuse the store codes, and a wrapped batch
+failure is unwrapped to its primary. A failure to produce the ground image itself — rasterization or its
+encoding — is `BASEMAP_RENDER_FAILED` at `BASEMAP_RENDER`, which also carries the engine states reachable
+only if RenG mismanaged a handle it owns, so no untyped throwable escapes.
 _Avoid_: Adapter exception, cause chain, message-based recovery
 
 **Diagnostic**:

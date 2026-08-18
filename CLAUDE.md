@@ -29,7 +29,9 @@ remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
 preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and
-terminal renderer ownership, and ADR 0018 governs canonical identities). Read both before proposing anything that touches
+terminal renderer ownership, ADR 0018 governs canonical identities, ADR 0019 takes kotlinx-coroutines as a
+first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, and ADR 0022
+supersedes ADR 0009's source-set visibility claim). Read both before proposing anything that touches
 the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is

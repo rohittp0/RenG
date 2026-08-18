@@ -60,24 +60,51 @@ Most of the rest were the same shape: values whose constructors accepted self-co
 reducer never produced. **When a reducer's own state type is the boundary that makes an illegal state
 impossible, write the invariant into the type, not only into the paths that build it.**
 
-### Open decisions for the repository owner
+### The five open decisions, resolved
 
-None block integration review. Each changes approved code or an approved contract, so each was left alone.
+All five were worked on 2026-08-18. Four are closed in code or documentation; one is deliberately deferred.
 
-1. **Transport response copy amplification.** A successful 200 duplicates its body four to five times and
-   retains three at once; at the 256 MiB model limit the peak live set approaches 1.75 GB for one file.
-   Latch retention is required by ADR 0016, the extra copies are not, and `TransportResponse` already
-   snapshots on construction and copies on every read.
-2. **`ShaderProfilePlan` validates nothing.** A directly constructed profile can claim a source it does not
-   describe, and desktop substitution then emits `#version 330 core#version 300 es`, which will not
-   compile. The fix belongs in Task 9C's construction surface.
-3. **Scheduling cost across distinct routes** is quadratic in the number of routes, pre-existing from Task
-   12B. The specified case — 4,096 joined occurrences on one route — is linear and passes.
-4. **The plan omits advancement events.** Tasks 14A, 14B and 14C each needed one to preserve the
-   zero-action lookup boundary; only the first is specified. Worth folding into the plan or an ADR.
-5. **Two guards proved unkillable by test** — the buffered-outcome guard in route success, and the
-   gate-index distinction — because no admissible state distinguishes them. Kept and documented rather
-   than removed or covered by a vacuous test.
+1. **Transport response copy amplification — partly fixed.** The original note undercounted its own
+   arithmetic: a successful 200 made **seven** copies, not four to five (1.75 GB ÷ 256 MiB is exactly 7),
+   and two paths went unmentioned — the `304` merge and the Store read, the latter running on every warm
+   frame. `TransportResponse` and `StoredRawResource` now expose internal non-copying snapshot accessors
+   used where the array is only measured or fed straight into a copying constructor, and the redundant
+   latch and `copyStored` re-copies are gone. Both classes are `final` over private snapshots with
+   copying public getters, so no aliasing escapes and the public copy-on-read contract is untouched.
+   **Still open, and deliberately:** letting RenG retain the consumer's own `TransportResponse` instead of
+   its own copy would remove two further copies, but ADR 0016 says the outcome is latched as a
+   *defensively copied* response, and retaining the consumer's object makes identity observable through
+   `===`. That is an ADR 0016 amendment, not a cleanup.
+2. **`ShaderProfilePlan` validates nothing — fixed.** The type now carries five `init` invariants relating
+   its declared span to the actual source: ascending in-range span, span starts and ends a physical line,
+   and the trimmed span is exactly the accepted directive. Bounds are checked before the trim comparison,
+   which indexes the span. Seven contradictory constructions are now rejected with
+   `IllegalArgumentException`, including the reported `#version 330 core#version 300 es` case and a
+   descending span that previously duplicated text silently. Messages carry no source text.
+3. **Scheduling cost — documented, not changed, by decision.** The original note named the wrong cause.
+   `startNotYetStartedRoutes` sorting every route is real but nearly irrelevant. The actual shape is a
+   **Θ(routes + occurrences) floor paid by every event** — the reducer rebuilds all derived indexes,
+   re-copies every route record and re-validates the whole state per transition — times roughly nine
+   events per route, giving Θ(events × (routes + occurrences)). Two further costs compound it: the
+   style-owner barrier is O(owners × occurrences), which bites because a 256-frame batch binds all 256
+   owners to one `StyleGroupId`; and `OwnerResourceSet` calls `toSet()` on every transition while
+   `StoredRawResource.hashCode()` does a full `contentHashCode()` byte scan, so **every event re-hashes the
+   complete payload of every already-installed resource** — on the order of 100 GB per frame at 512 tiles
+   of 50 KB. Extrapolated from this repository's own test timings at ~2.2 µs per occurrence per event on
+   Kotlin/Native, one frame at the **shipped default** 512-tile budget spends roughly five seconds of pure
+   CPU in the scheduler; the 4096 maximum is minutes. None of this is observable in Cycle B, which has no
+   factory and no public runtime API. **Cycle C's first task on the resource driver must land a scale
+   benchmark over a realistic multi-hundred-tile frame before any of it is optimised** — fixing this
+   without a benchmark that fails first is how a scheduling regression ships. The cheapest real win is
+   caching `StoredRawResource`'s hash at construction; the honest fix is the per-event rebuild itself.
+4. **Advancement events — fixed in the plan.** `AdvancePendingClassGates` appeared three times in the plan
+   and `AdvancePendingSpriteCommit` and `AdvancePendingStyleCommit` zero times, though the reducer
+   implements all three with identical preconditions. Tasks 14B and 14C now specify theirs, including the
+   start-ceiling behaviour that makes a ceiling-prohibited sprite member stage no candidate.
+5. **Two unkillable guards — kept and now documented in code.** The buffered-outcome guard in
+   `successOutcome` carries a comment explaining that outcomes buffer only at or above
+   `nextRetirementOrdinal`, so the preceding retirement check already implies it. Neither guard had any
+   comment before, so a future reader would reasonably have deleted them as dead code.
 
 ## Cycle C — resource layer
 
@@ -167,9 +194,10 @@ sketches signatures for representative calls; the specification has to choose.
 
 ## Cycles E through J
 
-**E — basemap.** Rentile tiles decoded, uploaded and drawn as the mercator ground, with texture residency
-and eviction driven by the prepared frames that are alive, which connects directly to Cycle B's lease
-machinery. First pixels, so per-platform golden baselines start here.
+**E — basemap and terrain.** Rentile tiles decoded, uploaded and drawn as the mercator ground, with texture
+residency and eviction driven by the prepared frames that are alive, which connects directly to Cycle B's
+lease machinery. It also displaces that ground with the terrain Cycle C acquires, since nothing before it
+consumes elevation. First pixels, so golden baselines start here.
 
 Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
 while a developer's machine renders through Metal, so the reported renderer string — not the target —
@@ -178,7 +206,7 @@ should key a baseline, or the first run somewhere new will fail on a difference 
 **F — drawn things.** Stickers, models with textures and animation-track time sampling, and geometries
 painted by consumer shader pairs. Owns the decision `CLAUDE.md` flags as ADR-worthy and still unmade: how
 the two draw regimes order within one frame, given screen-anchored things composite by z-index with no
-depth test while map-anchored things are occlusion-tested. That would be **ADR 0019**. This cycle also
+depth test while map-anchored things are occlusion-tested. That would be **ADR 0023**. This cycle also
 fixes the documented uniform and attribute names a shader pair may declare.
 
 **G — globe projection.** The second projection mode, re-projecting mercator tiles and every placement.

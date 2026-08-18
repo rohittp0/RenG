@@ -458,7 +458,7 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
     }
 
     override fun getShaderInfoLog(shader: Int): String = memScoped {
-        val lengthVar = alloc<IntVar>()
+        val lengthVar = alloc<IntVar> { value = 0 }
         getShaderivFn(shader.toUInt(), GL_INFO_LOG_LENGTH.toUInt(), lengthVar.ptr)
         val length = lengthVar.value
         if (length <= 0) {
@@ -488,7 +488,7 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
     }
 
     override fun getProgramInfoLog(program: Int): String = memScoped {
-        val lengthVar = alloc<IntVar>()
+        val lengthVar = alloc<IntVar> { value = 0 }
         getProgramivFn(program.toUInt(), GL_INFO_LOG_LENGTH.toUInt(), lengthVar.ptr)
         val length = lengthVar.value
         if (length <= 0) {

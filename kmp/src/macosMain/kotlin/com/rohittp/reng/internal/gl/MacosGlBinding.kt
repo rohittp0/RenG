@@ -155,11 +155,13 @@ internal object MacosGlBinding : GlBinding {
     override fun isEnabled(cap: Int): Boolean = glIsEnabled(cap.toUInt()).asBoolean()
 
     override fun genFramebuffers(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenFramebuffers needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenFramebuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteFramebuffers(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteFramebuffers needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteFramebuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -181,11 +183,13 @@ internal object MacosGlBinding : GlBinding {
     override fun isFramebuffer(framebuffer: Int): Boolean = glIsFramebuffer(framebuffer.toUInt()).asBoolean()
 
     override fun genRenderbuffers(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenRenderbuffers needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenRenderbuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteRenderbuffers(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteRenderbuffers needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteRenderbuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -211,6 +215,7 @@ internal object MacosGlBinding : GlBinding {
     }
 
     override fun drawBuffers(count: Int, buffers: IntArray) {
+        require(buffers.size >= count) { "glDrawBuffers needs room for $count buffers" }
         if (count == 0) return
         buffers.usePinned { pinned -> glDrawBuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -220,11 +225,13 @@ internal object MacosGlBinding : GlBinding {
     }
 
     override fun genTextures(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenTextures needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenTextures(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteTextures(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteTextures needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteTextures(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -266,11 +273,13 @@ internal object MacosGlBinding : GlBinding {
     }
 
     override fun genSamplers(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenSamplers needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenSamplers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteSamplers(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteSamplers needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteSamplers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -293,11 +302,13 @@ internal object MacosGlBinding : GlBinding {
     }
 
     override fun genBuffers(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenBuffers needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenBuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteBuffers(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteBuffers needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteBuffers(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
@@ -320,11 +331,13 @@ internal object MacosGlBinding : GlBinding {
     }
 
     override fun genVertexArrays(count: Int, out: IntArray) {
+        require(out.size >= count) { "glGenVertexArrays needs room for $count names" }
         if (count == 0) return
         out.usePinned { pinned -> glGenVertexArrays(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }
 
     override fun deleteVertexArrays(count: Int, names: IntArray) {
+        require(names.size >= count) { "glDeleteVertexArrays needs room for $count names" }
         if (count == 0) return
         names.usePinned { pinned -> glDeleteVertexArrays(count, pinned.addressOf(0).reinterpret<UIntVar>()) }
     }

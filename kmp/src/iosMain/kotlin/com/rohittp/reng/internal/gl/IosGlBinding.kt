@@ -377,7 +377,7 @@ internal object IosGlBinding : GlBinding {
     }
 
     override fun getShaderInfoLog(shader: Int): String = memScoped {
-        val length = alloc<IntVar>()
+        val length = alloc<IntVar> { value = 0 }
         glGetShaderiv(shader.toUInt(), GL_INFO_LOG_LENGTH.toUInt(), length.ptr)
         val size = length.value
         if (size <= 0) return@memScoped ""
@@ -410,7 +410,7 @@ internal object IosGlBinding : GlBinding {
     }
 
     override fun getProgramInfoLog(program: Int): String = memScoped {
-        val length = alloc<IntVar>()
+        val length = alloc<IntVar> { value = 0 }
         glGetProgramiv(program.toUInt(), GL_INFO_LOG_LENGTH.toUInt(), length.ptr)
         val size = length.value
         if (size <= 0) return@memScoped ""

@@ -103,42 +103,42 @@
 Use isolated worktrees only for these parallel waves. Each worker owns only its listed production/test files, commits them, and returns the commit SHA. The controller reviews and cherry-picks each commit before the next wave.
 
 ```text
-Task 0 freeze exact worker base
+the setup section freeze exact worker base
   └─ Task 1 tokens and roster
        └─ Task 2 seam interface, expect declaration, recording fake
             ├─ Task 3 iosMain            ┐
             ├─ Task 4 macosMain          │ four independent binding lanes
             ├─ Task 5 linuxMain          │
             └─ Task 6 androidMain        ┘
-                 └─ Task 7 six-target layout proof
+                 └─ Task 6 six-target layout proof
        └─ (in parallel with 3–6, all pure and fake-driven)
-            ├─ Task 8 context profile and dialect
-            ├─ Task 9 error queue
-            └─ Task 11 internal resource identities
+            ├─ Task 7 context profile and dialect
+            ├─ Task 8 error queue
+            └─ Task 10 internal resource identities
 
-After Task 8 and Task 9:
-  └─ Task 10 save-and-restore set
+After Task 7 and Task 8:
+  └─ Task 9 save-and-restore set
 
-After Task 8, Task 10, and Task 11:
-  ├─ Task 12 shader compiler and program cache
-  └─ Task 13 offscreen surface
+After Task 7, Task 9, and Task 10:
+  ├─ Task 11 shader compiler and program cache
+  └─ Task 12 offscreen surface
 
-After Task 12 and Task 13:
-  └─ Task 14 composite pass and draw path
+After Task 11 and Task 12:
+  └─ Task 13 composite pass and draw path
 
-After Task 13:
-  └─ Task 15 object registry and context identity
+After Task 12:
+  └─ Task 14 object registry and context identity
 
-After Task 14 and Task 15:
-  └─ Task 16 lifecycle driver
+After Task 13 and Task 14:
+  └─ Task 15 lifecycle driver
 
-After Task 7 and Task 16:
-  └─ Task 17 shared conformance suite body
-       ├─ Task 18 Linux fixture and suite run
-       └─ Task 19 macOS fixture and suite run
+After Task 6 and Task 15:
+  └─ Task 16 shared conformance suite body
+       ├─ Task 17 Linux fixture and suite run
+       └─ Task 18 macOS fixture and suite run
 
-Task 20 CI wiring after Task 18
-Task 21 documentation and full local gates after Tasks 19 and 20
+Task 17 CI wiring after Task 17
+Task 19 documentation and full local gates after Tasks 19 and 20
 ```
 
 At most three independent implementation workers run at once. A practical schedule is `(3,4,5)`, then `(6,8,9)`, then `(7,10,11)`, then `(12,13)`, then `(14,15)`, then the serial `16 → 17 → (18,19) → 20 → 21`. Each dependent dispatch uses a new exact controller SHA after its prerequisites are reviewed and incorporated.
@@ -147,19 +147,12 @@ No two workers edit the same seam interface file, roster file, recording fake, A
 
 ---
 
-### Task 0: Freeze the Execution Base
+## Before you start
 
-**Files:**
-- Verify tracked: `docs/superpowers/plans/2026-08-18-cycle-d-gl-foundation.md`
-- Verify tracked: `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md`
-- Verify tracked: `docs/research/2026-08-18-cycle-d-gl-foundation.md`
-- Modify: none.
+Plan-wide setup rather than a task: it produces no deliverable and nothing reviews it in
+isolation. Do all of it once, before Task 1.
 
-**Interfaces:**
-- Consumes: the committed, independently reviewed plan; the approved Cycle D specification; ADRs 0001, 0005, 0006, 0007, 0008, 0009, 0011, 0012, 0015, 0022.
-- Produces: one exact clean controller SHA used as the base of every worker in the next wave, and a recorded baseline ABI digest.
-
-- [ ] **Step 1: Require the reviewed artifacts to be committed**
+**Require the reviewed artifacts to be committed**
 
 ```bash
 git ls-files --error-unmatch \
@@ -172,7 +165,7 @@ test -z "$(git status --porcelain)"
 
 If any command fails, stop before implementation and commit the missing documentation rather than giving workers an untracked side channel.
 
-- [ ] **Step 2: Record the ABI baseline this cycle must not move**
+**Record the ABI baseline this cycle must not move**
 
 ```bash
 shasum -a 256 kmp/api/kmp.klib.api | tee /tmp/reng-cycle-d-abi-baseline.txt
@@ -180,7 +173,7 @@ shasum -a 256 kmp/api/kmp.klib.api | tee /tmp/reng-cycle-d-abi-baseline.txt
 
 Every task that touches `kmp/src` re-runs `:kmp:checkKotlinAbi` and re-checks this digest. A changed digest means an `internal` declaration leaked into the public surface, and is a stop-the-line defect rather than a dump to regenerate.
 
-- [ ] **Step 3: Capture and enforce each wave base**
+**Capture and enforce each wave base**
 
 ```bash
 WAVE_BASE="$(git rev-parse HEAD)"
@@ -196,6 +189,8 @@ test -z "$(git status --porcelain)"
 ```
 
 The controller includes the literal `WAVE_BASE` SHA in each dispatch and captures a new base after reviewing and cherry-picking a worker commit. Remove completed `.claude/worktrees/agent-*` entries only after confirming each is clean and incorporated; keep the primary checkout.
+
+---
 
 ---
 
@@ -254,7 +249,7 @@ class GlEntryPointRosterTest {
 }
 ```
 
-The last case is not decoration: `GL_DRAW_BUFFER` and `GL_LINE_SMOOTH` are the two tokens Task 10 must query only on a desktop context, and `GL_NUM_EXTENSIONS` is the token that makes `glGetStringi` necessary at all, so their values are pinned where a reader will look for them.
+The last case is not decoration: `GL_DRAW_BUFFER` and `GL_LINE_SMOOTH` are the two tokens Task 9 must query only on a desktop context, and `GL_NUM_EXTENSIONS` is the token that makes `glGetStringi` necessary at all, so their values are pinned where a reader will look for them.
 
 - [ ] **Step 2: Run the focused test and verify red**
 
@@ -524,7 +519,7 @@ Expected: both test runs pass and `checkKotlinAbi` reports no change.
 
 **Interfaces:**
 - Consumes: Task 1 tokens and roster.
-- Produces: `internal interface GlBinding` with eighty-four methods typed at Android's width; `internal sealed interface GlBindingResult`; `internal expect fun openPlatformGlBinding(): GlBindingResult`; and `RecordingGlBinding`, the programmable fake that every pure test in Tasks 8–16 drives.
+- Produces: `internal interface GlBinding` with eighty-four methods typed at Android's width; `internal sealed interface GlBindingResult`; `internal expect fun openPlatformGlBinding(): GlBindingResult`; and `RecordingGlBinding`, the programmable fake that every pure test in Tasks 7–15 drives.
 
 - [ ] **Step 1: Write the seam-shape test**
 
@@ -993,7 +988,7 @@ Append to the same file:
 internal actual fun openPlatformGlBinding(): GlBindingResult = GlBindingResult.Bound(IosGlBinding)
 ```
 
-Apple's ES entry points are resolved by the linker, so there is nothing to fail here; the only `Unsupported` result on iOS comes later, from Task 8's context adoption.
+Apple's ES entry points are resolved by the linker, so there is nothing to fail here; the only `Unsupported` result on iOS comes later, from Task 7's context adoption.
 
 - [ ] **Step 4: Compile both iOS targets and commit**
 
@@ -1297,7 +1292,7 @@ git commit -m "feat: implement the GL seam on Linux"
 
 ---
 
-### Task 6: The Android Implementation over `GLES30`
+### Task 6: The Android Implementation over `GLES30`, and Proving the Layout on Every Leaf
 
 **Files:**
 - Create: `kmp/src/androidMain/kotlin/com/rohittp/reng/internal/gl/AndroidGlBinding.kt`
@@ -1395,25 +1390,7 @@ Write the remaining methods as direct `GLES30.<name>(...)` calls, passing `0` as
 
 Expected: both succeed. `androidHostTest` runs on the JVM against `android.jar` stubs that throw on every real call, so no host test may invoke `AndroidGlBinding`; Android's real-context coverage is Cycle H's, and this seam is exercised in continuous integration by the macOS and Linux implementations instead (ADR 0011).
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add kmp/src/androidMain/kotlin/com/rohittp/reng/internal/gl/AndroidGlBinding.kt
-git commit -m "feat: implement the GL seam on Android"
-```
-
----
-
-### Task 7: Prove the Layout on Every Leaf
-
-**Files:**
-- Modify: none. This task compiles and verifies.
-
-**Interfaces:**
-- Consumes: Tasks 3–6.
-- Produces: recorded evidence that all six leaf compilations and the shared-source-set metadata compilation accept the layout, and that no GL type reached the public ABI.
-
-- [ ] **Step 1: Compile every leaf plus the shared metadata compilation**
+- [ ] **Step 3: Compile every leaf plus the shared metadata compilation**
 
 ```bash
 ./gradlew --no-configuration-cache \
@@ -1428,7 +1405,7 @@ git commit -m "feat: implement the GL seam on Android"
 
 Expected: all seven succeed. `compileIosMainKotlinMetadata` matters because the shared-source-set metadata compilation resolves against commonized cinterop libraries and is the compilation most likely to reject platform GL. A partial compile can look green — platform-library resolution is enforced per leaf, not by pre-computing an intersection — so the layout is trusted only after every one of these passes.
 
-- [ ] **Step 2: Confirm the seam produced no public ABI**
+- [ ] **Step 4: Confirm the seam produced no public ABI**
 
 ```bash
 ./gradlew --no-configuration-cache :kmp:checkKotlinAbi
@@ -1437,26 +1414,25 @@ diff <(shasum -a 256 kmp/api/kmp.klib.api) /tmp/reng-cycle-d-abi-baseline.txt
 ! grep -nE 'platform\.|kotlinx\.cinterop|GLES30|GlBinding' kmp/api/kmp.klib.api
 ```
 
-Expected: `checkKotlinAbi` passes, the digest matches Task 0's baseline exactly, and the grep finds nothing. `@OptIn(ExperimentalForeignApi::class)` is harmless while the seam is `internal` and must never reach public API; this step is what makes that a check rather than an intention.
+Expected: `checkKotlinAbi` passes, the digest matches the baseline recorded in "Before you start" exactly, and the grep finds nothing. `@OptIn(ExperimentalForeignApi::class)` is harmless while the seam is `internal` and must never reach public API; this step is what makes that a check rather than an intention.
 
-- [ ] **Step 3: Commit the evidence in the message only**
+- [ ] **Step 5: Commit**
 
 ```bash
-test -z "$(git status --porcelain)"
+git add kmp/src/androidMain/kotlin/com/rohittp/reng/internal/gl/AndroidGlBinding.kt
+git commit -m "feat: implement the GL seam on Android"
 ```
-
-Expected: nothing to commit. This task changes no file; if it reports changes, a previous task left work uncommitted.
 
 ---
 
-### Task 8: Context Adoption and Runtime Dialect Detection
+### Task 7: Context Adoption and Runtime Dialect Detection
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/RenderContextProfile.kt`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/RenderContextProfileTest.kt`
 
 **Interfaces:**
-- Consumes: Task 1 tokens, Task 2 seam, Task 9's `GlErrorQueue` (land Task 9 first or stub the drain call and fill it in when Task 9 merges).
+- Consumes: Task 1 tokens, Task 2 seam, Task 8's `GlErrorQueue` (land Task 8 first or stub the drain call and fill it in when Task 8 merges).
 - Produces: `ShaderDialect`, `GlVersion`, `RenderContextProfile`, `RenderContextAdoption`, `detectShaderDialect`, `parseGlVersion`, `readExtensionNames`, and `adoptRenderContext`.
 
 > **The dialect is a runtime property of the adopted context and never a property of the target.** This is the specification's single most important statement about shaders. On `linuxX64` and `linuxArm64` the consumer creates the context and may reasonably create either an ES 3.x context or a desktop core context — an EGL/Wayland application does the former, a GLX application the latter, from the same binary on the same target. Keying substitution off the platform would inject `#version 330 core` into an ES context, which is fatal, and that is the more likely Linux case. No `expect`/`actual`, no `Platform.osFamily`, no target-conditional compilation, and no build flag may reach this decision. The only input is `GL_SHADING_LANGUAGE_VERSION` read from the live context.
@@ -1766,7 +1742,7 @@ git commit -m "feat: detect the render context dialect at runtime"
 
 ---
 
-### Task 9: The Error Queue, and Its One Declared Exception
+### Task 8: The Error Queue, and Its One Declared Exception
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlErrorQueue.kt`
@@ -1776,7 +1752,7 @@ git commit -m "feat: detect the render context dialect at runtime"
 - Consumes: Task 1 tokens, Task 2 seam.
 - Produces: `GlErrorQueue.drainOnEntry`, `GlErrorQueue.firstOwnError`, and `glOperationFailure`.
 
-`glGetError` is destructive: a provoked error reads `0x500` once and `0x0` thereafter, and there is no way to push a flag back. RenG drains on entry, treats any flag found as the consumer's rather than its own, and **documents that it consumes the error queue**. That is a real, stated exception to ADR 0006's guarantee that RenG modifies nothing outside the restore set — one to declare rather than let a consumer discover — and Task 21 writes it down where a consumer will read it.
+`glGetError` is destructive: a provoked error reads `0x500` once and `0x0` thereafter, and there is no way to push a flag back. RenG drains on entry, treats any flag found as the consumer's rather than its own, and **documents that it consumes the error queue**. That is a real, stated exception to ADR 0006's guarantee that RenG modifies nothing outside the restore set — one to declare rather than let a consumer discover — and Task 19 writes it down where a consumer will read it.
 
 - [ ] **Step 1: Write the drain tests**
 
@@ -1902,14 +1878,14 @@ git commit -m "feat: drain the GL error queue on entry"
 
 ---
 
-### Task 10: The Corrected Save-and-Restore Set
+### Task 9: The Corrected Save-and-Restore Set
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlStateSnapshot.kt`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/GlStateSnapshotTest.kt`
 
 **Interfaces:**
-- Consumes: Task 1 tokens, Task 2 seam, Task 8's `RenderContextProfile` and `ShaderDialect`.
+- Consumes: Task 1 tokens, Task 2 seam, Task 7's `RenderContextProfile` and `ShaderDialect`.
 - Produces: `GlTextureUnitState`, `GlStateSnapshot`, `captureGlState`, and `restoreGlState`.
 
 Two ordering and portability constraints are normative rather than advisory. Reading a texture binding requires making its unit active, so `GL_ACTIVE_TEXTURE` is captured **first** and reinstated **last**, with every per-unit read and write nested inside. And `GL_DRAW_BUFFER` and `GL_LINE_SMOOTH` are queryable on a desktop core profile but raise `GL_INVALID_ENUM` on ES, so this code is dialect-aware; an unconditional query list would leave a spurious error flag on ES. The **array** buffer binding is captured explicitly because the VAO does not capture it, while the **element** array buffer binding needs no restore because it is per-VAO state restored implicitly by the VAO binding.
@@ -2251,7 +2227,7 @@ git commit -m "feat: capture and restore the corrected GL state set"
 
 ---
 
-### Task 11: Freeze the Internal Pipeline and Offscreen Surface Identities
+### Task 10: Freeze the Internal Pipeline and Offscreen Surface Identities
 
 **Files:**
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/ResourceKeyDerivation.kt`
@@ -2361,7 +2337,7 @@ Expected: compilation fails because neither deriver method exists.
 
 - [ ] **Step 3: Declare the descriptors**
 
-Put these three enums and the descriptor in the GL package, beside the code that creates the resources they describe, at `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/OffscreenSurface.kt` (Task 13 fills in the rest of that file) and `CompositePipeline.kt` (Task 14). If Task 11 lands before either, create the files with only these declarations.
+Put these three enums and the descriptor in the GL package, beside the code that creates the resources they describe, at `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/OffscreenSurface.kt` (Task 12 fills in the rest of that file) and `CompositePipeline.kt` (Task 13). If Task 10 lands before either, create the files with only these declarations.
 
 ```kotlin
 internal enum class InternalPipelineRole(internal val wireValue: Int) {
@@ -2468,7 +2444,7 @@ Expected: the pre-existing Cycle B identity tests still pass unchanged, which is
 
 ---
 
-### Task 12: Shader Compilation, Version Substitution, and the Program Cache
+### Task 11: Shader Compilation, Version Substitution, and the Program Cache
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlShaderCompiler.kt`
@@ -2476,7 +2452,7 @@ Expected: the pre-existing Cycle B identity tests still pass unchanged, which is
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/GlShaderCompilerTest.kt`
 
 **Interfaces:**
-- Consumes: Cycle B's `ShaderProfilePlan` (`gles300Source()`, `desktop330Source()`) and `ResourceKeyDeriver.geometryProgram`; Task 8's `ShaderDialect`; Task 9's `glOperationFailure`.
+- Consumes: Cycle B's `ShaderProfilePlan` (`gles300Source()`, `desktop330Source()`) and `ResourceKeyDeriver.geometryProgram`; Task 7's `ShaderDialect`; Task 8's `glOperationFailure`.
 - Produces: `ShaderCompileStep`, `ShaderInfoLogObserver`, `GlProgramResult`, `ShaderProfilePlan.sourceFor`, `compileShaderProgram`, `shaderProgramFailure`, and `GlProgramCache`.
 
 Cycle B already implements the scan and the substitution purely, and its plan now validates that the declared span actually describes the directive line, so a `ShaderProfilePlan` cannot emit `#version 330 core#version 300 es`. Cycle D supplies the dialect and performs the compile, and adds nothing to the substitution rule itself.
@@ -2780,7 +2756,7 @@ git commit -m "feat: compile shaders against the detected dialect"
 
 ---
 
-### Task 13: The Offscreen Colour-and-Depth Surface
+### Task 12: The Offscreen Colour-and-Depth Surface
 
 **Files:**
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/OffscreenSurface.kt`
@@ -2788,7 +2764,7 @@ git commit -m "feat: compile shaders against the detected dialect"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/OffscreenSurfaceTest.kt`
 
 **Interfaces:**
-- Consumes: Task 8's `RenderContextProfile`, Task 9's `GlErrorQueue`/`glOperationFailure`, Task 10's snapshot, Task 11's `OffscreenSurfaceDescriptor` and `ResourceKeyDeriver.offscreenSurface`, and public `OutputPixelSize`.
+- Consumes: Task 7's `RenderContextProfile`, Task 8's `GlErrorQueue`/`glOperationFailure`, Task 9's snapshot, Task 10's `OffscreenSurfaceDescriptor` and `ResourceKeyDeriver.offscreenSurface`, and public `OutputPixelSize`.
 - Produces: `withCapturedGlState`, `OffscreenSurface`, `OffscreenSurfaceResult`, `createOffscreenSurface`, and `deleteOffscreenSurface`.
 
 RenG renders into its own offscreen colour-and-depth surface at the configured output pixel size and then composites it into the caller's `RenderTarget`, so a target only has to be a colour-writable framebuffer of the configured dimensions (ADR 0005). The surface is allocated once and never resized, because output size is fixed at setup (ADR 0012).
@@ -3035,7 +3011,7 @@ git commit -m "feat: allocate RenG's offscreen colour and depth surface"
 
 ---
 
-### Task 14: The Composite Pass and the Cycle D Draw Path
+### Task 13: The Composite Pass and the Cycle D Draw Path
 
 **Files:**
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/CompositePipeline.kt`
@@ -3419,7 +3395,7 @@ git commit -m "feat: composite RenG's offscreen surface into the caller's target
 
 ---
 
-### Task 15: The GL Object Registry and the Render Context Identity Seam
+### Task 14: The GL Object Registry and the Render Context Identity Seam
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlObjectRegistry.kt`
@@ -3641,7 +3617,7 @@ git commit -m "feat: track GL handles and the adopted context identity"
 
 ---
 
-### Task 16: Drive Cycle B's Lifecycle State Machine with Real GL Facts
+### Task 15: Drive Cycle B's Lifecycle State Machine with Real GL Facts
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/GlLifecycleDriver.kt`
@@ -3820,7 +3796,7 @@ class GlLifecycleDriverTest {
 }
 ```
 
-Add a private `driverWorld(...)` helper building a `RecordingGlBinding` seeded like Task 8's ES context, a `GlObjectRegistry` optionally holding one texture handle under `surfaceKey`, a `GlProgramCache`, a probe returning the supplied identity, an initial `RendererLifecycleSnapshot` whose owner state is `LIVE` or `AWAITING_CONTEXT_ADOPTION`, and `setLedger` to install deferred entries into both the registry and the snapshot's `GpuLedger`. Add `geometryKey()`, `vertexPlan()`, and `fragmentPlan()` helpers reusing Task 12's sources.
+Add a private `driverWorld(...)` helper building a `RecordingGlBinding` seeded like Task 7's ES context, a `GlObjectRegistry` optionally holding one texture handle under `surfaceKey`, a `GlProgramCache`, a probe returning the supplied identity, an initial `RendererLifecycleSnapshot` whose owner state is `LIVE` or `AWAITING_CONTEXT_ADOPTION`, and `setLedger` to install deferred entries into both the registry and the snapshot's `GpuLedger`. Add `geometryKey()`, `vertexPlan()`, and `fragmentPlan()` helpers reusing Task 11's sources.
 
 - [ ] **Step 2: Run and verify red**
 
@@ -4042,13 +4018,13 @@ Expected: the two pre-existing Cycle B lifecycle suites still pass untouched, wh
 
 ---
 
-### Task 17: The Shared Conformance Suite Body
+### Task 16: The Shared Conformance Suite Body
 
 **Files:**
 - Create: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/GlConformanceSuite.kt`
 
 **Interfaces:**
-- Consumes: every component from Tasks 8–16 and the real `GlBinding` a platform fixture supplies.
+- Consumes: every component from Tasks 7–15 and the real `GlBinding` a platform fixture supplies.
 - Produces: `GlConformanceReport` and `runGlConformanceSuite(binding, probe, expectedDialect)`, called only from `linuxTest` and `macosTest`.
 
 The suite body lives in `commonTest` so one set of assertions runs against both dialects and both binding implementations without a custom source set or a build-script change. It is compiled for every target and invoked on exactly two; `androidHostTest` and the iOS test compilations never call it, because they have no real context.
@@ -4537,14 +4513,16 @@ Expected: both tasks succeed. The suite compiles for every target and is invoked
 
 ---
 
-### Task 18: The Linux Surfaceless EGL Fixture and Its Two Dialects
+### Task 17: The Linux Surfaceless EGL Fixture, Its Two Dialects, and the CI Gate That Runs It
 
 **Files:**
 - Create: `kmp/src/linuxTest/kotlin/com/rohittp/reng/internal/gl/SurfacelessEglContext.kt`
 - Create: `kmp/src/linuxTest/kotlin/com/rohittp/reng/internal/gl/LinuxGlConformanceTest.kt`
+- Modify: `.github/workflows/ci.yml`
+- Modify: `.github/workflows/publish.yml`
 
 **Interfaces:**
-- Consumes: Task 5's `openPlatformGlBinding`, Task 17's `runGlConformanceSuite`, `platform.posix` `dlopen`/`dlsym`.
+- Consumes: Task 5's `openPlatformGlBinding`, Task 16's `runGlConformanceSuite`, `platform.posix` `dlopen`/`dlsym`.
 - Produces: a surfaceless EGL context in either dialect, a `RenderContextProbe` over `eglGetCurrentContext`, and two conformance runs.
 
 Context creation lives in the test fixture, not in RenG (ADR 0001). This is the cheapest place RenG will ever get two dialects on one machine, so the suite runs on both.
@@ -4764,7 +4742,49 @@ class LinuxGlConformanceTest {
 
 The third case is the one that would have caught a platform-keyed substitution rule: one binary, one target, two dialects, the same renderer string, and different detected dialects.
 
-- [ ] **Step 3: Run on Linux and commit**
+- [ ] **Step 3: Read both workflows before editing**
+
+```bash
+sed -n '1,50p' .github/workflows/ci.yml
+sed -n '70,105p' .github/workflows/publish.yml
+```
+
+Confirm that `ci.yml`'s `android-linux` job and `publish.yml`'s `linux-release` job each contain a Gradle step invoking `:kmp:linuxX64Test`, and that no EGL package is installed anywhere.
+
+- [ ] **Step 4: Add the install step to `ci.yml`**
+
+Insert immediately before the `Test and compile` step of the `android-linux` job:
+
+```yaml
+      - name: Install Mesa EGL for the GL conformance suite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2
+```
+
+- [ ] **Step 5: Add the same step to `publish.yml`**
+
+Insert immediately before the `Test Linux and Android release outputs` step of the `linux-release` job:
+
+```yaml
+      - name: Install Mesa EGL for the GL conformance suite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2
+```
+
+Mesa's ICD registers itself at `/usr/share/glvnd/egl_vendor.d/50_mesa.json` and `swrast_dri.so` is already installed on the runner image, so llvmpipe needs nothing further: no X server, no Wayland compositor, no GBM device, and no DRM node.
+
+- [ ] **Step 6: Parse both workflows and re-run the policy gate**
+
+```bash
+ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/ci.yml"), [], [], true); YAML.safe_load(File.read(".github/workflows/publish.yml"), [], [], true)'
+PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
+```
+
+Expected: the Ruby command exits silently and the policy check prints its pass line. The completion-record policy inspects five specific named steps in `publish.yml` and their relative order; an install step added to a different job does not touch any of them, and this run is the proof rather than the assumption.
+
+- [ ] **Step 7: Run on Linux and commit**
 
 ```bash
 sudo apt-get update
@@ -4780,14 +4800,14 @@ git commit -m "test: run the GL conformance suite on real llvmpipe contexts"
 
 ---
 
-### Task 19: The macOS CGL Fixture, With Acceleration Never Requested
+### Task 18: The macOS CGL Fixture, With Acceleration Never Requested
 
 **Files:**
 - Create: `kmp/src/macosTest/kotlin/com/rohittp/reng/internal/gl/CglCoreProfileContext.kt`
 - Create: `kmp/src/macosTest/kotlin/com/rohittp/reng/internal/gl/MacosGlConformanceTest.kt`
 
 **Interfaces:**
-- Consumes: Task 4's `openPlatformGlBinding`, Task 17's `runGlConformanceSuite`, `platform.OpenGLCommon` CGL entry points.
+- Consumes: Task 4's `openPlatformGlBinding`, Task 16's `runGlConformanceSuite`, `platform.OpenGLCommon` CGL entry points.
 - Produces: a headless core-profile context and one conformance run.
 
 > **Never request acceleration.** A hosted macOS runner yields a context only when the accelerated pixel-format requirement is dropped, and it then reports `Apple Software Renderer`. Request acceleration and no context is obtained at all, and the failure names an invalid pixel format rather than the absence of a GPU — which reads as a broken suite rather than as a missing GPU. `kCGLPFAAccelerated` must not appear in the attribute list.
@@ -4916,70 +4936,7 @@ Expected: the suite passes and the printed renderer line appears in the test out
 
 ---
 
-### Task 20: Install Mesa EGL in Both Linux Gates
-
-**Files:**
-- Modify: `.github/workflows/ci.yml`
-- Modify: `.github/workflows/publish.yml`
-
-**Interfaces:**
-- Consumes: Task 18's fixture, which needs `libEGL.so.1` at runtime.
-- Produces: a `linuxX64Test` job that can create a surfaceless context in continuous integration and in the release gate.
-
-Both workflows run `:kmp:linuxX64Test` on `ubuntu-latest`, and neither installs EGL today. `libEGL` is not present on a stock runner, and the cached `libegl-mesa0` version 404s, so `apt-get update` must precede the install. The macOS jobs need no change: they already run `:kmp:macosArm64Test`, which is where the Apple conformance run lands.
-
-- [ ] **Step 1: Read both workflows before editing**
-
-```bash
-sed -n '1,50p' .github/workflows/ci.yml
-sed -n '70,105p' .github/workflows/publish.yml
-```
-
-Confirm that `ci.yml`'s `android-linux` job and `publish.yml`'s `linux-release` job each contain a Gradle step invoking `:kmp:linuxX64Test`, and that no EGL package is installed anywhere.
-
-- [ ] **Step 2: Add the install step to `ci.yml`**
-
-Insert immediately before the `Test and compile` step of the `android-linux` job:
-
-```yaml
-      - name: Install Mesa EGL for the GL conformance suite
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2
-```
-
-- [ ] **Step 3: Add the same step to `publish.yml`**
-
-Insert immediately before the `Test Linux and Android release outputs` step of the `linux-release` job:
-
-```yaml
-      - name: Install Mesa EGL for the GL conformance suite
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2
-```
-
-Mesa's ICD registers itself at `/usr/share/glvnd/egl_vendor.d/50_mesa.json` and `swrast_dri.so` is already installed on the runner image, so llvmpipe needs nothing further: no X server, no Wayland compositor, no GBM device, and no DRM node.
-
-- [ ] **Step 4: Parse both workflows and re-run the policy gate**
-
-```bash
-ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/ci.yml"), [], [], true); YAML.safe_load(File.read(".github/workflows/publish.yml"), [], [], true)'
-PYTHONDONTWRITEBYTECODE=1 python3 tools/check_repository_policy.py --root .
-```
-
-Expected: the Ruby command exits silently and the policy check prints its pass line. The completion-record policy inspects five specific named steps in `publish.yml` and their relative order; an install step added to a different job does not touch any of them, and this run is the proof rather than the assumption.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add .github/workflows/ci.yml .github/workflows/publish.yml
-git commit -m "ci: install Mesa EGL for the Linux GL conformance gate"
-```
-
----
-
-### Task 21: Record the Corrected Contract and Run Every Local Gate
+### Task 19: Record the Corrected Contract and Run Every Local Gate
 
 **Files:**
 - Create: `docs/adr/0023-restore-the-corrected-gl-state-set-and-consume-the-error-queue.md`
@@ -4990,7 +4947,7 @@ git commit -m "ci: install Mesa EGL for the Linux GL conformance gate"
 - Verify: all production/tests, policy, ABI, publication, smoke.
 
 **Interfaces:**
-- Consumes: Tasks 1–20.
+- Consumes: Tasks 1–18.
 - Produces: a locally verified Cycle D implementation branch ready for integration review; no push, no publication.
 
 ADR 0006's set is measured incomplete and its no-modification guarantee has one unavoidable exception, so a newer ADR records both — that is how this repository carries corrections forward, and CLAUDE.md already says the newer ADR wins where documents disagree. The specification requires the error-queue consumption to be **declared rather than discovered**, and this task is where it is declared.
@@ -5055,7 +5012,7 @@ git diff --stat "$(git merge-base HEAD main)"..HEAD -- kmp/api/kmp.klib.api
 ! grep -nE 'platform\.|kotlinx\.cinterop|GLES30|GlBinding|GlEntryPoint' kmp/api/kmp.klib.api
 ```
 
-Expected: `checkKotlinAbi` passes, the digest is identical to Task 0's baseline, the ABI dump shows zero changed lines across the whole cycle, and the grep finds nothing. A changed ABI dump is a defect in this cycle, not a dump to regenerate.
+Expected: `checkKotlinAbi` passes, the digest is identical to the baseline recorded in "Before you start", the ABI dump shows zero changed lines across the whole cycle, and the grep finds nothing. A changed ABI dump is a defect in this cycle, not a dump to regenerate.
 
 - [ ] **Step 6: Run every locally compilable gate**
 
@@ -5141,16 +5098,16 @@ Execution stops before any push, merge, workflow dispatch, R2 upload, or publica
 ## Plan Self-Review Checklist
 
 - **The GL seam, typed at Android's width** — Task 2 declares all eighty-four methods with `Int` names and enums, `Boolean`/`BooleanArray`, `IntArray`, `FloatArray`, `Int` buffer sizes, `ByteArray?` payloads, and one `String` shader source; Task 1 supplies the roster and tokens, including `glGetStringi` beside `glGetString`.
-- **Source-set layout per ADR 0022** — Tasks 3, 4, 5, and 6 place one implementation each in `iosMain`, `macosMain`, `linuxMain`, and `androidMain`, every one behind a probe step that proves the source set resolves its binding; Task 7 compiles every leaf plus `compileIosMainKotlinMetadata`, because resolution is enforced per leaf and a partial compile can look green.
+- **Source-set layout per ADR 0022** — Tasks 3, 4, 5, and 6 place one implementation each in `iosMain`, `macosMain`, `linuxMain`, and `androidMain`, every one behind a probe step that proves the source set resolves its binding; Task 6 compiles every leaf plus `compileIosMainKotlinMetadata`, because resolution is enforced per leaf and a partial compile can look green.
 - **Measured native traps** — the zero-length `addressOf(0)` guard is a stated rule in Tasks 3 and 5 and a test in Task 2; no cinterop definition exists anywhere; Linux resolves through `dlopen("libEGL.so.1")` plus `eglGetProcAddress` with `dlsym` as fallback and fails closed as a typed redacted setup error.
-- **Context adoption and runtime dialect** — Task 8 keys the dialect on `GL_SHADING_LANGUAGE_VERSION` beginning `OpenGL ES GLSL ES`, states in a call-out that the trigger is a runtime query and never the target, requires ES 3.0 or desktop 3.3, and rejects with `UNSUPPORTED_RENDER_CONTEXT` at `CONTEXT_ADOPTION` while touching no state; Task 18 proves two dialects from one binary on one target.
-- **Shader compilation, substitution, and caching** — Task 12 selects the source by dialect through `ShaderProfilePlan`, caches by Cycle B's `GEOMETRY_PROGRAM` key, emits `SHADER_COMPILE_FAILED` and `SHADER_LINK_FAILED` at `SHADER_COMPILATION`, keeps the info log behind an observer, and routes internal-pipeline failures to `GPU_OPERATION_FAILED` because the diagnostic rules admit only a geometry-program identity there.
-- **Offscreen surface and composite pass** — Task 11 freezes the `OFFSCREEN_SURFACE` and `INTERNAL_PIPELINE` identities, Task 13 creates the colour-and-depth surface, and Task 14 composites it as a blended draw with `GL_FRAMEBUFFER_SRGB` set explicitly and restored.
-- **The complete restore set** — Task 10 captures and restores every binding, pipeline, and pixel-store item the specification names, with `GL_ACTIVE_TEXTURE` first and last, the unpack alignment default of `4`, dialect-gated `GL_DRAW_BUFFER` and `GL_LINE_SMOOTH`, an explicitly captured array buffer binding, and no element array buffer query.
-- **The error-queue exception** — Task 9 implements the bounded destructive drain and its two attributions; Task 17 proves destructiveness against a real driver; Task 21 declares it in ADR 0023 and in `CONTEXT.md`.
-- **Driving the existing lifecycle machine** — Task 16 supplies `ExactContextFact`, `AdoptionContextFact`, `FramebufferFact`, deferred-deletion acknowledgement and failure, quiescence, and preparation termination, and executes `DeleteDeferred` and `ExecutePermittedOperation`; ADR 0015 exact-context deletion, ADR 0007 forgetting without deleting, and deferred-deletion draining each have their own test, and the Cycle B reducer is not modified.
-- **The conformance suite** — Task 17 holds one shared body; Task 18 runs it on real ES 3.2 and 4.5 core llvmpipe contexts through `EGL_PLATFORM_SURFACELESS_MESA`; Task 19 runs it on a real CGL core profile with acceleration never requested; both fixtures own context creation, per ADR 0001.
-- **CI wiring** — Task 20 adds the Mesa EGL install to both Ubuntu jobs after reading the workflows, because both run `:kmp:linuxX64Test` and neither installs EGL today; the macOS jobs already run `macosArm64Test` and need no change.
+- **Context adoption and runtime dialect** — Task 7 keys the dialect on `GL_SHADING_LANGUAGE_VERSION` beginning `OpenGL ES GLSL ES`, states in a call-out that the trigger is a runtime query and never the target, requires ES 3.0 or desktop 3.3, and rejects with `UNSUPPORTED_RENDER_CONTEXT` at `CONTEXT_ADOPTION` while touching no state; Task 17 proves two dialects from one binary on one target.
+- **Shader compilation, substitution, and caching** — Task 11 selects the source by dialect through `ShaderProfilePlan`, caches by Cycle B's `GEOMETRY_PROGRAM` key, emits `SHADER_COMPILE_FAILED` and `SHADER_LINK_FAILED` at `SHADER_COMPILATION`, keeps the info log behind an observer, and routes internal-pipeline failures to `GPU_OPERATION_FAILED` because the diagnostic rules admit only a geometry-program identity there.
+- **Offscreen surface and composite pass** — Task 10 freezes the `OFFSCREEN_SURFACE` and `INTERNAL_PIPELINE` identities, Task 12 creates the colour-and-depth surface, and Task 13 composites it as a blended draw with `GL_FRAMEBUFFER_SRGB` set explicitly and restored.
+- **The complete restore set** — Task 9 captures and restores every binding, pipeline, and pixel-store item the specification names, with `GL_ACTIVE_TEXTURE` first and last, the unpack alignment default of `4`, dialect-gated `GL_DRAW_BUFFER` and `GL_LINE_SMOOTH`, an explicitly captured array buffer binding, and no element array buffer query.
+- **The error-queue exception** — Task 8 implements the bounded destructive drain and its two attributions; Task 16 proves destructiveness against a real driver; Task 19 declares it in ADR 0023 and in `CONTEXT.md`.
+- **Driving the existing lifecycle machine** — Task 15 supplies `ExactContextFact`, `AdoptionContextFact`, `FramebufferFact`, deferred-deletion acknowledgement and failure, quiescence, and preparation termination, and executes `DeleteDeferred` and `ExecutePermittedOperation`; ADR 0015 exact-context deletion, ADR 0007 forgetting without deleting, and deferred-deletion draining each have their own test, and the Cycle B reducer is not modified.
+- **The conformance suite** — Task 16 holds one shared body; Task 17 runs it on real ES 3.2 and 4.5 core llvmpipe contexts through `EGL_PLATFORM_SURFACELESS_MESA`; Task 18 runs it on a real CGL core profile with acceleration never requested; both fixtures own context creation, per ADR 0001.
+- **CI wiring** — Task 17 adds the Mesa EGL install to both Ubuntu jobs after reading the workflows, because both run `:kmp:linuxX64Test` and neither installs EGL today; the macOS jobs already run `macosArm64Test` and need no change.
 - **No public surface** — Tasks 0, 7, and 21 pin the ABI digest at three points in the cycle, and every declaration added is `internal`.
 - **No placeholders** — every step contains real commands or real Kotlin; the only prose-specified bodies are mechanical expansions governed by explicitly stated rules (the remaining seam methods per implementation, the recording fake's remaining methods, and the scratch-object helpers), each with its rule set written out and its shape demonstrated in code.
 

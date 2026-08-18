@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import tomllib
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,12 @@ _FORBIDDEN_DEPENDENCY = re.compile(
     r"\b(?:wire|serialization|skiko|ktor|corpus|coroutines?|crypto|hash)\b",
     re.IGNORECASE,
 )
+# ADR 0019 takes exactly one coroutines coordinate as a first-party production dependency,
+# plus the one test-scope artifact `runTest`/`TestScope`/`advanceTimeBy` live in. The forbidden
+# pattern above still rejects every other library, including any other coroutines artifact, so
+# neither exemption can widen by accident.
+_PERMITTED_NEW_DEPENDENCIES = frozenset({"libs.kotlinx.coroutines.core"})
+_PERMITTED_NEW_TEST_DEPENDENCIES = frozenset({"libs.kotlinx.coroutines.test"})
 _CONFLICTING_LICENSE = re.compile(
     r"\b(?:mit|bsd|gpl|lgpl|agpl|mozilla\s+public\s+license|eclipse\s+public\s+license|isc|unlicense|cc0)\b",
     re.IGNORECASE,
@@ -228,10 +234,22 @@ _REPOSITORY_IDENTIFIERS = frozenset({
     "repositories", "repositoriesMode", "r2Bucket", "r2Endpoint", "subprojects",
 })
 _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
-    "build.gradle.kts": "552201d8dc4bf1ffffc11bb1c95363bb853ee62e7d25a4b55bb853a61c7af352",
-    "gradle/libs.versions.toml": "35bfceee660cef966bffdcca954dbf501ea1acdd8a4f0c4e48069594bc80ab1f",
-    "kmp/build.gradle.kts": "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
-    "settings.gradle.kts": "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
+    "build.gradle.kts": frozenset({
+        "552201d8dc4bf1ffffc11bb1c95363bb853ee62e7d25a4b55bb853a61c7af352",
+    }),
+    # ADR 0019's coroutines dependency (see _PERMITTED_NEW_DEPENDENCIES above) is a second,
+    # equally-exact accepted form of these two files, alongside the pre-Cycle-C original.
+    "gradle/libs.versions.toml": frozenset({
+        "35bfceee660cef966bffdcca954dbf501ea1acdd8a4f0c4e48069594bc80ab1f",
+        "22f22f1be7560e60cc56104f0847582a49d8c10a6ed6d8e5b86e70207f575a69",
+    }),
+    "kmp/build.gradle.kts": frozenset({
+        "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
+        "386c6936c783eb1004ac0efe0a7954b0e93674d739f407e298e94a7a0763ccc7",
+    }),
+    "settings.gradle.kts": frozenset({
+        "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
+    }),
 }
 _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES = frozenset({
     ".a", ".aar", ".apk", ".asc", ".bc", ".bin", ".bz2", ".class",
@@ -950,6 +968,17 @@ def _token_sequence_at(tokens: Sequence[_Token], index: int, values: Sequence[st
     )
 
 
+def _permitted_dependency_tokens(coordinates: frozenset[str]) -> tuple[tuple[str, ...], ...]:
+    """Tokenize each permitted qualified coordinate the same way `expected_main`/`expected_test`
+    already are in `check_dependencies`, so a run of tokens can be matched rather than a single
+    token equalling the whole dotted string (the tokenizer splits `libs.kotlinx.coroutines.core`
+    into seven separate tokens)."""
+    return tuple(
+        tuple(token.value for token in _kotlin_tokens(coordinate))
+        for coordinate in sorted(coordinates)
+    )
+
+
 def _annotation_token(tokens: Sequence[_Token], name: str) -> _Token | None:
     return next(
         (
@@ -1160,17 +1189,22 @@ def _dependency_name_policy_token(
             continue
         if token.value == "libs":
             plugin_accessor = _plugin_accessor_at(tokens, index)
-            rentile_dependency = (
-                relative == "kmp/build.gradle.kts"
-                and index >= 2
+            permitted_libs_dependency_coordinates = (
+                ("libs", ".", "rentile", ".", "kmp"),
+                *_permitted_dependency_tokens(_PERMITTED_NEW_DEPENDENCIES),
+                *_permitted_dependency_tokens(_PERMITTED_NEW_TEST_DEPENDENCIES),
+            )
+            permitted_libs_dependency = relative == "kmp/build.gradle.kts" and any(
+                index >= 2
                 and index - 2 in allowed_call_indices
                 and tokens[index - 2].value == "implementation"
                 and tokens[index - 1].value == "("
-                and _token_sequence_at(tokens, index, ("libs", ".", "rentile", ".", "kmp"))
-                and index + 5 < len(tokens)
-                and tokens[index + 5].value == ")"
+                and _token_sequence_at(tokens, index, coordinate_tokens)
+                and index + len(coordinate_tokens) < len(tokens)
+                and tokens[index + len(coordinate_tokens)].value == ")"
+                for coordinate_tokens in permitted_libs_dependency_coordinates
             )
-            if plugin_accessor is None and not rentile_dependency:
+            if plugin_accessor is None and not permitted_libs_dependency:
                 return token
         if token.value == "kotlin":
             qualified_name = (
@@ -1313,7 +1347,7 @@ def _build_semantics_violations(root: Path) -> list[Violation]:
         for path in _kmp_gradle_configuration_files(root)
     }
     violations = []
-    for relative, expected_fingerprint in _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS.items():
+    for relative, expected_fingerprints in _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS.items():
         path = actual.get(relative, root / relative)
         if not path.is_file():
             violations.append(_violation(
@@ -1324,7 +1358,7 @@ def _build_semantics_violations(root: Path) -> list[Violation]:
             ))
             continue
         actual_fingerprint = _build_configuration_fingerprint(path, _read(path))
-        if actual_fingerprint != expected_fingerprint:
+        if actual_fingerprint not in expected_fingerprints:
             violations.append(_violation(
                 "FORBIDDEN_CYCLE_B_DEPENDENCY",
                 path,
@@ -1427,10 +1461,23 @@ def _has_empty_call(tokens: Sequence[_Token], name: str) -> _Token | None:
     return None
 
 
-def _contains_forbidden(tokens: Iterable[_Token]) -> _Token | None:
-    for token in tokens:
-        if _FORBIDDEN_DEPENDENCY.search(token.value):
-            return token
+def _contains_forbidden(
+    tokens: Sequence[_Token],
+    permitted_runs: Sequence[Sequence[str]] = (),
+) -> _Token | None:
+    tokens = tuple(tokens)
+    index = 0
+    while index < len(tokens):
+        matched_run = next(
+            (run for run in permitted_runs if _token_sequence_at(tokens, index, run)),
+            None,
+        )
+        if matched_run is not None:
+            index += len(matched_run)
+            continue
+        if _FORBIDDEN_DEPENDENCY.search(tokens[index].value):
+            return tokens[index]
+        index += 1
     return None
 
 
@@ -1534,6 +1581,23 @@ _CYCLE_B_DEPENDENCY_MESSAGE = (
 )
 
 
+def _dependency_call_shape_allowed(
+    calls: Sequence[tuple[str, tuple[str, ...]]],
+    required: tuple[str, ...],
+    permitted_extras: Sequence[tuple[str, ...]],
+) -> bool:
+    """A source set's dependency calls are allowed when the first call is exactly the required
+    coordinate, and every call after it is, in order, one of the permitted extra coordinates
+    (ADR 0019's coroutines dependency) with no repeats and nothing else."""
+    if not calls or calls[0] != ("implementation", required):
+        return False
+    extras = calls[1:]
+    return len(extras) <= len(permitted_extras) and all(
+        call == ("implementation", extra)
+        for call, extra in zip(extras, permitted_extras)
+    )
+
+
 def check_dependencies(root: Path) -> list[Violation]:
     path = root / "kmp/build.gradle.kts"
     if not path.is_file():
@@ -1555,6 +1619,8 @@ def check_dependencies(root: Path) -> list[Violation]:
 
     expected_main = ("libs", ".", "rentile", ".", "kmp")
     expected_test = ("kotlin", "(", "test", ")")
+    permitted_main = _permitted_dependency_tokens(_PERMITTED_NEW_DEPENDENCIES)
+    permitted_test = _permitted_dependency_tokens(_PERMITTED_NEW_TEST_DEPENDENCIES)
     main_calls = [
         (token.value, tuple(item.value for item in arguments))
         for index, token, arguments in dependency_calls
@@ -1565,12 +1631,14 @@ def check_dependencies(root: Path) -> list[Violation]:
         for index, token, arguments in dependency_calls
         if _inside_ranges(index, common_test_ranges)
     ]
+    main_allowed = _dependency_call_shape_allowed(main_calls, expected_main, permitted_main)
+    test_allowed = _dependency_call_shape_allowed(test_calls, expected_test, permitted_test)
     allowed = (
         len(common_main_ranges) == 1
         and len(common_test_ranges) == 1
-        and main_calls == [("implementation", expected_main)]
-        and test_calls == [("implementation", expected_test)]
-        and len(dependency_calls) == 2
+        and main_allowed
+        and test_allowed
+        and len(dependency_calls) == len(main_calls) + len(test_calls)
     )
 
     allowed_call_indices = frozenset(
@@ -1580,11 +1648,11 @@ def check_dependencies(root: Path) -> list[Violation]:
         and (
             (
                 _inside_ranges(index, common_main_ranges)
-                and tuple(item.value for item in arguments) == expected_main
+                and tuple(item.value for item in arguments) in (expected_main, *permitted_main)
             )
             or (
                 _inside_ranges(index, common_test_ranges)
-                and tuple(item.value for item in arguments) == expected_test
+                and tuple(item.value for item in arguments) in (expected_test, *permitted_test)
             )
         )
     )
@@ -1610,6 +1678,7 @@ def check_dependencies(root: Path) -> list[Violation]:
     kmp_indirection = _dependency_indirection_token(
         tokens, allowed_call_indices, allowed_dependency_markers,
     )
+    permitted_dependency_runs = permitted_main + permitted_test
     forbidden_token = None
     for index, token in enumerate(tokens):
         arguments = _call_arguments(tokens, index)
@@ -1617,7 +1686,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             continue
         if token.value not in _DEPENDENCY_CALLS | _PLUGIN_CALLS:
             continue
-        forbidden_token = _contains_forbidden(arguments)
+        forbidden_token = _contains_forbidden(arguments, permitted_dependency_runs)
         if forbidden_token is not None:
             break
 
@@ -1741,18 +1810,39 @@ def check_dependencies(root: Path) -> list[Violation]:
         versions = parsed.get("versions", {})
         libraries = parsed.get("libraries", {})
         plugins = parsed.get("plugins", {})
-        exact = exact and versions == {
+        base_versions = {
             "agp": "9.3.1",
             "kotlin": "2.3.21",
             "mavenPublish": "0.36.0",
             "rentile": "0.1.5",
         }
-        exact = exact and libraries == {
+        base_libraries = {
             "rentile-kmp": {
                 "module": "com.rohittp.rentile:kmp",
                 "version": {"ref": "rentile"},
             },
         }
+        # ADR 0019's coroutines dependency (see _PERMITTED_NEW_DEPENDENCIES above) is a second,
+        # equally-exact accepted catalog shape, alongside the pre-Cycle-C original: nothing but
+        # these two named coordinates may join the catalog.
+        permitted_catalog_libraries = {
+            "kotlinx-coroutines-core": {
+                "module": "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+                "version": {"ref": "kotlinxCoroutines"},
+            },
+            "kotlinx-coroutines-test": {
+                "module": "org.jetbrains.kotlinx:kotlinx-coroutines-test",
+                "version": {"ref": "kotlinxCoroutines"},
+            },
+        }
+        exact = exact and versions in (
+            base_versions,
+            base_versions | {"kotlinxCoroutines": "1.11.0"},
+        )
+        exact = exact and libraries in (
+            base_libraries,
+            base_libraries | permitted_catalog_libraries,
+        )
         exact = exact and plugins == {
             "kotlin-multiplatform": {
                 "id": "org.jetbrains.kotlin.multiplatform",
@@ -1767,7 +1857,17 @@ def check_dependencies(root: Path) -> list[Violation]:
                 "version": {"ref": "mavenPublish"},
             },
         }
-        forbidden_match = _FORBIDDEN_DEPENDENCY.search(_mask_hash_comments(catalog_text))
+        # The forbidden-word scan below runs over the *raw* text (it has to, to catch a rogue
+        # table dict-equality above never even looks at, such as a smuggled [bundles] section),
+        # so it would flag the two permitted coroutines entries' own key/value text purely
+        # because "coroutines" is hyphen-bounded there. Strip exactly those two literal
+        # coordinate substrings first, but only once each entry has been confirmed above to be
+        # byte-for-byte the permitted shape — never a blanket exemption for the word itself.
+        forbidden_scan_text = _mask_hash_comments(catalog_text)
+        for name, expected_entry in permitted_catalog_libraries.items():
+            if libraries.get(name) == expected_entry:
+                forbidden_scan_text = forbidden_scan_text.replace(name, "")
+        forbidden_match = _FORBIDDEN_DEPENDENCY.search(forbidden_scan_text)
         if not exact or forbidden_match is not None:
             offset = forbidden_match.start() if forbidden_match is not None else 0
             violations.append(_violation(

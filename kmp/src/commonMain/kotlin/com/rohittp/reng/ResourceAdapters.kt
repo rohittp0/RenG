@@ -89,6 +89,14 @@ public class TransportResponse(
 ) {
     private val bodyBytes: ByteArray = body.freshCopy()
 
+    /**
+     * The construction snapshot, read without a further copy by RenG-internal code only. This array is
+     * never handed to a caller, never mutated, and never retained past the reading call; [body] remains
+     * the only externally visible read and still returns a fresh copy on every access.
+     */
+    internal val bodySnapshot: ByteArray
+        get() = bodyBytes
+
     public val body: ByteArray
         get() = bodyBytes.freshCopy()
 
@@ -159,6 +167,14 @@ public class StoredRawResource(
     public val metadata: StoredRawResourceMetadata,
 ) {
     private val storedBytes: ByteArray = bytes.freshCopy()
+
+    /**
+     * The construction snapshot, read without a further copy by RenG-internal code only. This array is
+     * never handed to a caller, never mutated, and never retained past the reading call; [bytes] remains
+     * the only externally visible read and still returns a fresh copy on every access.
+     */
+    internal val byteSnapshot: ByteArray
+        get() = storedBytes
 
     public val bytes: ByteArray
         get() = storedBytes.freshCopy()

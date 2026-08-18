@@ -5,6 +5,39 @@ internal class ShaderProfilePlan(
     val directiveStartUtf16: Int,
     val directiveEndExclusiveUtf16: Int,
 ) {
+    init {
+        // The span, not only the source, is this type's boundary: desktop substitution replaces exactly
+        // these code units, so a span that does not describe the directive line emits a source no driver
+        // compiles. Bounds are checked before the trim comparison, which indexes the span itself.
+        require(directiveStartUtf16 in 0..directiveEndExclusiveUtf16) {
+            "directive span must be a non-negative ascending half-open range"
+        }
+        require(directiveEndExclusiveUtf16 <= originalSource.length) {
+            "directive span must lie within the shader source"
+        }
+        require(
+            directiveStartUtf16 == 0 ||
+                originalSource[directiveStartUtf16 - 1].isPhysicalLineTerminatorCodeUnit(),
+        ) {
+            "directive span must start a physical line"
+        }
+        require(
+            directiveEndExclusiveUtf16 == originalSource.length ||
+                originalSource[directiveEndExclusiveUtf16].isPhysicalLineTerminatorCodeUnit(),
+        ) {
+            "directive span must end a physical line"
+        }
+        require(
+            originalSource.lineAsciiTrimEquals(
+                directiveStartUtf16,
+                directiveEndExclusiveUtf16,
+                GLES_DIRECTIVE,
+            ),
+        ) {
+            "directive span must be the accepted shader profile directive line"
+        }
+    }
+
     internal fun gles300Source(): String = originalSource
 
     internal fun desktop330Source(): String =

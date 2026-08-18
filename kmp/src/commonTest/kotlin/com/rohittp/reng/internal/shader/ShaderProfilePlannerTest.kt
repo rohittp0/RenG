@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.shader
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -205,6 +206,46 @@ class ShaderProfilePlannerTest {
         assertEquals("ShaderProfilePlan(<redacted>)", plan.toString())
         assertFalse(plan.toString().contains("signed-resource-secret"))
         assertNull(scanShaderProfile("signed-resource-secret\n#version 300 es"))
+    }
+
+    @Test
+    fun rejectsADirectiveSpanThatDoesNotDescribeItsOwnSource() {
+        val source = "#version 300 es\nvoid main() {}"
+
+        // The reported defect: an empty span at zero emits "#version 330 core#version 300 es".
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan(source, 0, 0) }
+        // A descending span silently duplicated text, because each substring call is independently in range.
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan(source, 5, 2) }
+        // Out-of-range spans report an argument violation rather than an index failure.
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan(source, 0, source.length + 1) }
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan(source, -1, 5) }
+        // In range and equal to the directive after trimming, rejected only by the line-boundary guards.
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan("x#version 300 es", 1, 16) }
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan("#version 300 esX", 0, 15) }
+        // A different profile directive is not the accepted one.
+        assertFailsWith<IllegalArgumentException> { ShaderProfilePlan("#version 310 es", 0, 15) }
+    }
+
+    @Test
+    fun acceptsEveryScannerProducedSpanAndRedactsRejectionMessages() {
+        val validSources = listOf(
+            "#version 300 es",
+            " \t#version 300 es\t \r\nvoid main() {}",
+            "#version 300 es\nvoid main() {}",
+            "#version 300 es\r\nvoid main() {}",
+            "\r#version 300 es\rbody",
+            "// leading comment\n\t#version 300 es \t\r\nprecision mediump float;",
+            "/* block */\n#version 300 es\nvoid main() {}",
+        )
+
+        for (source in validSources) {
+            val plan = assertNotNull(scanShaderProfile(source), "unexpectedly rejected: ${source.escapeForAssertion()}")
+            ShaderProfilePlan(source, plan.directiveStartUtf16, plan.directiveEndExclusiveUtf16)
+        }
+
+        val secret = "#version 300 es\n// signed-resource-secret"
+        val failure = assertFailsWith<IllegalArgumentException> { ShaderProfilePlan(secret, 0, 0) }
+        assertFalse(failure.message.orEmpty().contains("signed-resource-secret"))
     }
 
     private fun String.escapeForAssertion(): String =

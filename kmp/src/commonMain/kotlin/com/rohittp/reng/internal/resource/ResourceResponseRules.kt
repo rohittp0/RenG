@@ -55,7 +55,7 @@ internal fun copyValidStoredResource(
     sha256: Sha256Function,
 ): StoredRawResource? {
     require(maximumResponseBytes > 0L) { "maximum response bytes must be positive" }
-    val bytes = stored.bytes
+    val bytes = stored.byteSnapshot
     if (bytes.isEmpty() || bytes.size.toLong() > maximumResponseBytes) return null
     if (!isLowercaseSha256(stored.contentDigest)) return null
     if (!isValidMetadata(stored.metadata)) return null
@@ -75,7 +75,7 @@ private fun resolveFullResponse(
     response: TransportResponse,
     sha256: Sha256Function,
 ): ResponseRuleOutcome {
-    val body = response.body
+    val body = response.bodySnapshot
     if (body.isEmpty()) {
         return ResponseRuleOutcome.Failure(
             invalidResponseFailure(
@@ -123,7 +123,7 @@ private fun resolveNotModifiedResponse(
     response: TransportResponse,
     sha256: Sha256Function,
 ): ResponseRuleOutcome {
-    val body = response.body
+    val body = response.bodySnapshot
     if (body.isNotEmpty()) {
         return ResponseRuleOutcome.Failure(
             invalidResponseFailure(
@@ -155,7 +155,7 @@ private fun resolveNotModifiedResponse(
     val baselineMetadata = baseline.metadata
     val responseMetadata = response.metadata
     val merged = StoredRawResource(
-        bytes = baseline.bytes,
+        bytes = baseline.byteSnapshot,
         contentDigest = baseline.contentDigest,
         metadata = StoredRawResourceMetadata(
             contentType = responseMetadata.contentType ?: baselineMetadata.contentType,

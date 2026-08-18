@@ -2124,6 +2124,10 @@ internal object ResourceOperationStateMachine {
         private fun successOutcome(): ResourceOperationOutcome? {
             if (activeRouteOrdinals.isNotEmpty()) return null
             if (nextRetirementOrdinal != nextRouteOrdinal) return null
+            // Retained deliberately, though no admissible state distinguishes it from the line above:
+            // outcomes buffer only at ordinals at or above nextRetirementOrdinal, so once every route
+            // has retired the buffer is necessarily drained. It is kept as an explicit statement of the
+            // success precondition rather than removed or covered by a vacuous test.
             if (bufferedRouteOutcomes.isNotEmpty()) return null
             if (eligibleFifo.isNotEmpty() || !staticContinuation.isEmpty || frontierStack.isNotEmpty()) {
                 return null
@@ -2595,7 +2599,7 @@ internal object ResourceOperationStateMachine {
     }
 
     private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(
-        bytes = stored.bytes,
+        bytes = stored.byteSnapshot,
         contentDigest = stored.contentDigest,
         metadata = StoredRawResourceMetadata(
             contentType = stored.metadata.contentType,
@@ -2622,7 +2626,7 @@ internal object ResourceOperationStateMachine {
         outcome = when (val outcome = latch.outcome) {
             LatchedTransportOutcome.Failed -> LatchedTransportOutcome.Failed
             is LatchedTransportOutcome.Cancelled -> LatchedTransportOutcome.Cancelled(outcome.cancellation)
-            is LatchedTransportOutcome.Response -> LatchedTransportOutcome.Response(copyResponse(outcome.response))
+            is LatchedTransportOutcome.Response -> LatchedTransportOutcome.Response(outcome.response)
         },
     )
 }

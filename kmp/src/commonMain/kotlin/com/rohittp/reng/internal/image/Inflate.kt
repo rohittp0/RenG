@@ -21,11 +21,4 @@ internal expect class InflateStream() {
     fun close()
 }
 
-/**
- * A streaming, chainable CRC-32 (the zlib/PNG variant): `crc32(seed, bytes, offset, length)` continues a
- * running checksum from `seed`. `crc32(0u, a, ...)` followed by `crc32(<that result>, b, ...)` is
- * identical to a single call over the concatenation of `a` and `b` — the shape a PNG chunk walk needs to
- * accumulate the CRC over a chunk's type field and its payload, which may itself arrive in more than one
- * piece.
- */
 internal expect fun crc32(seed: UInt, bytes: ByteArray, offset: Int, length: Int): UInt

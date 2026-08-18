@@ -105,6 +105,35 @@ class InflateTest {
     }
 
     @Test
+    fun undersizedOutputBufferAcrossSeveralCallsProducesIdenticalBytes() {
+        // Both existing successful-decode tests give inflate() a full-size output array, so the
+        // available window only shrinks as it nears the end — it is never genuinely constrained. This
+        // reuses one small (and not evenly divisive) 13-byte window across every call, on the largest
+        // vector (64 KiB, built from long LZ77 back-references), forcing many resumptions where each
+        // call's avail_out runs out well before the stream itself does — exactly the pattern a decoder
+        // filling one fixed-size row or tile buffer at a time will hit in Tasks 4 and 5.
+        val vector = inflateVectors.first { it.name == "long_match_64k" }
+        val result = ByteArray(vector.expected.size)
+        val window = ByteArray(13)
+        val stream = InflateStream()
+        var consumed = 0
+        var produced = 0
+        var finished = false
+        while (!finished) {
+            val step = stream.inflate(vector.deflated.copyOfRange(consumed, vector.deflated.size), window, 0)
+            consumed += step.consumed
+            window.copyInto(result, destinationOffset = produced, startIndex = 0, endIndex = step.produced)
+            produced += step.produced
+            finished = step.finished
+            if (step.consumed == 0 && step.produced == 0 && !step.finished) break
+        }
+        stream.close()
+        assertTrue(finished, "stream did not finish")
+        assertEquals(vector.expected.size, produced, "wrong output length")
+        assertContentEquals(vector.expected, result, "wrong bytes")
+    }
+
+    @Test
     fun corruptPayloadFailsRatherThanProducingPlausibleBytes() {
         val vector = inflateVectors.first { it.name == "dynamic_text" }
         val corrupted = vector.deflated.copyOf()
@@ -131,7 +160,13 @@ class InflateTest {
         assertEquals(0u, crc32(0u, ByteArray(0), 0, 0))
         val check = "123456789".encodeToByteArray()
         assertEquals(0xCBF43926u, crc32(0u, check, 0, check.size))
+        // A PNG chunk's CRC covers its 4-byte type immediately followed by its payload — a contiguous
+        // range of the same buffer a container walk already holds — so the seed stays 0 and the whole
+        // range is covered by one call, never by chaining across separate calls. Confirm that a
+        // contiguous range computed in place (the type bytes sitting at an offset inside a larger
+        // buffer, exactly as a chunk walk would see them) matches the same bytes computed on their own.
         val ihdr = byteArrayOf(0x49, 0x48, 0x44, 0x52)
-        assertEquals(crc32(0u, ihdr, 0, 4), crc32(crc32(0u, ihdr, 0, 2), ihdr, 2, 2))
+        val embedded = byteArrayOf(0xAA.toByte(), 0xBB.toByte()) + ihdr + byteArrayOf(0xCC.toByte())
+        assertEquals(crc32(0u, ihdr, 0, 4), crc32(0u, embedded, 2, 4))
     }
 }

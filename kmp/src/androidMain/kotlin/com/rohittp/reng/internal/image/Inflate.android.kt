@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.image
 
+import java.util.zip.CRC32
 import java.util.zip.DataFormatException
 import java.util.zip.Inflater
 
@@ -47,31 +48,15 @@ internal actual class InflateStream actual constructor() {
     }
 }
 
-// A hand-rolled CRC-32 (the reflected IEEE 802.3 / zlib / PNG variant) rather than a wrapper over
-// java.util.zip.CRC32: that class has no way to inject a running value as a seed, only to accumulate
-// through repeated update() calls on one stateful instance, and the required signature here is a pure
-// function that takes its running value as an explicit seed parameter — the exact shape a PNG chunk
-// walk needs to chain the CRC across a chunk's type field and its (possibly multi-piece) payload. This
-// table and loop are the same algorithm `platform.zlib.crc32` runs on the native targets, so both
-// actuals produce identical bytes for every seed, not just seed 0.
-private const val CRC32_POLYNOMIAL = 0xEDB88320u
-
-private val crc32Table: UIntArray = UIntArray(256) { index ->
-    var value = index.toUInt()
-    repeat(8) {
-        value = if (value and 1u != 0u) (value shr 1) xor CRC32_POLYNOMIAL else value shr 1
-    }
-    value
-}
-
 internal actual fun crc32(seed: UInt, bytes: ByteArray, offset: Int, length: Int): UInt {
     require(offset >= 0 && length >= 0 && offset + length <= bytes.size) { "crc range out of bounds" }
-    if (length == 0) return seed
-    var crc = seed xor 0xFFFFFFFFu
-    for (i in offset until offset + length) {
-        val byteValue = (bytes[i].toInt() and 0xFF).toUInt()
-        val tableIndex = (crc xor byteValue) and 0xFFu
-        crc = crc32Table[tableIndex.toInt()] xor (crc shr 8)
+    val digest = CRC32()
+    if (seed != 0u) {
+        // CRC32 has no seed setter; the PNG walk only ever seeds from zero — a chunk's type and payload
+        // are a contiguous range of the same buffer, so the caller covers both in one call rather than
+        // chaining. A non-zero seed here would mean a chained call this actual does not support.
+        throw IllegalArgumentException("chained crc32 seeds are supplied by the caller's running value")
     }
-    return crc xor 0xFFFFFFFFu
+    digest.update(bytes, offset, length)
+    return digest.value.toUInt()
 }

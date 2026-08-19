@@ -97,6 +97,7 @@ class GltfFeaturesTest {
     private val accessorWithoutBufferViewNoExtension = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "accessors": [
             {"componentType": 5126, "count": 3, "type": "VEC3"}
           ]
@@ -106,6 +107,7 @@ class GltfFeaturesTest {
     private val sparseAccessor = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
           "accessors": [
@@ -123,6 +125,7 @@ class GltfFeaturesTest {
     private fun primitiveWithMode(mode: Int) = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
           "accessors": [{"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3"}],
@@ -137,6 +140,7 @@ class GltfFeaturesTest {
     private fun primitiveWithAttribute(semantic: String) = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
           "accessors": [{"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3"}],
@@ -147,6 +151,7 @@ class GltfFeaturesTest {
     private val documentWithSkin = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "skins": [{}],
           "nodes": [{"skin": 0}]
         }
@@ -155,6 +160,7 @@ class GltfFeaturesTest {
     private val documentWithMorphTargets = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
           "accessors": [{"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3"}],
@@ -168,6 +174,7 @@ class GltfFeaturesTest {
     private fun animationChannel(path: String, interpolation: String) = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": 100},
@@ -190,6 +197,7 @@ class GltfFeaturesTest {
     private val jpegImage = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "images": [{"mimeType": "image/jpeg"}]
         }
     """.trimIndent()
@@ -204,6 +212,7 @@ class GltfFeaturesTest {
     private val bufferWithDataUri = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 0, "uri": "data:application/octet-stream;base64,AAAA"}]
         }
     """.trimIndent()
@@ -211,6 +220,7 @@ class GltfFeaturesTest {
     private val secondBufferDeclared = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 0}, {"byteLength": 0}]
         }
     """.trimIndent()
@@ -229,6 +239,7 @@ class GltfFeaturesTest {
     private val normalizedFloatAccessor = """
         {
           "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
           "buffers": [{"byteLength": 1024}],
           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
           "accessors": [

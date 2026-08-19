@@ -10,6 +10,7 @@ import com.rohittp.reng.internal.lifecycle.RendererLifecycleOperation
 import com.rohittp.reng.internal.lifecycle.RendererLifecycleOutcome
 import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
 import com.rohittp.reng.internal.lifecycle.RendererOwnerState
+import com.rohittp.reng.internal.shader.ShaderProfilePlan
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -359,18 +360,37 @@ private fun assertShaderDialectMatrix(binding: GlBinding, profile: RenderContext
         ShaderDialect.GLES -> ShaderDialect.DESKTOP
         ShaderDialect.DESKTOP -> ShaderDialect.GLES
     }
-    var observedLog = ""
-    val other = compileShaderProgram(binding, opposite, key, vertexPlan, fragmentPlan) { _, log ->
-        observedLog = log
-    }
 
+    // Mesa 25.2.8's libgallium SIGSEGVs inside glLinkProgram whenever a process holds 2+ EGL
+    // contexts -- at least one GLES-profile -- and at least one of them performs exactly this
+    // deliberate cross-#version-dialect link. See
+    // docs/research/2026-08-19-mesa-cross-dialect-link-segfault.md for the full crash-rate
+    // matrix, the minimal C reproducer, and the version bisection (29/30 crashes on Mesa
+    // 25.2.8, 0/15 on Mesa 23.2.1). RenG's production code never performs this operation --
+    // `ShaderProfilePlan` always substitutes to the dialect the runtime context reports, so
+    // only this suite's deliberate negative check ever links a knowingly-mismatched shader.
+    //
+    // The negative expectation this check exists to prove -- "the wrong directive must fail to
+    // link" -- is also already unsound on exactly the drivers that crash: a driver advertising
+    // GL_ARB_ES3_compatibility (Mesa's desktop core profile) is entitled to accept
+    // `#version 300 es` unchanged, which is precisely why the `oppositeShouldLink` branch below
+    // already exists as a non-failure case. So on such a driver there is nothing left to prove
+    // by forcing the link, and this suite does not perform it -- it instead proves the
+    // capability probe itself is correct, by asserting `#version 300 es` genuinely compiles
+    // (never linking) on this context, so the skip is not indistinguishable from an assertion
+    // that silently checks nothing. Where the driver does NOT advertise
+    // GL_ARB_ES3_compatibility, the negative check below is unchanged: the assertion is valid
+    // there, and the Mesa crash trigger needs a GLES-profile context to be entitled to accept
+    // the cross-dialect input in the first place, which a non-ES3-compatible driver never is.
     val oppositeShouldLink =
         profile.dialect == ShaderDialect.DESKTOP && profile.supportsEs3Compatibility
     if (oppositeShouldLink) {
-        val tolerated = other as? GlProgramResult.Linked
-            ?: throw AssertionError("a driver advertising $ES3_COMPATIBILITY_EXTENSION accepts 300 es")
-        binding.deleteProgram(tolerated.program)
+        assertGles300CompilesWithoutLinking(binding, vertexPlan, fragmentPlan)
     } else {
+        var observedLog = ""
+        val other = compileShaderProgram(binding, opposite, key, vertexPlan, fragmentPlan) { _, log ->
+            observedLog = log
+        }
         val failed = other as? GlProgramResult.Failed
             ?: throw AssertionError("the wrong directive must fail on this context")
         assertTrue(observedLog.isNotEmpty(), "the driver must explain its rejection to the observer")
@@ -381,6 +401,37 @@ private fun assertShaderDialectMatrix(binding: GlBinding, profile: RenderContext
         assertEquals("shaderPair", assertNotNull(failed.failure.diagnostic).fieldName)
     }
     GlErrorQueue.drainOnEntry(binding)
+}
+
+/**
+ * Proves `supportsEs3Compatibility` correctly predicts that `#version 300 es` is accepted on
+ * this (desktop) context, without ever calling `glLinkProgram` on a cross-dialect pair -- that
+ * exact call is the one Mesa 25.2.8 crashes inside (see the gate comment above and
+ * `docs/research/2026-08-19-mesa-cross-dialect-link-segfault.md`). Compiling, never linking, is
+ * unaffected: the reported crash is isolated to the link stage.
+ */
+private fun assertGles300CompilesWithoutLinking(
+    binding: GlBinding,
+    vertexPlan: ShaderProfilePlan,
+    fragmentPlan: ShaderProfilePlan,
+) {
+    assertShaderStageCompiles(binding, GL_VERTEX_SHADER, vertexPlan.sourceFor(ShaderDialect.GLES))
+    assertShaderStageCompiles(binding, GL_FRAGMENT_SHADER, fragmentPlan.sourceFor(ShaderDialect.GLES))
+}
+
+private fun assertShaderStageCompiles(binding: GlBinding, type: Int, source: String) {
+    val shader = binding.createShader(type)
+    binding.shaderSource(shader, source)
+    binding.compileShader(shader)
+    val status = IntArray(1)
+    binding.getShaderiv(shader, GL_COMPILE_STATUS, status)
+    val log = binding.getShaderInfoLog(shader)
+    binding.deleteShader(shader)
+    assertTrue(
+        status[0] != 0,
+        "a driver advertising $ES3_COMPATIBILITY_EXTENSION must accept #version 300 es at the " +
+            "compile stage even though this suite skips the crash-triggering link: $log",
+    )
 }
 
 private fun assertOffscreenCompositeAndRestore(binding: GlBinding, profile: RenderContextProfile) {

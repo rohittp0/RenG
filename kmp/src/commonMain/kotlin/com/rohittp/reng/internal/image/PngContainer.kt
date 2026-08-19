@@ -233,7 +233,13 @@ internal fun scanPng(bytes: ByteArray): PngScan {
             imageDataRanges.add(payloadStart until (payloadStart + payloadLength))
         } else if (type == TYPE_PLTE) {
             // Position first: even a PLTE that would otherwise be the only one in the file is
-            // malformed once the first IDAT has already been seen, regardless of duplicate status.
+            // malformed once the first IDAT has already been seen, regardless of duplicate status. A
+            // PLTE that is BOTH a duplicate and mispositioned therefore reports PALETTE_AFTER_IMAGE_DATA,
+            // never DUPLICATE_CRITICAL_CHUNK — pinned by
+            // PngContainerTest.positionWinsOverDuplicateWhenAPlteIsBothMispositionedAndDuplicated. Both
+            // codes lead the consumer to the same fix (delete the second PLTE), so the ordering is
+            // defensible either way; it is fixed here, deliberately, so a future if-reorder is a diff a
+            // reviewer sees rather than a silent behaviour change.
             if (sawIdat) return PngScan.Malformed(PngReject.PALETTE_AFTER_IMAGE_DATA)
             if (palette != null) return PngScan.Malformed(PngReject.DUPLICATE_CRITICAL_CHUNK)
             palette = bytes.copyOfRange(payloadStart, payloadStart + payloadLength)

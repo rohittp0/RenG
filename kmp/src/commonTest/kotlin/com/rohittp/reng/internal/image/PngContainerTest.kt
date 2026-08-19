@@ -143,6 +143,18 @@ class PngContainerTest {
         assertEquals(PngReject.PALETTE_AFTER_IMAGE_DATA, rejectionOf(paletteAfterIdat))
     }
 
+    // A PLTE that is BOTH a duplicate (a first, correctly placed PLTE already exists) AND
+    // mispositioned (this second one comes after the first IDAT). PngContainer.kt's PLTE branch checks
+    // position before checking duplicate, so this pins PALETTE_AFTER_IMAGE_DATA as the winner —
+    // matching the precedent this file already sets in rejectsEveryUnsupportedReasonSpecifically ("bit
+    // depth wins first on paletteAtBitDepthFour"). The two codes are not otherwise distinguishable in
+    // consequence (either way the fix is deleting the second PLTE), but an untested precedence is
+    // incidental rather than deliberate and one accidental if-reorder away from flipping silently.
+    @Test
+    fun positionWinsOverDuplicateWhenAPlteIsBothMispositionedAndDuplicated() {
+        assertEquals(PngReject.PALETTE_AFTER_IMAGE_DATA, rejectionOf(duplicatePlteAfterImageData))
+    }
+
     // colour type 2 (truecolour), 1x1, a single correctly-CRC'd 6-byte tRNS chunk before IDAT.
     private val rgb8SingleTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 6, 116, 82, 78, 83, 0, 10, 0, 20, 0, 30, -59, 54, 41, -1, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 
@@ -157,6 +169,10 @@ class PngContainerTest {
     // palette per specification, never required for a valid truecolour decode, but its position after
     // the first IDAT is itself the violation.
     private val paletteAfterIdat: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 6, 80, 76, 84, 69, 1, 2, 3, 4, 5, 6, -107, 83, 111, 72, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Same base image as paletteAfterIdat, but with a first PLTE correctly placed before IDAT too, so
+    // the second PLTE (after IDAT) is both a duplicate and mispositioned.
+    private val duplicatePlteAfterImageData: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 6, 80, 76, 84, 69, 1, 2, 3, 4, 5, 6, -107, 83, 111, 72, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 6, 80, 76, 84, 69, 7, 8, 9, 10, 11, 12, 18, -49, -99, 10, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 
     // rgb8TwoByTwo: png(2, 2, 8, 2, zlib.compress(raw)) — a minimal admitted 2x2 8-bit truecolour image.
     private val rgb8TwoByTwo: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0, -3, -44, -102, 115, 0, 0, 0, 18, 73, 68, 65, 84, 120, -100, 99, -8, -49, -64, -64, 0, -62, 12, -1, -127, 0, 0, 31, -18, 5, -5, 11, -39, 104, -117, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)

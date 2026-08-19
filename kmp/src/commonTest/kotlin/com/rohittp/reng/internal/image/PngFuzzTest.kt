@@ -109,8 +109,15 @@ private val SEEDS: List<PngSeed> = listOf(
             69, 78, 68, -82, 66, 96, -126,
         ),
     ),
-    // Colour type 3 (palette), 2x1, PLTE plus tRNS both present. Decodes as Success. Palette-index
-    // adjacent mutations against this seed exercise widenToRgba's PALETTE_INDEX_OUT_OF_RANGE path.
+    // Colour type 3 (palette), 2x1, PLTE plus tRNS both present. Decodes as Success. This seed gives
+    // the fuzzer its only palette-bearing, tRNS-bearing input, so it covers colour-type-3 chunk-shape
+    // and IHDR-field mutations generally. It does NOT reach widenToRgba's PALETTE_INDEX_OUT_OF_RANGE
+    // path: that needs either altered IDAT/PLTE payload bytes with a fixed-up CRC (no mutation kind
+    // touches those payloads while fixing the chunk's own CRC) or a dimension/colour-type
+    // reinterpretation of this seed's bytes that still satisfies IMAGE_DATA_LENGTH, and this seed's
+    // raw size (height*(width+1) = 3) has no positive-integer factorisation other than the original
+    // (1, 2). The palette-index path is pinned instead by the hand-crafted deterministic fixture in
+    // PngDecoderTest.rejectsAPaletteIndexOutOfRange.
     PngSeed(
         "paletteWithTrns",
         byteArrayOf(

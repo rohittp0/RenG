@@ -28,12 +28,13 @@ internal sealed interface GlbScan {
  * A JSON chunk that parses cleanly but whose root value is not an object is a distinct fault from
  * both of those: every byte parsed, so nothing is "trailing", and the document obeys JSON grammar,
  * so nothing is malformed JSON — it is simply the wrong shape for glTF, whose root **MUST** be an
- * object. That case is [JSON_ROOT_NOT_OBJECT], and it is checked only after the strict-space
- * padding rule passes: a byte-level fault (trailing content, or padding that is not `0x20`) is
- * detected during the same walk and always wins over the root-shape check, because it is the
- * more specific, earlier-discovered problem. A non-object root that also has genuinely bad
- * padding is therefore reported as [JSON_TRAILING_CONTENT] or [JSON_PADDING_NOT_SPACE], never
- * [JSON_ROOT_NOT_OBJECT].
+ * object. That case is [JSON_ROOT_NOT_OBJECT], and the two ways a byte-level fault can beat it are
+ * not the same mechanism. [JSON_PADDING_NOT_SPACE] genuinely wins by ordering: it is checked, in
+ * the same [JsonParse.Parsed] branch, before the root's shape is inspected, so a non-object root
+ * with bad padding still reports the padding fault. [JSON_TRAILING_CONTENT] wins by construction,
+ * not ordering: it can only arise from the separate, mutually exclusive [JsonParse.Failed] branch,
+ * which returns immediately and never reaches the root-shape check at all — there is no race
+ * between the two to order, because a single parse can never produce both outcomes.
  */
 internal enum class GlbReject {
     HEADER_TOO_SHORT,

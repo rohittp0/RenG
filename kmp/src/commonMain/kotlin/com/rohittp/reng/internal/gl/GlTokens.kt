@@ -59,6 +59,7 @@ internal const val GL_PIXEL_UNPACK_BUFFER_BINDING: Int = 0x88EF
 internal const val GL_UNIFORM_BUFFER_BINDING: Int = 0x8A28
 internal const val GL_VERTEX_ARRAY_BINDING: Int = 0x85B5
 internal const val GL_STATIC_DRAW: Int = 0x88E4
+internal const val GL_DYNAMIC_DRAW: Int = 0x88E8
 
 internal const val GL_VERTEX_SHADER: Int = 0x8B31
 internal const val GL_FRAGMENT_SHADER: Int = 0x8B30

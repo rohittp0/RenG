@@ -52,6 +52,13 @@ internal sealed interface JsonValue {
 }
 
 internal sealed interface JsonParse {
+    /**
+     * [endOffset] is the position immediately after the value's own closing token — the closing
+     * `}`/`]`/`"`, or the last digit or literal character — and never includes any trailing
+     * whitespace that follows it. A caller enforcing what comes after the document (Task 7's GLB
+     * padding rule, which requires every byte from here to the chunk's end to be `0x20`) needs
+     * exactly this position, not the end of the scanned span.
+     */
     data class Parsed(val value: JsonValue, val endOffset: Int) : JsonParse
 
     data class Failed(val reason: JsonReject) : JsonParse
@@ -59,19 +66,24 @@ internal sealed interface JsonParse {
 
 /**
  * Parses one JSON value (RFC 8259, restricted to the strictness this module documents) from
- * `bytes[offset, endExclusive)`. Whitespace after the value is consumed; anything else remaining
- * before `endExclusive` is [JsonReject.TRAILING_CONTENT]. `maximumDepth` bounds array/object
- * nesting so a parse can never recurse past a caller-chosen ceiling.
+ * `bytes[offset, endExclusive)`. Whitespace after the value is consumed only to confirm nothing
+ * but whitespace remains before `endExclusive`; anything else remaining is
+ * [JsonReject.TRAILING_CONTENT]. `maximumDepth` bounds array/object nesting so a parse can never
+ * recurse past a caller-chosen ceiling.
  */
 internal fun parseJson(bytes: ByteArray, offset: Int, endExclusive: Int, maximumDepth: Int): JsonParse {
     val parser = JsonParser(bytes, offset, endExclusive, maximumDepth)
     return try {
         val value = parser.parseValue(depth = 0)
+        // Capture where the value's own closing token ended, before consuming any trailing
+        // whitespace: the caller (Task 7's GLB padding rule) needs the document's true end, not
+        // the end of whatever whitespace happens to follow it.
+        val endOffset = parser.pos
         parser.skipWhitespace()
         if (parser.pos != endExclusive) {
             JsonParse.Failed(JsonReject.TRAILING_CONTENT)
         } else {
-            JsonParse.Parsed(value, parser.pos)
+            JsonParse.Parsed(value, endOffset)
         }
     } catch (signal: JsonRejectSignal) {
         JsonParse.Failed(signal.reason)

@@ -53,6 +53,36 @@ class JsonReaderTest {
         assertFailsWith<IllegalArgumentException> { requireUnicodeScalars("lone \uD800", "field", nonBlank = true) }
     }
 
+    @Test
+    fun endOffsetPointsAtTheClosingTokenNotAtTheBufferEnd() {
+        val withNewlineAndTab = "{}\n\t".encodeToByteArray()
+        val whitespaceResult = assertIs<JsonParse.Parsed>(parseJson(withNewlineAndTab, 0, withNewlineAndTab.size, 64))
+        assertEquals(2, whitespaceResult.endOffset)
+        assertTrue(whitespaceResult.endOffset < withNewlineAndTab.size)
+
+        val withTrailingSpaces = "[1,2]   ".encodeToByteArray()
+        val spacesResult = assertIs<JsonParse.Parsed>(parseJson(withTrailingSpaces, 0, withTrailingSpaces.size, 64))
+        assertEquals(5, spacesResult.endOffset)
+        assertTrue(spacesResult.endOffset < withTrailingSpaces.size)
+    }
+
+    @Test
+    fun rejectsEveryRemainingUncoveredGrammarAndUtf8Code() {
+        assertEquals(JsonReject.UNEXPECTED_END_OF_INPUT, rejectionOf("""{"a":1"""))
+        assertEquals(JsonReject.EXPECTED_COLON, rejectionOf("""{"a" 1}"""))
+        assertEquals(JsonReject.EXPECTED_COMMA_OR_CLOSE, rejectionOf("[1 2]"))
+        assertEquals(JsonReject.INVALID_LITERAL, rejectionOf("nul"))
+        assertEquals(JsonReject.BAD_EXPONENT, rejectionOf("""{"a":1e}"""))
+        // The mirror of the high-surrogate case above: a low surrogate escape with no preceding
+        // high surrogate is just as lone, and must be rejected the same way.
+        assertEquals(JsonReject.LONE_LOW_SURROGATE_ESCAPE, rejectionOf("""{"a":"\uDC00"}"""))
+        assertEquals(JsonReject.UTF8_INVALID_LEAD_BYTE, rejectionOfBytes(byteArrayOf(0x22, 0xF5.toByte(), 0x22)))
+        assertEquals(
+            JsonReject.UTF8_INVALID_CONTINUATION,
+            rejectionOfBytes(byteArrayOf(0x22, 0xF4.toByte(), 0x90.toByte(), 0x22)),
+        )
+    }
+
     private fun memberOf(json: String): JsonValue {
         val result = parseJson(json.encodeToByteArray(), 0, json.encodeToByteArray().size, 64)
         val parsed = assertIs<JsonParse.Parsed>(result)

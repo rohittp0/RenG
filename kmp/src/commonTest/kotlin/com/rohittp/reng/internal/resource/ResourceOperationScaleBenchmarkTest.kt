@@ -27,8 +27,28 @@ import kotlin.time.TimeSource
  * Successive-doubling ratios are ~3.5, ~4.0, and ~4.2 — at or above the quadratic signature (ratio 4), not
  * the linear one (ratio 2), which confirms the reducer's per-event O(routes + occurrences) rebuild, at
  * roughly nine events per route, compounds into effectively O(routes²) (or worse) total work rather than
- * the O(routes) a linear driver would show. The real 512-route number is ~5.8x-6.7x HANDOFF.md's prior
- * *extrapolated* ~5-second estimate for this exact scenario — the extrapolation undercounted the true cost.
+ * the O(routes) a linear driver would show.
+ *
+ * This isolates that rebuild floor alone, not HANDOFF.md's other two named costs: every route here takes
+ * a unique [ResourceOwnerId], so `OwnerResourceSet` never exceeds one element and the O(owners ×
+ * occurrences) style-owner barrier is never exercised; every occurrence uses [ResourceCommitBinding.Single],
+ * so the shared style/sprite group path is never taken; and the transport body is four bytes, not a
+ * realistic ~50 KB tile, so full-payload content re-hashing is never exercised either. Both remain
+ * extrapolations; only the rebuild floor above is a direct measurement.
+ *
+ * A 2026-08-19 review found this test's own driver had contributed a second, avoidable O(routes²) cost of
+ * its own, stacked on the reducer's: [advanceAllPendingClassGates] re-scanned the full `routeRecords` list
+ * from scratch after every action, restarting at index 0 each time it found a parked route. That scan is
+ * gone — see the comments on [advanceAllPendingClassGates] and its caller for why naming the ordinal
+ * directly off the [CallTransport] action that produces it is exact, not approximate, for this benchmark's
+ * fixed event mapping. Re-running the fixed driver on the same host reproduced successive-doubling ratios
+ * of roughly 3.9, 4.1, and 4.4 — inside the same at-or-above-quadratic range reported above — confirming
+ * the reducer's own per-event rebuild, not the test's driving loop, produced these numbers. That re-run
+ * shared its host with heavy concurrent load (`uptime` reported load averages above 140 against 14
+ * physical cores, and `top` reported 0% idle CPU throughout both runs), which inflated every absolute
+ * figure by roughly 7x uniformly across all four route counts without changing the doubling-ratio shape;
+ * the raw contended-host figures are recorded in the task report rather than here so they are never
+ * mistaken for a clean-host comparison against the guard below.
  */
 class ResourceOperationScaleBenchmarkTest {
     @Test
@@ -61,9 +81,14 @@ class ResourceOperationScaleBenchmarkTest {
         val definition = definitionOfDistinctStickerRoutes(routeCount)
         val started = TimeSource.Monotonic.markNow()
         val pending = ArrayDeque<ResourceOperationAction>()
+        // Ordinals of routes known to need an AdvancePendingClassGates event, in the order their
+        // CallTransport action resolved. See the note on advanceAllPendingClassGates below for why
+        // this queue — populated in O(1) per action rather than discovered by scanning route state —
+        // is exact for this benchmark's fixed event mapping.
+        val pendingClassGateOrdinals = ArrayDeque<Long>()
         var transition = ResourceOperationStateMachine.start(definition)
         pending.addAll(transition.actions)
-        transition = advanceAllPendingClassGates(transition, pending)
+        transition = advanceAllPendingClassGates(transition, pending, pendingClassGateOrdinals)
         while (transition.outcome == null) {
             val action = pending.removeFirstOrNull() ?: break
             // transition() is a two-argument function on the ResourceOperationStateMachine object,
@@ -78,13 +103,29 @@ class ResourceOperationScaleBenchmarkTest {
             } else {
                 ResourceOperationStateMachine.transition(runningState, eventFor(action))
             }
-            pending.addAll(transition.actions)
             // Second deviation: once a route's response is resolved, the reducer parks it in a
             // PendingClassGates cursor and waits for an explicit AdvancePendingClassGates(ordinal)
             // event — it is not among transition.actions, so nothing in the action queue would ever
             // produce it. Every existing commit test drives this by hand (search "AdvancePendingClassGates"
             // in ResourceOperationOrdinaryCommitTest.kt); the benchmark driver must do the same.
-            transition = advanceAllPendingClassGates(transition, pending)
+            //
+            // Which action parks a route there is exact, not guessed, for this benchmark's fixed
+            // eventFor mapping: residentObserved always sees resource = null, so it never selects
+            // content directly; storeReadCompleted always sees Success(null), so under NORMAL access
+            // mode it always falls through to requestTransport rather than selecting content; and
+            // every route uses a distinct locator, so CallTransport is never replayed from a closed
+            // latch. That leaves transportCompleted's SuppliedCallOutcome.Success branch — which,
+            // given a 200 status and a small non-empty body, resolveTransportResponse always resolves
+            // to ResponseRuleOutcome.Selected (see resolveFullResponse in ResourceResponseRules.kt) —
+            // as the only path into PendingClassGates. So naming the ordinal directly off the
+            // CallTransport action that triggered it is O(1) and exact, with no route-list scan
+            // needed. advancePendingClassGates's own precondition (cursor is PendingClassGates at
+            // that same ordinal) still enforces this if this benchmark's event mapping ever changes.
+            if (action is CallTransport) {
+                pendingClassGateOrdinals.addLast(action.ordinal)
+            }
+            pending.addAll(transition.actions)
+            transition = advanceAllPendingClassGates(transition, pending, pendingClassGateOrdinals)
         }
         require(transition.outcome is ResourceOperationOutcome.Success) {
             "benchmark must drive every route to a successful completion, not merely register them"
@@ -92,17 +133,28 @@ class ResourceOperationScaleBenchmarkTest {
         return started.elapsedNow().inWholeMilliseconds
     }
 
-    /** Advances every route currently parked at [PendingClassGates] until none remain, queuing each
-     *  advance's own emitted actions (its first class gate's [ValidateResourceClass]) for the normal loop. */
+    /**
+     * Advances every route named in [pendingOrdinals] until the queue is drained, queuing each
+     * advance's own emitted actions (its first class gate's [ValidateResourceClass]) for the normal
+     * loop.
+     *
+     * This used to find parked routes by scanning `state.routeRecords` for `it.cursor is
+     * PendingClassGates`, restarting from index 0 after every route it found — an O(routes) scan
+     * repeated on the order of `routes` times across a run, contributing an O(routes²) cost from
+     * the TEST HARNESS ITSELF, stacked on top of whatever the reducer costs. That defeated the
+     * point of this benchmark: it exists to show the reducer's own cost, not the driver's. The
+     * queue-based version above tracks exactly which ordinals need advancing (see the comment at
+     * the CallTransport check in the caller) so this function never inspects route state at all.
+     */
     private fun advanceAllPendingClassGates(
         transitionIn: ResourceOperationTransition,
         pending: ArrayDeque<ResourceOperationAction>,
+        pendingOrdinals: ArrayDeque<Long>,
     ): ResourceOperationTransition {
         var current = transitionIn
         while (true) {
             val state = current.state ?: return current
-            val ordinal = state.routeRecords.firstOrNull { it.cursor is PendingClassGates }?.ordinal
-                ?: return current
+            val ordinal = pendingOrdinals.removeFirstOrNull() ?: return current
             current = ResourceOperationStateMachine.transition(state, AdvancePendingClassGates(ordinal))
             pending.addAll(current.actions)
         }

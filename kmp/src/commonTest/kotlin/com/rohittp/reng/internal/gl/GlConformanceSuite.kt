@@ -43,10 +43,41 @@ internal data class GlConformanceReport(
     val checks: List<String>,
 )
 
+/**
+ * How [assertShaderDialectMatrix] handles its deliberate cross-`#version`-dialect negative link.
+ *
+ * [EXERCISE_LINK] performs the real check everywhere it is safe: compile a shader pair in the
+ * dialect opposite the adopted context and call `glLinkProgram` on it, asserting the driver
+ * rejects it (or, where [RenderContextProfile.supportsEs3Compatibility] entitles the driver to
+ * accept it instead, asserting the compile-only capability probe -- see
+ * [assertGles300CompilesWithoutLinking]). This is the assertion proving RenG's `#version`
+ * substitution (`ShaderProfilePlan`, ADR 0008) is necessary rather than decorative, so every
+ * fixture keeps it unless it has a documented reason not to. This is the default, and the only
+ * value any caller needs to pass explicitly today; from Task 18, the macOS CGL fixture is
+ * expected to rely on this default too.
+ *
+ * [SKIP_ON_LINUX_MESA_LINK_SEGFAULT] never calls `glLinkProgram` on a cross-dialect pair, on
+ * either dialect. Mesa 25.2.8's `libgallium` SIGSEGVs inside that exact call whenever a process
+ * holds two or more EGL contexts where at least one is GLES-profile and at least one of them
+ * performs this link -- a genuine, order-independent driver defect reproduced from a RenG-free C
+ * program, not a RenG bug, and not fixable by gating on a capability extension alone (a
+ * GLES-profile context never advertises `GL_ARB_ES3_compatibility`, so that gate leaves the link
+ * still running on the GLES side). See
+ * `docs/research/2026-08-19-mesa-cross-dialect-link-segfault.md` for the full crash-rate matrix,
+ * the minimal C reproducer, and the version bisection. Only [LinuxGlConformanceTest] passes this
+ * value -- its fixture is the one that repeatedly creates and destroys GLES-profile EGL contexts
+ * in one process, which is exactly the shape that triggers the defect.
+ */
+internal enum class CrossDialectLinkPolicy {
+    EXERCISE_LINK,
+    SKIP_ON_LINUX_MESA_LINK_SEGFAULT,
+}
+
 internal fun runGlConformanceSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     expectedDialect: ShaderDialect,
+    crossDialectLinkPolicy: CrossDialectLinkPolicy = CrossDialectLinkPolicy.EXERCISE_LINK,
 ): GlConformanceReport {
     val checks = mutableListOf<String>()
 
@@ -58,7 +89,7 @@ internal fun runGlConformanceSuite(
     checks += "error-queue"
     assertStateRoundTripIsExact(binding, profile)
     checks += "state-round-trip"
-    assertShaderDialectMatrix(binding, profile)
+    assertShaderDialectMatrix(binding, profile, crossDialectLinkPolicy)
     checks += "shader-dialect-matrix"
     assertOffscreenCompositeAndRestore(binding, profile)
     checks += "offscreen-composite"
@@ -345,7 +376,11 @@ private const val CONFORMANCE_FRAGMENT_SOURCE: String =
         "    rengConformanceColour = texture(rengConformanceTexture, rengConformanceUv / max(size, vec2(1.0)));\n" +
         "}\n"
 
-private fun assertShaderDialectMatrix(binding: GlBinding, profile: RenderContextProfile) {
+private fun assertShaderDialectMatrix(
+    binding: GlBinding,
+    profile: RenderContextProfile,
+    crossDialectLinkPolicy: CrossDialectLinkPolicy,
+) {
     val pair = ShaderPair(CONFORMANCE_VERTEX_SOURCE, CONFORMANCE_FRAGMENT_SOURCE)
     val key = ResourceKeyDeriver().geometryProgram(pair).key
     val vertexPlan = requireNotNull(scanShaderProfile(CONFORMANCE_VERTEX_SOURCE))
@@ -384,21 +419,50 @@ private fun assertShaderDialectMatrix(binding: GlBinding, profile: RenderContext
     // the cross-dialect input in the first place, which a non-ES3-compatible driver never is.
     val oppositeShouldLink =
         profile.dialect == ShaderDialect.DESKTOP && profile.supportsEs3Compatibility
-    if (oppositeShouldLink) {
-        assertGles300CompilesWithoutLinking(binding, vertexPlan, fragmentPlan)
-    } else {
-        var observedLog = ""
-        val other = compileShaderProgram(binding, opposite, key, vertexPlan, fragmentPlan) { _, log ->
-            observedLog = log
+
+    when {
+        oppositeShouldLink -> assertGles300CompilesWithoutLinking(binding, vertexPlan, fragmentPlan)
+
+        crossDialectLinkPolicy == CrossDialectLinkPolicy.SKIP_ON_LINUX_MESA_LINK_SEGFAULT -> {
+            // Gating only the ES3-compatible-DESKTOP branch above (the previous fix, commit
+            // 598cc44) did not fully avoid the Mesa defect: a GLES-profile context never
+            // advertises GL_ARB_ES3_compatibility, so `oppositeShouldLink` is always false here,
+            // meaning the unmodified negative link below still ran on the GLES side. The
+            // investigation's own crash-rate matrix already contains this exact case -- two
+            // GLES-profile contexts, each running this unmodified negative link, crash 15/15
+            // with zero DESKTOP contexts involved at all -- which is exactly what
+            // `LinuxGlConformanceTest.theSameBinaryDetectsTwoDialectsOnOneTarget`'s second GLES
+            // context does after the first test method's GLES context already ran. Measured safe
+            // at 20/20 trials
+            // (docs/research/2026-08-19-mesa-cross-dialect-link-segfault.md): skip the
+            // cross-dialect glLinkProgram call entirely on Linux, regardless of dialect or
+            // capability -- there is no capability-based gate that avoids this, short of never
+            // performing the link.
+            //
+            // This intentionally drops the "the wrong directive fails to link" assertion on
+            // Linux. Task 18's macOS CGL fixture is where that assertion must keep running --
+            // Apple's GL is 4.1 core and does not advertise GL_ARB_ES3_compatibility, so the
+            // check is both valid (the driver has no entitlement to accept the mismatch) and
+            // safe (macOS is not the driver with this defect) there. Do not delete this branch as
+            // a "pointless" no-op without reading the research document above first: it is a
+            // driver workaround, not a design choice, and removing it re-exposes the Mesa
+            // SIGSEGV on every Linux CI run.
         }
-        val failed = other as? GlProgramResult.Failed
-            ?: throw AssertionError("the wrong directive must fail on this context")
-        assertTrue(observedLog.isNotEmpty(), "the driver must explain its rejection to the observer")
-        assertTrue(
-            observedLog !in failed.failure.toString(),
-            "the driver log must never cross the failure boundary",
-        )
-        assertEquals("shaderPair", assertNotNull(failed.failure.diagnostic).fieldName)
+
+        else -> {
+            var observedLog = ""
+            val other = compileShaderProgram(binding, opposite, key, vertexPlan, fragmentPlan) { _, log ->
+                observedLog = log
+            }
+            val failed = other as? GlProgramResult.Failed
+                ?: throw AssertionError("the wrong directive must fail on this context")
+            assertTrue(observedLog.isNotEmpty(), "the driver must explain its rejection to the observer")
+            assertTrue(
+                observedLog !in failed.failure.toString(),
+                "the driver log must never cross the failure boundary",
+            )
+            assertEquals("shaderPair", assertNotNull(failed.failure.diagnostic).fieldName)
+        }
     }
     GlErrorQueue.drainOnEntry(binding)
 }

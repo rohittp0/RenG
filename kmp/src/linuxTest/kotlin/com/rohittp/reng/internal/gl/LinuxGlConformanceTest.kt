@@ -38,7 +38,17 @@ class LinuxGlConformanceTest {
             // A surfaceless context starts with viewport and scissor box 0,0,0,0.
             binding.viewport(0, 0, CONFORMANCE_SURFACE_PIXELS, CONFORMANCE_SURFACE_PIXELS)
             binding.scissor(0, 0, CONFORMANCE_SURFACE_PIXELS, CONFORMANCE_SURFACE_PIXELS)
-            val report = runGlConformanceSuite(binding, fixture.probe, dialect)
+            // This fixture repeatedly creates and destroys GLES-profile EGL contexts in one
+            // process -- exactly the shape that triggers Mesa 25.2.8's libgallium SIGSEGV inside
+            // a cross-dialect glLinkProgram (docs/research/2026-08-19-mesa-cross-dialect-link-
+            // segfault.md). See CrossDialectLinkPolicy's doc comment in GlConformanceSuite.kt for
+            // why this is scoped to Linux only and why macOS (Task 18) must keep the real check.
+            val report = runGlConformanceSuite(
+                binding,
+                fixture.probe,
+                dialect,
+                crossDialectLinkPolicy = CrossDialectLinkPolicy.SKIP_ON_LINUX_MESA_LINK_SEGFAULT,
+            )
             assertEquals(7, report.checks.size)
             return assertions(report)
         } finally {

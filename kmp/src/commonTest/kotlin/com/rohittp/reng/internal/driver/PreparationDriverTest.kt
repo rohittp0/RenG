@@ -55,7 +55,12 @@ class PreparationDriverTest {
     @Test
     fun performsExactlyOneConsumerExchangePerStructuralIdentity() = runTest {
         val transport = CountingTransport(); val store = CountingStore()
-        driver(transport, store).run(twoOccurrencesOfOneRoute())
+        val outcome = driver(transport, store).run(twoOccurrencesOfOneRoute())
+        // Call counts alone would stay green even if InstallVisibility (which runs after every count
+        // here is already final) silently started reporting Failed for a normal round trip -- a
+        // fresh-content route wrongly re-leasing instead of installing, say. Asserting Success as well
+        // is what actually pins ValidateResourceClass and InstallVisibility genuinely completing.
+        assertIs<ResourceOperationOutcome.Success>(outcome)
         assertEquals(1, transport.executeCalls)
         assertEquals(1, store.readCalls)
         assertEquals(1, store.writeCalls)

@@ -51,9 +51,11 @@ class StickerPipelineTest {
     @Test fun theMapRegimeDrawsDepthTestedBeforeTheScreenRegimeComposites() {
         val binding = RecordingGlBinding()
         val pipeline = createdPipeline(binding)
+        val mapTexture = 11
+        val screenTexture = 22
         val world = StickerWorld(
-            mapAnchored = listOf(resolvedSticker(texture = 11)),
-            screenAnchored = listOf(resolvedSticker(texture = 22, z = 5.0)),
+            mapAnchored = listOf(resolvedSticker(texture = mapTexture)),
+            screenAnchored = listOf(resolvedSticker(texture = screenTexture, z = 5.0)),
         )
         binding.log.clear()
         drawStickers(binding, pipeline, world)
@@ -66,6 +68,22 @@ class StickerPipelineTest {
         assertTrue(depthEnabled in 0 until mapDraw, "the map regime must be depth-tested")
         assertTrue(mapDraw < depthDisabled, "depth must stay on until the map regime is finished")
         assertTrue(depthDisabled < screenDraw, "the screen regime must composite with depth off")
+
+        // The assertions above only check drawArrays call *positions*, so a bug that swaps which of
+        // mapAnchored/screenAnchored feeds the depth-tested loop versus the depth-off loop -- while
+        // keeping the enable/disable/draw call shape intact -- would still pass them. Tie each
+        // sticker's specific texture to the depth state active when its texture bound, so that swap
+        // fails here instead.
+        val mapBind = binding.log.indexOfFirst { it == "bindTexture(0xDE1,$mapTexture)" } // GL_TEXTURE_2D
+        val screenBind = binding.log.indexOfFirst { it == "bindTexture(0xDE1,$screenTexture)" }
+        assertTrue(
+            mapBind in depthEnabled until depthDisabled,
+            "the map-anchored sticker's texture must bind while depth testing is on",
+        )
+        assertTrue(
+            screenBind > depthDisabled,
+            "the screen-anchored sticker's texture must bind after depth testing is turned off",
+        )
     }
 
     @Test fun equalZIndexCompositesInStablePlanOrder() {

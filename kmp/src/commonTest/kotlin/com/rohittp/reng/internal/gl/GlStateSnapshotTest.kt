@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.gl
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -175,6 +176,41 @@ class GlStateSnapshotTest {
         assertTrue(binding.log.contains("bindTexture(0xDE1,7)"))
         assertTrue(binding.log.contains("bindSampler(0,2)"))
         assertTrue(binding.log.contains("bindSampler(1,2)"))
+    }
+
+    /**
+     * [withCapturedGlState] wraps the block in a `finally`, so its restore guarantee must hold
+     * even when the block throws. A round trip against [captureGlState] alone cannot prove this:
+     * `RecordingGlBinding`'s query maps are static, so a second capture equals the first whether or
+     * not restore ever ran. Instead this asserts on the log, using [populatedBinding]'s seeded
+     * original draw-framebuffer handle (11) against a block-written handle (7) that differs from
+     * it, so the restore write is textually distinguishable from the block's own write, and
+     * ordered after it.
+     */
+    @Test fun theCapturedStateGuardRestoresEvenWhenTheBlockThrows() {
+        val binding = populatedBinding()
+        val profile = esProfile()
+        binding.log.clear()
+
+        val thrown = assertFailsWith<IllegalStateException> {
+            withCapturedGlState(binding, profile, textureUnitCount = 1) {
+                binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 7)
+                throw IllegalStateException("frame content failed")
+            }
+        }
+        assertEquals("frame content failed", thrown.message)
+
+        val blockWrite = binding.log.indexOfFirst { it == "bindFramebuffer(0x8CA9,7)" }
+        val restoreWrite = binding.log.indexOfLast { it == "bindFramebuffer(0x8CA9,11)" }
+        assertTrue(blockWrite >= 0, "the block's own write must reach the log")
+        assertTrue(
+            restoreWrite >= 0,
+            "the finally must restore the original draw framebuffer binding (11), distinct from the block's 7",
+        )
+        assertTrue(
+            blockWrite < restoreWrite,
+            "the restore write must appear after the block's write, proving it came from the finally",
+        )
     }
 
     /**

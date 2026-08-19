@@ -766,7 +766,7 @@ internal class RenGRenderer(
      * fixed for the renderer's whole lifetime (ADR 0012). A failure here is therefore a caller
      * contract violation rather than a legitimate runtime outcome — exactly
      * `internal.gl.requireResolvedAtDrawTime`'s own reasoning — and (Task 9b) is now reported through
-     * that exact same shared function, as a typed [RenGException] (`GPU_OPERATION_FAILED` at `DRAW`)
+     * that exact same shared function, as a typed [RenGException] (`INVALID_VALUE` at `DRAW`)
      * rather than the bare `error(...)` this used to throw directly.
      */
     private fun resolveFrameCamera(camera: Camera): ResolvedMercatorCamera =

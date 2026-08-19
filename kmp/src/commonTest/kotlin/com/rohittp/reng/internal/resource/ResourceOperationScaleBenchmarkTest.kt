@@ -49,6 +49,22 @@ import kotlin.time.TimeSource
  * figure by roughly 7x uniformly across all four route counts without changing the doubling-ratio shape;
  * the raw contended-host figures are recorded in the task report rather than here so they are never
  * mistaken for a clean-host comparison against the guard below.
+ *
+ * The guard below no longer asserts an absolute-millisecond ceiling. A ceiling calibrated to this
+ * machine's absolute speed (a prior version used a 50-second ceiling with ~49% headroom above the worst
+ * run recorded above) failed on hosted CI runners that are simply slower at CPU-bound work than the
+ * development machine it was calibrated on — raising the number only relocates the same problem to
+ * whatever host is slower next. The successive-doubling ratio measured throughout this KDoc (~3.5-4.6x,
+ * at or above the quadratic signature of 4x and well below the ~8x a cubic regression would produce) is
+ * machine-independent: a slower host scales every measurement in proportion and leaves the ratio intact.
+ * The test now asserts that ratio instead (see the comment above the assertion in the test body for the
+ * exact threshold and why it sits there).
+ *
+ * The top route count also dropped from 512 to 256. The ratio is what this test exists to check, not the
+ * absolute scale, and the 128-to-256 ratio (still the two longest-running, least noise-prone measurements
+ * available at that top end) already shows the same at-or-above-quadratic shape that 256-to-512 did above
+ * — so measuring out to 512 bought no additional signal for roughly 25-30 extra seconds on every run, on
+ * every platform, on every build.
  */
 class ResourceOperationScaleBenchmarkTest {
     @Test
@@ -56,24 +72,56 @@ class ResourceOperationScaleBenchmarkTest {
         // Existing scheduling tests register many routes but never drive one past StartRoute,
         // and the lookup test drives 4096 occurrences joined onto ONE route. Neither pays the
         // per-route event multiplier, which is why the cost is unexercised rather than absent.
-        var elapsedAt512 = -1L
-        for (routeCount in listOf(64, 128, 256, 512)) {
+        //
+        // Top-end route count is 256, not 512: see the class KDoc for why the 128->256 ratio already
+        // isolates the property under test as well as 256->512 did, at a fraction of the wall-clock cost.
+        val routeCounts = listOf(64, 128, 256)
+        val elapsedMillisByRouteCount = LinkedHashMap<Int, Long>()
+        for (routeCount in routeCounts) {
             val elapsed = driveDistinctRoutesToCompletion(routeCount)
             println("routes=$routeCount elapsedMillis=$elapsed")
-            if (routeCount == 512) elapsedAt512 = elapsed
+            elapsedMillisByRouteCount[routeCount] = elapsed
         }
-        // Guard, not a target: three real runs of this exact 512-route scenario measured 29052-33622ms,
-        // roughly 5.8x-6.7x HANDOFF.md's prior *extrapolated* ~5-second estimate — the extrapolation
-        // undercounted the true cost, so the ceiling below is anchored to the observed figure (worst of the
-        // three runs) rather than to that estimate. The ~49% margin above the worst observed run (33622ms)
-        // is headroom for slower CI hardware, not room for a further regression: extrapolating the 256-route
-        // worst run (7274ms) forward at a cubic rather than the observed near-quadratic rate — i.e. an 8x
-        // rather than ~4.2-4.6x doubling ratio — predicts ~58192ms for 512 routes, which this ceiling still
-        // catches, while a ceiling loosened to comfortably clear any plausible run (e.g. several minutes)
-        // would catch nothing short of runaway behaviour.
+
+        // Successive-doubling ratios: elapsed(2n) / elapsed(n) for each consecutive pair in routeCounts.
+        // A zero or negative elapsed measurement (possible on a very fast machine or a coarse monotonic
+        // clock) makes a ratio undefined rather than merely small or large, so fail with a clear message
+        // instead of dividing by — or into — it.
+        val doublingRatios = routeCounts.zipWithNext { smaller, larger ->
+            val smallerElapsed = elapsedMillisByRouteCount.getValue(smaller)
+            val largerElapsed = elapsedMillisByRouteCount.getValue(larger)
+            require(smallerElapsed > 0L && largerElapsed > 0L) {
+                "cannot compute a doubling ratio from a non-positive elapsed measurement: " +
+                    "routes=$smaller took ${smallerElapsed}ms, routes=$larger took ${largerElapsed}ms"
+            }
+            largerElapsed.toDouble() / smallerElapsed.toDouble()
+        }
+        println("doubling ratios for route counts $routeCounts: $doublingRatios")
+
+        // Base the assertion on the LARGEST pair (128 -> 256), not the smallest (64 -> 128): the 64-route
+        // case finishes in roughly half a second on the reference host, where scheduler jitter and JIT/
+        // native warmup are a large fraction of the total elapsed time, making its ratio comparatively
+        // unstable run to run. The 128->256 pair runs long enough (roughly 1.7s -> 7s on the reference
+        // host) that the same absolute jitter is a much smaller fraction of the total, making it the more
+        // reliable signal of the underlying growth rate.
+        val largestPairRatio = doublingRatios.last()
+
+        // This guard checks the SHAPE of the growth, not its absolute speed, so it survives a move to
+        // slower or faster hardware unchanged: a slower host scales every measurement in proportion and
+        // leaves the ratio intact, unlike an absolute-millisecond ceiling. The reducer's own per-event
+        // O(routes + occurrences) rebuild (see the class KDoc) doubles routes into roughly a 4x
+        // elapsed-time increase; a cubic regression would double into roughly 8x. Real runs on the
+        // reference host measured ratios of roughly 3.5x-4.6x for both the 64->128 and 128->256 pairs
+        // (see the class KDoc). 6.0x sits near the geometric mean of 4 and 8 — comfortably above every
+        // observed near-quadratic ratio (about 30% headroom over the highest, 4.6x) while still well below
+        // the ~8x a cubic regression would produce, so it separates the two shapes clearly without being
+        // tuned tightly to the last observed run. This is a check for an algorithmic regression, not a
+        // performance target, so it is deliberately loose.
         assertTrue(
-            elapsedAt512 < 50_000L,
-            "distinct-route scheduling cost regressed: routes=512 took ${elapsedAt512}ms, ceiling is 50000ms",
+            largestPairRatio < 6.0,
+            "distinct-route scheduling cost regressed: doubling routes from 128 to 256 scaled elapsed " +
+                "time by ${largestPairRatio}x (ceiling 6.0x; quadratic scaling implies ~4x, cubic ~8x); " +
+                "measurements: $elapsedMillisByRouteCount",
         )
     }
 

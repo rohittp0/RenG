@@ -253,3 +253,24 @@ internal fun restoreGlState(binding: GlBinding, snapshot: GlStateSnapshot) {
 private fun GlBinding.setEnabled(cap: Int, enabled: Boolean) {
     if (enabled) enable(cap) else disable(cap)
 }
+
+/**
+ * Runs [block] with [binding]'s corrected save-and-restore set captured beforehand and restored
+ * afterward unconditionally, including when [block] throws.
+ *
+ * Restoring in a `finally` is what turns ADR 0006 from a happy-path promise into a guarantee: a
+ * frame that fails halfway through still hands the context back exactly as it was found.
+ */
+internal inline fun <T> withCapturedGlState(
+    binding: GlBinding,
+    profile: RenderContextProfile,
+    textureUnitCount: Int,
+    block: () -> T,
+): T {
+    val snapshot = captureGlState(binding, profile, textureUnitCount)
+    try {
+        return block()
+    } finally {
+        restoreGlState(binding, snapshot)
+    }
+}

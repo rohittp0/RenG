@@ -3,7 +3,10 @@ package com.rohittp.reng.internal.gl
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
-import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.PipelineStage
+import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.ShaderValue
+import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleMatrix4
 import com.rohittp.reng.internal.math.DoubleVector3
@@ -14,14 +17,26 @@ import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
+import com.rohittp.reng.internal.renGFailure
 
 /**
  * One sticker still carrying its raw, unresolved [Placement] plus the GL texture name its image
  * already uploaded to (Task 4's `uploadTexture`, run once by whoever assembles a [SceneContent]).
  * [SceneContent] resolves [placement] against the frame's camera at draw time — see the class KDoc
  * for why that does not repeat the mistake ADR 0024 warns against.
+ *
+ * [imageWidthPixels] and [imageHeightPixels] are the uploaded image's own pixel dimensions
+ * (`internal.image.DecodedImage.width`/`.height`) — `CONTEXT.md`: a Sticker draws "as a centred
+ * local XY quad whose width and height are the image's pixel dimensions." Defaulting both to `1`
+ * keeps every pre-existing caller (and test) that has no image dimensions to report compiling
+ * unchanged, at exactly the unit-quad size this cycle shipped before Task 9b's fix.
  */
-internal class SceneSticker(val placement: Placement, val texture: Int)
+internal class SceneSticker(
+    val placement: Placement,
+    val texture: Int,
+    val imageWidthPixels: Int = 1,
+    val imageHeightPixels: Int = 1,
+)
 
 /**
  * One consumer [Geometry] paired with the [GeometryPipeline] already compiled — and cached by
@@ -29,18 +44,36 @@ internal class SceneSticker(val placement: Placement, val texture: Int)
  * `GlProgramCache` bookkeeping that belongs to whoever assembles a [SceneContent] once per frame
  * (Cycle F-1 Task 9's renderer), not to [SceneContent] itself.
  *
- * [consumerTextures] is [geometry]'s own [Geometry.textures] map — keyed by the same consumer
- * sampler names — with every [com.rohittp.reng.ResourceLocator] already resolved and decoded to a
- * [DecodedImage], exactly the same "resolve once, upstream, then carry the resolved value" pattern
- * [SceneSticker.texture] already establishes for a sticker's uploaded GL texture name. [geometry]'s
- * own [Geometry.uniforms] needs no such pre-resolution step — a [com.rohittp.reng.ShaderValue] is
- * already in the exact shape [drawGeometry]'s `consumerUniforms` parameter expects — so only
- * textures need this extra field.
+ * [consumerUniforms] and [consumerTextures] are the [PreparedFrame][com.rohittp.reng.PreparedFrame]-time
+ * SNAPSHOTS of [geometry]'s own [Geometry.uniforms] and [Geometry.textures] — never the live `Map`
+ * references [geometry] itself carries. Reading `geometry.uniforms`/`geometry.textures` directly at
+ * draw time would be a second, later read of the same caller-owned object beyond
+ * `FramePlanningCore.plan()`'s single synchronous read, exactly the gap `Geometry`'s own KDoc warns
+ * about: a consumer mutating one of those maps between `prepare()` and `draw()` would then render
+ * content differing from what the frame's canonical identity already hashed.
+ * `com.rohittp.reng.RenGPreparedFrame` takes both snapshots once, at `prepare()` time.
+ *
+ * [consumerUniforms] deliberately has NO default, even though `geometry.uniforms` would compile as
+ * one. "Unreachable in the current codebase" is a property of today's call graph, not a language
+ * guarantee — the same reasoning `internal.gl.requireResolvedAtDrawTime`'s typed-conversion applies
+ * to a provably-unreachable failure applies here to a merely-currently-single call site: a future
+ * second production constructor of [SceneGeometry] (a preview path, a batch or dry-run renderer)
+ * that forgot to pass this parameter would silently reintroduce the exact live-map hazard this class
+ * exists to close, with the compiler offering no resistance. Every caller, test included, must pass
+ * it explicitly.
+ *
+ * [consumerTextures] carries each consumer sampler name's ALREADY-UPLOADED GL texture object name —
+ * not a [com.rohittp.reng.internal.image.DecodedImage] — because upload-and-cache-by-`ResourceKey`
+ * (Task 9b's texture-lifetime fix) happens one layer up, in whoever assembles a [SceneContent], the
+ * same layer [SceneSticker.texture] already establishes the pattern for. Its default of `emptyMap()`
+ * carries no equivalent hazard — it never reads any live reference, so a caller with no consumer
+ * textures at all may still omit it safely.
  */
 internal class SceneGeometry(
     val geometry: Geometry,
     val pipeline: GeometryPipeline,
-    val consumerTextures: Map<String, DecodedImage> = emptyMap(),
+    val consumerUniforms: Map<String, ShaderValue>,
+    val consumerTextures: Map<String, Int> = emptyMap(),
 )
 
 /**
@@ -77,8 +110,9 @@ internal class Scene(
  * identical inputs cannot newly fail — it is exactly as safe as threading `FRAME_PLANNING`'s
  * resolved objects all the way into this GL layer would have been, without growing that seam before
  * Task 9 fixes what a prepared frame actually retains. A resolution failure reaching [draw] is
- * therefore a caller contract violation, not a legitimate runtime outcome, and is reported with
- * [error] rather than silently swallowed or drawn wrong.
+ * therefore a caller contract violation, not a legitimate runtime outcome, and is reported as a
+ * typed [com.rohittp.reng.RenGException] (`INVALID_VALUE` at `DRAW`) via [requireResolvedAtDrawTime]
+ * rather than silently swallowed, drawn wrong, or thrown as a bare untyped exception.
  *
  * **Precision.** [composeMapModelViewProjection], [composeScreenModelViewProjection], and
  * [composeGeometryViewProjection] multiply [ResolvedMercatorCamera]'s and [ResolvedPlacement]'s
@@ -111,7 +145,7 @@ internal class SceneContent(
                     resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
                     boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
                     frameIndex = scene.frameIndex,
-                    consumerUniforms = sceneGeometry.geometry.uniforms,
+                    consumerUniforms = sceneGeometry.consumerUniforms,
                     consumerTextures = sceneGeometry.consumerTextures,
                 )
             }
@@ -121,10 +155,19 @@ internal class SceneContent(
         val screenAnchored = ArrayList<ResolvedSticker>()
         for (sticker in scene.stickers) {
             val resolved = resolvePlacement(sticker.placement, camera).requireResolvedAtDrawTime()
+            // CONTEXT.md: a Sticker draws "as a centred local XY quad whose width and height are
+            // the image's pixel dimensions" -- so the image's own dimensions scale the unit quad
+            // BEFORE the placement's own (map-metres-per-unit or screen-pixels-per-unit) scale is
+            // applied, exactly the way `affineModelMatrix`'s per-axis scale composes below.
+            val localDimensions = DoubleVector3(
+                sticker.imageWidthPixels.toDouble(),
+                sticker.imageHeightPixels.toDouble(),
+                1.0,
+            )
             val modelViewProjection = when (resolved.drawRegime) {
-                DrawRegime.MAP_OCCLUDED -> composeMapModelViewProjection(camera, resolved)
+                DrawRegime.MAP_OCCLUDED -> composeMapModelViewProjection(camera, resolved, localDimensions)
                 DrawRegime.SCREEN_COMPOSITED ->
-                    composeScreenModelViewProjection(scene.outputPixelSize, resolved)
+                    composeScreenModelViewProjection(scene.outputPixelSize, resolved, localDimensions)
             }
             val entry = ResolvedSticker(
                 modelViewProjection = modelViewProjection,
@@ -141,12 +184,44 @@ internal class SceneContent(
     }
 }
 
-private fun <T> SpatialOutcome<T>.requireResolvedAtDrawTime(): T = when (this) {
+/**
+ * Unwraps a draw-time re-resolution (of a [Placement], [Geometry], or [com.rohittp.reng.Camera])
+ * that a reviewer established CANNOT legitimately fail: only per-object resolution is re-derived at
+ * draw time (the camera itself arrives already resolved), and every resolver this calls
+ * ([resolvePlacement], [resolveGeometry], [com.rohittp.reng.internal.projection.resolveMercatorCamera])
+ * is pure and deterministic in its inputs, which are themselves immutable
+ * (`com.rohittp.reng.RenGPreparedFrame` snapshots every mutable input before this ever runs — see
+ * `Geometry.uniforms`/`.textures`'s KDoc). A [SpatialOutcome.Failure] reaching here is therefore a
+ * caller contract violation, not a legitimate runtime outcome.
+ *
+ * **Typed, not [error].** This used to throw a bare, untyped `IllegalStateException` via [error] —
+ * which contradicted RenG's typed-failure contract at exactly the boundary `drawFrame`'s
+ * `try`/`finally` cannot shield a consumer from (state restoration still runs, but the exception
+ * still escapes to the caller of `Renderer.draw`).
+ *
+ * **`RenGErrorCode.INVALID_VALUE` at [PipelineStage.DRAW], not `GPU_OPERATION_FAILED`.** A
+ * resolution failure is semantically an invalid-value fault: [resolvePlacement], [resolveGeometry],
+ * and [com.rohittp.reng.internal.projection.resolveMercatorCamera] all report their OWN internal
+ * failures as `INVALID_VALUE` at `FRAME_PLANNING`, so this reuses the SAME code, only relocated to
+ * the stage it fires from here. `GPU_OPERATION_FAILED` ([glOperationFailure]) is
+ * [GlErrorQueue]'s own wrapper for a genuine `glGetError()` result; reporting it here would send a
+ * consumer to inspect their GL state when the actual fault is in their `FramePlan`. Extending
+ * `internal.requireAllowedFailureContext`/`failureRule`'s allowlist to permit `INVALID_VALUE` at
+ * `DRAW` is a private-file change invisible to `checkKotlinAbi` and costs no more than the reused
+ * code it replaces — the no-new-public-ABI constraint never required picking the wrong code, it
+ * only made the reused one the path of least resistance.
+ *
+ * `internal`, not `private`, specifically so a test can drive a synthetic
+ * [SpatialOutcome.Failure] directly and assert the resulting shape without needing to construct an
+ * actually-unreachable end-to-end scenario. Shared by [com.rohittp.reng.RenGRenderer]'s own
+ * draw-time camera re-resolution, which used to duplicate this exact `error(...)` pattern.
+ */
+internal fun <T> SpatialOutcome<T>.requireResolvedAtDrawTime(): T = when (this) {
     is SpatialOutcome.Success -> value
-    is SpatialOutcome.Failure -> error(
-        "SceneContent received a Placement/Geometry that failed to resolve against its camera at " +
-            "draw time; resolution must already have succeeded once during FRAME_PLANNING before a " +
-            "SceneContent is ever assembled, so this indicates a caller contract violation",
+    is SpatialOutcome.Failure -> throw renGFailure(
+        code = RenGErrorCode.INVALID_VALUE,
+        stage = PipelineStage.DRAW,
+        failureContext = failureContextDiagnostic(stage = PipelineStage.DRAW),
     )
 }
 
@@ -199,10 +274,19 @@ internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): Floa
  * space through [camera]'s view matrix, and [ResolvedPlacement.directionTransform] /
  * [ResolvedPlacement.logicalScale] are applied there — never re-multiplied against the view matrix's
  * rotation a second time, which would double-apply it.
+ *
+ * [localDimensions] scales the local unit quad's x/y/z axes independently BEFORE
+ * [ResolvedPlacement.logicalScale] and [ResolvedPlacement.directionTransform] apply — see
+ * [affineModelMatrix]'s per-axis (per-column) scale. It defaults to `(1, 1, 1)`, i.e. no local
+ * pre-scale at all, which reproduces this function's pre-Task-9b behaviour bit-for-bit. A sticker's
+ * caller passes its decoded image's own pixel dimensions here (`CONTEXT.md`: "a centred local XY
+ * quad whose width and height are the image's pixel dimensions"); nothing else in this cycle has a
+ * local size of its own to report.
  */
 internal fun composeMapModelViewProjection(
     camera: ResolvedMercatorCamera,
     placement: ResolvedPlacement,
+    localDimensions: DoubleVector3 = DoubleVector3(1.0, 1.0, 1.0),
 ): FloatArray {
     require(placement.drawRegime == DrawRegime.MAP_OCCLUDED) {
         "composeMapModelViewProjection requires a map-occluded placement"
@@ -210,7 +294,7 @@ internal fun composeMapModelViewProjection(
     val viewSpaceAnchor = camera.viewMatrix.transformAffinePoint(placement.logicalPosition)
     val cameraSpaceModel = affineModelMatrix(
         rotation = placement.directionTransform,
-        scale = placement.logicalScale,
+        scale = localDimensions * placement.logicalScale,
         translation = viewSpaceAnchor,
     )
     val modelViewProjection = camera.projectionMatrix * cameraSpaceModel
@@ -228,17 +312,21 @@ internal fun composeMapModelViewProjection(
  * screen-right/screen-up/toward-viewer axes instead, so [SCREEN_ROTATION_ROW_SIGN] flips the y and z
  * rows of the rotation-and-scale block — never the translation — to reconcile the two conventions
  * before the result is combined with [screenOrthographicProjection].
+ *
+ * [localDimensions] is the same per-axis local pre-scale [composeMapModelViewProjection] documents;
+ * it defaults to `(1, 1, 1)`, reproducing this function's pre-Task-9b behaviour bit-for-bit.
  */
 internal fun composeScreenModelViewProjection(
     outputPixelSize: OutputPixelSize,
     placement: ResolvedPlacement,
+    localDimensions: DoubleVector3 = DoubleVector3(1.0, 1.0, 1.0),
 ): FloatArray {
     require(placement.drawRegime == DrawRegime.SCREEN_COMPOSITED) {
         "composeScreenModelViewProjection requires a screen-composited placement"
     }
     val pixelSpaceModel = affineModelMatrix(
         rotation = placement.directionTransform,
-        scale = placement.logicalScale,
+        scale = localDimensions * placement.logicalScale,
         translation = placement.logicalPosition,
         rotationScaleRowSign = SCREEN_ROTATION_ROW_SIGN,
     )
@@ -251,32 +339,38 @@ private val SCREEN_ROTATION_ROW_SIGN: DoubleVector3 = DoubleVector3(1.0, -1.0, -
 
 /**
  * Builds `Translate(translation) * Rotate(rotation) * Scale(scale)` as a single row-major 4x4
- * matrix, applying [rotationScaleRowSign] to each row of the rotation-and-scale block only —
- * [translation] is always carried through unchanged.
+ * matrix, applying [rotationScaleRowSign] to each row of the rotation-and-scale block and [scale]'s
+ * three components to each COLUMN of it — never [translation], which is always carried through
+ * unchanged. Per-column scaling is what makes [scale] anisotropic: `R * diag(scale.x, scale.y,
+ * scale.z)` scales local axis `j` by `scale`'s `j`th component before rotation, exactly the local
+ * pre-scale [composeMapModelViewProjection] and [composeScreenModelViewProjection] document. When
+ * `scale.x == scale.y == scale.z` (every caller before Task 9b's sticker-sizing fix), this reduces
+ * to the previous scalar behaviour bit-for-bit, since scaling every column by the same factor is
+ * exactly what multiplying the whole row by that scalar already did.
  */
 private fun affineModelMatrix(
     rotation: DoubleMatrix3,
-    scale: Double,
+    scale: DoubleVector3,
     translation: DoubleVector3,
     rotationScaleRowSign: DoubleVector3 = DoubleVector3(1.0, 1.0, 1.0),
 ): DoubleMatrix4 = DoubleMatrix4.fromRows(
     listOf(
         listOf(
-            rotationScaleRowSign.x * rotation[0, 0] * scale,
-            rotationScaleRowSign.x * rotation[0, 1] * scale,
-            rotationScaleRowSign.x * rotation[0, 2] * scale,
+            rotationScaleRowSign.x * rotation[0, 0] * scale.x,
+            rotationScaleRowSign.x * rotation[0, 1] * scale.y,
+            rotationScaleRowSign.x * rotation[0, 2] * scale.z,
             translation.x,
         ),
         listOf(
-            rotationScaleRowSign.y * rotation[1, 0] * scale,
-            rotationScaleRowSign.y * rotation[1, 1] * scale,
-            rotationScaleRowSign.y * rotation[1, 2] * scale,
+            rotationScaleRowSign.y * rotation[1, 0] * scale.x,
+            rotationScaleRowSign.y * rotation[1, 1] * scale.y,
+            rotationScaleRowSign.y * rotation[1, 2] * scale.z,
             translation.y,
         ),
         listOf(
-            rotationScaleRowSign.z * rotation[2, 0] * scale,
-            rotationScaleRowSign.z * rotation[2, 1] * scale,
-            rotationScaleRowSign.z * rotation[2, 2] * scale,
+            rotationScaleRowSign.z * rotation[2, 0] * scale.x,
+            rotationScaleRowSign.z * rotation[2, 1] * scale.y,
+            rotationScaleRowSign.z * rotation[2, 2] * scale.z,
             translation.z,
         ),
         listOf(0.0, 0.0, 0.0, 1.0),

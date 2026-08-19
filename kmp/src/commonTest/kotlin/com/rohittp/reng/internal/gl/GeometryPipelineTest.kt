@@ -7,7 +7,6 @@ import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Vector3
-import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
@@ -250,7 +249,14 @@ class GeometryPipelineTest {
         assertTrue(binding.log.none { it.startsWith("uniform") }, "an undeclared consumer name binds nothing")
     }
 
-    // --- Task 7: consumer textures take deterministic, name-sorted units ----------------------
+    // --- Task 7/9b: consumer textures take deterministic, name-sorted units -------------------
+    //
+    // As of Task 9b, drawGeometry's consumerTextures parameter carries each name's ALREADY-UPLOADED
+    // GL texture object name (an Int), never a DecodedImage: uploading (and caching it by
+    // ResourceKey, through GlObjectRegistry) is the job of whoever assembles a frame's
+    // SceneGeometrys, not drawGeometry itself -- see its KDoc. These tests therefore assert binding
+    // (activeTexture/bindTexture/uniform1i), never texImage2D upload bytes; the DATA-vs-IMAGE
+    // premultiply distinction is covered where the upload actually happens, in GlTextureUploadTest.
 
     @Test
     fun consumerTexturesTakeStableUnitsSortedByNameAndTheirSamplersReceiveTheUnitIndex() {
@@ -260,14 +266,15 @@ class GeometryPipelineTest {
 
         drawGeometry(
             binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
-            consumerTextures = linkedMapOf(
-                "uMaskB" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1)),
-                "uMaskA" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1)),
-            ),
+            consumerTextures = linkedMapOf("uMaskB" to 202, "uMaskA" to 101),
         )
 
         // Sorted by name regardless of map insertion order: uMaskA takes unit 0, uMaskB takes unit 1.
         assertEquals(listOf("uniform1i(8,0)", "uniform1i(9,1)"), binding.log.filter { it.startsWith("uniform1i") })
+        assertEquals(
+            listOf("bindTexture(0xDE1,101)", "bindTexture(0xDE1,202)"),
+            binding.log.filter { it.startsWith("bindTexture") },
+        )
     }
 
     @Test
@@ -278,19 +285,20 @@ class GeometryPipelineTest {
 
         drawGeometry(
             binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
-            consumerTextures = mapOf("uUnused" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1))),
+            consumerTextures = mapOf("uUnused" to 101),
         )
 
         assertTrue(binding.log.none { it.startsWith("uniform1i") })
+        // Even undeclared, the texture unit is still bound -- ADR 0008 only skips the SAMPLER
+        // uniform when undeclared, never the underlying GL bind.
+        assertTrue(binding.log.any { it == "bindTexture(0xDE1,101)" })
     }
 
     @Test
     fun drawGeometryRejectsMoreConsumerTexturesThanTheBudgetAllows() {
         val binding = RecordingGlBinding()
         val pipeline = createPipeline(binding)
-        val tooMany = (0 until MAXIMUM_CONSUMER_TEXTURES + 1).associate {
-            "uMask$it" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1))
-        }
+        val tooMany = (0 until MAXIMUM_CONSUMER_TEXTURES + 1).associate { "uMask$it" to it }
 
         assertFailsWithIllegalArgument {
             drawGeometry(
@@ -300,25 +308,25 @@ class GeometryPipelineTest {
         }
     }
 
-    // --- Task 7: the single most damaging error available here — DATA, never IMAGE ------------
+    // --- Task 9b: no upload happens here at all -------------------------------------------------
 
     @Test
-    fun consumerTexturesUploadBitExactAndAreNeverPremultiplied() {
+    fun drawGeometryNeverCallsGenTexturesEvenWithConsumerTexturesBound() {
+        // The single most important regression this refactor protects: if drawGeometry ever went
+        // back to calling uploadTexture itself, every draw of an unchanged Geometry would leak a
+        // fresh GPU texture again, exactly the bug Task 9b's caching fix (one layer up, in
+        // RenGRenderer) depends on this function never doing.
         val binding = RecordingGlBinding().withDeclaredNames("uMask" to 8)
         val pipeline = createPipeline(binding)
         binding.log.clear()
 
-        // 255, 0, 0, 128 unpremultiplied. If the implementation uploaded this through
-        // TextureContent.IMAGE instead of TextureContent.DATA, byte 0 would come out premultiplied
-        // to 128 (255 * 128 / 255, rounded), not stay 255 (as -1 in a signed byte) — silently
-        // corrupting whatever a mask or signed-distance field packed into that channel. Swapping
-        // DATA for IMAGE in GeometryPipeline's consumer-texture path must make this assertion fail.
         drawGeometry(
             binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
-            consumerTextures = mapOf("uMask" to DecodedImage(1, 1, byteArrayOf(-1, 0, 0, -128))),
+            consumerTextures = mapOf("uMask" to 101),
         )
 
-        assertEquals(listOf<Byte>(-1, 0, 0, -128), binding.lastTexImageBytes())
+        assertTrue(binding.log.none { it.startsWith("genTextures") })
+        assertTrue(binding.log.none { it.startsWith("texImage2D") })
     }
 
     // --- creation / deletion, mirroring CompositePipelineTest's shape ------------------------

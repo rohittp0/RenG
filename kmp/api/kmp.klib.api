@@ -18,6 +18,7 @@ final enum class com.rohittp.reng/AnchoringMode : kotlin/Enum<com.rohittp.reng/A
 }
 
 final enum class com.rohittp.reng/DiagnosticCode : kotlin/Enum<com.rohittp.reng/DiagnosticCode> { // com.rohittp.reng/DiagnosticCode|null[0]
+    enum entry BASEMAP_NOT_CONFIGURED // com.rohittp.reng/DiagnosticCode.BASEMAP_NOT_CONFIGURED|null[0]
     enum entry FAILURE_CONTEXT // com.rohittp.reng/DiagnosticCode.FAILURE_CONTEXT|null[0]
     enum entry RESOURCE_RELOADED_AFTER_FREE // com.rohittp.reng/DiagnosticCode.RESOURCE_RELOADED_AFTER_FREE|null[0]
 
@@ -878,3 +879,5 @@ final value class com.rohittp.reng/FramebufferName { // com.rohittp.reng/Framebu
     final fun hashCode(): kotlin/Int // com.rohittp.reng/FramebufferName.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/FramebufferName.toString|toString(){}[0]
 }
+
+final fun com.rohittp.reng/createRenderer(com.rohittp.reng/RendererConfiguration): com.rohittp.reng/Renderer // com.rohittp.reng/createRenderer|createRenderer(com.rohittp.reng.RendererConfiguration){}[0]

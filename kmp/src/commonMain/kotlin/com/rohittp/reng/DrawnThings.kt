@@ -240,13 +240,12 @@ public data class Geometry(
      * type's does. `FramePlanningCore.plan()` reads this map exactly once, synchronously, and
      * serializes it into the plan's immutable canonical bytes, so that reader can never observe a
      * mutation. `internal.gl.drawGeometry` (Cycle F-1 Task 7) is a second, later reader of the same
-     * object at draw time: if a `PreparedFrame` (Task 9) ever retains this exact [Geometry]
-     * instance rather than a snapshot taken at `prepare()` time, a caller mutating this `Map`
-     * between `prepare()` and `draw()` would render values that differ from what the frame's
-     * recorded identity already hashed. A caller must therefore treat a `Map` passed here as
-     * immutable from the moment it is passed. Closing this gap on RenG's side requires
-     * `PreparedFrame` to snapshot [uniforms] and [textures] at `prepare()` time — this class only
-     * documents the requirement, since no `PreparedFrame` implementation exists yet to do it.
+     * object — but by the time it runs, at draw time, `com.rohittp.reng.RenGPreparedFrame` (Task 9b)
+     * has already taken its own `.toMap()` snapshot at `prepare()` time, so a caller mutating this
+     * `Map` between `prepare()` and a later `draw()` on that same frame cannot change what draws or
+     * diverge from what the frame's recorded identity already hashed. A caller should still treat a
+     * `Map` passed here as immutable from the moment it is passed — RenG's own protection is a
+     * defence for its internal correctness, not a licence to keep mutating a map handed to it.
      */
     public val uniforms: Map<String, ShaderValue> = emptyMap(),
     /**

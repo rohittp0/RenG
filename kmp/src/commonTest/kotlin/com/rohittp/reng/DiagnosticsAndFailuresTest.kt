@@ -44,7 +44,7 @@ class DiagnosticsAndFailuresTest {
         )
         assertEquals(listOf("INFO", "WARNING", "ERROR"), DiagnosticSeverity.entries.map { it.name })
         assertEquals(
-            listOf("RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT"),
+            listOf("RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT", "BASEMAP_NOT_CONFIGURED"),
             DiagnosticCode.entries.map { it.name },
         )
     }

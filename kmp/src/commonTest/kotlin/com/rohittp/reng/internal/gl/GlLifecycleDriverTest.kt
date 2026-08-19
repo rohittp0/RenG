@@ -191,20 +191,55 @@ class GlLifecycleDriverTest {
         )
     }
 
+    // Fix B: the previous version of this test recorded "execute" into `order` exactly once, so
+    // it could not distinguish "the checks ran first" from "the checks ran after" or "the checks
+    // never ran at all" -- any of the three would have produced the identical `listOf("execute")`
+    // assertion. `OrderTrackingGlBinding` marks the exact-context probe call and the framebuffer
+    // completeness check into the same `order` list the executor writes to, so the single
+    // assertion below can actually tell the orderings apart.
+    //
+    // Verified: temporarily changed `beginLiveDraw` in RendererLifecycleStateMachine.kt to
+    // `return executePermitted(snapshot, operation)` instead of
+    // `return awaitExactContext(snapshot, operation)`, i.e. skip straight to the executor without
+    // observing the context or validating the framebuffer. With that bypass in place this test
+    // failed (`order` was `["execute"]`, not the expected three-element list), while the other 13
+    // tests in this file were unaffected. The old single-marker assertion would NOT have caught
+    // this bypass, since `order` would still have equalled `listOf("execute")`. The bypass was
+    // then reverted and the full suite confirmed green again.
     @Test fun drawingRunsTheExecutorOnlyAfterProvenanceContextAndFramebufferChecks() {
-        val world = driverWorld(currentContext = adopted)
         val order = mutableListOf<String>()
-        val outcome = world.driver.run(
+        val recording = RecordingGlBinding().apply {
+            strings[GL_SHADING_LANGUAGE_VERSION] = "OpenGL ES GLSL ES 3.20"
+            strings[GL_VERSION] = "OpenGL ES 3.2 Mesa 25.2.8-0ubuntu0.24.04.2"
+            strings[GL_RENDERER] = "llvmpipe (LLVM 20.1.2, 256 bits)"
+            strings[GL_VENDOR] = "Mesa"
+        }
+        val binding = OrderTrackingGlBinding(order, recording)
+        val probe = RenderContextProbe { order += "context-check"; adopted }
+        val driver = GlLifecycleDriver(
+            binding = binding,
+            probe = probe,
+            registry = GlObjectRegistry(),
+            programs = GlProgramCache(),
+            initialSnapshot = RendererLifecycleSnapshot(
+                ownerState = RendererOwnerState.LIVE,
+                contextGeneration = 0L,
+                preparationActive = false,
+                gpuLedger = GpuLedger(hasLiveGpuObjects = false, deferredDeletions = emptyList()),
+            ),
+            initialContext = adopted,
+            initialProfile = null,
+        )
+
+        val outcome = driver.run(
             RendererLifecycleOperation.Draw(
                 frame = PreparedFrameFact.OwnedOpen,
                 target = RenderTargetFact.OwnedCurrent(FramebufferName(5u)),
             ),
         ) { order += "execute"; null }
+
         assertEquals(RendererLifecycleOutcome.Succeeded, outcome)
-        assertEquals(listOf("execute"), order)
-        assertTrue(
-            world.binding.log.indexOfFirst { it.startsWith("checkFramebufferStatus") } >= 0,
-        )
+        assertEquals(listOf("context-check", "framebuffer-check", "execute"), order)
     }
 
     @Test fun closingAfterLossIsContextFreeAndTerminal() {
@@ -294,5 +329,22 @@ class GlLifecycleDriverTest {
             initialProfile = null,
         )
         return DriverWorld(binding, registry, programs, probe, driver)
+    }
+}
+
+/**
+ * A thin [GlBinding] decorator that appends `"framebuffer-check"` to [order] whenever
+ * [checkFramebufferStatus] is called, forwarding every other call unchanged to [delegate]. Exists
+ * only so [GlLifecycleDriverTest.drawingRunsTheExecutorOnlyAfterProvenanceContextAndFramebufferChecks]
+ * can prove ordering across the exact-context probe call, the framebuffer-completeness check, and
+ * the caller's draw executor with one shared, chronologically ordered list.
+ */
+private class OrderTrackingGlBinding(
+    private val order: MutableList<String>,
+    private val delegate: GlBinding,
+) : GlBinding by delegate {
+    override fun checkFramebufferStatus(target: Int): Int {
+        order += "framebuffer-check"
+        return delegate.checkFramebufferStatus(target)
     }
 }

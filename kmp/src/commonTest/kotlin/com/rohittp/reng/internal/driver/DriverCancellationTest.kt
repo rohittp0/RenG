@@ -84,6 +84,31 @@ class DriverCancellationTest {
         assertIs<ResourceOperationOutcome.Cancelled>(outcome)
     }
 
+    // Cycle C Task 15 kept its adapter-cancellation tests single-route specifically to avoid tripping
+    // the CancelRoute crash carried into Cycle F-1: retireBufferedPrefix() calls cancelActiveRoutes(...)
+    // on every OTHER active ordinal once one route retires via ResourceRouteOutcome.Cancelled, and
+    // ResourceActionExecutor.execute had no branch for the resulting CancelRoute action at all -- an
+    // unhandled `else -> error(...)`. Two DISTINCT locators are essential here: a same-key fixture would
+    // be merged into one RouteRecord at preRegister and could never exercise the multi-route path (see
+    // replaysALatchedOutcomeWithoutASecondExchange's own comment on that exact trap).
+    @Test
+    fun aMultiRouteOperationSurvivesOneRouteObservingAdapterCancellation() = runTest {
+        val cancellingRegistration = registration("cancelling")
+        val survivingRegistration = registration("surviving")
+        val transport = FirstThrowsAdapterCancellationTransport(cancellingRegistration.route.locator)
+        val definition = definitionOf(
+            occurrence(1L, cancellingRegistration),
+            occurrence(2L, survivingRegistration),
+            maximumConcurrentRoutes = 2,
+        )
+
+        val outcome = driver(transport).run(definition)
+
+        // The crash was an error(...) fallthrough in the executor, not an assertion failure, so the
+        // meaningful claim is that we reach a typed outcome at all.
+        assertIs<ResourceOperationOutcome.Cancelled>(outcome)
+    }
+
     // The brief this task was written from names this `driver(engine = ClosingEngine())`, modelling a
     // rasterizer whose close() cancels its own internal job and surfaces that to in-flight work as a
     // plain CancellationException (see rentile's DefaultBasemapRasterizer.close(), which does exactly
@@ -224,6 +249,18 @@ private class CancellationCountingTransport(private val delayMillis: Long = 0L) 
 /** Always throws [throwable] from [execute]. */
 private class CancellationThrowingTransport(private val throwable: Throwable) : Transport {
     override suspend fun execute(request: TransportRequest): TransportResponse = throw throwable
+}
+
+/** [cancellingLocator]'s own request throws a bare [CancellationException], exactly as an adapter would
+ *  if it cancelled itself; every other request resolves normally with a 200 and a valid PNG, so that
+ *  sibling route keeps progressing through its own remaining pipeline steps (class validation, store
+ *  write, install visibility) rather than retiring in the same step -- it is still active, not yet
+ *  retired, at the moment the cancelling route's own outcome retires first and reaches
+ *  cancelActiveRoutes. */
+private class FirstThrowsAdapterCancellationTransport(private val cancellingLocator: ResourceLocator) : Transport {
+    override suspend fun execute(request: TransportRequest): TransportResponse =
+        if (request.locator == cancellingLocator) throw CancellationException("adapter cancelled itself")
+        else response(200)
 }
 
 /** Never returns from [read] on its own; it only ever ends by the calling coroutine's own Job being

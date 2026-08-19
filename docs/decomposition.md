@@ -14,15 +14,21 @@ inherits the current decisions rather than revisiting them without new evidence.
 
 ## Order
 
+**Reordered 2026-08-19 so an MVP can ship for waiting consumers.** Existing cycle letters stay bound to
+their existing content so no prior reference breaks: Cycle F splits into **F-1** (stickers, geometries, and
+the renderer factory) and **F-2** (models with textures and animation), and Cycle E splits across its
+basemap and terrain halves. Six Cycle C tasks travel to Cycle E in this reorder — see "C — Resource layer"
+below for exactly which.
+
 ```
 A skeleton ──► B core ──┬──► C resources ──┐
-                        │                  ├──► E basemap+terrain ──► F drawn things ──┬──► G globe
-                        └──► D gl foundation┘                                  ├──► H platforms
-                                                                               └──► I harness ──► J corpus
+                        └──► D gl foundation┘──► F-1 (MVP) ──► release ──► E-basemap ──► release
+                                                            ──► F-2 models ──► release ──► E-terrain
+                                                            ──► G globe ──► H platforms ──► I harness ──► J corpus
 ```
 
 C and D are genuinely independent — one is I/O and CPU, the other is GPU — and are the natural place to
-work in parallel. Everything else is a chain.
+work in parallel. Everything from F-1 onward is a chain; the MVP release sits between F-1 and E-basemap.
 
 | Cycle | Delivers | Gates |
 |---|---|---|
@@ -30,12 +36,19 @@ work in parallel. Everything else is a chain.
 | B | Public API surface and the pure core behind it | `checkKotlinAbi`, host + `linuxX64` + `macosArm64` tests |
 | C | Resource acquisition, decode, parse, caching | Host tests against fake transport/store |
 | D | The GL seam and its three implementations | Real-context conformance on macOS and llvmpipe |
-| E | Basemap and terrain drawn from Rentile tiles | First frame with pixels; golden baseline per reported renderer |
-| F | Stickers, models, geometries, both draw regimes | Per-platform golden baselines |
+| F-1 | Stickers, geometries, and the renderer factory — the MVP | Call-log draw-path assertions; ADR 0024's draw-regime order honoured |
+| *(internal MVP release)* | All six targets published; only macOS and Linux verified | — |
+| E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; golden baseline per reported renderer |
+| F-2 | Models with textures and animation | Per-platform golden baselines |
+| E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
 | G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |
 | I | macOS harness: plans in, MP4 out | A rendered sequence encodes and plays |
 | J | Golden-image corpus gate | Corpus job wired into `ci.yml` and `publish.yml` |
+
+The MVP release is **internal**: breaking the public interface in a later cycle is accepted. Publication
+itself stays immutable regardless — a later breaking change means a new version, never overwriting a
+published coordinate.
 
 ## A — Build and publication skeleton
 
@@ -103,6 +116,21 @@ Kotlin decoder needs an inflate implementation. GLB parsing is glTF 2.0 binary: 
 binary chunk, tractable in pure Kotlin, but the supported feature subset must be written down rather
 than discovered.
 
+Both spikes landed and the design specification and implementation plan were approved. Cycle C is
+implemented on branch `feat/cycle-c-resource-layer` and awaits integration review; it ships the plan's
+tasks 1 through 13 and 15 — the coroutines dependency and public-surface growth, the inflate/CRC-32 seam,
+PNG container parsing and decode (own-authored, no Skiko, hardened by a 300,000-input fuzz test after five
+adversarial review passes found six distinct defects), strict UTF-8 and a hand-rolled JSON reader, GLB
+container scanning and glTF parsing with the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates, the resident cache,
+the resource driver's class gates and Store writes, and cancellation through the driver. The owner
+reordered the remaining six tasks onto Cycle E instead, so an MVP can ship before basemap work is ready:
+sprite/style commits, the production Rentile private-key resolver, the firewall transport/store adapters,
+engine failure classification, and the basemap rasterizer host travel to E's basemap half, and terrain
+acquisition travels to E's terrain half. This cycle therefore proxies nothing to Rentile yet, decodes no
+basemap tile, and draws no map text or pixel; six Rentile-firewall-validated gate/class combinations fail
+loudly rather than fake success, pending that later firewall. `HANDOFF.md` carries the scheduler-cost
+measurement taken here and an erratum owed against ADR 0016's basemap-class count.
+
 ## D — GL foundation
 
 The internal GL seam and its three implementations — `platform.OpenGL3`/`platform.OpenGLCommon`,
@@ -116,35 +144,70 @@ The conformance suite lands here and is the reason ADR 0006 and ADR 0008 are cla
 state identical before and after a draw, and a GLSL ES 3.00 source compiling under both a substituted
 and an unsubstituted directive. It runs against real contexts on `macosArm64` and llvmpipe.
 
+Cycle D is implemented on branch `feat/cycle-d-gl-foundation`, where every plan task including the
+real-context conformance suite is complete and each was independently reviewed with its findings fixed.
+`checkKotlinAbi` reports no public ABI change across the whole cycle. Its own gates pass locally: the
+conformance suite ran for real
+against llvmpipe (surfaceless EGL, ES 3.2 and desktop 4.5 core) and against a real CGL core-profile context
+on Apple silicon; ADR 0006's restore-set claim is corrected and superseded by ADR 0023 and verified
+byte-exact on both. A Mesa 25.2.8 driver defect made one deliberate negative check — a cross-dialect
+`glLinkProgram` — SIGSEGV in-process on Linux; the owner-approved fix skips that one check on Linux for
+every dialect, leaving the macOS fixture as the only remaining real proof that `#version` substitution is
+load-bearing. That Linux verification happened opportunistically under Docker against real Mesa, not
+through a hosted CI run of `:kmp:linuxX64Test`; the hosted runner's no-GPU software-renderer fallback on
+macOS remains untested on any machine with a real GPU. Cycle D awaits integration review; it is not merged
+and not released, so its exact merged-commit CI and publication have not been observed, and `VERSION_NAME`
+remains `0.1.0`.
+
 ## E — Basemap and terrain
 
-Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with texture
-residency and eviction driven by the prepared frames that are alive. This is the first cycle that
+**Split across two execution slots by the 2026-08-19 reorder** so an MVP can ship first: the basemap half
+runs immediately after F-1's MVP release, and the terrain half runs after F-2, moved behind models because
+terrain was already deferred once for having no consumer while models have consumers waiting. Both halves
+still belong to one letter and one subject — the ground — described together here.
+
+**E-basemap.** Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with
+texture residency and eviction driven by the prepared frames that are alive. This is the first cycle that
 produces pixels, so it is also where per-platform golden baselines start — never cross-platform pixel
-equality, since llvmpipe and Apple's GL will not agree.
+equality, since llvmpipe and Apple's GL will not agree. It also picks up five of Cycle C's deferred tasks:
+sprite/style commits, the production Rentile private-key resolver, the firewall transport/store adapters,
+engine failure classification, and the basemap rasterizer host.
 
 Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
 while a developer's machine renders through Metal, so the reported renderer string — not the target —
 keys a baseline, or the first run on new hardware fails on a difference that is not a regression.
 
-E also draws the terrain Cycle C acquires. Cycle C takes Rentile's terrain descriptor and DEM tiles,
-decodes them, and validates their declared encoding, but nothing consumes elevation until here: this cycle
-displaces the mercator ground with it. That keeps the ground one subject rather than splitting acquisition
-from the only thing that reads it. Ground radiance, which Rentile evaluates from the style and hands over
-as a literal, belongs with the same work.
+**E-terrain.** Draws the terrain Cycle C acquires, plus Cycle C's deferred terrain-acquisition task. Cycle
+C takes Rentile's terrain descriptor and DEM tiles, decodes them, and validates their declared encoding,
+but nothing consumes elevation until here: this half displaces the mercator ground with it. That keeps the
+ground one subject rather than splitting acquisition from the only thing that reads it. Ground radiance,
+which Rentile evaluates from the style and hands over as a literal, belongs with the same work.
 
 ## F — Drawn things
 
-Stickers, models with their textures and animation-track time sampling, and geometries painted by
-consumer shader pairs. This cycle owns the decision CLAUDE.md flags as ADR-worthy: how the two draw
-regimes order against each other within one frame, given screen-anchored things composite by z-index
-with no depth test while map-anchored things are occlusion-tested against the scene. It also fixes the
-documented uniform and attribute names a shader pair may declare.
+**Split into F-1 and F-2 by the 2026-08-19 reorder** so an MVP can ship for waiting consumers before models
+are ready. Both halves belong to one letter and one subject — things a `FramePlan` draws — described
+together here.
+
+**F-1 — stickers, geometries, and the renderer factory (the MVP).** `createRenderer`, the first API making
+RenG operable; stickers drawn in both draw regimes; geometries painted by consumer shader pairs with
+consumer-supplied uniforms and textures. This cycle owns the decision CLAUDE.md flagged as ADR-worthy: how
+the two draw regimes order against each other within one frame, given screen-anchored things composite by
+z-index with no depth test while map-anchored things are occlusion-tested against the scene. **ADR 0024**
+answers it: the map regime draws first, depth-tested, and the screen regime composites on top as a single
+stack. It also fixes the documented uniform and attribute names a shader pair may declare. Ships no
+basemap, terrain, models, or globe, and defers all pixel verification to Cycle J in favour of call-log
+draw-path assertions. This cycle's release is the internal MVP.
+
+**F-2 — models with textures and animation.** Models with their textures and animation-track time
+sampling, split out so they can ship after the MVP and after the basemap without blocking either — models
+have consumers waiting, unlike terrain.
 
 ## G — Globe projection
 
 The second projection mode, re-projecting mercator basemap tiles and every placement onto a globe.
-Deliberately after F so it re-projects a complete scene rather than being designed around a partial one.
+Deliberately after both halves of F and E so it re-projects a complete scene rather than being designed
+around a partial one.
 
 ## H — Android and iOS bring-up
 

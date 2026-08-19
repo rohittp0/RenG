@@ -112,11 +112,11 @@ the setup section freeze exact worker base
             └─ Task 6 androidMain        ┘
                  └─ Task 6 six-target layout proof
        └─ (in parallel with 3–6, all pure and fake-driven)
-            ├─ Task 7 context profile and dialect
             ├─ Task 8 error queue
+            │    └─ Task 7 context profile and dialect
             └─ Task 10 internal resource identities
 
-After Task 7 and Task 8:
+After Task 7:
   └─ Task 9 save-and-restore set
 
 After Task 7, Task 9, and Task 10:
@@ -137,11 +137,11 @@ After Task 6 and Task 15:
        ├─ Task 17 Linux fixture and suite run
        └─ Task 18 macOS fixture and suite run
 
-Task 17 CI wiring after Task 17
-Task 19 documentation and full local gates after Tasks 19 and 20
+After Task 17 and Task 18:
+  └─ Task 19 documentation and full local gates
 ```
 
-At most three independent implementation workers run at once. A practical schedule is `(3,4,5)`, then `(6,8,9)`, then `(7,10,11)`, then `(12,13)`, then `(14,15)`, then the serial `16 → 17 → (18,19) → 20 → 21`. Each dependent dispatch uses a new exact controller SHA after its prerequisites are reviewed and incorporated.
+At most three independent implementation workers run at once. A practical schedule is `(3,4,5)`, then `(6,8,9)`, then `(7,10,11)`, then `(12,13)`, then `(14,15)`, then the serial `16 → (17, 18) → 19`. Each dependent dispatch uses a new exact controller SHA after its prerequisites are reviewed and incorporated.
 
 No two workers edit the same seam interface file, roster file, recording fake, ABI dump, workflow, or documentation status file.
 
@@ -1432,7 +1432,7 @@ git commit -m "feat: implement the GL seam on Android"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/RenderContextProfileTest.kt`
 
 **Interfaces:**
-- Consumes: Task 1 tokens, Task 2 seam, Task 8's `GlErrorQueue` (land Task 8 first or stub the drain call and fill it in when Task 8 merges).
+- Consumes: Task 1 tokens, Task 2 seam, Task 8's `GlErrorQueue`.
 - Produces: `ShaderDialect`, `GlVersion`, `RenderContextProfile`, `RenderContextAdoption`, `detectShaderDialect`, `parseGlVersion`, `readExtensionNames`, and `adoptRenderContext`.
 
 > **The dialect is a runtime property of the adopted context and never a property of the target.** This is the specification's single most important statement about shaders. On `linuxX64` and `linuxArm64` the consumer creates the context and may reasonably create either an ES 3.x context or a desktop core context — an EGL/Wayland application does the former, a GLX application the latter, from the same binary on the same target. Keying substitution off the platform would inject `#version 330 core` into an ES context, which is fatal, and that is the more likely Linux case. No `expect`/`actual`, no `Platform.osFamily`, no target-conditional compilation, and no build flag may reach this decision. The only input is `GL_SHADING_LANGUAGE_VERSION` read from the live context.
@@ -2231,6 +2231,8 @@ git commit -m "feat: capture and restore the corrected GL state set"
 
 **Files:**
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/ResourceKeyDerivation.kt`
+- Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/OffscreenSurface.kt`
+- Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/gl/CompositePipeline.kt`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/identity/InternalResourceKeyTest.kt`
 
 **Interfaces:**
@@ -2764,7 +2766,7 @@ git commit -m "feat: compile shaders against the detected dialect"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/OffscreenSurfaceTest.kt`
 
 **Interfaces:**
-- Consumes: Task 7's `RenderContextProfile`, Task 8's `GlErrorQueue`/`glOperationFailure`, Task 9's snapshot, Task 10's `OffscreenSurfaceDescriptor` and `ResourceKeyDeriver.offscreenSurface`, and public `OutputPixelSize`.
+- Consumes: Task 7's `RenderContextProfile`, Task 8's `GlErrorQueue`/`glOperationFailure`, Task 9's snapshot, Task 10's `OffscreenSurfaceDescriptor` and `ResourceKeyDeriver.offscreenSurface`.
 - Produces: `withCapturedGlState`, `OffscreenSurface`, `OffscreenSurfaceResult`, `createOffscreenSurface`, and `deleteOffscreenSurface`.
 
 RenG renders into its own offscreen colour-and-depth surface at the configured output pixel size and then composites it into the caller's `RenderTarget`, so a target only has to be a colour-writable framebuffer of the configured dimensions (ADR 0005). The surface is allocated once and never resized, because output size is fixed at setup (ADR 0012).
@@ -2774,7 +2776,6 @@ RenG renders into its own offscreen colour-and-depth surface at the configured o
 ```kotlin
 package com.rohittp.reng.internal.gl
 
-import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
@@ -2913,14 +2914,6 @@ internal sealed interface OffscreenSurfaceResult {
     data class Failed(val failure: FailureDescriptor) : OffscreenSurfaceResult
 }
 
-internal fun offscreenSurfaceDescriptorFor(size: OutputPixelSize): OffscreenSurfaceDescriptor =
-    OffscreenSurfaceDescriptor(
-        widthPixels = size.width,
-        heightPixels = size.height,
-        colourFormat = OffscreenColourFormat.RGBA8,
-        depthFormat = OffscreenDepthFormat.DEPTH_COMPONENT24,
-    )
-
 internal fun createOffscreenSurface(
     binding: GlBinding,
     profile: RenderContextProfile,
@@ -3020,7 +3013,7 @@ git commit -m "feat: allocate RenG's offscreen colour and depth surface"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/GlFrameDrawerTest.kt`
 
 **Interfaces:**
-- Consumes: Tasks 8, 9, 10, 11, 12, 13; public `FramebufferName`.
+- Consumes: Tasks 7, 8, 9, 10, 11, 12; public `FramebufferName`.
 - Produces: `COMPOSITE_VERTEX_SOURCE`, `COMPOSITE_FRAGMENT_SOURCE`, `COMPOSITE_SHADER_PAIR`, `littleEndianBytes`, `CompositePipeline`, `createCompositePipeline`, `deleteCompositePipeline`, `GlFrameContent`, `REVERSE_Z_FAR_DEPTH`, and `drawFrame`.
 
 Compositing is a blended draw rather than a framebuffer blit, because a blit does not blend and a consumer compositing RenG's output over existing content needs it to (ADR 0005). Cycle D draws no frame content: `EmptyGlFrameContent` is what production passes, and Cycle E replaces it.
@@ -3525,8 +3518,6 @@ internal class GlObjectRegistry {
         live.getOrPut(key) { mutableListOf() }.addAll(handles)
     }
 
-    internal fun handles(key: ResourceKey): List<GlObjectHandle> = ArrayList(live[key].orEmpty())
-
     internal fun liveKeys(): List<ResourceKey> = ArrayList(live.keys)
 
     internal fun hasLiveGpuObjects(): Boolean = live.values.any { it.isNotEmpty() }
@@ -3624,7 +3615,7 @@ git commit -m "feat: track GL handles and the adopted context identity"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/gl/GlLifecycleDriverTest.kt`
 
 **Interfaces:**
-- Consumes: `RendererLifecycleStateMachine.begin`/`resume`, `RendererLifecycleSnapshot`, `RendererLifecycleOperation`, `RendererLifecycleAction`, `RendererLifecycleObservation`, `RendererLifecycleOutcome`, `GpuLedger`, `RendererOwnerState`, `FramebufferFact`, `AdoptionContextFact`; Tasks 8, 9, 13, 14, 15.
+- Consumes: `RendererLifecycleStateMachine.begin`/`resume`, `RendererLifecycleSnapshot`, `RendererLifecycleOperation`, `RendererLifecycleAction`, `RendererLifecycleObservation`, `RendererLifecycleOutcome`, `GpuLedger`, `RendererOwnerState`, `FramebufferFact`, `AdoptionContextFact`; Tasks 7, 8, 11, 14.
 - Produces: `PermittedOperationExecutor`, `RenderCallBarrier`, `PreparationController`, and `GlLifecycleDriver`.
 
 `RendererLifecycleStateMachine` already owns the three owner states and the total operation and error precedence from supplied facts. This driver supplies those facts and executes the actions the machine emits. **It re-decides nothing**: there is no `when` here that duplicates a decision the reducer already makes, and no place where a GL result overrides a machine outcome.
@@ -4792,7 +4783,9 @@ sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2
 ./gradlew --no-configuration-cache :kmp:linuxX64Test \
   --tests "com.rohittp.reng.internal.gl.LinuxGlConformanceTest"
 ./gradlew --no-configuration-cache :kmp:compileKotlinLinuxArm64
-git add kmp/src/linuxTest/kotlin/com/rohittp/reng/internal/gl
+git add kmp/src/linuxTest/kotlin/com/rohittp/reng/internal/gl \
+  .github/workflows/ci.yml \
+  .github/workflows/publish.yml
 git commit -m "test: run the GL conformance suite on real llvmpipe contexts"
 ```
 
@@ -5108,7 +5101,7 @@ Execution stops before any push, merge, workflow dispatch, R2 upload, or publica
 - **Driving the existing lifecycle machine** — Task 15 supplies `ExactContextFact`, `AdoptionContextFact`, `FramebufferFact`, deferred-deletion acknowledgement and failure, quiescence, and preparation termination, and executes `DeleteDeferred` and `ExecutePermittedOperation`; ADR 0015 exact-context deletion, ADR 0007 forgetting without deleting, and deferred-deletion draining each have their own test, and the Cycle B reducer is not modified.
 - **The conformance suite** — Task 16 holds one shared body; Task 17 runs it on real ES 3.2 and 4.5 core llvmpipe contexts through `EGL_PLATFORM_SURFACELESS_MESA`; Task 18 runs it on a real CGL core profile with acceleration never requested; both fixtures own context creation, per ADR 0001.
 - **CI wiring** — Task 17 adds the Mesa EGL install to both Ubuntu jobs after reading the workflows, because both run `:kmp:linuxX64Test` and neither installs EGL today; the macOS jobs already run `macosArm64Test` and need no change.
-- **No public surface** — Tasks 0, 7, and 21 pin the ABI digest at three points in the cycle, and every declaration added is `internal`.
+- **No public surface** — the "Before you start" section, Task 6 Step 4, and Task 19 Step 5 pin the ABI digest at three points in the cycle, and every declaration added is `internal`.
 - **No placeholders** — every step contains real commands or real Kotlin; the only prose-specified bodies are mechanical expansions governed by explicitly stated rules (the remaining seam methods per implementation, the recording fake's remaining methods, and the scratch-object helpers), each with its rule set written out and its shape demonstrated in code.
 
 ## Recorded Execution Decision

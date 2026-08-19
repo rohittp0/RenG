@@ -8,8 +8,12 @@ import struct
 import subprocess
 from tempfile import TemporaryDirectory
 
+from unittest.mock import patch
+
 from tools.check_repository_policy import (
+    _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS,
     _build_configuration_fingerprint,
+    check_dependencies,
     check_repository,
     main,
 )
@@ -264,7 +268,7 @@ VERSION_CATALOG = """[versions]
 agp = "9.3.1"
 kotlin = "2.3.21"
 mavenPublish = "0.36.0"
-rentile = "0.1.5"
+rentile = "0.2.0"
 
 [libraries]
 rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
@@ -274,6 +278,46 @@ kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref 
 android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }
 """
+
+# ADR 0019's coroutines dependency (Cycle C task 1): the same fixtures as KMP_BUILD and
+# VERSION_CATALOG above, with exactly the two permitted coroutines coordinates the policy
+# checker's _PERMITTED_NEW_DEPENDENCIES / _PERMITTED_NEW_TEST_DEPENDENCIES admit. Built by
+# amending the base fixtures rather than a standalone file, so every other check that
+# `check_dependencies` runs on `kmp/build.gradle.kts` (plugin block, publishing block, and
+# the whole-file content fingerprint) still recognizes the rest of the file.
+_KMP_BUILD_WITH_COROUTINES = KMP_BUILD.replace(
+    "        commonMain.dependencies {\n"
+    "            implementation(libs.rentile.kmp)\n"
+    "        }\n",
+    "        commonMain.dependencies {\n"
+    "            implementation(libs.rentile.kmp)\n"
+    "            implementation(libs.kotlinx.coroutines.core)\n"
+    "        }\n",
+).replace(
+    "        commonTest.dependencies {\n"
+    "            implementation(kotlin(\"test\"))\n"
+    "        }\n",
+    "        commonTest.dependencies {\n"
+    "            implementation(kotlin(\"test\"))\n"
+    "            implementation(libs.kotlinx.coroutines.test)\n"
+    "        }\n",
+)
+
+# Matches the real gradle/libs.versions.toml's alphabetical convention exactly (kotlin, then
+# kotlinxCoroutines, then mavenPublish; kotlinx-coroutines-* before rentile-kmp), because this
+# fixture and the real file must tokenize identically for the shared build-fingerprint pin.
+_VERSION_CATALOG_WITH_COROUTINES = VERSION_CATALOG.replace(
+    'kotlin = "2.3.21"\n',
+    'kotlin = "2.3.21"\n'
+    'kotlinxCoroutines = "1.11.0"\n',
+).replace(
+    'rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }\n',
+    'kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core",'
+    ' version.ref = "kotlinxCoroutines" }\n'
+    'kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test",'
+    ' version.ref = "kotlinxCoroutines" }\n'
+    'rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }\n',
+)
 
 PUBLIC_SMOKE_STEP = """      - name: Resolve six targets from the public repository without credentials
         run: >-
@@ -338,6 +382,23 @@ def write_bytes(root: Path, relative: str, contents: bytes) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(contents)
+
+
+def _neutralized_fingerprint_overrides(root: Path) -> dict[str, frozenset[str]]:
+    """Compute the *actual* whole-file content fingerprint for each pinned production file
+    currently on disk at `root`, keyed exactly as `_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS` is,
+    so a test can `patch.dict` that mapping to always accept whatever is there. This isolates
+    one check_dependencies mechanism from the unrelated whole-file fingerprint pin, which would
+    otherwise also fire on any fixture mutation and mask the mechanism actually under test."""
+    return {
+        relative: frozenset({
+            _build_configuration_fingerprint(
+                root / relative, (root / relative).read_text(encoding="utf-8"),
+            ),
+        })
+        for relative in ("kmp/build.gradle.kts", "gradle/libs.versions.toml")
+        if (root / relative).is_file()
+    }
 
 
 def force_track_fixture(root: Path) -> None:
@@ -513,9 +574,6 @@ class RepositoryPolicyTests(unittest.TestCase):
         append_cases = (
             ("com.rohittp.rentile/RenderOptions\n", "ABI_RENTILE_LEAK"),
             ("final class platform.posix/FILE\n", "ABI_PLATFORM_LEAK"),
-            ("final fun com.rohittp.reng/createRenderer(): com.rohittp.reng/Renderer\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
-            ("final class com.rohittp.reng/RendererFactory\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
-            ("final object com.rohittp.reng/RenG\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
         )
         for mutation, expected in append_cases:
             with self.subTest(expected=expected, mutation=mutation):
@@ -717,6 +775,132 @@ class RepositoryPolicyTests(unittest.TestCase):
                     )
                     codes = {violation.code for violation in check_repository(root)}
                     self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_allows_only_the_named_coroutines_coordinates(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_COROUTINES)
+            self.assertEqual([], check_dependencies(root))
+
+    def test_rejects_a_second_new_main_dependency(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "kmp/build.gradle.kts",
+                _KMP_BUILD_WITH_COROUTINES.replace(
+                    "implementation(libs.kotlinx.coroutines.core)",
+                    "implementation(libs.kotlinx.coroutines.core)\n"
+                    "            implementation(libs.kotlinx.serialization.json)",
+                ),
+            )
+            # A second, unlisted addition is rejected by more than one independent check at
+            # once (the exact dependency shape and the whole-file content fingerprint both
+            # fire), so the codes are compared as a set rather than an exact violation count.
+            codes = {violation.code for violation in check_dependencies(root)}
+            self.assertEqual({"FORBIDDEN_CYCLE_B_DEPENDENCY"}, codes)
+
+    def test_rejects_a_second_new_test_dependency(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "kmp/build.gradle.kts",
+                _KMP_BUILD_WITH_COROUTINES.replace(
+                    "implementation(libs.kotlinx.coroutines.test)",
+                    "implementation(libs.kotlinx.coroutines.test)\n"
+                    "            implementation(libs.kotlinx.serialization.json)",
+                ),
+            )
+            codes = {violation.code for violation in check_dependencies(root)}
+            self.assertEqual({"FORBIDDEN_CYCLE_B_DEPENDENCY"}, codes)
+
+    def test_still_rejects_a_bare_coroutines_coordinate(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "kmp/build.gradle.kts",
+                _KMP_BUILD_WITH_COROUTINES.replace(
+                    "implementation(libs.kotlinx.coroutines.core)",
+                    'implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")',
+                ),
+            )
+            self.assertNotEqual([], check_dependencies(root))
+
+    def test_still_rejects_a_bare_coroutines_test_coordinate(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(
+                root,
+                "kmp/build.gradle.kts",
+                _KMP_BUILD_WITH_COROUTINES.replace(
+                    "implementation(libs.kotlinx.coroutines.test)",
+                    'implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")',
+                ),
+            )
+            self.assertNotEqual([], check_dependencies(root))
+
+    def test_clean_fixture_with_coroutines_dependency_and_catalog_passes(self) -> None:
+        # Exercises the exact combination Cycle C task 1 lands in the real repository: both
+        # the build script and the version catalog carry the coroutines coordinates together,
+        # so the catalog's exact library/version snapshot and the whole-file fingerprint for
+        # both files must accept this shape end to end via the full check_repository pipeline.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_COROUTINES)
+            write(root, "gradle/libs.versions.toml", _VERSION_CATALOG_WITH_COROUTINES)
+            self.assertEqual([], check_repository(root))
+
+    def test_catalog_forbidden_scan_still_covers_text_outside_the_exact_tables(self) -> None:
+        # Stripping the two permitted coroutines coordinates from the forbidden-word scan must
+        # not become a blanket exemption: a smuggled table the versions/libraries/plugins exact
+        # comparisons never look at (here, [bundles]) still has to be caught even while the
+        # catalog's known tables remain byte-for-byte the permitted with-coroutines shape. The
+        # unrelated whole-file fingerprint pin (_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS) would
+        # also fire on this exact fixture and mask a broken scan, so it is patched here to
+        # always accept whatever is actually on disk — isolating the forbidden-scan mechanism
+        # itself as the only thing this test can observe.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_COROUTINES)
+            write(
+                root,
+                "gradle/libs.versions.toml",
+                _VERSION_CATALOG_WITH_COROUTINES + "\n[bundles]\n"
+                'sneaky = ["org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.0"]\n',
+            )
+            with patch.dict(
+                _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS,
+                _neutralized_fingerprint_overrides(root),
+            ):
+                codes = {violation.code for violation in check_dependencies(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
+
+    def test_catalog_rejects_a_third_library_entry_beyond_the_two_permitted(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_COROUTINES)
+            write(
+                root,
+                "gradle/libs.versions.toml",
+                _VERSION_CATALOG_WITH_COROUTINES.replace(
+                    "[plugins]",
+                    'kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android",'
+                    ' version.ref = "kotlinxCoroutines" }\n\n'
+                    "[plugins]",
+                ),
+            )
+            codes = {violation.code for violation in check_repository(root)}
+            self.assertIn("FORBIDDEN_CYCLE_B_DEPENDENCY", codes)
 
     def test_cycle_b_dependency_allowlist_rejects_gradle_indirection(self) -> None:
         script_mutations = (
@@ -1062,7 +1246,7 @@ class InjectedPlugin : Plugin<Project> {
     def test_cycle_b_dependency_catalog_is_exact_and_custom_catalogs_are_rejected(self) -> None:
         catalog_mutations = (
             lambda text: text.replace("com.rohittp.rentile:kmp", "com.example:replacement"),
-            lambda text: text.replace('rentile = "0.1.5"', 'rentile = "9.9.9"'),
+            lambda text: text.replace('rentile = "0.2.0"', 'rentile = "9.9.9"'),
             lambda text: text.replace(
                 "[plugins]",
                 'extra = { module = "com.example:runtime", version = "1" }\n[plugins]',

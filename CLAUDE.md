@@ -22,7 +22,45 @@ Cycle B is pure core only: public immutable values, protocols and sanitized fail
 spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven entirely by supplied
 values. There is still no renderer factory, consumer adapter call, Rentile acquisition, decoder, parser,
 production cache, GL call, shader compilation, or pixel, and no public runtime API — the KLIB ABI dump
-contains no Rentile type, platform binding, or renderer factory. Cycle B has **not** been merged to `main`,
+contains no Rentile type, platform binding, or renderer factory. Cycle B has been merged to `main` locally,
+as stated above, but `main` itself is unpushed, so Cycle B has **not** been released and its exact
+merged-commit CI and publication have not been observed. `VERSION_NAME` remains `0.1.0` and the public
+`0.1.0` record remains Cycle A's.
+
+**Cycle C is implemented on branch `feat/cycle-c-resource-layer` and awaits integration review.** Its
+owner-approved design is `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and its
+reviewed plan is `docs/superpowers/plans/2026-08-18-cycle-c-resource-layer.md`, but the plan's original
+scope is now wider than what shipped: the owner reordered the cycles so an MVP can ship for waiting
+consumers, and six of its twenty-one tasks travel with the basemap cycle instead. **Shipped in Cycle C**
+(tasks 1–13 and 15): the coroutines dependency; the five public declarations Task 2 adds; the inflate and
+CRC-32 seam; PNG container parsing and unfiltering to canonical RGBA8, hardened by five adversarial review
+passes into a 300,000-input property fuzz test that asserts `decodePng` never throws; strict UTF-8 and a
+hand-written JSON reader (no serialization library is compile-visible outside native targets); GLB
+container scanning, glTF document parsing, and the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates; the resident
+cache (generations, leases, reload markers); the resource driver running RenG's own class gates and
+performing Store writes and visibility installs; and cancellation propagated unwrapped through the driver.
+**Deferred to the basemap cycle, not implemented:** sprite-pair and basemap-style commits, the production
+Rentile private-key resolver, the firewall transport/store adapters, engine failure classification, the
+basemap rasterizer host and rendered-tile identity, and terrain acquisition. Consequently Cycle C calls no
+Rentile adapter, decodes no basemap tile, and draws no map text or pixel of any kind; six
+Rentile-firewall-validated gate/class combinations (`PARSE_TILEJSON`, `DECODE_VECTOR_TILE`,
+`PARSE_GEOJSON`, and `DECODE_PNG` over the basemap raster/DEM classes) throw loudly rather than fake
+`Valid`, and are unreached until the deferred firewall lands. See `HANDOFF.md` for the scheduler-cost
+measurement, the PNG hardening detail, and an owed erratum against ADR 0016's basemap-class count. Cycle C
+has **not** been merged to `main`, has not been released, and its exact merged-commit CI and publication
+have not been observed. `VERSION_NAME` remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+
+**Cycle D is implemented on branch `feat/cycle-d-gl-foundation` and awaits integration review.** Its
+authority is `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` and
+`docs/superpowers/plans/2026-08-18-cycle-d-gl-foundation.md`; every plan task including the real-context
+conformance suite is complete, and each was independently reviewed with its findings fixed. It adds the
+internal GL seam and its four platform implementations, runtime shading-language dialect detection, the
+offscreen colour-and-depth surface and its composite pass, the corrected GL restore set (ADR 0023), shader
+compilation with version-directive substitution and program caching, the lifecycle driver that supplies
+real GL facts to Cycle B's unmodified pure reducer, and the GL conformance suite that runs against real
+contexts on both llvmpipe and Apple silicon. Cycle D still adds no public ABI, no renderer factory, no
+resource acquisition, no Rentile call, no decoder or parser, and no frame content — the KLIB ABI dump
+contains no Rentile type, platform binding, or renderer factory. Cycle D has **not** been merged to `main`,
 has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
 remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
 
@@ -30,8 +68,9 @@ Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
 preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and
 terminal renderer ownership, ADR 0018 governs canonical identities, ADR 0019 takes kotlinx-coroutines as a
-first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, and ADR 0022
-supersedes ADR 0009's source-set visibility claim). Read both before proposing anything that touches
+first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, ADR 0022
+supersedes ADR 0009's source-set visibility claim, and ADR 0023 supersedes ADR 0006's GL restore set and
+declares the GL error-queue exception). Read both before proposing anything that touches
 the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is

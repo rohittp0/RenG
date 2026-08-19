@@ -363,6 +363,44 @@ class FramePlanningCoreTest {
     }
 
     @Test
+    fun geometryConsumerTexturesAreTraversedSortedByNameRightAfterTheirGeometryProgram() {
+        // Cycle F-1 Task 9b, item 4's first half: a Geometry's consumer textures must be traversed
+        // during planning exactly like a sticker's image or a model's texture override, so a
+        // consumer supplying one is not met with silence.
+        val limits = ResourceLimits(maximumModelTextureBytes = 8_192L)
+        val resolver = RecordingPrivateKeyResolver()
+        val planned = planSuccess(
+            planningCore(resolver),
+            request(
+                plan = framePlan(
+                    geometries = listOf(
+                        geometry(
+                            Vector3(20.0, 0.0, 0.0),
+                            Vector3(10.0, 1.0, 0.0),
+                            shaderPair("textured"),
+                            textures = linkedMapOf(
+                                "uMaskB" to ResourceLocator("mask-b"),
+                                "uMaskA" to ResourceLocator("mask-a"),
+                            ),
+                        ),
+                    ),
+                ),
+                resourceLimits = limits,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                expectedGeometryProgram(shaderPair("textured")),
+                // Sorted by uniform name (uMaskA, uMaskB), regardless of map insertion order.
+                expectedExternal("mask-a", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("mask-b", ResourceClass.MODEL_TEXTURE, limits),
+            ),
+            planned.staticResourceTraversal,
+        )
+    }
+
+    @Test
     fun privateKeyResolverRunsOncePerDistinctExternalRouteAndNeverForGeometryPrograms() {
         val sharedLocator = "shared-locator"
         val resolver = RecordingPrivateKeyResolver()
@@ -884,7 +922,8 @@ class FramePlanningCoreTest {
         topLeft: Vector3,
         bottomRight: Vector3,
         shaderPair: ShaderPair,
-    ): Geometry = Geometry(topLeft = topLeft, bottomRight = bottomRight, shaderPair = shaderPair)
+        textures: Map<String, ResourceLocator> = emptyMap(),
+    ): Geometry = Geometry(topLeft = topLeft, bottomRight = bottomRight, shaderPair = shaderPair, textures = textures)
 
     private fun shaderPair(suffix: String): ShaderPair = ShaderPair(
         vertexSource = validShader("$suffix-vertex"),

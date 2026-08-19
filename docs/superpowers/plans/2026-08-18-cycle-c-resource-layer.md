@@ -16,8 +16,8 @@
 - Keep exactly one published module, `:kmp`, and package public declarations under `com.rohittp.reng`.
 - Keep exactly six targets: `android`, `iosArm64`, `iosSimulatorArm64`, `macosArm64`, `linuxX64`, and `linuxArm64`. Add no JVM, `macosX64`, or `iosX64` target and no new Gradle subproject.
 - Keep `com.rohittp.rentile:kmp:0.1.5` as an `implementation` dependency; expose no Rentile or platform type in public ABI.
-- `org.jetbrains.kotlinx:kotlinx-coroutines-core` is the **only** new dependency permitted, per ADR 0019, and its version lives in RenG's own version catalogue. Add no serialization library, crypto library, Ktor, Skiko, Wire, or protobuf runtime.
-- Keep `explicitApi()` and Kotlin ABI validation enabled. The public ABI grows by **exactly four declarations** across this whole cycle: `ResourceLimits.maximumDecodedImageBytes`, `ResourceLimits.maximumModelJsonChunkBytes`, `RenGErrorCode.BASEMAP_RENDER_FAILED`, `PipelineStage.BASEMAP_RENDER`, and `ResourceKind.BASEMAP_TILE`. Nothing else public changes.
+- `org.jetbrains.kotlinx:kotlinx-coroutines-core` is the **only** new production dependency permitted, per ADR 0019, and its version lives in RenG's own version catalogue. `org.jetbrains.kotlinx:kotlinx-coroutines-test`, sharing that same catalogue version, is the one test-scope artifact permitted alongside it — restricted to `:kmp`'s `commonTest`, because `runTest`, `TestScope`, and `advanceTimeBy` live only there, never in `kotlinx-coroutines-core`. Add no serialization library, crypto library, Ktor, Skiko, Wire, or protobuf runtime.
+- Keep `explicitApi()` and Kotlin ABI validation enabled. The public ABI grows by **exactly five declarations** across this whole cycle: `ResourceLimits.maximumDecodedImageBytes`, `ResourceLimits.maximumModelJsonChunkBytes`, `RenGErrorCode.BASEMAP_RENDER_FAILED`, `PipelineStage.BASEMAP_RENDER`, and `ResourceKind.BASEMAP_TILE`. Nothing else public changes.
 - Expose no renderer factory, public implementation, top-level `createRenderer`, `RenG` construction object, GL call, shader compilation, context, framebuffer, or pixel behavior.
 - Snapshot every `List`/`ByteArray` constructor input. Every public getter returns a fresh copy that cannot mutate backing state.
 - Never expose locator, adapter message/cause, validator, bytes, or engine text in diagnostics, exceptions, or textual representations. An engine `RawResourceKey` must never reach a RenG diagnostic — its `toString()` prints its `stableId`.
@@ -42,25 +42,38 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `kotlinx.coroutines` available to `commonMain` on all six targets; the policy checker permits exactly `libs.kotlinx.coroutines.core` in `:kmp`'s `commonMain` and continues to reject every other forbidden coordinate.
+- Produces: `kotlinx.coroutines` available to `commonMain` on all six targets, and `kotlinx.coroutines.test` available to `commonTest`; the policy checker permits exactly `libs.kotlinx.coroutines.core` in `:kmp`'s `commonMain` and exactly `libs.kotlinx.coroutines.test` in `:kmp`'s `commonTest`, and continues to reject every other forbidden coordinate.
 
 - [ ] **Step 1: Write the failing policy test**
 
 Add to `tools/tests/test_check_repository_policy.py`:
 
 ```python
-def test_allows_only_the_named_coroutines_coordinate(self):
+def test_allows_only_the_named_coroutines_coordinates(self):
     root = self._repository()
     self._write(root / "kmp/build.gradle.kts", _KMP_BUILD_WITH_COROUTINES)
     self.assertEqual(check_dependencies(root), [])
 
-def test_rejects_a_second_new_dependency(self):
+def test_rejects_a_second_new_main_dependency(self):
     root = self._repository()
     self._write(
         root / "kmp/build.gradle.kts",
         _KMP_BUILD_WITH_COROUTINES.replace(
             "implementation(libs.kotlinx.coroutines.core)",
             "implementation(libs.kotlinx.coroutines.core)\n"
+            "            implementation(libs.kotlinx.serialization.json)",
+        ),
+    )
+    violations = check_dependencies(root)
+    self.assertEqual([violation.code for violation in violations], ["FORBIDDEN_CYCLE_B_DEPENDENCY"])
+
+def test_rejects_a_second_new_test_dependency(self):
+    root = self._repository()
+    self._write(
+        root / "kmp/build.gradle.kts",
+        _KMP_BUILD_WITH_COROUTINES.replace(
+            "implementation(libs.kotlinx.coroutines.test)",
+            "implementation(libs.kotlinx.coroutines.test)\n"
             "            implementation(libs.kotlinx.serialization.json)",
         ),
     )
@@ -77,9 +90,20 @@ def test_still_rejects_a_bare_coroutines_coordinate(self):
         ),
     )
     self.assertNotEqual(check_dependencies(root), [])
+
+def test_still_rejects_a_bare_coroutines_test_coordinate(self):
+    root = self._repository()
+    self._write(
+        root / "kmp/build.gradle.kts",
+        _KMP_BUILD_WITH_COROUTINES.replace(
+            "implementation(libs.kotlinx.coroutines.test)",
+            'implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")',
+        ),
+    )
+    self.assertNotEqual(check_dependencies(root), [])
 ```
 
-Define the fixture next to the existing build fixtures in that file:
+Define the fixture next to the existing build fixtures in that file, with the one test-scope coordinate this task also takes:
 
 ```python
 _KMP_BUILD_WITH_COROUTINES = """
@@ -91,6 +115,7 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
         }
     }
 }
@@ -104,28 +129,33 @@ Expected: FAIL — `check_dependencies` currently pins `:kmp` to exactly two dep
 
 - [ ] **Step 3: Amend the policy checker**
 
-In `tools/check_repository_policy.py`, add the single permitted coordinate and exempt it from the forbidden pattern. Keep the pattern itself intact so every other library stays rejected:
+In `tools/check_repository_policy.py`, add the two permitted coordinates — one production, one test-scope — and exempt both from the forbidden pattern. Keep the pattern itself intact so every other library, and every other coroutines artifact, stays rejected:
 
 ```python
-# ADR 0019 takes exactly one coroutines coordinate as a first-party dependency.
-# The forbidden pattern below still rejects every other library, including any
-# other coroutines artifact, so the exemption cannot widen by accident.
+# ADR 0019 takes exactly one coroutines coordinate as a first-party production dependency,
+# plus the one test-scope artifact `runTest`/`TestScope`/`advanceTimeBy` live in. The forbidden
+# pattern below still rejects every other library, including any other coroutines artifact, so
+# neither exemption can widen by accident.
 _PERMITTED_NEW_DEPENDENCIES = frozenset({"libs.kotlinx.coroutines.core"})
+_PERMITTED_NEW_TEST_DEPENDENCIES = frozenset({"libs.kotlinx.coroutines.test"})
 ```
 
-Update `check_dependencies` so `:kmp`'s `commonMain` admits `libs.rentile.kmp` plus any member of `_PERMITTED_NEW_DEPENDENCIES`, and update the forbidden-token scan to skip a token that is exactly a permitted coordinate before applying `_FORBIDDEN_DEPENDENCY`.
+Update `check_dependencies` so `:kmp`'s `commonMain` admits `libs.rentile.kmp` plus any member of `_PERMITTED_NEW_DEPENDENCIES`, and `:kmp`'s `commonTest` admits `kotlin("test")` plus any member of `_PERMITTED_NEW_TEST_DEPENDENCIES`. `main_calls`/`test_calls` each become a fixed two-call set instead of one call, so the total the `allowed` check counts rises from `len(dependency_calls) == 2` to `len(dependency_calls) == 4` — two `implementation` calls in `commonMain`, two in `commonTest` — and `allowed_call_indices` gains the coroutines-test call alongside `kotlin("test")`.
+
+Rewrite the forbidden-token scan itself rather than trying to skip one token: `_kotlin_tokens` splits a qualified reference into one token per identifier and per `.` (`libs`, `.`, `kotlinx`, `.`, `coroutines`, `.`, `core` — seven tokens, not one), so no single token can ever equal a full coordinate string, and "skip a token that is exactly a permitted coordinate" cannot be implemented as such. Instead, tokenize each permitted coordinate once (with `_kotlin_tokens`, exactly as `expected_main`/`expected_test` already are) and change `_contains_forbidden` to walk `arguments` by index: at each position, check whether the run starting there matches a permitted coordinate's tokens using `_token_sequence_at` — the same run-matching helper the file already uses for `_EXPECTED_PLUGIN_BLOCKS` — and if it does, skip past the whole run without applying `_FORBIDDEN_DEPENDENCY` to any token inside it; otherwise test that one token exactly as today.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/tests -p 'test_*.py'`
-Expected: PASS, with the suite count risen by three.
+Expected: PASS, with the suite count risen by five.
 
-- [ ] **Step 5: Declare the dependency**
+- [ ] **Step 5: Declare the dependencies**
 
 In `gradle/libs.versions.toml`, under `[versions]` add `kotlinxCoroutines = "1.11.0"`, and under `[libraries]`:
 
 ```toml
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
 ```
 
 In `kmp/build.gradle.kts`:
@@ -134,6 +164,10 @@ In `kmp/build.gradle.kts`:
 commonMain.dependencies {
     implementation(libs.rentile.kmp)
     implementation(libs.kotlinx.coroutines.core)
+}
+commonTest.dependencies {
+    implementation(kotlin("test"))
+    implementation(libs.kotlinx.coroutines.test)
 }
 ```
 
@@ -158,14 +192,17 @@ git commit -m "build: take kotlinx-coroutines as the one permitted new dependenc
 
 ---
 
-### Task 2: Grow the public surface by exactly four declarations
+### Task 2: Grow the public surface by exactly five declarations
 
 **Files:**
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/Resources.kt`
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/Exceptions.kt`
 - Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/Diagnostics.kt`
+- Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/ValueSupport.kt`
+- Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/ResourceKeyDerivation.kt`
 - Modify: `kmp/api/kmp.klib.api`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/ResourcesTest.kt`
+- Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/DiagnosticsAndFailuresTest.kt`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -243,6 +280,19 @@ public data class ResourceLimits(
 
 Add `BASEMAP_TILE` to `ResourceKind`, `BASEMAP_RENDER_FAILED` to `RenGErrorCode`, and `BASEMAP_RENDER` to `PipelineStage`. Extend `reportOrder` in `internal/ValueSupport.kt` so `BASEMAP_TILE` sorts after the existing kinds, keeping report ordering total.
 
+`ResourceKind` has a second exhaustive `when` with no `else`: `private val ResourceKind.wireValue: Int` in `internal/identity/ResourceKeyDerivation.kt` matches `EXTERNAL`, `GEOMETRY_PROGRAM`, `INTERNAL_PIPELINE`, and `OFFSCREEN_SURFACE` only, so adding `BASEMAP_TILE` without a branch there fails the build the same way an unextended `reportOrder` would. Add a fifth branch:
+
+```kotlin
+private val ResourceKind.wireValue: Int
+    get() = when (this) {
+        ResourceKind.EXTERNAL -> 1
+        ResourceKind.GEOMETRY_PROGRAM -> 2
+        ResourceKind.INTERNAL_PIPELINE -> 3
+        ResourceKind.OFFSCREEN_SURFACE -> 4
+        ResourceKind.BASEMAP_TILE -> 5
+    }
+```
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest :kmp:macosArm64Test`
@@ -257,7 +307,7 @@ Expected: exactly five added lines — two `ResourceLimits` properties with thei
 
 ```bash
 git add kmp/src/commonMain/kotlin/com/rohittp/reng/ kmp/src/commonTest/kotlin/com/rohittp/reng/ kmp/api/kmp.klib.api
-git commit -m "feat(kmp): add the four public declarations Cycle C requires"
+git commit -m "feat(kmp): add the five public declarations Cycle C requires"
 ```
 
 ---
@@ -1105,7 +1155,7 @@ git commit -m "feat(kmp): scan the GLB container with the strict-space padding r
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/glb/GltfParseTest.kt`
 
 **Interfaces:**
-- Consumes: `scanGlb`, `JsonValue` from Tasks 6 and 7.
+- Consumes: `JsonValue` from Task 6; `scanGlb` from Task 7.
 - Produces:
   ```kotlin
   internal data class GltfAccessor(
@@ -1120,6 +1170,12 @@ git commit -m "feat(kmp): scan the GLB container with the strict-space padding r
       val textures: List<GltfTexture>, val samplers: List<GltfSampler>,
       val extensionsRequired: List<String>, val buffers: List<GltfBuffer>,
   )
+  internal enum class GltfReject {
+      ACCESSOR_SPAN_EXCEEDS_BUFFER_VIEW, BUFFER_VIEW_EXCEEDS_BUFFER,
+      NODE_MATRIX_AND_TRS, NODE_GRAPH_NOT_DISJOINT_TREES, NODE_DEPTH_EXCEEDED,
+      INDEX_OUT_OF_RANGE, INDEX_VALUE_OUT_OF_RANGE, DUPLICATE_ANIMATION_NAME,
+      NON_INTEGER_INDEX, COMPONENT_TYPE,
+  }
   internal sealed interface GltfParseResult {
       data class Parsed(val document: GltfDocument) : GltfParseResult
       data class Malformed(val reason: GltfReject) : GltfParseResult
@@ -1228,6 +1284,11 @@ git commit -m "feat(kmp): parse the glTF document and enforce the PARSE_GLB gate
 - Consumes: `GltfDocument` from Task 8.
 - Produces:
   ```kotlin
+  internal enum class GltfUnsupported {
+      EXTENSION_REQUIRED, ACCESSOR_WITHOUT_BUFFER_VIEW, SPARSE_ACCESSOR, PRIMITIVE_MODE,
+      ATTRIBUTE_SEMANTIC, SKIN, MORPH_TARGET, ANIMATION_TARGET_PATH, INTERPOLATION,
+      IMAGE_MEDIA_TYPE, EXTERNAL_URI, SCENE_AMBIGUOUS, NORMALIZED_NOT_PERMITTED,
+  }
   internal sealed interface GltfFeatureResult {
       data object Supported : GltfFeatureResult
       data class Unsupported(val reason: GltfUnsupported) : GltfFeatureResult
@@ -1287,11 +1348,12 @@ Reject a non-empty `extensionsRequired` with one blanket rule — that covers Dr
 
 Accept and ignore `TANGENT`, `COLOR_0`, `extensionsUsed` without `extensionsRequired`, unknown `extensions`/`extras`, cameras and lights, and a channel with no `target.node`. Parse and retain the whole `pbrMetallicRoughness` block, the four secondary texture slots, and the alpha and cull state, because a base-colour override is specified to preserve every other material property.
 
-- [ ] **Step 4: Run, then run the Khronos corpus count**
+- [ ] **Step 4: Run to verify it passes**
 
 Run: `./gradlew --no-configuration-cache --rerun-tasks :kmp:testAndroidHostTest :kmp:macosArm64Test --tests "com.rohittp.reng.internal.glb.GltfFeaturesTest"`
+Expected: PASS on both.
 
-Then run the container and feature layers over the Khronos sample models and record how many assets the subset rejects and why. ADR 0021 names this as the check most likely to move a row from reject to accept, and it is owed before the first release that draws a model. Write the counts into the ADR as an addendum if any row should change; do not silently widen the subset.
+**Deferred, not a checkbox step — the Khronos sample-model corpus count.** ADR 0021 names running the container and feature layers over the Khronos glTF-Sample-Models corpus as the check most likely to move a row from reject to accept, and states it is owed before the first release that draws a model. Unlike every checkbox step above, this plan cannot yet give it a pinned download location, a fixed asset subset, or a command that produces a recorded pass/fail result, so it is left as a standing obligation rather than a step nobody can actually check off. Whichever later task first draws an authored model must add the concrete download step, the command, and the recorded per-asset reject/accept counts, and must write those counts into ADR 0021 as an addendum if any row should change. Do not silently widen the subset in the meantime.
 
 - [ ] **Step 5: Commit**
 
@@ -1478,21 +1540,25 @@ class ResourceOperationScaleBenchmarkTest {
             val elapsed = driveDistinctRoutesToCompletion(routeCount)
             println("routes=$routeCount elapsedMillis=$elapsed")
         }
-        // Guard, not a target: 512 distinct routes must complete inside a generous ceiling so a
-        // future change that makes this super-quadratic fails here rather than in Cycle E.
-        assertTrue(driveDistinctRoutesToCompletion(512) < 20_000L)
+        // Guard, not a target: HANDOFF.md's own extrapolation already puts the current, unfixed
+        // cost at roughly five seconds of pure CPU for this exact 512-tile scenario, so a ceiling
+        // has to sit at that figure rather than well above it — a looser ceiling (e.g. 20 seconds)
+        // would not fail even for a substantially regressed implementation, only a catastrophic one.
+        assertTrue(driveDistinctRoutesToCompletion(512) < 5_000L)
     }
 
     private fun driveDistinctRoutesToCompletion(routeCount: Int): Long {
         val definition = definitionOfDistinctStickerRoutes(routeCount)
         val started = TimeSource.Monotonic.markNow()
-        var state = ResourceOperationStateMachine.start(definition)
+        var transition = ResourceOperationStateMachine.start(definition)
         val pending = ArrayDeque<ResourceOperationAction>()
-        pending.addAll(state.actions)
-        while (state.outcome == null) {
+        pending.addAll(transition.actions)
+        while (transition.outcome == null) {
             val action = pending.removeFirstOrNull() ?: break
-            val transition = state.machine.transition(eventFor(action))
-            state = transition
+            // transition() is a two-argument function on the ResourceOperationStateMachine object,
+            // not a method reachable through the previous transition's result.
+            val runningState = requireNotNull(transition.state) { "no outcome yet but state is null" }
+            transition = ResourceOperationStateMachine.transition(runningState, eventFor(action))
             pending.addAll(transition.actions)
         }
         return started.elapsedNow().inWholeMilliseconds
@@ -1507,7 +1573,8 @@ class ResourceOperationScaleBenchmarkTest {
         is CallTransport -> TransportCompleted(action.actionId, SuppliedCallOutcome.Success(okResponse()))
         is ValidateResourceClass -> ResourceClassValidationCompleted(action.actionId, SuppliedValidationOutcome.Valid)
         is WriteStore -> StoreWriteCompleted(action.actionId, SuppliedCallOutcome.Success(Unit))
-        is InstallVisibility -> VisibilityInstallCompleted(action.actionId, SuppliedInstallOutcome.Installed)
+        // SuppliedInstallOutcome's success case is `Succeeded`, a data object with no payload.
+        is InstallVisibility -> VisibilityInstallCompleted(action.actionId, SuppliedInstallOutcome.Succeeded)
         else -> error("the sticker-only definition emits no other action: $action")
     }
 }
@@ -1553,6 +1620,8 @@ git commit -m "test(kmp): measure resource scheduler cost against distinct route
       suspend fun run(definition: ResourceOperationDefinition): ResourceOperationOutcome
   }
   ```
+
+`ResourceOperationAction` is a sealed interface with 18 subtypes, and `ResourceActionExecutor.kt`'s dispatch is one exhaustive `when (action)` over all of them. This task's commit handles `SampleClock`, `ObserveResident`, `ReadStore`, `CallTransport`, `ReplayLatchedTransport`, and `StartRoute` — the last is how a route begins at all, so every test below already depends on it working. Every action no task has reached yet falls through `else -> error("ResourceActionExecutor does not yet handle $action")`, so this task's own commit compiles and its own tests pass standing alone. Tasks 13 and 14 each replace one or more `else` branches with the class-gate, write, visibility, sprite, and style actions; Task 14 also replaces the `DiscoverChildren` branch; Task 15 replaces the `CancelRoute` branch. No `else` branch survives once every action is covered.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1616,6 +1685,8 @@ Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest --tests "com.r
 
 `run` opens one `coroutineScope`, so structured concurrency binds every child to the caller's job and no child outlives the invocation. A `Semaphore(maximumConcurrentOperations)` bounds concurrent actions. The loop: ask the state machine for actions, launch each inside a permit, await outcomes, feed each back as exactly one event, repeat until the machine yields an outcome.
 
+`StartRoute(ordinal, registration)` is the one action in this task that performs no adapter call and feeds back no event through `transition`: the driver executes it by calling `ResourceOperationStateMachine.beginLookup(state, action.ordinal)` directly — `beginLookup`'s own `(state, ordinal)` shape matches `StartRoute`'s `ordinal` field exactly — and folds the resulting transition's actions and outcome into the same loop as every other action.
+
 Select no dispatcher — work runs on the caller's context, because RenG owns no thread pool. Map a non-cancellation `Throwable` from `Store.read` to `STORE_READ_FAILED / STORE_READ`, from `Store.write` to `STORE_WRITE_FAILED / STORE_WRITE`, and from `Transport.execute` to `TRANSPORT_EXECUTION_FAILED / TRANSPORT`, discarding message and cause. Write **no code path** for a retry, repair, redirect, status fallback, or byte range: the state machine emits no action for any of them, so a code path for one is unreachable by construction and must not exist.
 
 - [ ] **Step 3: Run to verify it passes, then commit**
@@ -1636,8 +1707,11 @@ git commit -m "feat(kmp): drive lookup actions against real transport and store 
 
 **Interfaces:**
 - Consumes: `decodePng`, `scanGlb`, `parseGltf`, `validateGltfFeatures`, `ResidentCache`.
-- Produces:
+- Produces, all in `ClassGateRunner.kt`, which is their sole definer — Task 20 consumes them rather than redefining them:
   ```kotlin
+  internal enum class TerrainEncoding { MAPBOX, TERRARIUM }
+  internal fun encodingOf(samples: DecodedImage): TerrainEncoding?
+  internal fun validateTerrain(samples: DecodedImage): SuppliedValidationOutcome
   internal fun interface ClassGateRunner {
       suspend fun run(gate: ResourceClassGate, content: ResolvedResourceContent): SuppliedValidationOutcome
   }
@@ -1691,7 +1765,7 @@ class ClassGateRunnerTest {
 
 Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest --tests "com.rohittp.reng.internal.driver.ClassGateRunnerTest"`
 
-`DECODE_PNG` calls `decodePng` with the class's decoded ceiling. `PARSE_GLB` calls `scanGlb` then `parseGltf`; `VALIDATE_GLB_FEATURES` calls `validateGltfFeatures`. `VALIDATE_DEM_TERRAIN_ENCODING` runs on decoded samples and admits exactly the two eight-bit RGB terrain encodings, rejecting anything else — no RenG source names them today, so define them here as an internal enum.
+`DECODE_PNG` calls `decodePng` with the class's decoded ceiling. `PARSE_GLB` calls `scanGlb` then `parseGltf`; `VALIDATE_GLB_FEATURES` calls `validateGltfFeatures`. `VALIDATE_DEM_TERRAIN_ENCODING` runs on decoded samples and admits exactly the two eight-bit RGB terrain encodings, rejecting anything else — no RenG source names them today, so this task defines `TerrainEncoding`, `encodingOf`, and `validateTerrain` in `ClassGateRunner.kt` as this task's own internal enum and functions. Task 13 is their sole definer; Task 20's terrain acquisition consumes them rather than declaring its own copy.
 
 For the six engine-validated classes the runner does **not** decode or parse. It reports the outcome the firewall observed, supplied by Task 18. Wire that as a constructor parameter so the runner stays testable in isolation.
 
@@ -1714,7 +1788,7 @@ git commit -m "feat(kmp): run class gates and perform writes and visibility inst
 
 **Interfaces:**
 - Consumes: the sprite and style actions from `ResourceOperationProtocol`.
-- Produces: execution for `ValidateSpritePair`, `WriteSpriteMember`, `InstallSpriteVisibility`, `ValidateBasemapStyle`, `CompileBasemapStyle`, `WriteBasemapStyle`, `InstallBasemapStyleVisibility`.
+- Produces: execution for `ValidateSpritePair`, `WriteSpriteMember`, `InstallSpriteVisibility`, `ValidateBasemapStyle`, `CompileBasemapStyle`, `WriteBasemapStyle`, `InstallBasemapStyleVisibility`, and `DiscoverChildren` — this task replaces Task 12's `else -> error(...)` branch for it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1752,6 +1826,14 @@ class CommitActionsTest {
         driver(store = store).run(routeSatisfiedFromStore())
         assertEquals(0, store.writeCalls)
     }
+
+    @Test
+    fun discoversAStylesChildrenAfterItsOwnRouteCompletes() = runTest {
+        // DiscoverChildren is how a completed style or sprite route's structural children
+        // (e.g. the style's referenced sources and sprite) are announced back to the machine.
+        val outcome = driver().run(styleWithTwoDiscoverableChildren())
+        assertIs<ResourceOperationOutcome.Success>(outcome)
+    }
 }
 ```
 
@@ -1760,6 +1842,8 @@ class CommitActionsTest {
 Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest --tests "com.rohittp.reng.internal.driver.CommitActionsTest"`
 
 `ValidateSpritePair` decodes the image with the PNG decoder and parses the JSON with the JSON reader, jointly, before either member is written. `WriteSpriteMember` writes in the machine's supplied member order. `ValidateBasemapStyle` parses the style document and reports its discovered children. `CompileBasemapStyle` hands the staged bytes to the engine. `WriteBasemapStyle` performs the one consumer write, and only when the machine asks for it — never for resident or Store-sourced content.
+
+`DiscoverChildren(ordinal, parentOccurrenceId)` performs no adapter call: it walks the already-resolved parent content structurally (the parsed style document's referenced sources, or a sprite group's members) and feeds back `ChildrenDiscovered(action.parentOccurrenceId, children)`. This task replaces Task 12's `else -> error(...)` branch for it, alongside the sprite and style branches above.
 
 - [ ] **Step 3: Run, then commit**
 
@@ -1777,8 +1861,8 @@ git commit -m "feat(kmp): execute sprite pair and basemap style commit actions"
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/driver/DriverCancellationTest.kt`
 
 **Interfaces:**
-- Consumes: `CancellationSelection`, `ResourceOperationOutcome.Cancelled`.
-- Produces: `PreparationDriver.cancel()` and unwrapped cancellation propagation.
+- Consumes: `CancellationSelection`, `ResourceOperationOutcome.Cancelled`, `ResidentCache` — the fourth test below instantiates and queries it directly.
+- Produces: `PreparationDriver.cancel()`, unwrapped cancellation propagation, and execution of `CancelRoute` — this task replaces Task 12's `else -> error(...)` branch for it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1827,6 +1911,8 @@ Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest --tests "com.r
 
 Because `run` uses `coroutineScope`, caller cancellation already reaches every child. Feed an adapter's `CancellationException` back as `SuppliedCallOutcome.Cancelled` with its opaque selection identifier; never construct a `RenGException` from it. Cycle B's arbitration decides precedence — supply the observation, do not re-decide it.
 
+`CancelRoute(ordinal)` performs no adapter call either: it cancels that specific route's own in-flight child coroutine, then feeds back `CleanupCancellationObserved(action.ordinal)` once that cancellation is observed. This task replaces Task 12's `else -> error(...)` branch for it.
+
 - [ ] **Step 3: Run, then commit**
 
 ```bash
@@ -1844,7 +1930,7 @@ git commit -m "feat(kmp): propagate cancellation unwrapped through the resource 
 
 **Interfaces:**
 - Consumes: `Sha256Function`, `RentilePrivateKey`, `RentilePrivateKeyResolver`.
-- Produces: `internal class ProductionRentilePrivateKeyResolver(sha256: Sha256Function) : RentilePrivateKeyResolver`.
+- Produces: `internal class ProductionRentilePrivateKeyResolver(sha256: Sha256Function) : RentilePrivateKeyResolver`, and `internal fun redactAuthenticationQuery(url: String): String` — the test below calls it directly.
 
 **This derivation's failure mode is silent.** If RenG computes a digest the engine does not ask for, the result is a permanent cache miss rather than an error.
 
@@ -2068,7 +2154,9 @@ class EngineFailureClassificationTest {
         val descriptor = classify(rasterizationFailureWithMessage("tile https://host/a?token=SECRET failed"))
         assertFalse(descriptor.toString().contains("SECRET"))
         assertFalse(descriptor.toString().contains("host"))
-        assertTrue(descriptor.diagnostics.all { it.resourceKey == null || it.resourceKey!!.stableId.length == 64 })
+        // FailureDescriptor.diagnostic is a singular nullable Diagnostic?, not a list.
+        val diagnostic = descriptor.diagnostic
+        assertTrue(diagnostic == null || diagnostic.resourceKey == null || diagnostic.resourceKey!!.stableId.length == 64)
     }
 
     @Test
@@ -2097,11 +2185,14 @@ git commit -m "feat(kmp): classify engine failures into RenG's closed vocabulary
 
 **Files:**
 - Create: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHost.kt`
+- Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/CanonicalBinary.kt`
+- Modify: `kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/ResourceKeyDerivation.kt`
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHostTest.kt`
 
 **Interfaces:**
+- Consumes: `ProductionRentilePrivateKeyResolver` from Task 16; `FirewallTransport`, `FirewallStore` from Task 17; `classifyEngineFailure` from Task 18; `ResourceKind.BASEMAP_TILE` from Task 2.
 - Produces: `internal class BasemapEngineHost` owning one rasterizer per renderer, plus
-  `internal fun basemapTileKey(styleDigest: String, tile: TileCoordinate, outputSize: OutputPixelSize): ResourceKey`.
+  `internal fun basemapTileKey(styleDigest: String, tile: TileCoordinate, outputSize: OutputPixelSize): ResourceKey`, plus a `CanonicalRootKind.BASEMAP_TILE` and its dedicated derivation function.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2161,18 +2252,62 @@ class BasemapEngineHostTest {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails, then implement**
+- [ ] **Step 2: Add the BASEMAP_TILE canonical root and its derivation function**
+
+`CanonicalRootKind` (`internal/identity/CanonicalBinary.kt`) has exactly five entries today — `FRAME`, `EXTERNAL_RESOURCE`, `GEOMETRY_PROGRAM`, `INTERNAL_PIPELINE`, `OFFSCREEN_SURFACE` — one per existing identity, each with its own dedicated derivation function on `ResourceKeyDeriver` in `internal/identity/ResourceKeyDerivation.kt` (`external(...)`, `geometryProgram(...)`). A rendered basemap tile needs a sixth root following that same one-root-per-identity pattern exactly:
+
+```kotlin
+internal enum class CanonicalRootKind(internal val wireByte: Int) {
+    FRAME(1),
+    EXTERNAL_RESOURCE(2),
+    GEOMETRY_PROGRAM(3),
+    INTERNAL_PIPELINE(4),
+    OFFSCREEN_SURFACE(5),
+    BASEMAP_TILE(6),
+}
+```
+
+Add this as a member function of `ResourceKeyDeriver` itself, alongside `external` and `geometryProgram` — `derive` is a `private` member of that class, so a same-file extension cannot reach it, and `ResourceKind.wireValue` (already a `private` top-level property in the same file, extended for `BASEMAP_TILE` by Task 2) is likewise only reachable from inside the file:
+
+```kotlin
+internal fun basemapTile(
+    styleDigest: String,
+    tile: TileCoordinate,
+    outputSize: OutputPixelSize,
+): DerivedResourceKey {
+    val identity = derive(
+        CanonicalBinary.root(CanonicalRootKind.BASEMAP_TILE) {
+            field(1, CanonicalBinary.u16(ResourceKind.BASEMAP_TILE.wireValue))
+            field(2, CanonicalBinary.exactUtf8(styleDigest))
+            field(3, CanonicalBinary.u16(tile.zoom))
+            field(4, CanonicalBinary.u64(tile.x.toLong()))
+            field(5, CanonicalBinary.u64(tile.y.toLong()))
+            field(6, CanonicalBinary.u16(outputSize.width))
+            field(7, CanonicalBinary.u16(outputSize.height))
+        },
+    )
+    return DerivedResourceKey(
+        key = ResourceKey(kind = ResourceKind.BASEMAP_TILE, stableId = identity.digest.lowercaseHex, resourceClass = null),
+        rawKey = null,
+        identity = identity,
+    )
+}
+```
+
+`basemapTileKey`, this task's own free function in `BasemapEngineHost.kt`, is then `ResourceKeyDeriver().basemapTile(styleDigest, tile, outputSize).key` — never the engine's own `outputRequestKey`.
+
+- [ ] **Step 3: Run to verify it fails, then implement**
 
 Run: `./gradlew --no-configuration-cache :kmp:testAndroidHostTest --tests "com.rohittp.reng.internal.firewall.BasemapEngineHostTest"`
 
 Build one engine configuration with the firewall's fixed adapters, `CredentialProvider.None`, `MapSessionProvider.None`, default execution policy and limits, no metrics sink, and the system clock. Compile the prepared style lazily on first use and bind it to the style's current resident generation.
 
-Derive the rendered-tile key from an ADR 0018 canonical root containing the prepared style's digest, the tile coordinate, and the output size — never from the engine's own request key, so an engine release that changes its derivation cannot silently invalidate RenG's cache.
+Derive the rendered-tile key from the ADR 0018 canonical root added in Step 2, containing the prepared style's digest, the tile coordinate, and the output size — never from the engine's own request key, so an engine release that changes its derivation cannot silently invalidate RenG's cache.
 
-- [ ] **Step 3: Run, then commit**
+- [ ] **Step 4: Run, then commit**
 
 ```bash
-git add kmp/src/commonMain/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHost.kt kmp/src/commonTest/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHostTest.kt
+git add kmp/src/commonMain/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHost.kt kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/CanonicalBinary.kt kmp/src/commonMain/kotlin/com/rohittp/reng/internal/identity/ResourceKeyDerivation.kt kmp/src/commonTest/kotlin/com/rohittp/reng/internal/firewall/BasemapEngineHostTest.kt
 git commit -m "feat(kmp): own one basemap engine per renderer with RenG-derived tile identity"
 ```
 
@@ -2185,9 +2320,10 @@ git commit -m "feat(kmp): own one basemap engine per renderer with RenG-derived 
 - Test: `kmp/src/commonTest/kotlin/com/rohittp/reng/internal/firewall/TerrainAcquisitionTest.kt`
 
 **Interfaces:**
+- Consumes: `decodePng` from Task 5; `TerrainEncoding`, `encodingOf`, `validateTerrain` from Task 13; `BasemapEngineHost` from Task 19.
 - Produces: `internal class TerrainAcquisition` exposing the style's terrain descriptor, ground radiance, and decoded DEM samples.
 
-Nothing consumes elevation in this cycle; Cycle E displaces the ground with it. Acquire, decode, and validate only.
+Nothing consumes elevation in this cycle; Cycle E displaces the ground with it. Acquire, decode, and validate only. `TerrainEncoding`, `encodingOf`, and `validateTerrain`, used directly in this task's own test below, are Task 13's — defined once in `ClassGateRunner.kt` and consumed here, never redefined.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2268,7 +2404,7 @@ final_smoke_home="$(mktemp -d)"
 - [ ] **Step 3: Review the ABI diff one final time**
 
 Run: `git diff main -- kmp/api/kmp.klib.api`
-Expected: exactly the four declarations from Task 2 and nothing else. If a Rentile or platform type appears anywhere in the dump, stop.
+Expected: exactly the five declarations from Task 2 and nothing else. If a Rentile or platform type appears anywhere in the dump, stop.
 
 - [ ] **Step 4: Update the repository documents**
 

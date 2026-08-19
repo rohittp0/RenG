@@ -10,6 +10,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class ResourcesTest {
     @Test
@@ -65,6 +66,7 @@ class ResourcesTest {
                 ResourceKind.GEOMETRY_PROGRAM,
                 ResourceKind.INTERNAL_PIPELINE,
                 ResourceKind.OFFSCREEN_SURFACE,
+                ResourceKind.BASEMAP_TILE,
             ),
             ResourceKind.entries,
         )
@@ -184,6 +186,31 @@ class ResourcesTest {
         STICKER_IMAGE,
         MODEL_GLB,
         MODEL_TEXTURE,
+    }
+
+    @Test
+    fun decodedAndJsonChunkCeilingsHaveDocumentedDefaultsAndRanges() {
+        val limits = ResourceLimits()
+        assertEquals(64L * 1024L * 1024L, limits.maximumDecodedImageBytes)
+        assertEquals(16L * 1024L * 1024L, limits.maximumModelJsonChunkBytes)
+
+        assertFailsWith<IllegalArgumentException> { ResourceLimits(maximumDecodedImageBytes = 0L) }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumDecodedImageBytes = Int.MAX_VALUE.toLong() + 1L)
+        }
+        assertFailsWith<IllegalArgumentException> { ResourceLimits(maximumModelJsonChunkBytes = 0L) }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumModelJsonChunkBytes = Int.MAX_VALUE.toLong() + 1L)
+        }
+    }
+
+    @Test
+    fun basemapTileIsANonExternalResourceKind() {
+        assertTrue(ResourceKind.BASEMAP_TILE in ResourceKind.entries)
+        // Only EXTERNAL keys carry a resource class; this invariant must survive the new entry.
+        assertFailsWith<IllegalArgumentException> {
+            ResourceKey(ResourceKind.BASEMAP_TILE, "0".repeat(64), ResourceClass.BASEMAP_RASTER_TILE)
+        }
     }
 
     private companion object {

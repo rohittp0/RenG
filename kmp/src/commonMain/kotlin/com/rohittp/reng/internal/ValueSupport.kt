@@ -14,25 +14,34 @@ internal fun requireFinite(value: Double, field: String): Double {
     return value
 }
 
-internal fun requireUnicodeScalars(value: String, field: String, nonBlank: Boolean): String {
-    require(!nonBlank || value.isNotBlank()) { "$field must not be blank" }
+internal fun canonicalFloat(value: Float, field: String): Float {
+    val finiteValue = requireFiniteFloat(value, field)
+    return if (finiteValue == 0.0f) 0.0f else finiteValue
+}
 
+internal fun requireFiniteFloat(value: Float, field: String): Float {
+    require(value.isFinite()) { "$field must be finite" }
+    return value
+}
+
+internal fun containsOnlyUnicodeScalars(value: String): Boolean {
     var index = 0
     while (index < value.length) {
-        when (value[index]) {
-            in '\uD800'..'\uDBFF' -> {
-                require(index + 1 < value.length && value[index + 1] in '\uDC00'..'\uDFFF') {
-                    "$field must contain Unicode scalar values"
-                }
-                index += 2
-            }
-            in '\uDC00'..'\uDFFF' -> {
-                throw IllegalArgumentException("$field must contain Unicode scalar values")
-            }
-            else -> index += 1
+        val unit = value[index]
+        if (unit.isHighSurrogate()) {
+            if (index + 1 >= value.length || !value[index + 1].isLowSurrogate()) return false
+            index += 2
+            continue
         }
+        if (unit.isLowSurrogate()) return false
+        index += 1
     }
+    return true
+}
 
+internal fun requireUnicodeScalars(value: String, field: String, nonBlank: Boolean): String {
+    require(!nonBlank || value.isNotBlank()) { "$field must not be blank" }
+    require(containsOnlyUnicodeScalars(value)) { "$field must contain Unicode scalar values" }
     return value
 }
 
@@ -95,4 +104,5 @@ internal val ResourceKind.reportOrder: Int
         ResourceKind.GEOMETRY_PROGRAM -> 1
         ResourceKind.INTERNAL_PIPELINE -> 2
         ResourceKind.OFFSCREEN_SURFACE -> 3
+        ResourceKind.BASEMAP_TILE -> 4
     }

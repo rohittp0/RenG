@@ -126,6 +126,20 @@ context, but the consumer serializes them. Preparation invocations are serialize
 history; one batch still performs independent resource work concurrently.
 _Avoid_: Surface, device, GL session, EGL context
 
+**Restore Set**:
+The closed, documented set of GL state RenG reads before it draws and restores before it returns: the draw
+and read framebuffer, renderbuffer, program, vertex array, array buffer, pixel unpack buffer and uniform
+buffer bindings; the active texture unit and the texture and sampler binding on every unit RenG uses; blend
+enable, separate factors, separate equations and colour; depth test enable, function, write mask and range;
+cull enable, mode and winding; viewport; scissor enable and box; the colour write mask; the colour and depth
+clear values; the unpack alignment, row length, skip rows and skip pixels and the pack alignment; and, on a
+desktop **Render Context** only, the draw buffer and line smoothing. `GL_FRAMEBUFFER_SRGB` is set explicitly
+and restored wherever it is queryable. The element array buffer binding is excluded because the vertex array
+binding restores it. `GL_ACTIVE_TEXTURE` is captured first and reinstated last. The GL error queue is the one
+piece of state RenG cannot restore: reading it clears it, so RenG drains it on entry, attributes any flag
+found to the consumer, and consumes it.
+_Avoid_: GL state cache, context reset, default state, state stack
+
 **Renderer State**:
 One of three terminally ordered owner states. `LIVE` has one adopted exact **Render Context**;
 `AWAITING_CONTEXT_ADOPTION` follows **GPU Object Loss**, has no adopted context or live GL handle, and still
@@ -264,6 +278,20 @@ the directive physical line's complete non-terminator span with `#version 330 co
 and every other code unit, and performs no other substitution. A missing or different directive is
 `INVALID_VALUE` at `FRAME_PLANNING`, not a driver compilation failure.
 _Avoid_: Shader language, GLSL version, compatibility profile
+
+**Shader Interface**:
+The fixed attribute and uniform names RenG binds by name in a compiled **Shader Pair**, honouring the
+**Shader Profile**'s substitution rule — ADR 0008 binds a documented name only when the compiled program
+declares it, and never fails a shader for omitting one. Attributes: `aPosition` (`vec3`), `aTexCoord`
+(`vec2`). Uniforms: `uModelViewProjection` (`mat4`); `uResolution` (`vec2`); `uGeometryBounds` (`vec4`,
+west/south/east/north degrees); `uFrameIndex` (`uint`). `uGeometryBounds` is explicitly informational and
+unsuitable for placement arithmetic — placement stays camera-relative and exact through `aPosition` and
+`uModelViewProjection`, because Cycle B measured camera-relative Float error below 0.001 px and absolute
+degrees packed into a 32-bit float would discard that precision. `uFrameIndex` is narrowed from **Frame
+Plan**'s `frameIndex` (`Long`) because GLSL ES 3.00 has no 64-bit integer type, wrapping at roughly 2.3
+years of continuous 60fps; `frameIndex` is an ordering key rather than a clock, so that wrap is not a
+correctness hazard. See ADR 0024 for the hazard of renaming one of these names later.
+_Avoid_: uniform preamble, injected include, varying, built-in attribute
 
 **Basemap Tile**:
 One canonical PNG tile acquired from Rentile and drawn as the ground beneath a frame. A canonical tile

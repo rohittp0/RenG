@@ -22,6 +22,7 @@ public enum class PipelineStage {
     RESOURCE_FREE,
     RENDERER_CLOSE,
     CONTEXT_ADOPTION,
+    BASEMAP_RENDER,
 }
 
 public enum class DiagnosticSeverity {
@@ -33,6 +34,7 @@ public enum class DiagnosticSeverity {
 public enum class DiagnosticCode {
     RESOURCE_RELOADED_AFTER_FREE,
     FAILURE_CONTEXT,
+    BASEMAP_NOT_CONFIGURED,
 }
 
 @ConsistentCopyVisibility
@@ -83,6 +85,19 @@ public data class Diagnostic internal constructor(
                 require(severity == DiagnosticSeverity.ERROR) {
                     "failure context diagnostics are errors"
                 }
+            }
+
+            DiagnosticCode.BASEMAP_NOT_CONFIGURED -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "basemap-not-configured diagnostics are warnings"
+                }
+                require(stage == PipelineStage.BASEMAP_RENDER) {
+                    "basemap-not-configured diagnostics occur during basemap render"
+                }
+                require(
+                    fieldName == null && resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "basemap-not-configured diagnostics carry no further context" }
             }
         }
     }

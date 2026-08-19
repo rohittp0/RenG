@@ -32,6 +32,7 @@ public enum class RenGErrorCode {
     SHADER_LINK_FAILED,
     GPU_OPERATION_FAILED,
     IDENTITY_COLLISION,
+    BASEMAP_RENDER_FAILED,
 }
 
 public class RenGException internal constructor(

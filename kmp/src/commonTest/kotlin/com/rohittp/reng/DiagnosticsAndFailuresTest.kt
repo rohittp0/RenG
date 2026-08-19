@@ -22,7 +22,7 @@ class DiagnosticsAndFailuresTest {
                 "STORE_READ", "STORE_VALIDATION", "TRANSPORT", "TRANSPORT_VALIDATION",
                 "STORE_WRITE", "RESOURCE_DECODING", "RESOURCE_PARSING", "SHADER_COMPILATION",
                 "GPU_RESOURCE", "RENDER_TARGET", "DRAW", "RESOURCE_FREE", "RENDERER_CLOSE",
-                "CONTEXT_ADOPTION",
+                "CONTEXT_ADOPTION", "BASEMAP_RENDER",
             ),
             PipelineStage.entries.map { it.name },
         )
@@ -38,13 +38,13 @@ class DiagnosticsAndFailuresTest {
                 "STORE_READ_FAILED", "STORE_WRITE_FAILED", "STORE_INTEGRITY_FAILED",
                 "RESOURCE_DECODE_FAILED", "RESOURCE_PARSE_FAILED", "UNSUPPORTED_RESOURCE_FEATURE",
                 "SHADER_COMPILE_FAILED", "SHADER_LINK_FAILED", "GPU_OPERATION_FAILED",
-                "IDENTITY_COLLISION",
+                "IDENTITY_COLLISION", "BASEMAP_RENDER_FAILED",
             ),
             RenGErrorCode.entries.map { it.name },
         )
         assertEquals(listOf("INFO", "WARNING", "ERROR"), DiagnosticSeverity.entries.map { it.name })
         assertEquals(
-            listOf("RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT"),
+            listOf("RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT", "BASEMAP_NOT_CONFIGURED"),
             DiagnosticCode.entries.map { it.name },
         )
     }
@@ -93,8 +93,8 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
-        assertEquals(92, allowedFailureCases.size)
-        assertEquals(27, allowedFailureCases.count { !it.hasDiagnostic })
+        assertEquals(93, allowedFailureCases.size)
+        assertEquals(28, allowedFailureCases.count { !it.hasDiagnostic })
         assertEquals(65, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
@@ -294,6 +294,14 @@ class DiagnosticsAndFailuresTest {
                 diagnostic,
             )
         }
+    }
+
+    @Test
+    fun basemapRenderFailureCarriesItsOwnStage() {
+        val failure = RenGException(RenGErrorCode.BASEMAP_RENDER_FAILED, PipelineStage.BASEMAP_RENDER)
+        assertEquals("RenG failure: BASEMAP_RENDER_FAILED at BASEMAP_RENDER", failure.message)
+        assertNull(failure.cause)
+        assertEquals(emptyList(), failure.diagnostics)
     }
 
     @Test
@@ -592,6 +600,7 @@ class DiagnosticsAndFailuresTest {
             IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
                 add(failureContext(RenGErrorCode.IDENTITY_COLLISION, PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE, identity))
             }
+            add(noDiagnostic(RenGErrorCode.BASEMAP_RENDER_FAILED, PipelineStage.BASEMAP_RENDER))
         }
     }
 }

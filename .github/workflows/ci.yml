@@ -31,6 +31,10 @@ jobs:
           -v
       - name: Check Cycle A repository policy
         run: python3 tools/check_repository_policy.py --root .
+      - name: Install Mesa EGL for the Linux GL conformance gate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libegl-mesa0 libgles2
       - name: Test and compile
         run: >-
           ./gradlew --no-configuration-cache

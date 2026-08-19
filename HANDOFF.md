@@ -1,9 +1,15 @@
-# RenG handoff — 2026-08-18
+# RenG handoff — 2026-08-19
 
 The recovery point for whoever picks RenG up next. Cycle A is publicly released. **Cycle B is complete and
 merged to `main` locally**, with its five open decisions resolved and every local gate green — but `main` is
-unpushed, so its exact merged-commit CI and publication have not been observed. **Cycles C and D have
-owner-approved design specifications and written implementation plans**; neither has been implemented.
+unpushed, so its exact merged-commit CI and publication have not been observed. **Cycle C is implemented on
+branch `feat/cycle-c-resource-layer`**, but narrower than its approved plan: six of its 21 tasks (sprite/style
+commits, the production Rentile key resolver, the firewall adapters, engine failure classification, the
+basemap rasterizer host, and terrain acquisition) were reordered onto the basemap cycle so a resource-layer
+MVP can ship first; see "Cycle C — resource layer, as implemented" below for exactly what shipped, what
+didn't, and what five review passes found in the PNG path. **Cycle D has an owner-approved design
+specification and written implementation plan** and is being implemented on a separate branch not covered by
+this update.
 
 RenG still renders nothing and exposes no public runtime API.
 
@@ -15,14 +21,20 @@ immutably. Nothing about that has happened.
 
 1. `CLAUDE.md` — repository constraints, purity contract, six targets, commands, publication rules.
 2. `CONTEXT.md` — canonical vocabulary. Read it before naming anything.
-3. `docs/adr/0001`–`0018` — newer ADRs override older prose.
+3. `docs/adr/0001`–`0022` — newer ADRs override older prose. ADR 0016's "eight basemap classes" is one
+   version stale against Rentile `0.3.0`; see the erratum below rather than editing the ADR.
 4. `docs/decomposition.md` — the cycle sequence and each cycle's gates.
 5. `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and
-   `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` — the approved specifications for the
-   next two cycles, each with a written plan alongside in `docs/superpowers/plans/`. The Cycle A and Cycle B
-   pairs in the same directories are historical decision records.
-6. `docs/research/` — the four Cycle C and D findings documents. Read the relevant one before writing
-   either cycle's specification; each ends with a checklist of what its spec must decide.
+   `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` — the approved specifications, each
+   with a written plan alongside in `docs/superpowers/plans/`. Cycle C's plan is mostly implemented (tasks
+   1–13, 15) with six tasks reordered onto the basemap cycle — read the plan itself for what any given
+   task number covers, and this document for what shipped. The Cycle A and Cycle B pairs in the same
+   directories are historical decision records.
+6. `docs/research/` — six Cycle C and D findings documents, plus a Cycle C erratum noted below whose
+   supporting measurement is an uncommitted file in the `reng-c-bench` worktree, not yet in this
+   repository's history. Read the relevant one before writing
+   either cycle's specification or touching the area it covers; each of the four original documents ends
+   with a checklist of what its spec must decide.
 
 Approved specifications and plans are not reopened without repository-owner review.
 
@@ -112,14 +124,177 @@ All five were worked on 2026-08-18. Four are closed in code or documentation; on
    `nextRetirementOrdinal`, so the preceding retirement check already implies it. Neither guard had any
    comment before, so a future reader would reasonably have deleted them as dead code.
 
-## Cycle C — resource layer
+## Cycle C — resource layer, as implemented
 
 Acquisition through the consumer's adapters, proxying basemap resources to Rentile and fetching RenG's own;
 PNG decode; GLB parse; the content-keyed cache with refcounted lifetime across live prepared frames; the
 reload-on-access path; cancellation of everything in flight. Cycle B already decided every pure action this
 cycle executes, so Cycle C connects real observations rather than inventing policy.
 
-Its two open questions are now settled, and a third emerged.
+**Cycle C's plan has 21 tasks, and its scope shrank after the plan was approved.** The owner reordered the
+cycles so a resource-layer MVP can ship for waiting consumers: six tasks — 14 (sprite pair and basemap
+style commits), 16 (the production Rentile private-key resolver), 17 (the firewall transport/store
+adapters), 18 (engine failure classification), 19 (the basemap rasterizer host, style compilation, and
+rendered-tile identity), and 20 (terrain acquisition and encoding validation) — turned out to be basemap
+work and now travel with Cycle E instead of Cycle C. **Shipped, on branch `feat/cycle-c-resource-layer`,
+commit `69c6187`:** tasks 1–13 and 15 — the coroutines dependency and Task 2's five-declaration public
+surface growth; the inflate/CRC-32 seam; the PNG container walk, CRC validation, and unfiltering into
+canonical unpremultiplied RGBA8; strict UTF-8 and a hand-written JSON reader; the GLB container scan, the
+glTF document parser, and the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates; the resident cache (generations,
+leases, reload markers); the resource driver's class gates, Store writes, and visibility installs; and
+cancellation propagated unwrapped through the driver.
+
+**Consequently, Cycle C calls no Rentile adapter, decodes no basemap tile, and draws no map text or pixel
+of any kind.** `RenGClassGateRunner` implements only RenG's own three gated classes (`DECODE_PNG` for
+sticker/model-texture, `PARSE_GLB`/`VALIDATE_GLB_FEATURES`, and `VALIDATE_DEM_TERRAIN_ENCODING`); the six
+Rentile-firewall-validated combinations (`PARSE_TILEJSON`, `DECODE_VECTOR_TILE`, `PARSE_GEOJSON`, and
+`DECODE_PNG` over `BASEMAP_RASTER_TILE`/`BASEMAP_DEM_TILE`) call `error(...)` rather than rubber-stamping
+`Valid` — a loud, honest gap rather than a silent one, unreachable today because nothing in the tree calls
+`prepare()` with a basemap resource class. RenG drawing no map text is not new to this cycle: Rentile
+itself deliberately draws none baked into a tile (see
+`docs/research/2026-08-18-rentile-label-primitives-request.md`), and RenG asked Rentile for a label
+primitive so it could draw text as its own billboards later rather than accept it baked into the ground
+texture. That request landed in Rentile 0.3.0 as `ResourceClass.GLYPH_RANGE` behind a new
+`acquireLabelCandidates` entry point — see the erratum below — but Cycle C does not call it and consumes no
+label data.
+
+**Verified here, execution-verified on this machine (macOS, `--rerun-tasks`):** `checkKotlinAbi` clean —
+the ABI diff against `main` is exactly Task 2's five declarations
+(`PipelineStage.BASEMAP_RENDER`, `RenGErrorCode.BASEMAP_RENDER_FAILED`, `ResourceKind.BASEMAP_TILE`,
+`ResourceLimits.maximumDecodedImageBytes`, `ResourceLimits.maximumModelJsonChunkBytes`) plus their
+mechanical `ResourceLimits` constructor/`copy`/`component9`/`component10` fallout — no Rentile type,
+platform binding, or renderer factory anywhere in the dump; `testAndroidHostTest` 542 tests, 0 failures;
+`macosArm64Test` 538 tests, 0 failures (matching the counts this task was asked to check against, so
+nothing regressed); `compileKotlinIosArm64`, `compileKotlinIosSimulatorArm64`, `compileKotlinLinuxX64`,
+`compileKotlinLinuxArm64`, and `bundleAndroidMainAar` all succeed; all seven publications resolve into a
+local repository; a fresh-Gradle-home, `--refresh-dependencies` consumer-smoke build resolves and compiles
+all six published targets with no credentials. 81/81 Python tests and the repository policy check both
+pass. **Not run and not claimed:** `linuxX64Test` — Linux CI coverage, not a macOS-local gate.
+
+### What five adversarial passes over the PNG path found, and the lesson worth keeping
+
+PNG decode is RenG's primary hostile-input surface — Rentile hands back encoded tile bytes even for vector
+basemaps, and stickers and model textures are consumer-supplied. It took five separate review/audit passes
+to get this path clean, and every single pass found something:
+
+1. The implementer self-reported an uncaught `ArrayIndexOutOfBoundsException` on an out-of-range palette
+   index.
+2. The reviewer found, unprompted, that a declared width/height at or past `2^31` sign-extends through
+   signed 32-bit arithmetic, silently bypassing the size ceiling before an allocation throws
+   `NegativeArraySizeException` — a crafted file of a few dozen bytes crashing the decoder.
+3. A dedicated adversarial audit found the *ceiling check itself* overflows: `width * height * 4` as a
+   `Long` product can wrap past `Long.MAX_VALUE` even after both dimensions are individually bounded,
+   defeating the ceiling either loudly (a crash) or silently (an allocation roughly 3x the configured
+   limit, with no rejection at all).
+4. A second, independent audit pass found the fix for (3) was sound but two chunk-ordering rules were
+   still missing: a duplicate `tRNS` chunk resolved by last-write-wins, and a `PLTE` chunk accepted after
+   `IDAT` with no ordering check.
+5. Building the fuzz harness (below) surfaced two more silent-wrong-result gaps that 300,000 random inputs
+   could not find, because a "never throws" property is blind to bugs that decode without complaint but
+   produce the wrong pixels.
+
+Four crash classes and two silent-wrong-result gaps, six defects total, found by four different routes
+(self-report, reviewer, dedicated audit, fuzz-adjacent inspection) — no single method found everything.
+`PngDecoder.kt`/`PngContainer.kt` now carry `PngFuzzTest`, a deterministic 300,000-input property test (six
+valid seeds × 50,000 mutations, a from-scratch fixed-seed xorshift32, twelve structured mutation kinds
+including IHDR dimension corruption with the CRC recomputed so mutations reach deep validation rather than
+dying at the checksum) asserting `decodePng` never throws for any byte sequence, on a realistic 1 MiB
+ceiling. It runs in under half a second on both hosts that execute tests. The property is permanent
+regression coverage for all four crash classes; it does not, by construction, cover the two silent
+wrong-result gaps, which have their own dedicated fixtures instead. The base rate of one new defect per
+pass did not visibly decline until the fifth pass — worth remembering before declaring any single hostile-
+input surface "clean" after one review.
+
+### GLB feature subset — corpus-checked, unchanged
+
+ADR 0021's supported/rejected subset was reasoned from the glTF 2.0 specification, not measured against a
+corpus. `docs/research/2026-08-19-glb-feature-subset-corpus-check.md` records that check: 118 `.glb` files
+from `KhronosGroup/glTF-Sample-Assets` run through the real, unmodified `scanGlb`/`parseGltf`/
+`validateGltfFeatures` pipeline. 52 supported; every rejection (JPEG textures, required extensions, skin
+attributes, a `KHR_animation_pointer` target, morph targets, `CUBICSPLINE` interpolation) traces to a
+decision ADR 0021 already makes deliberately. No row moved from reject to accept, so the ADR is unchanged.
+
+### Erratum owed: ADR 0016 and this cycle's own design spec undercount Rentile's resource classes by one
+
+Rentile `0.3.0` — now published — adds a ninth `ResourceClass`, `GLYPH_RANGE`, reachable only through a new
+`acquireLabelCandidates` entry point that Rentile's `prepare`/`prepareBatch`/`render` never touch. ADR 0016
+and `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` both say "eight basemap classes"
+and now understate the real count by one. **Neither is edited here** — both are decision records, and the
+undercount is a fact about the world changing after they were written, not an error in what they decided.
+The measurement is at `docs/research/2026-08-19-rentile-030-counting-stub-respike.md` (currently an
+uncommitted, untracked file in the `reng-c-bench` worktree — not yet committed anywhere, and not on this
+branch): style still has no raw-store write;
+TileJSON/vector/raster/GeoJSON validate-then-write; DEM writes after only generic image validation; sprite
+JSON and PNG write before joint validation and a digest-consistent-but-invalid sprite record is terminal;
+store reads are unbounded against a transport bounded at peak 6 of 8 — every ADR 0016 claim holds unchanged
+at `0.3.0`. `GLYPH_RANGE` itself: accept is a third non-null value (`application/x-protobuf`), it writes
+before decode validation (DEM-like), and it recovers from corruption via remove-then-refetch rather than
+going terminal (unlike sprite). This branch pins rentile `0.2.0` (bumped in commit `c9b6e0a`, moving the
+three coupled version references documented below); bumping further to `0.3.0` is a separate decision that
+needs this respike's evidence, not a reflex, and `GLYPH_RANGE` is deliberately out of Cycle C's scope
+either way — RenG does not call `acquireLabelCandidates` and draws no label primitives yet. When ADR 0016
+and the design spec are next revised, correcting "eight" to "nine" (RenG's own `ResourceClass` stays at
+eleven; `CONTEXT.md` already says "eleven" and needs no change) is the owed fix.
+
+**A version now lives in three coupled places**, discovered while bumping to `0.2.0`: `gradle/libs.versions.toml`,
+the two `_EXPECTED_PRODUCTION_BUILD_FINGERPRINTS` whole-file SHA-256 hashes, and a `base_versions` literal
+inside `tools/check_repository_policy.py`'s `_dependency_name_policy_token`. All three must move together
+in one commit or `check_repository_policy.py` fails closed.
+
+### Two duplications from a decomposition error, resolved at merge
+
+Splitting Cycle C across worktrees for parallelism put a dependency (Task 10's cache) on a different branch
+than its consumer (Task 12's driver), and separately put the canonical GLB parser out of reach of Task 13's
+class-gate wiring. Both produced a stand-in implementation that had to be discarded rather than merged
+alongside the real one. At the `feat/cycle-c-glb` merge (commit `d5dd1ab`): the canonical, reference-identity
+`ResidentCache` (full lease/generation/reload-marker contract, independently reviewed) won over the
+stand-in built only to satisfy `PreparationDriver`'s constructor, with the atomicity fix
+(`installAndTakeLease`/`observeAndTakeLease`) re-expressed onto the canonical model; and Task 13's narrowed
+GLB/DEM class-gate checks were replaced by the canonical `scanGlb`→`parseGltf`→`validateGltfFeatures`
+pipeline. The merge surfaced one real defect in the process — a `ClassGateRunnerTest` fixture asserting a
+scene-less GLB as valid, which the canonical validator correctly rejects as `SCENE_AMBIGUOUS` — fixed by
+correcting the fixture, not the assertion.
+
+### The scheduler cost is measured, and it is worse than the Cycle B extrapolation
+
+Carried forward from the Cycle B handoff's ~5-second extrapolation at the shipped default 512-tile budget:
+Task 11 built `ResourceOperationScaleBenchmarkTest`, driving distinct sticker routes to real `Success`
+outcomes, and measured (three clean runs, quiet host): **64 routes ≈ 500ms, 128 ≈ 1750ms, 256 ≈ 7000ms, 512
+≈ 30000ms** — doubling ratios of 3.5–4.3x, at or above quadratic, not linear. A single frame at the shipped
+default 512-tile budget costs roughly **thirty seconds** of pure CPU in the pure reducer alone, before any
+byte is decoded or any pixel drawn — about 6x the prior extrapolation. This is a **floor-only** measurement:
+every route used a unique owner and a single-occurrence binding, so the O(owners × occurrences) style-owner
+barrier that Cycle B's handoff also names is never exercised, and the payload was 4 bytes against the ~50KB
+content-rehashing estimate — the true worst case is likely higher, not equal. The optimisation itself is
+**not** a Cycle C task and none was added; measuring before optimising is the gate this cycle's design spec
+sets, and only the measurement half is done. A wall-clock guard of 50 seconds was chosen from this data
+(~49% headroom over the worst clean run; a contention run under unrelated concurrent load hit 184 seconds,
+which is a real CI-flakiness warning for a shared or busy runner, not part of the baseline).
+
+**Concern to carry forward:** `ResourceOperationScaleBenchmarkTest.kt` and this measurement were produced on
+the separate `feat/cycle-c-bench` worktree/branch (commits `85e2660`, `4b7b1ba`), which — unlike
+`feat/cycle-c-glb` — was **never merged** into `feat/cycle-c-resource-layer`. The test file is not present
+in this branch's tree, and the 542/538 test counts verified above do not include it. The measurement above
+is a real, independently verified fact, but the regression-guard test that produced it does not yet exist
+in shipped code. Merging `feat/cycle-c-bench` in (it touches only the one new test file plus `HANDOFF.md`,
+per the ledger) is outstanding work, not something this documentation task performed.
+
+### Cancellation: one gap, correctly scoped to block the MVP rather than Cycle C
+
+Task 15 wired cancellation through the driver, propagating an unsolicited `CancellationException` unwrapped
+rather than letting structured concurrency silently absorb it (a real defect the implementer caught and
+fixed mid-task). One gap remains: `ResourceActionExecutor` has no `CancelRoute` handler, so a multi-route
+operation where one route observes an adapter cancellation while sibling routes are still active would
+crash there. This does **not** block Cycle C — `Renderer` is a bare sealed interface with no concrete
+implementation anywhere in the tree, so `Renderer.cancelPreparations()` is unreachable public ABI text, not
+a path a consumer can hit. It **does** block the MVP: the gap becomes reachable the moment a renderer
+factory exists, and the Cycle F-1 plan already places its fix as that cycle's first task, ahead of the
+factory itself.
+
+### Pre-implementation spike findings, still accurate
+
+The rest of this section is background from before Cycle C was implemented. Its two open questions were
+settled, and a third emerged, and all three findings held up through implementation.
 
 **PNG decode — `docs/research/2026-08-18-cycle-c-png-decode.md`.** Own the container in common Kotlin and
 delegate only decompression and checksum to the platform: the bundled `zlib` binding on the five native
@@ -271,4 +446,5 @@ Spike code is deliberately throwaway and lives outside the repository. The findi
 
 Pushing a development branch is a recovery checkpoint, not permission to merge, dispatch publication,
 upload to R2, or claim a public release. Cycle A's immutable public `0.1.0` record remains historical.
-Cycle B is neither released nor complete as a released cycle.
+Cycle B is neither released nor complete as a released cycle, and neither is Cycle C — its
+`feat/cycle-c-resource-layer` branch has not merged to `main`.

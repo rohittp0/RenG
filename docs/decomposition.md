@@ -103,6 +103,21 @@ Kotlin decoder needs an inflate implementation. GLB parsing is glTF 2.0 binary: 
 binary chunk, tractable in pure Kotlin, but the supported feature subset must be written down rather
 than discovered.
 
+Both spikes landed and the design specification and implementation plan were approved. Cycle C is
+implemented on branch `feat/cycle-c-resource-layer` and awaits integration review; it ships the plan's
+tasks 1 through 13 and 15 — the coroutines dependency and public-surface growth, the inflate/CRC-32 seam,
+PNG container parsing and decode (own-authored, no Skiko, hardened by a 300,000-input fuzz test after five
+adversarial review passes found six distinct defects), strict UTF-8 and a hand-rolled JSON reader, GLB
+container scanning and glTF parsing with the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates, the resident cache,
+the resource driver's class gates and Store writes, and cancellation through the driver. The owner
+reordered the remaining six tasks — sprite/style commits, the production Rentile private-key resolver, the
+firewall transport/store adapters, engine failure classification, the basemap rasterizer host, and terrain
+acquisition — onto the basemap cycle (E) instead, so a resource-layer MVP can ship before basemap work is
+ready. This cycle therefore proxies nothing to Rentile yet, decodes no basemap tile, and draws no map text
+or pixel; six Rentile-firewall-validated gate/class combinations fail loudly rather than fake success,
+pending that later firewall. `HANDOFF.md` carries the scheduler-cost measurement taken here and an erratum
+owed against ADR 0016's basemap-class count.
+
 ## D — GL foundation
 
 The internal GL seam and its three implementations — `platform.OpenGL3`/`platform.OpenGLCommon`,

@@ -26,6 +26,29 @@ contains no Rentile type, platform binding, or renderer factory. Cycle B has **n
 has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
 remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
 
+**Cycle C is implemented on branch `feat/cycle-c-resource-layer` and awaits integration review.** Its
+owner-approved design is `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and its
+reviewed plan is `docs/superpowers/plans/2026-08-18-cycle-c-resource-layer.md`, but the plan's original
+scope is now wider than what shipped: the owner reordered the cycles so an MVP can ship for waiting
+consumers, and six of its twenty-one tasks travel with the basemap cycle instead. **Shipped in Cycle C**
+(tasks 1–13 and 15): the coroutines dependency; the five public declarations Task 2 adds; the inflate and
+CRC-32 seam; PNG container parsing and unfiltering to canonical RGBA8, hardened by five adversarial review
+passes into a 300,000-input property fuzz test that asserts `decodePng` never throws; strict UTF-8 and a
+hand-written JSON reader (no serialization library is compile-visible outside native targets); GLB
+container scanning, glTF document parsing, and the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates; the resident
+cache (generations, leases, reload markers); the resource driver running RenG's own class gates and
+performing Store writes and visibility installs; and cancellation propagated unwrapped through the driver.
+**Deferred to the basemap cycle, not implemented:** sprite-pair and basemap-style commits, the production
+Rentile private-key resolver, the firewall transport/store adapters, engine failure classification, the
+basemap rasterizer host and rendered-tile identity, and terrain acquisition. Consequently Cycle C calls no
+Rentile adapter, decodes no basemap tile, and draws no map text or pixel of any kind; six
+Rentile-firewall-validated gate/class combinations (`PARSE_TILEJSON`, `DECODE_VECTOR_TILE`,
+`PARSE_GEOJSON`, and `DECODE_PNG` over the basemap raster/DEM classes) throw loudly rather than fake
+`Valid`, and are unreached until the deferred firewall lands. See `HANDOFF.md` for the scheduler-cost
+measurement, the PNG hardening detail, and an owed erratum against ADR 0016's basemap-class count. Cycle C
+has **not** been merged to `main`, has not been released, and its exact merged-commit CI and publication
+have not been observed. `VERSION_NAME` remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
 preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and

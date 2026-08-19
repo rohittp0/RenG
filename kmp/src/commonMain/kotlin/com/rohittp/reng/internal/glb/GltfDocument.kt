@@ -38,9 +38,11 @@ internal data class GltfPrimitive(
 internal data class GltfMesh(val primitives: List<GltfPrimitive>)
 
 /** One node in the scene graph. Exactly one of [matrix] or any of [translation]/[rotation]/
- * [scale] may be present -- [parseGltf] rejects both, per the specification. [skin] and [camera]
- * are parsed only so a later gate can detect and reject them; [GltfDocument] retains no top-level
- * `skins` or `cameras` catalog because nothing else in RenG's vocabulary refers to either. */
+ * [scale] may be present -- [parseGltf] rejects both, per the specification. [skin] is parsed
+ * only so a later gate can detect and reject it; [camera] is parsed only so that gate can bound-
+ * check it and then ignore it -- ADR 0021 accepts cameras and draws nothing from them.
+ * [GltfDocument] retains no top-level `skins` or `cameras` catalog because nothing else in RenG's
+ * vocabulary refers to either. */
 internal data class GltfNode(
     val children: List<Int>,
     val mesh: Int?,

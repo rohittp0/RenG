@@ -4,8 +4,9 @@ import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
 import com.rohittp.reng.PipelineStage
+import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderValue
-import com.rohittp.reng.internal.failure.toException
+import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleMatrix4
 import com.rohittp.reng.internal.math.DoubleVector3
@@ -16,6 +17,7 @@ import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
+import com.rohittp.reng.internal.renGFailure
 
 /**
  * One sticker still carrying its raw, unresolved [Placement] plus the GL texture name its image
@@ -48,20 +50,29 @@ internal class SceneSticker(
  * draw time would be a second, later read of the same caller-owned object beyond
  * `FramePlanningCore.plan()`'s single synchronous read, exactly the gap `Geometry`'s own KDoc warns
  * about: a consumer mutating one of those maps between `prepare()` and `draw()` would then render
- * content differing from what the frame's canonical identity already hashed. `com.rohittp.reng.RenGPreparedFrame`
- * takes both snapshots once, at `prepare()` time — [consumerUniforms] defaults to `geometry.uniforms`
- * only so a test (or any other caller with no prepare/draw gap to protect) can omit it; production
- * drawing always passes the prepare-time snapshot explicitly.
+ * content differing from what the frame's canonical identity already hashed.
+ * `com.rohittp.reng.RenGPreparedFrame` takes both snapshots once, at `prepare()` time.
+ *
+ * [consumerUniforms] deliberately has NO default, even though `geometry.uniforms` would compile as
+ * one. "Unreachable in the current codebase" is a property of today's call graph, not a language
+ * guarantee — the same reasoning `internal.gl.requireResolvedAtDrawTime`'s typed-conversion applies
+ * to a provably-unreachable failure applies here to a merely-currently-single call site: a future
+ * second production constructor of [SceneGeometry] (a preview path, a batch or dry-run renderer)
+ * that forgot to pass this parameter would silently reintroduce the exact live-map hazard this class
+ * exists to close, with the compiler offering no resistance. Every caller, test included, must pass
+ * it explicitly.
  *
  * [consumerTextures] carries each consumer sampler name's ALREADY-UPLOADED GL texture object name —
  * not a [com.rohittp.reng.internal.image.DecodedImage] — because upload-and-cache-by-`ResourceKey`
  * (Task 9b's texture-lifetime fix) happens one layer up, in whoever assembles a [SceneContent], the
- * same layer [SceneSticker.texture] already establishes the pattern for.
+ * same layer [SceneSticker.texture] already establishes the pattern for. Its default of `emptyMap()`
+ * carries no equivalent hazard — it never reads any live reference, so a caller with no consumer
+ * textures at all may still omit it safely.
  */
 internal class SceneGeometry(
     val geometry: Geometry,
     val pipeline: GeometryPipeline,
-    val consumerUniforms: Map<String, ShaderValue> = geometry.uniforms,
+    val consumerUniforms: Map<String, ShaderValue>,
     val consumerTextures: Map<String, Int> = emptyMap(),
 )
 
@@ -100,9 +111,8 @@ internal class Scene(
  * resolved objects all the way into this GL layer would have been, without growing that seam before
  * Task 9 fixes what a prepared frame actually retains. A resolution failure reaching [draw] is
  * therefore a caller contract violation, not a legitimate runtime outcome, and is reported as a
- * typed [com.rohittp.reng.RenGException] (`GPU_OPERATION_FAILED` at `DRAW`) via
- * [requireResolvedAtDrawTime] rather than silently swallowed, drawn wrong, or thrown as a bare
- * untyped exception.
+ * typed [com.rohittp.reng.RenGException] (`INVALID_VALUE` at `DRAW`) via [requireResolvedAtDrawTime]
+ * rather than silently swallowed, drawn wrong, or thrown as a bare untyped exception.
  *
  * **Precision.** [composeMapModelViewProjection], [composeScreenModelViewProjection], and
  * [composeGeometryViewProjection] multiply [ResolvedMercatorCamera]'s and [ResolvedPlacement]'s
@@ -187,11 +197,19 @@ internal class SceneContent(
  * **Typed, not [error].** This used to throw a bare, untyped `IllegalStateException` via [error] —
  * which contradicted RenG's typed-failure contract at exactly the boundary `drawFrame`'s
  * `try`/`finally` cannot shield a consumer from (state restoration still runs, but the exception
- * still escapes to the caller of `Renderer.draw`). [RenGErrorCode.GPU_OPERATION_FAILED] at
- * [PipelineStage.DRAW] with no resource key is the same generic "something is wrong at draw time
- * with nothing more specific to report" shape [GlFrameDrawer.kt]'s own driver-error path already
- * uses ([glOperationFailure]) — reused here rather than a new code, since 9b's scope adds no public
- * ABI and this is exactly the same class of "impossible, but typed if it ever happens" failure.
+ * still escapes to the caller of `Renderer.draw`).
+ *
+ * **`RenGErrorCode.INVALID_VALUE` at [PipelineStage.DRAW], not `GPU_OPERATION_FAILED`.** A
+ * resolution failure is semantically an invalid-value fault: [resolvePlacement], [resolveGeometry],
+ * and [com.rohittp.reng.internal.projection.resolveMercatorCamera] all report their OWN internal
+ * failures as `INVALID_VALUE` at `FRAME_PLANNING`, so this reuses the SAME code, only relocated to
+ * the stage it fires from here. `GPU_OPERATION_FAILED` ([glOperationFailure]) is
+ * [GlErrorQueue]'s own wrapper for a genuine `glGetError()` result; reporting it here would send a
+ * consumer to inspect their GL state when the actual fault is in their `FramePlan`. Extending
+ * `internal.requireAllowedFailureContext`/`failureRule`'s allowlist to permit `INVALID_VALUE` at
+ * `DRAW` is a private-file change invisible to `checkKotlinAbi` and costs no more than the reused
+ * code it replaces — the no-new-public-ABI constraint never required picking the wrong code, it
+ * only made the reused one the path of least resistance.
  *
  * `internal`, not `private`, specifically so a test can drive a synthetic
  * [SpatialOutcome.Failure] directly and assert the resulting shape without needing to construct an
@@ -200,7 +218,11 @@ internal class SceneContent(
  */
 internal fun <T> SpatialOutcome<T>.requireResolvedAtDrawTime(): T = when (this) {
     is SpatialOutcome.Success -> value
-    is SpatialOutcome.Failure -> throw glOperationFailure(PipelineStage.DRAW, resourceKey = null).toException()
+    is SpatialOutcome.Failure -> throw renGFailure(
+        code = RenGErrorCode.INVALID_VALUE,
+        stage = PipelineStage.DRAW,
+        failureContext = failureContextDiagnostic(stage = PipelineStage.DRAW),
+    )
 }
 
 /**

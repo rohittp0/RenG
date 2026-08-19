@@ -302,6 +302,48 @@ class RendererFactoryTest {
         )
     }
 
+    @Test
+    fun notifyGpuObjectsGoneForgetsWithoutDeletingAndTheNextDrawReUploadsFreshly() = runTest {
+        // ADR 0007/0015's other half of item 1: losing the GL context is NOT freeing. The registry
+        // must forget its cached texture without issuing a single GL delete (the handle is already
+        // gone with the lost context, so a delete call would be meaningless or, worse, could collide
+        // with an unrelated live object in the replacement context) -- and the NEXT draw, after the
+        // caller re-adopts a context, must re-upload fresh rather than reuse a stale cache entry.
+        val binding = validGlesBinding()
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"))),
+        )
+        val frame = renderer.prepare(plan)
+        val firstTarget = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, firstTarget)
+        assertEquals(1, binding.log.count { it.startsWith("genTextures") }, "the first draw must upload")
+
+        binding.log.clear()
+        renderer.notifyGpuObjectsGone()
+        assertTrue(
+            binding.log.none { it.startsWith("delete") },
+            "forgetting GPU objects must never issue a GL delete call: ${binding.log}",
+        )
+
+        // A render target minted before the context was lost is stale once a fresh one is adopted;
+        // mint a new one, same as any real caller must after adoptCurrentRenderContext().
+        renderer.adoptCurrentRenderContext()
+        val secondTarget = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, secondTarget)
+
+        assertEquals(
+            1,
+            binding.log.count { it.startsWith("genTextures") },
+            "after forgetting, the next draw must re-upload fresh rather than reuse a stale " +
+                "registry entry from before the context was lost: ${binding.log}",
+        )
+    }
+
     // ---- Task 9b item 2: a sticker's quad is sized from its own image's pixel dimensions ------------
 
     @Test

@@ -233,6 +233,18 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
                 ),
             )
 
+            // Cycle F-1 Task 9b fix round 1: a draw-time Placement/Geometry/Camera re-resolution
+            // failure is, semantically, an invalid-value fault -- resolveMercatorCamera,
+            // resolvePlacement, and resolveGeometry all report their OWN internal failures as
+            // INVALID_VALUE at FRAME_PLANNING, so the re-resolution `internal.gl.requireResolvedAtDrawTime`
+            // performs at draw time reuses the same code, only relocated to the stage it actually
+            // fires from. No fieldName is carried (this allowlist is private and invisible to
+            // checkKotlinAbi, so extending it costs nothing toward the public-ABI-freeze
+            // constraint) -- unlike GPU_OPERATION_FAILED, which is GlErrorQueue's wrapper for a
+            // genuine glGetError() result and would misdirect a consumer at their GL state when the
+            // actual fault is in their own FramePlan.
+            PipelineStage.DRAW -> FailureRule.Context(fields = setOf(null))
+
             else -> null
         }
 

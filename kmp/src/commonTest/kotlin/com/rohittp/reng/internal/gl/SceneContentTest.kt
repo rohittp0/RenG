@@ -54,7 +54,7 @@ class SceneContentTest {
                 SceneSticker(mapPlacement(), texture = mapTexture),
                 SceneSticker(screenPlacement(z = 5.0), texture = screenTexture),
             ),
-            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline)),
+            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap())),
         )
         binding.log.clear()
 
@@ -104,7 +104,7 @@ class SceneContentTest {
         val scene = Scene(
             outputPixelSize = OutputPixelSize(width = 1024, height = 768),
             frameIndex = 0L,
-            geometries = listOf(SceneGeometry(geometry, pipeline)),
+            geometries = listOf(SceneGeometry(geometry, pipeline, consumerUniforms = emptyMap())),
         )
 
         SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
@@ -130,7 +130,7 @@ class SceneContentTest {
         val scene = Scene(
             outputPixelSize = OUTPUT_SIZE,
             frameIndex = 0L,
-            geometries = listOf(SceneGeometry(testGeometry(), pipeline)),
+            geometries = listOf(SceneGeometry(testGeometry(), pipeline, consumerUniforms = emptyMap())),
         )
         binding.log.clear()
 
@@ -162,7 +162,7 @@ class SceneContentTest {
         val scene = Scene(
             outputPixelSize = OUTPUT_SIZE,
             frameIndex = 0L,
-            geometries = listOf(SceneGeometry(geometryWithUniform, pipeline)),
+            geometries = listOf(SceneGeometry(geometryWithUniform, pipeline, consumerUniforms = geometryWithUniform.uniforms)),
         )
         binding.log.clear()
 
@@ -192,6 +192,7 @@ class SceneContentTest {
         val sceneGeometry = SceneGeometry(
             geometry = geometry,
             pipeline = pipeline,
+            consumerUniforms = emptyMap(),
             consumerTextures = mapOf("uMask" to 909),
         )
         val scene = Scene(
@@ -345,16 +346,20 @@ class SceneContentTest {
 
     @Test
     fun requireResolvedAtDrawTimeConvertsAFailureToATypedRedactedRenGException() {
-        // The wrapped failure deliberately carries a DIFFERENT code and stage (GPU_RESOURCE, not
-        // DRAW) than the exception this must throw, proving requireResolvedAtDrawTime reports its
-        // own generic, redacted draw-time failure rather than merely rethrowing whatever it was
-        // handed -- exactly the shape GlFrameDrawer.kt's own driver-error path already uses for
-        // "something is wrong at draw time, nothing more specific to say."
+        // The wrapped failure deliberately carries a DIFFERENT code and stage (GPU_RESOURCE /
+        // GPU_OPERATION_FAILED, not DRAW / INVALID_VALUE) than the exception this must throw,
+        // proving requireResolvedAtDrawTime reports its own fixed, redacted draw-time failure
+        // rather than merely rethrowing whatever it was handed. INVALID_VALUE, not
+        // GPU_OPERATION_FAILED, is the correct code: resolvePlacement/resolveGeometry/
+        // resolveMercatorCamera all report their OWN internal failures as INVALID_VALUE at
+        // FRAME_PLANNING, and GPU_OPERATION_FAILED is GlErrorQueue's wrapper for a genuine
+        // glGetError() result, which would misdirect a consumer at their GL state when the actual
+        // fault is in their FramePlan.
         val wrapped = SpatialOutcome.Failure(glOperationFailure(PipelineStage.GPU_RESOURCE, resourceKey = null))
 
         val failure = assertFailsWith<RenGException> { wrapped.requireResolvedAtDrawTime() }
 
-        assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, failure.code)
+        assertEquals(RenGErrorCode.INVALID_VALUE, failure.code)
         assertEquals(PipelineStage.DRAW, failure.stage)
         val rendered = failure.toString() + failure.message.orEmpty()
         assertTrue(!rendered.contains("Mesa", ignoreCase = true))

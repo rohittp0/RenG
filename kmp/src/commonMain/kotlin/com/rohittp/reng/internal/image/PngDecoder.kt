@@ -17,9 +17,12 @@ internal class DecodedImage(val width: Int, val height: Int, rgba: ByteArray) {
 
 /**
  * The outcome of decoding a candidate PNG's bytes into one [DecodedImage]. [Malformed] and
- * [Unsupported] carry [scanPng]'s own [PngReject] reasons — Task 4's enum is a closed, independently
- * reviewed set of 16 branches, and every decode-time rejection below reuses one of those values rather
- * than adding a new one.
+ * [Unsupported] carry [PngReject] reasons, shared with [scanPng] (Task 4): most decode-time rejections
+ * below reuse a container-walk reason where its meaning genuinely fits (e.g. [PngReject.FILTER_METHOD]
+ * for an invalid per-scanline filter byte); where none does, this file adds its own —
+ * [PngReject.TRNS_FORBIDDEN], [PngReject.IMAGE_DATA_LENGTH], and [PngReject.PALETTE_INDEX_OUT_OF_RANGE] —
+ * rather than misdirecting a caller at the wrong fault. A reject code must be true of the fault, not
+ * merely defensible.
  */
 internal sealed interface PngDecodeResult {
     data class Success(val image: DecodedImage) : PngDecodeResult
@@ -65,9 +68,8 @@ private fun decodeAdmitted(bytes: ByteArray, scan: PngScan.Admitted, maximumDeco
 
     if (scan.transparency != null && (colourType == 4 || colourType == 6)) {
         // Colour types 4 and 6 already carry a full alpha channel; a tRNS chunk is only meaningful
-        // as a colour-key for types 0, 2, and 3. Reusing PALETTE_FORBIDDEN: like an out-of-place
-        // PLTE, this is an ancillary chunk present where the colour type forbids it.
-        return PngDecodeResult.Malformed(PngReject.PALETTE_FORBIDDEN)
+        // as a colour-key for types 0, 2, and 3.
+        return PngDecodeResult.Malformed(PngReject.TRNS_FORBIDDEN)
     }
 
     val channels = channelsFor(colourType)
@@ -80,15 +82,16 @@ private fun decodeAdmitted(bytes: ByteArray, scan: PngScan.Admitted, maximumDeco
     val stride = strideLong.toInt()
 
     val inflated = inflateExactly(bytes, scan.imageDataRanges, rawSize)
-        // Reusing CHUNK_LENGTH: like a chunk whose declared length does not fit the buffer, this is a
-        // declared raster length (from IHDR's own dimensions) that the decompressed byte count does
-        // not match, whether the stream ends earlier or keeps producing past it.
-        ?: return PngDecodeResult.Malformed(PngReject.CHUNK_LENGTH)
+        // The decompressed byte count doesn't match the raster size IHDR's own dimensions declare,
+        // whether the stream ends earlier or keeps producing past it. This is a content-length
+        // mismatch, not a container-framing fault — the chunk lengths themselves are fine.
+        ?: return PngDecodeResult.Malformed(PngReject.IMAGE_DATA_LENGTH)
 
     val raster = unfilter(inflated, height, stride, bpp)
         ?: return PngDecodeResult.Malformed(PngReject.FILTER_METHOD)
 
     val rgba = widenToRgba(colourType, raster, width, height, channels, stride, scan.palette, scan.transparency)
+        ?: return PngDecodeResult.Malformed(PngReject.PALETTE_INDEX_OUT_OF_RANGE)
     return PngDecodeResult.Success(DecodedImage(width, height, rgba))
 }
 
@@ -181,7 +184,12 @@ private fun paeth(a: Int, b: Int, c: Int): Int {
 
 private const val OPAQUE: Byte = -1 // 0xFF unsigned
 
-/** Widens unfiltered raw pixel bytes into tightly packed RGBA8, applying `tRNS` for types 0, 2, 3. */
+/**
+ * Widens unfiltered raw pixel bytes into tightly packed RGBA8, applying `tRNS` for types 0, 2, 3.
+ * Returns `null` if a colour-type-3 raster byte indexes past the end of the admitted `PLTE` payload —
+ * `scanPng` only checks that a palette exists for colour type 3, never that every index a (possibly
+ * hostile) raster contains actually fits it.
+ */
 private fun widenToRgba(
     colourType: Int,
     raster: ByteArray,
@@ -191,7 +199,7 @@ private fun widenToRgba(
     stride: Int,
     palette: ByteArray?,
     transparency: ByteArray?,
-): ByteArray {
+): ByteArray? {
     val rgba = ByteArray(width * height * 4)
     var out = 0
     for (row in 0 until height) {
@@ -219,6 +227,7 @@ private fun widenToRgba(
                     val index = raster[pixelStart].toInt() and 0xFF
                     val paletteBytes = requireNotNull(palette) { "colour type 3 requires a palette" }
                     val paletteOffset = index * 3
+                    if (paletteOffset + 3 > paletteBytes.size) return null
                     rgba[out] = paletteBytes[paletteOffset]
                     rgba[out + 1] = paletteBytes[paletteOffset + 1]
                     rgba[out + 2] = paletteBytes[paletteOffset + 2]

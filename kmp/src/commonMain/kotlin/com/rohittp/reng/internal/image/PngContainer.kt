@@ -28,8 +28,9 @@ internal sealed interface PngScan {
 }
 
 /**
- * Every reason a scan can reject a file. Only [BIT_DEPTH], [COLOUR_TYPE], and [INTERLACE] surface as
- * [PngScan.Unsupported]; every other reason surfaces as [PngScan.Malformed].
+ * Every reason a scan (or, downstream, a decode — see `PngDecoder.kt`) can reject a file. Only
+ * [BIT_DEPTH], [COLOUR_TYPE], and [INTERLACE] surface as [PngScan.Unsupported]; every other reason
+ * surfaces as [PngScan.Malformed].
  */
 internal enum class PngReject {
     SIGNATURE,
@@ -43,11 +44,28 @@ internal enum class PngReject {
     COMPRESSION_METHOD,
     FILTER_METHOD,
     ZERO_DIMENSION,
+
+    /**
+     * A declared `IHDR` width or height outside the PNG specification's valid range of 1 to 2^31-1. A
+     * value of 2^31 or above cannot be represented as a positive 32-bit `Int`, so unchecked bit-math
+     * over such a value would silently produce a negative width/height instead of failing loudly —
+     * this check exists specifically to catch that before it ever reaches decode arithmetic.
+     */
+    DIMENSION_OUT_OF_RANGE,
     PALETTE_MISSING,
     PALETTE_FORBIDDEN,
     BIT_DEPTH,
     COLOUR_TYPE,
     INTERLACE,
+
+    /** A `tRNS` chunk on a colour type (4 or 6) that already carries a full alpha channel. */
+    TRNS_FORBIDDEN,
+
+    /** The inflated `IDAT` stream's decompressed byte count does not match the declared raster size. */
+    IMAGE_DATA_LENGTH,
+
+    /** A colour-type-3 raster byte indexes past the end of the `PLTE` payload it was admitted with. */
+    PALETTE_INDEX_OUT_OF_RANGE,
 }
 
 private val PNG_SIGNATURE = byteArrayOf(-0x77, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
@@ -141,6 +159,12 @@ internal fun scanPng(bytes: ByteArray): PngScan {
             if (interlaceMethod != 0) return PngScan.Unsupported(PngReject.INTERLACE)
             if (compressionMethod != 0) return PngScan.Malformed(PngReject.COMPRESSION_METHOD)
             if (filterMethod != 0) return PngScan.Malformed(PngReject.FILTER_METHOD)
+            // width/height above are raw 32-bit reinterpretations of unsigned IHDR fields: a declared
+            // value of 2^31 or above (0x80000000..0xFFFFFFFF) wraps to a negative Int here. The PNG
+            // specification's valid dimension range is 1 to 2^31-1, so a negative value is out of range
+            // — checked before ZERO_DIMENSION so a decoder never has to reason about a negative width or
+            // height downstream.
+            if (width < 0 || height < 0) return PngScan.Malformed(PngReject.DIMENSION_OUT_OF_RANGE)
             if (width == 0 || height == 0) return PngScan.Malformed(PngReject.ZERO_DIMENSION)
 
             header = PngHeader(width, height, bitDepth, colourType, interlaceMethod)

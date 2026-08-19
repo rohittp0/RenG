@@ -67,6 +67,7 @@ class PngContainerTest {
         assertEquals(PngReject.UNKNOWN_CRITICAL_CHUNK, rejectionOf(unknownCriticalChunk))
         assertEquals(PngReject.COMPRESSION_METHOD, rejectionOf(compressionMethodOne))
         assertEquals(PngReject.FILTER_METHOD, rejectionOf(filterMethodOne))
+        assertEquals(PngReject.DIMENSION_OUT_OF_RANGE, rejectionOf(hugeWidthWrapsNegative))
         assertEquals(PngReject.ZERO_DIMENSION, rejectionOf(zeroWidth))
         assertEquals(PngReject.PALETTE_MISSING, rejectionOf(colourTypeThreeWithoutPlte))
         assertEquals(PngReject.PALETTE_FORBIDDEN, rejectionOf(greyscaleWithPlte))
@@ -142,6 +143,12 @@ class PngContainerTest {
 
     // Width declared as 0.
     private val zeroWidth: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 2, 8, 2, 0, 0, 0, -7, 33, 74, 78, 0, 0, 0, 8, 73, 68, 65, 84, 120, -100, 3, 0, 0, 0, 0, 1, 72, 6, -119, -46, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Width declared as 0x80000000 (2^31) — a value which, as an unchecked 32-bit reinterpretation,
+    // wraps to a negative Int. height=1, depth=8, colour=2 (truecolour), otherwise a complete, validly
+    // CRC'd 1x1 image (real IDAT/IEND included, though scanPng rejects from inside IHDR parsing before
+    // it ever needs them).
+    private val hugeWidthWrapsNegative: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, -128, 0, 0, 0, 0, 0, 0, 1, 8, 2, 0, 0, 0, -33, -33, 29, -9, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, -23, -110, 55, -44, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 
     // Colour type 3 (palette) with no PLTE chunk present anywhere.
     private val colourTypeThreeWithoutPlte: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 3, 0, 0, 0, 69, 104, -3, 22, 0, 0, 0, 11, 73, 68, 65, 84, 120, -100, 99, 96, 96, 0, 0, 0, 3, 0, 1, -72, -83, 58, 99, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)

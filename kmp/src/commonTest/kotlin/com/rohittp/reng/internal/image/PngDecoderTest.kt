@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.image
 
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 
@@ -92,8 +93,11 @@ class PngDecoderTest {
 
     @Test
     fun rejectsAStreamThatEndsEarlyOrRunsLong() {
-        assertIs<PngDecodeResult.Malformed>(decodePng(deflateShorterThanRaster, 1L shl 20))
-        assertIs<PngDecodeResult.Malformed>(decodePng(deflateLongerThanRaster, 1L shl 20))
+        // IMAGE_DATA_LENGTH: the chunk lengths themselves are fine here — it's the decompressed
+        // content that mismatches the declared raster, a different layer from a container-framing
+        // fault, so this does not reuse CHUNK_LENGTH.
+        assertEquals(PngReject.IMAGE_DATA_LENGTH, malformedReasonOf(deflateShorterThanRaster))
+        assertEquals(PngReject.IMAGE_DATA_LENGTH, malformedReasonOf(deflateLongerThanRaster))
     }
 
     @Test
@@ -129,12 +133,37 @@ class PngDecoderTest {
     // rejected for colour types 4 and 6 as Malformed") and reachable through scanPng: scanPng captures
     // any tRNS chunk regardless of colour type and only rejects PLTE-on-0/4 (PALETTE_FORBIDDEN), so a
     // colour-type-4-or-6 file carrying tRNS reaches PngScan.Admitted and this decoder must reject it
-    // itself.
+    // itself. TRNS_FORBIDDEN, not PALETTE_FORBIDDEN: colour types 4 and 6 never carry a PLTE at all, so
+    // "palette" would be false of this fault and would send a reader looking at the wrong chunk.
     @Test
     fun rejectsTrnsForColourTypesThatAlreadyCarryAlpha() {
-        assertIs<PngDecodeResult.Malformed>(decodePng(greyAlphaWithForbiddenTrns, 1L shl 20))
-        assertIs<PngDecodeResult.Malformed>(decodePng(rgbaWithForbiddenTrns, 1L shl 20))
+        assertEquals(PngReject.TRNS_FORBIDDEN, malformedReasonOf(greyAlphaWithForbiddenTrns))
+        assertEquals(PngReject.TRNS_FORBIDDEN, malformedReasonOf(rgbaWithForbiddenTrns))
     }
+
+    // A small PLTE (one entry) plus a raster index byte that indexes past it. scanPng only checks that
+    // colour type 3 has SOME palette, never that every index a raster contains fits it, so this reaches
+    // widenToRgba, which must reject rather than crash with ArrayIndexOutOfBoundsException.
+    @Test
+    fun rejectsAPaletteIndexOutOfRange() {
+        assertEquals(PngReject.PALETTE_INDEX_OUT_OF_RANGE, malformedReasonOf(paletteIndexOutOfRange))
+    }
+
+    // A declared IHDR width of 0x80000000 (2^31) — the PNG specification's valid dimension range is 1
+    // to 2^31-1, and this value wraps to a negative Int under the container's unchecked 32-bit
+    // reinterpretation. Without PngContainer.kt's DIMENSION_OUT_OF_RANGE check, this same fixture
+    // crashes rather than failing an assertion: `width.toLong() * height.toLong() * 4L` sign-extends to
+    // a large negative Long, so it is never `> maximumDecodedBytes` and the TooLarge gate never fires;
+    // downstream `rawSizeLong.toInt()` goes negative and `ByteArray(expectedSize + 1)` throws
+    // NegativeArraySizeException. Confirmed by temporarily removing that check and observing exactly
+    // that crash (see task-5-report.md) rather than this assertion failing — the fix is load-bearing.
+    @Test
+    fun rejectsADimensionThatWrapsToANegativeInt() {
+        assertEquals(PngReject.DIMENSION_OUT_OF_RANGE, malformedReasonOf(dimensionOutOfRange))
+    }
+
+    private fun malformedReasonOf(bytes: ByteArray): PngReject =
+        assertIs<PngDecodeResult.Malformed>(decodePng(bytes, 1L shl 20)).reason
 
     // Not in the brief's literal test list. The brief's own context claims Task 4 already proves a
     // split IDAT stream "reassembles to identical scanlines", but PngContainerTest only asserts the
@@ -405,6 +434,25 @@ class PngDecoderTest {
         8, 6, 0, 0, 0, 31, 21, -60, -119, 0, 0, 0, 6, 116, 82, 78, 83, 1, 2, 3, 4, 5, 6, 94,
         -110, -47, 22, 0, 0, 0, 13, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, -5, 15, 0, 1, -92, 1, 60,
         76, -43, 28, -89, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // Colour type 3, PLTE with exactly one entry (10,20,30), raster is a single pixel with index byte
+    // 5 — out of range, since only index 0 is valid for a one-entry palette.
+    private val paletteIndexOutOfRange: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 3, 0, 0, 0, 40, -53, 52, -69, 0, 0, 0, 3, 80, 76, 84, 69, 10, 20, 30, 126, 76, 82, 58,
+        0, 0, 0, 10, 73, 68, 65, 84, 120, -38, 99, 96, 5, 0, 0, 7, 0, 6, 45, 69, 24, 7, 0, 0,
+        0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // IHDR declares width = 0x80000000 (2^31) — a value which, as an unchecked 32-bit
+    // reinterpretation, wraps to a negative Int. height=1, depth=8, colour=2 (truecolour), a complete,
+    // validly CRC'd file (real IDAT/IEND included, even though scanPng rejects from inside IHDR parsing
+    // before it would ever need them).
+    private val dimensionOutOfRange: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, -128, 0, 0, 0, 0, 0, 0, 1,
+        8, 2, 0, 0, 0, -33, -33, 29, -9, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, 96, 100, 98, 6,
+        0, 0, 14, 0, 7, -23, -110, 55, -44, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
     )
 
     private val multiIdatSplitImage: ByteArray = byteArrayOf(

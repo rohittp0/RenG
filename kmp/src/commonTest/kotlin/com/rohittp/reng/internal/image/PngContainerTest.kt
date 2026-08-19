@@ -81,6 +81,17 @@ class PngContainerTest {
         assertIs<PngScan.Admitted>(scanPng(apngBaseFrame))
     }
 
+    @Test
+    fun rejectsEveryUnsupportedReasonSpecifically() {
+        // The three assertIs checks above confirm the classification bucket; this pins the exact
+        // PngReject each fixture reports, including colour type, which none of the fixtures above
+        // happens to exercise (bit depth wins first on paletteAtBitDepthFour).
+        assertEquals(PngReject.BIT_DEPTH, rejectionOf(sixteenBitGreyscale))
+        assertEquals(PngReject.BIT_DEPTH, rejectionOf(paletteAtBitDepthFour))
+        assertEquals(PngReject.INTERLACE, rejectionOf(adam7Interlaced))
+        assertEquals(PngReject.COLOUR_TYPE, rejectionOf(invalidColourType))
+    }
+
     private fun rejectionOf(bytes: ByteArray): PngReject = when (val scan = scanPng(bytes)) {
         is PngScan.Malformed -> scan.reason
         is PngScan.Unsupported -> scan.reason
@@ -150,4 +161,7 @@ class PngContainerTest {
     // IHDR, acTL, fcTL, IDAT (base frame), fdAT (a second frame), IEND — acTL/fcTL/fdAT are all
     // ancillary (lowercase first letter) so the base frame decodes normally.
     private val apngBaseFrame: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0, -3, -44, -102, 115, 0, 0, 0, 8, 97, 99, 84, 76, 0, 0, 0, 2, 0, 0, 0, 0, -13, -115, -109, 112, 0, 0, 0, 30, 102, 99, 84, 76, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 41, 4, -55, -93, 0, 0, 0, 18, 73, 68, 65, 84, 120, -100, 99, -8, -49, -64, -64, 0, -62, 12, -1, -127, 0, 0, 31, -18, 5, -5, 11, -39, 104, -117, 0, 0, 0, 22, 102, 100, 65, 84, 0, 0, 0, 1, 120, -100, 99, -8, -49, -64, -64, 0, -62, 12, -1, -127, 0, 0, 31, -18, 5, -5, -103, 12, -70, 92, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Colour type 1, which is not one of the accepted {0, 2, 3, 4, 6}; every other field is valid.
+    private val invalidColourType: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 1, 0, 0, 0, -17, 97, 53, -99, 0, 0, 0, 11, 73, 68, 65, 84, 120, -100, 99, 96, 96, 0, 0, 0, 3, 0, 1, -72, -83, 58, 99, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 }

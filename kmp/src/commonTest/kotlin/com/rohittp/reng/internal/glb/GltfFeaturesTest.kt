@@ -64,6 +64,15 @@ class GltfFeaturesTest {
     }
 
     @Test
+    fun skinTakesPrecedenceOverAttributeSemanticWhenAMeshCarriesBoth() {
+        // A skinned mesh carries both the flagged JOINTS_0 attribute and a node.skin reference.
+        // Stripping the attribute alone would not fix the file -- the skin reference remains and
+        // export fails again next round, now against SKIN. This pins that SKIN, not
+        // ATTRIBUTE_SEMANTIC, is what the document actually reports.
+        assertEquals(GltfUnsupported.SKIN, unsupported(skinnedMeshWithDisallowedAttribute))
+    }
+
+    @Test
     fun neverLeaksAnAttackerControlledUriIntoTheRejectionItself() {
         // GltfUnsupported.EXTERNAL_URI carries no payload -- confirm the actual uri text used by
         // the fixture below cannot be recovered from the result's own string form.
@@ -154,6 +163,23 @@ class GltfFeaturesTest {
           "scenes": [{"nodes": []}],
           "skins": [{}],
           "nodes": [{"skin": 0}]
+        }
+    """.trimIndent()
+
+    // Combines both faults SKIN and ATTRIBUTE_SEMANTIC guard against: the mesh's one primitive
+    // carries the disallowed JOINTS_0 semantic, and the node drawing that mesh also carries a
+    // skin reference. Pins that SKIN wins the precedence, since validateNodes() now runs before
+    // validateMeshes().
+    private val skinnedMeshWithDisallowedAttribute = """
+        {
+          "asset": {"version": "2.0"},
+          "scenes": [{"nodes": [0]}],
+          "skins": [{}],
+          "buffers": [{"byteLength": 1024}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
+          "accessors": [{"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3"}],
+          "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "JOINTS_0": 0}, "mode": 4}]}],
+          "nodes": [{"mesh": 0, "skin": 0}]
         }
     """.trimIndent()
 

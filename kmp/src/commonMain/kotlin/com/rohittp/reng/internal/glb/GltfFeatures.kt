@@ -56,8 +56,12 @@ internal sealed interface GltfFeatureResult {
  *   points and lines.
  * - [ATTRIBUTE_SEMANTIC] covers any primitive attribute semantic outside
  *   [SUPPORTED_ATTRIBUTE_SEMANTICS]: `TEXCOORD_n`/`COLOR_n` above zero, `JOINTS_n`, `WEIGHTS_n`,
- *   and any application-specific `_`-prefixed name.
- * - [SKIN] covers any node carrying a `skin` index.
+ *   and any application-specific `_`-prefixed name. Checked after [SKIN]: a skinned mesh carries
+ *   both the flagged `JOINTS_0`/`WEIGHTS_0` attributes and a `node.skin` reference, and stripping
+ *   just the attributes would not fix the file, since the skin reference remains and export fails
+ *   again next round. [SKIN] names the feature the consumer must actually remove.
+ * - [SKIN] covers any node carrying a `skin` index. Checked before [ATTRIBUTE_SEMANTIC] for exactly
+ *   the reason given there.
  * - [MORPH_TARGET] covers any primitive whose `targets` array is non-empty.
  * - [ANIMATION_TARGET_PATH] covers any animation channel whose `target.path` is not one of
  *   `translation`, `rotation`, `scale` -- in practice, `weights`.
@@ -122,8 +126,8 @@ private class GltfFeatureValidator(private val document: GltfDocument) {
         validateBuffers()
         validateAccessors()
         validateImages()
-        validateMeshes()
         validateNodes()
+        validateMeshes()
         validateAnimations()
         validateScene()
     }

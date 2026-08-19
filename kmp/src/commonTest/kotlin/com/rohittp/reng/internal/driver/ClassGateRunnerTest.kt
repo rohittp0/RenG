@@ -165,7 +165,10 @@ private fun leBytes(value: Int): ByteArray = byteArrayOf(
     ((value ushr 24) and 0xFF).toByte(),
 )
 
-private val validGlb: ByteArray = buildGlb("""{"asset":{"version":"2.0"}}""")
+// A resolvable single scene, not just a bare asset header: the canonical VALIDATE_GLB_FEATURES gate
+// rejects a scene-less document as SCENE_AMBIGUOUS (there is no single default scene to draw), and
+// this fixture's job is to exercise RenG's own gates passing, not to accidentally test that rejection.
+private val validGlb: ByteArray = buildGlb("""{"asset":{"version":"2.0"},"scenes":[{"nodes":[]}]}""")
 
 private val glbWithRequiredExtension: ByteArray = buildGlb(
     """{"asset":{"version":"2.0"},"extensionsRequired":["KHR_draco_mesh_compression"]}""",

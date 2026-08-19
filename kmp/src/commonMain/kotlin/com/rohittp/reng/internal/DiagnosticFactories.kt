@@ -65,6 +65,19 @@ internal fun resourceReloadedAfterFreeDiagnostic(key: ResourceKey): Diagnostic =
         resourceKey = key,
     )
 
+/**
+ * `drawBasemap` was requested with no configured `basemapStyle`. Warns and degrades rather than
+ * failing: running with no map is the whole MVP use case, and stays legitimate once the basemap
+ * ships since `basemapStyle` remains nullable then too. Carries no further context — there is
+ * nothing more specific to report than "no style was configured."
+ */
+internal fun basemapNotConfiguredDiagnostic(): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.BASEMAP_NOT_CONFIGURED,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.BASEMAP_RENDER,
+    )
+
 internal fun renGFailure(
     code: RenGErrorCode,
     stage: PipelineStage,

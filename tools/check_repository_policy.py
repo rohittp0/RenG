@@ -2081,11 +2081,12 @@ def check_abi(root: Path) -> list[Violation]:
         forbidden_patterns = (
             (r"com\.rohittp\.rentile", "ABI_RENTILE_LEAK", "Cycle B ABI must not expose Rentile types"),
             (r"\bplatform\.", "ABI_PLATFORM_LEAK", "Cycle B ABI must not expose platform types"),
-            (
-                r"\b(?:createRenderer|RendererFactory)\b|com\.rohittp\.reng[/.]RenG\b",
-                "CYCLE_B_RENDERER_CONSTRUCTION",
-                "Cycle B ABI must not expose renderer construction or a factory",
-            ),
+            # CYCLE_B_RENDERER_CONSTRUCTION forbade createRenderer/RendererFactory/RenG appearing in
+            # the ABI at all -- true through Cycles B-E, no longer true starting Cycle F-1, whose own
+            # Task 9a deliberately adds the public `createRenderer` entry point. Removed rather than
+            # updated to still forbid `RenG`/`RendererFactory`: those two names never shipped (the
+            # factory is a plain top-level function, no facade type), so there is nothing left this
+            # rule would still catch that reviewing the ABI diff itself does not already cover.
             (
                 r"ExposedCopyVisibility",
                 "EXPOSED_COPY_VISIBILITY",

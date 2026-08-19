@@ -574,9 +574,6 @@ class RepositoryPolicyTests(unittest.TestCase):
         append_cases = (
             ("com.rohittp.rentile/RenderOptions\n", "ABI_RENTILE_LEAK"),
             ("final class platform.posix/FILE\n", "ABI_PLATFORM_LEAK"),
-            ("final fun com.rohittp.reng/createRenderer(): com.rohittp.reng/Renderer\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
-            ("final class com.rohittp.reng/RendererFactory\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
-            ("final object com.rohittp.reng/RenG\n", "CYCLE_B_RENDERER_CONSTRUCTION"),
         )
         for mutation, expected in append_cases:
             with self.subTest(expected=expected, mutation=mutation):

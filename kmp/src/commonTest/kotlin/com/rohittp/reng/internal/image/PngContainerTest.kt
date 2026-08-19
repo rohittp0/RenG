@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.image
 
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
@@ -103,6 +104,59 @@ class PngContainerTest {
         is PngScan.Unsupported -> scan.reason
         is PngScan.Admitted -> error("unexpectedly admitted")
     }
+
+    // Positive counterpart to rejectsADuplicateTrnsChunk below: a single, correctly-sized tRNS chunk
+    // must still be admitted with its bytes captured intact. Without this, a fix that rejected every
+    // tRNS (not just a second one) would also pass the negative test for the wrong reason.
+    @Test
+    fun admitsASingleTrnsChunk() {
+        val scan = assertIs<PngScan.Admitted>(scanPng(rgb8SingleTrns))
+        assertContentEquals(byteArrayOf(0, 10, 0, 20, 0, 30), scan.transparency)
+    }
+
+    // A second tRNS chunk after the first. Before this fix, scanPng captured whichever tRNS came last,
+    // silently discarding the first — so the exact same bytes could render differently depending on
+    // chunk order, which is exactly the ambiguity DUPLICATE_CRITICAL_CHUNK exists to remove for IHDR
+    // and PLTE. tRNS is ancillary (its type code's case bit is set), not critical, so this must NOT
+    // reuse DUPLICATE_CRITICAL_CHUNK — that would misreport an ancillary duplicate as a critical one.
+    @Test
+    fun rejectsADuplicateTrnsChunk() {
+        assertEquals(PngReject.DUPLICATE_ANCILLARY_CHUNK, rejectionOf(rgb8DuplicateTrns))
+    }
+
+    // Positive counterpart to rejectsAPaletteChunkAfterImageData below: PLTE correctly placed before
+    // the first IDAT must still be admitted with its bytes captured intact. Without this, a fix that
+    // rejected PLTE regardless of position would also pass the negative test for the wrong reason.
+    @Test
+    fun admitsAPaletteChunkBeforeImageData() {
+        val scan = assertIs<PngScan.Admitted>(scanPng(paletteBeforeIdat))
+        assertContentEquals(byteArrayOf(-1, 0, 0, 0, -1, 0), scan.palette)
+    }
+
+    // A PLTE chunk appearing after the first IDAT. The specification requires PLTE to precede image
+    // data; previously this was captured and used regardless of position. This is colour type 2
+    // (truecolour), where a PLTE is only ever a suggested palette — never required for a valid decode
+    // — so the fixture stays a perfectly decodable image but for this one ordering violation, proving
+    // the rejection is about position, not about whether the file could otherwise decode.
+    @Test
+    fun rejectsAPaletteChunkAfterImageData() {
+        assertEquals(PngReject.PALETTE_AFTER_IMAGE_DATA, rejectionOf(paletteAfterIdat))
+    }
+
+    // colour type 2 (truecolour), 1x1, a single correctly-CRC'd 6-byte tRNS chunk before IDAT.
+    private val rgb8SingleTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 6, 116, 82, 78, 83, 0, 10, 0, 20, 0, 30, -59, 54, 41, -1, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Same as rgb8SingleTrns, with a second, differently-valued tRNS chunk appended right after the
+    // first (both correctly CRC'd) — so "last one wins" would be observably different from the first.
+    private val rgb8DuplicateTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 6, 116, 82, 78, 83, 0, 10, 0, 20, 0, 30, -59, 54, 41, -1, 0, 0, 0, 6, 116, 82, 78, 83, 0, 99, 0, 98, 0, 97, -63, -46, 68, -116, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // colour type 3 (palette), 1x1, a two-entry PLTE chunk correctly placed before IDAT.
+    private val paletteBeforeIdat: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0, 40, -53, 52, -69, 0, 0, 0, 6, 80, 76, 84, 69, -1, 0, 0, 0, -1, 0, -46, -121, -17, 113, 0, 0, 0, 10, 73, 68, 65, 84, 120, -100, 99, 96, 0, 0, 0, 2, 0, 1, 72, -81, -92, 113, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // colour type 2 (truecolour), 1x1, a real IDAT followed by a PLTE chunk — PLTE here is a suggested
+    // palette per specification, never required for a valid truecolour decode, but its position after
+    // the first IDAT is itself the violation.
+    private val paletteAfterIdat: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 12, 73, 68, 65, 84, 120, -100, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 84, 8, -93, -9, 0, 0, 0, 6, 80, 76, 84, 69, 1, 2, 3, 4, 5, 6, -107, 83, 111, 72, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 
     // rgb8TwoByTwo: png(2, 2, 8, 2, zlib.compress(raw)) — a minimal admitted 2x2 8-bit truecolour image.
     private val rgb8TwoByTwo: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0, -3, -44, -102, 115, 0, 0, 0, 18, 73, 68, 65, 84, 120, -100, 99, -8, -49, -64, -64, 0, -62, 12, -1, -127, 0, 0, 31, -18, 5, -5, 11, -39, 104, -117, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)

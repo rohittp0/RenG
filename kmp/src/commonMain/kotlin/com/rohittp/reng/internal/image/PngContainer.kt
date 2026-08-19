@@ -52,6 +52,17 @@ internal enum class PngReject {
      * the rendered output). Each may appear at most once, per specification.
      */
     DUPLICATE_CRITICAL_CHUNK,
+
+    /**
+     * A known ancillary chunk (`tRNS`) appearing more than once. Deliberately NOT
+     * [DUPLICATE_CRITICAL_CHUNK]: a chunk type's own case bit distinguishes critical from ancillary
+     * (see [isCritical]), and that distinction is meaningful to anyone reading a PNG diagnostic —
+     * reporting an ancillary chunk's duplicate under a name that says "critical" would be false of the
+     * fault, not merely imprecise about it. A second `tRNS` previously fell through no check at all
+     * (the second silently overwrote the first, changing which pixels rendered transparent depending
+     * on chunk order alone). At most one `tRNS` is permitted, per specification.
+     */
+    DUPLICATE_ANCILLARY_CHUNK,
     COMPRESSION_METHOD,
     FILTER_METHOD,
     ZERO_DIMENSION,
@@ -86,6 +97,18 @@ internal enum class PngReject {
      * length-checked here — that leniency belongs to decode-time `paletteAlpha`, not to this rejection.
      */
     TRNS_LENGTH,
+
+    /**
+     * A `PLTE` chunk appearing after the first `IDAT` chunk. The specification requires `PLTE` to
+     * precede image data. Not [DUPLICATE_CRITICAL_CHUNK] — this can be the very first and only `PLTE`
+     * in the file, so nothing has been duplicated; the fault is purely positional. Not [CHUNK_LENGTH]
+     * or [CHUNK_CRC] — the chunk's own bytes are perfectly well-formed, only its place in the stream is
+     * wrong. For colour type 3 a misplaced `PLTE` would leave a decoder to apply whichever palette it
+     * captured regardless of the ordering a conforming reader would use; for colour types 2 and 6 —
+     * where `PLTE` is merely a suggested palette — an out-of-order one is the same specification
+     * violation even though nothing downstream strictly needs it to decode.
+     */
+    PALETTE_AFTER_IMAGE_DATA,
 }
 
 private val PNG_SIGNATURE = byteArrayOf(-0x77, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
@@ -121,7 +144,11 @@ private fun readUInt32BE(bytes: ByteArray, offset: Int): Long =
  * `IHDR` must be the first chunk and exactly 13 bytes; `IEND` must be the last chunk with nothing after
  * it. Unknown critical chunks are rejected; unknown ancillary chunks are skipped. `IDAT` payload ranges
  * are collected in the order they appear, not concatenated, so a decoder can stream them without
- * buffering the whole compressed image.
+ * buffering the whole compressed image. `IHDR` and `PLTE` may each appear at most once
+ * ([PngReject.DUPLICATE_CRITICAL_CHUNK]); `tRNS` may also appear at most once
+ * ([PngReject.DUPLICATE_ANCILLARY_CHUNK]). `PLTE` must precede the first `IDAT`
+ * ([PngReject.PALETTE_AFTER_IMAGE_DATA]) — malformed structure is rejected here, at the container,
+ * so the decoder only ever receives well-formed input.
  */
 internal fun scanPng(bytes: ByteArray): PngScan {
     if (bytes.size < PNG_SIGNATURE.size || !bytes.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE)) {
@@ -134,6 +161,7 @@ internal fun scanPng(bytes: ByteArray): PngScan {
     val imageDataRanges = mutableListOf<IntRange>()
     var sawIhdr = false
     var sawIend = false
+    var sawIdat = false
 
     var pos = PNG_SIGNATURE.size
     val total = bytes.size.toLong()
@@ -201,11 +229,16 @@ internal fun scanPng(bytes: ByteArray): PngScan {
             sawIend = true
             break
         } else if (type == TYPE_IDAT) {
+            sawIdat = true
             imageDataRanges.add(payloadStart until (payloadStart + payloadLength))
         } else if (type == TYPE_PLTE) {
+            // Position first: even a PLTE that would otherwise be the only one in the file is
+            // malformed once the first IDAT has already been seen, regardless of duplicate status.
+            if (sawIdat) return PngScan.Malformed(PngReject.PALETTE_AFTER_IMAGE_DATA)
             if (palette != null) return PngScan.Malformed(PngReject.DUPLICATE_CRITICAL_CHUNK)
             palette = bytes.copyOfRange(payloadStart, payloadStart + payloadLength)
         } else if (type == TYPE_TRNS) {
+            if (transparency != null) return PngScan.Malformed(PngReject.DUPLICATE_ANCILLARY_CHUNK)
             transparency = bytes.copyOfRange(payloadStart, payloadStart + payloadLength)
         } else if (isCritical(type)) {
             return PngScan.Malformed(PngReject.UNKNOWN_CRITICAL_CHUNK)

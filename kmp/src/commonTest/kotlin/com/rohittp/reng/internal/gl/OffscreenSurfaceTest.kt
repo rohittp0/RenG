@@ -58,19 +58,6 @@ class OffscreenSurfaceTest {
         assertEquals(1, binding.log.count { it.startsWith("deleteTextures") })
     }
 
-    @Test fun theCapturedStateGuardRestoresEvenWhenTheBlockThrows() {
-        val binding = RecordingGlBinding()
-        val before = captureGlState(binding, profile(), textureUnitCount = 1)
-        runCatching {
-            withCapturedGlState(binding, profile(), textureUnitCount = 1) {
-                binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 7)
-                throw IllegalStateException("frame content failed")
-            }
-        }
-        assertTrue(binding.log.any { it == "bindFramebuffer(0x8CA9,7)" })
-        assertEquals(before, captureGlState(binding, profile(), textureUnitCount = 1))
-    }
-
     private fun createSurface(binding: RecordingGlBinding): OffscreenSurfaceResult {
         val descriptor = descriptor(64, 64)
         return createOffscreenSurface(

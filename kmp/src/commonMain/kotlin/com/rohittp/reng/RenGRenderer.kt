@@ -13,7 +13,9 @@ import com.rohittp.reng.internal.gl.GeometryPipeline
 import com.rohittp.reng.internal.gl.GeometryPipelineResult
 import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.GlLifecycleDriver
+import com.rohittp.reng.internal.gl.GlObjectHandle
 import com.rohittp.reng.internal.gl.GlObjectRegistry
+import com.rohittp.reng.internal.gl.GlObjectType
 import com.rohittp.reng.internal.gl.GlProgramCache
 import com.rohittp.reng.internal.gl.OffscreenSurface
 import com.rohittp.reng.internal.gl.OffscreenSurfaceResult
@@ -31,10 +33,12 @@ import com.rohittp.reng.internal.gl.createOffscreenSurface
 import com.rohittp.reng.internal.gl.createStickerPipeline
 import com.rohittp.reng.internal.gl.deleteCompositePipeline
 import com.rohittp.reng.internal.gl.deleteGeometryPipeline
+import com.rohittp.reng.internal.gl.deleteGlObjects
 import com.rohittp.reng.internal.gl.deleteOffscreenSurface
 import com.rohittp.reng.internal.gl.deleteStickerPipeline
 import com.rohittp.reng.internal.gl.drawFrame
 import com.rohittp.reng.internal.gl.offscreenSurfaceDescriptorFor
+import com.rohittp.reng.internal.gl.requireResolvedAtDrawTime
 import com.rohittp.reng.internal.gl.uploadTexture
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
@@ -50,6 +54,7 @@ import com.rohittp.reng.internal.lifecycle.RendererLifecycleOutcome
 import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
 import com.rohittp.reng.internal.lifecycle.RendererOwnerState
 import com.rohittp.reng.internal.lifecycle.RenderTargetFact
+import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.planning.FramePlanningCore
 import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
@@ -94,22 +99,56 @@ internal object DeterministicRentilePrivateKeyResolver : RentilePrivateKeyResolv
     ): RentilePrivateKey = RentilePrivateKey("${resourceClass.name}:${locator.value}")
 }
 
-/** One [Sticker]'s [Placement] paired with its decoded, not-yet-uploaded image. */
-internal typealias PreparedSticker = Pair<Placement, DecodedImage>
+/**
+ * One [Sticker]'s [Placement] paired with its decoded, not-yet-uploaded image and the [ResourceKey]
+ * [FramePlanningCore]'s static traversal already derived for it — the same key
+ * [RenGRenderer.performDraw]'s texture cache uses so a repeated draw of an unchanged sticker image
+ * reuses its GL texture (Task 9b item 1) instead of re-uploading it every frame.
+ */
+internal class PreparedSticker(
+    internal val placement: Placement,
+    internal val resourceKey: ResourceKey,
+    internal val image: DecodedImage,
+)
+
+/**
+ * One [Geometry] consumer texture already fetched and decoded at `prepare()` time, paired with the
+ * [ResourceKey] its sampler name resolved to — the same shape [PreparedSticker] establishes for a
+ * sticker's image, reused here so [RenGRenderer.performDraw]'s texture cache covers both draw paths
+ * identically.
+ */
+internal class PreparedGeometryTexture(
+    internal val resourceKey: ResourceKey,
+    internal val image: DecodedImage,
+)
+
+/**
+ * One [Geometry] with both of Task 9b item 3's snapshots already taken at `prepare()` time:
+ * [uniformsSnapshot] is a `.toMap()` copy of [Geometry.uniforms] and [consumerTextures] replaces
+ * [Geometry.textures]' locators with their already-fetched, already-decoded content — never the
+ * caller's own live `Map` references. [geometry] itself is retained only for its immutable
+ * `topLeft`/`bottomRight`/`shaderPair` fields, which carry no such live-reference hazard.
+ */
+internal class PreparedGeometry(
+    internal val geometry: Geometry,
+    internal val uniformsSnapshot: Map<String, ShaderValue>,
+    internal val consumerTextures: Map<String, PreparedGeometryTexture>,
+)
 
 /**
  * The concrete [PreparedFrame] this cycle's factory produces. Deliberately thin: it retains exactly
- * what [RenGRenderer.draw] needs to assemble a [Scene] — the raw [Camera] and [Geometry] values plus
- * each sticker's already-decoded image — and nothing GL-shaped, since GPU texture upload and
- * geometry-pipeline compilation both need a live render context and therefore happen in
- * [RenGRenderer.draw], not here.
+ * what [RenGRenderer.draw] needs to assemble a [Scene] — the raw [Camera] value, each sticker's
+ * already-decoded image, and each geometry's already-snapshotted uniforms/textures — and nothing
+ * GL-shaped, since GPU texture upload and geometry-pipeline compilation both need a live render
+ * context and therefore happen in [RenGRenderer.draw], not here.
  *
- * **Known gap, left to Task 9b by design.** [geometries] retains the exact [Geometry] instances
- * [FramePlan] carried, including their live `uniforms`/`textures` `Map` references — not a snapshot.
- * [Geometry]'s own KDoc documents the resulting no-mutation-after-construction contract: a consumer
- * mutating one of those maps between `prepare()` and a later `draw()` on this same frame would render
- * content that differs from what the frame's canonical identity already hashed. Closing that gap
- * requires snapshotting both maps here, which is explicitly Task 9b's job.
+ * **Task 9b item 3, closed here.** [geometries] no longer retains the exact [Geometry] instances
+ * [FramePlan] carried with their live `uniforms`/`textures` `Map` references — every [PreparedGeometry]
+ * in [geometries] carries a fixed `.toMap()` snapshot of `uniforms` and fully resolved, already-decoded
+ * `consumerTextures`, both taken once, synchronously, inside `RenGRenderer.prepare()`. A consumer
+ * mutating their own `uniforms`/`textures` map after `prepare()` returns can no longer change what a
+ * later `draw()` on this same frame renders, closing the divergence [Geometry]'s own KDoc used to
+ * document as an open gap.
  */
 internal class RenGPreparedFrame(
     internal val owner: RenGRenderer,
@@ -117,13 +156,13 @@ internal class RenGPreparedFrame(
     internal val camera: Camera,
     internal val drawBasemap: Boolean,
     stickers: List<PreparedSticker>,
-    geometries: List<Geometry>,
+    geometries: List<PreparedGeometry>,
 ) : PreparedFrame {
     private val stickerSnapshot: List<PreparedSticker> = ArrayList(stickers)
-    private val geometrySnapshot: List<Geometry> = ArrayList(geometries)
+    private val geometrySnapshot: List<PreparedGeometry> = ArrayList(geometries)
 
     internal val stickers: List<PreparedSticker> get() = ArrayList(stickerSnapshot)
-    internal val geometries: List<Geometry> get() = ArrayList(geometrySnapshot)
+    internal val geometries: List<PreparedGeometry> get() = ArrayList(geometrySnapshot)
 
     internal var closed: Boolean = false
         private set
@@ -204,19 +243,19 @@ internal fun createInternalGlState(
  * acquisition), Cycle D's GL foundation (lifecycle state machine, offscreen surface, composite draw),
  * and this cycle's scene draw ([SceneContent]) into the renderer the public factory hands out.
  *
- * **Scope carried by this task (9a).** `createRenderer`, this class, lifecycle delegation to
+ * **Scope carried by Task 9a.** `createRenderer`, this class, lifecycle delegation to
  * [GlLifecycleDriver], `drawBasemap` warn-and-degrade, and wiring [SceneContent] into [drawFrame].
  *
- * **Scope explicitly left to Task 9b**, so a reviewer can reject one without the other: texture
- * caching and deletion through [GlObjectRegistry] (every sticker texture this class uploads in
- * [draw] is leaked — re-uploaded fresh on every draw call with nothing to delete it, exactly as the
- * plan's Task 9 description accepts for the MVP); [RenGPreparedFrame] snapshotting each [Geometry]'s
- * `uniforms`/`textures` maps rather than retaining the caller's own; sticker quad sizing from
- * [DecodedImage] dimensions (today's sticker quad is [com.rohittp.reng.internal.gl.STICKER_QUAD], a
- * fixed unit square); populating [SceneGeometry.consumerTextures] (this class fetches no consumer
- * geometry textures at all — [FramePlanningCore]'s own static-resource traversal does not yet walk
- * [Geometry.textures] either, so there is nothing here for Task 9b to have already half-wired); and
- * the untyped `error(...)` decision below (see [resolveFrameCamera]).
+ * **Scope carried by Task 9b, closing every gap 9a left**: texture caching and deletion through
+ * [glObjectRegistry] (a repeated draw of an unchanged sticker or consumer texture now reuses its GL
+ * texture — see [cachedTexture] — and [close] deletes every cached one); [RenGPreparedFrame]
+ * snapshotting each [Geometry]'s `uniforms`/`textures` maps in [prepare] rather than retaining the
+ * caller's own (see [PreparedGeometry]); sticker quad sizing from each [DecodedImage]'s own
+ * dimensions (see [SceneSticker]'s `imageWidthPixels`/`imageHeightPixels`); populating
+ * [SceneGeometry.consumerTextures] by fetching and decoding a [Geometry]'s consumer textures in
+ * [prepare] alongside its stickers (see [acquireExternalImages] and [geometryTextureReference]); and
+ * converting the untyped `error(...)` a draw-time resolution failure used to throw into a typed
+ * [RenGException] (see [resolveFrameCamera] and `internal.gl.requireResolvedAtDrawTime`).
  *
  * **Why `preparationActive` on [GlLifecycleDriver]'s own snapshot cannot serialize [prepare] calls
  * across coroutines.** [GlLifecycleDriver.run] is a single synchronous call: `BeginPreparation`
@@ -244,6 +283,7 @@ internal class RenGRenderer(
     private val preparationDriver: PreparationDriver,
     private val residentCache: ResidentCache,
     private val programs: GlProgramCache,
+    private val glObjectRegistry: GlObjectRegistry,
     initialGlState: InternalGlState,
 ) : Renderer {
 
@@ -297,20 +337,63 @@ internal class RenGRenderer(
             }
 
             // FramePlanningCore.staticResourceTraversal() walks plan.stickersForCore() in order,
-            // emitting exactly one External reference per sticker (and nothing for a Geometry's own
-            // consumer textures -- Task 9b's job, not traversed by this pure core yet either), so
-            // zipping the two lists back together by position is safe.
+            // emitting exactly one External reference per sticker, so zipping the two lists back
+            // together by position is safe.
             val stickerImageReferences = planned.staticResourceTraversal
                 .filterIsInstance<StaticResourceReference.External>()
                 .filter { it.resourceClass == ResourceClass.STICKER_IMAGE }
             check(stickerImageReferences.size == plan.stickers.size) {
                 "sticker image traversal must have exactly one entry per sticker"
             }
-            val decodedByKey = acquireStickerImages(stickerImageReferences, accessMode)
-            val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
-                sticker.placement to requireNotNull(decodedByKey[reference.resourceKey]) {
-                    "a successful sticker acquisition must decode every traversed image"
+
+            // Task 9b item 4: a Geometry's consumer textures are fetched and decoded here too, one
+            // geometry at a time, sorted by sampler name -- the exact same order
+            // FramePlanningCore.staticResourceTraversal() now traverses them in, computed
+            // independently through geometryKeyDeriver rather than re-parsed out of the traversal
+            // list. Both derivations are the same pure function of (resourceClass, locator), so they
+            // always agree -- the same "recompute, don't consume the traversal" pattern this
+            // function already uses for a geometry's PROGRAM key (see the `draw` section below).
+            val geometryTextureReferencesByGeometry: List<List<Pair<String, StaticResourceReference.External>>> =
+                plan.geometries.map { geometry ->
+                    geometry.textures.entries.sortedBy { it.key }.map { (name, locator) ->
+                        name to geometryTextureReference(locator)
+                    }
                 }
+
+            val decodedByKey = acquireExternalImages(
+                stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second },
+                accessMode,
+            )
+
+            val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
+                PreparedSticker(
+                    placement = sticker.placement,
+                    resourceKey = reference.resourceKey,
+                    image = requireNotNull(decodedByKey[reference.resourceKey]) {
+                        "a successful sticker acquisition must decode every traversed image"
+                    },
+                )
+            }
+
+            // Task 9b item 3: both of Geometry's live Map references are snapshotted right here,
+            // synchronously, before this suspend function ever returns -- uniforms via .toMap(),
+            // textures by replacing every ResourceLocator with its already-fetched, already-decoded
+            // content. Neither snapshot can be affected by a consumer mutating their own map after
+            // prepare() returns.
+            val geometries = plan.geometries.mapIndexed { index, geometry ->
+                val consumerTextures = geometryTextureReferencesByGeometry[index].associate { (name, reference) ->
+                    name to PreparedGeometryTexture(
+                        resourceKey = reference.resourceKey,
+                        image = requireNotNull(decodedByKey[reference.resourceKey]) {
+                            "a successful geometry-texture acquisition must decode every traversed image"
+                        },
+                    )
+                }
+                PreparedGeometry(
+                    geometry = geometry,
+                    uniformsSnapshot = geometry.uniforms.toMap(),
+                    consumerTextures = consumerTextures,
+                )
             }
 
             previousEncodedPlan = planned.encodedPlan
@@ -322,11 +405,33 @@ internal class RenGRenderer(
                 camera = plan.camera,
                 drawBasemap = plan.drawBasemap,
                 stickers = stickers,
-                geometries = plan.geometries,
+                geometries = geometries,
             )
         } finally {
             preparationMutex.unlock()
         }
+    }
+
+    /**
+     * Derives the same [StaticResourceReference.External] shape
+     * `FramePlanningCore.staticResourceTraversal()`'s own `external(...)` helper produces for a
+     * geometry consumer texture, independently — both are the same pure function of
+     * `(ResourceClass.MODEL_TEXTURE, locator)`, so they always agree without this function needing
+     * to parse the traversal list back apart by position (which — unlike a sticker, where exactly one
+     * traversal entry exists per plan sticker — would require distinguishing a geometry's own texture
+     * entries from a [Model]'s, since both traverse under the same reused [ResourceClass.MODEL_TEXTURE]).
+     */
+    private fun geometryTextureReference(locator: ResourceLocator): StaticResourceReference.External {
+        val derived = geometryKeyDeriver.external(ResourceClass.MODEL_TEXTURE, locator)
+        return StaticResourceReference.External(
+            resourceClass = ResourceClass.MODEL_TEXTURE,
+            locator = locator,
+            maximumResponseBytes = configuration.resourceLimits.maximumBytesFor(ResourceClass.MODEL_TEXTURE),
+            resourceKey = derived.key,
+            rawKey = requireNotNull(derived.rawKey),
+            privateRentileKey = DeterministicRentilePrivateKeyResolver.resolve(locator, ResourceClass.MODEL_TEXTURE),
+            canonicalIdentity = derived.identity,
+        )
     }
 
     override suspend fun prepareBatch(plans: List<FramePlan>, accessMode: ResourceAccessMode): List<PreparedFrame> {
@@ -348,12 +453,13 @@ internal class RenGRenderer(
     }
 
     /**
-     * Fetches every traversed sticker image through [preparationDriver] — one [ResourceOccurrence]
-     * per sticker, each its own owner so a merged route (two stickers sharing one image locator)
-     * still resolves independently — then decodes each resulting resident generation's bytes through
-     * Cycle C's PNG decoder. Returns nothing and performs no adapter call at all when [references] is
-     * empty, which is what keeps `prepare()` on a sticker-free, basemap-unconfigured plan honestly
-     * free of consumer exchange too.
+     * Fetches every traversed external image — a sticker's, or (Task 9b) a geometry consumer
+     * texture's — through [preparationDriver], one [ResourceOccurrence] per [references] entry, each
+     * its own owner so a merged route (two entries sharing one locator) still resolves independently
+     * — then decodes each resulting resident generation's bytes through Cycle C's PNG decoder.
+     * Returns nothing and performs no adapter call at all when [references] is empty, which is what
+     * keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no configured
+     * basemap honestly free of consumer exchange too.
      *
      * A [ResourceOperationOutcome.Cancelled] outcome — reached when one route's adapter call observes
      * its own cancellation while a sibling route is still active, exactly the multi-route scenario
@@ -363,7 +469,7 @@ internal class RenGRenderer(
      * makes that fixed `CancelRoute` path reachable through the public API for the first time: before
      * this factory existed, [preparationDriver]'s multi-route machinery had no caller at all.
      */
-    private suspend fun acquireStickerImages(
+    private suspend fun acquireExternalImages(
         references: List<StaticResourceReference.External>,
         accessMode: ResourceAccessMode,
     ): Map<ResourceKey, DecodedImage> {
@@ -486,8 +592,14 @@ internal class RenGRenderer(
         // NotifyGpuObjectsGone never reaches the permitted-operation executor (see GlLifecycleDriver /
         // RendererLifecycleStateMachine: it routes through AwaitRenderCallQuiescence instead, and
         // GlLifecycleDriver.forgetWithoutDeleting() already handles the registry and program cache on
-        // its own). This class's own GL-object fields are outside both of those, so they are forgotten
-        // here, unconditionally -- idempotent to call even when already forgotten.
+        // its own). Because `registry` there is this exact `glObjectRegistry` instance (constructed
+        // once, in RendererFactory, and threaded into both GlLifecycleDriver and this class), every
+        // cachedTexture()-registered sticker/geometry-consumer texture is ALSO forgotten there,
+        // without an extra line here -- forgotten, never deleted (ADR 0007/0015): the GL handles are
+        // already gone with the lost context, so there is nothing left to validly delete, and the
+        // decoded CPU-side content those handles cached stays resident and valid regardless. This
+        // class's own GL-object fields are outside both of those, so they are forgotten here,
+        // unconditionally -- idempotent to call even when already forgotten.
         driver.run(RendererLifecycleOperation.NotifyGpuObjectsGone) { null }
         offscreenSurface = null
         compositePipeline = null
@@ -574,12 +686,21 @@ internal class RenGRenderer(
 
         val resolvedCamera = resolveFrameCamera(frame.camera)
 
-        val sceneStickers = frame.stickers.map { (placement, image) ->
-            SceneSticker(placement, uploadTexture(binding, image, TextureContent.IMAGE))
+        val sceneStickers = frame.stickers.map { preparedSticker ->
+            val texture = cachedTexture(preparedSticker.resourceKey) {
+                uploadTexture(binding, preparedSticker.image, TextureContent.IMAGE)
+            }
+            SceneSticker(
+                placement = preparedSticker.placement,
+                texture = texture,
+                imageWidthPixels = preparedSticker.image.width,
+                imageHeightPixels = preparedSticker.image.height,
+            )
         }
 
         val sceneGeometries = ArrayList<SceneGeometry>(frame.geometries.size)
-        for (geometry in frame.geometries) {
+        for (preparedGeometry in frame.geometries) {
+            val geometry = preparedGeometry.geometry
             val key = geometryKeyDeriver.geometryProgram(geometry.shaderPair).key
             val pipeline = geometryPipelines[key] ?: when (
                 val result = createGeometryPipeline(binding, profile.dialect, programs, geometry.shaderPair)
@@ -587,7 +708,15 @@ internal class RenGRenderer(
                 is GeometryPipelineResult.Created -> result.pipeline.also { geometryPipelines[key] = it }
                 is GeometryPipelineResult.Failed -> return result.failure
             }
-            sceneGeometries += SceneGeometry(geometry = geometry, pipeline = pipeline)
+            val consumerTextures = preparedGeometry.consumerTextures.mapValues { (_, texture) ->
+                cachedTexture(texture.resourceKey) { uploadTexture(binding, texture.image, TextureContent.DATA) }
+            }
+            sceneGeometries += SceneGeometry(
+                geometry = geometry,
+                pipeline = pipeline,
+                consumerUniforms = preparedGeometry.uniformsSnapshot,
+                consumerTextures = consumerTextures,
+            )
         }
 
         val scene = Scene(
@@ -609,6 +738,25 @@ internal class RenGRenderer(
     }
 
     /**
+     * Task 9b item 1: the texture-lifetime fix. Looks [key] up in [glObjectRegistry] first — the
+     * SAME registry [driver]'s own `forgetWithoutDeleting()` clears on context loss and on
+     * [notifyGpuObjectsGone] (ADR 0007/0015: forgotten, not deleted, since the GL handles are already
+     * gone and there is nothing valid left to delete) — and only calls [upload] on a genuine cache
+     * miss, registering the freshly uploaded name under [key] so the NEXT draw of the same
+     * [ResourceKey] (an unchanged sticker image or geometry consumer texture) reuses it instead of
+     * calling [uploadTexture] (and therefore `genTextures`) again. [close] deletes every handle this
+     * ever registers; nothing here calls a GL delete directly, mirroring how [geometryPipelines] is
+     * cached by [ResourceKey] and deleted only in [close] / forgotten only in [notifyGpuObjectsGone].
+     */
+    private fun cachedTexture(key: ResourceKey, upload: () -> Int): Int {
+        val existing = glObjectRegistry.handles(key).firstOrNull { it.type == GlObjectType.TEXTURE }
+        if (existing != null) return existing.name
+        val name = upload()
+        glObjectRegistry.register(key, listOf(GlObjectHandle(GlObjectType.TEXTURE, name)))
+        return name
+    }
+
+    /**
      * Resolves [camera] against the fixed output pixel size a second time (the first was inside
      * `FramePlanningCore.plan()`'s own `planMercatorSpatial` call, at `prepare()` time). This mirrors
      * [SceneContent]'s own re-resolution of `Placement`/`Geometry` at draw time and accepts the same
@@ -616,19 +764,13 @@ internal class RenGRenderer(
      * inputs, [camera] cannot have changed since `prepare()` validated it (it is `RenGPreparedFrame`'s
      * own immutable field, not the caller's live [FramePlan]), and `configuration.outputPixelSize` is
      * fixed for the renderer's whole lifetime (ADR 0012). A failure here is therefore a caller
-     * contract violation rather than a legitimate runtime outcome — exactly [SceneContent]'s own
-     * `requireResolvedAtDrawTime` reasoning — and is reported the same untyped way pending Task 9b's
-     * decision on whether to convert every such site to a typed [RenGException].
+     * contract violation rather than a legitimate runtime outcome — exactly
+     * `internal.gl.requireResolvedAtDrawTime`'s own reasoning — and (Task 9b) is now reported through
+     * that exact same shared function, as a typed [RenGException] (`GPU_OPERATION_FAILED` at `DRAW`)
+     * rather than the bare `error(...)` this used to throw directly.
      */
     private fun resolveFrameCamera(camera: Camera): ResolvedMercatorCamera =
-        when (val outcome = resolveMercatorCamera(camera, configuration.outputPixelSize)) {
-            is SpatialOutcome.Success -> outcome.value
-            is SpatialOutcome.Failure -> error(
-                "RenGRenderer received a Camera that failed to resolve at draw time; camera " +
-                    "resolution must already have succeeded once during FRAME_PLANNING before a " +
-                    "PreparedFrame is ever produced, so this indicates a caller contract violation",
-            )
-        }
+        resolveMercatorCamera(camera, configuration.outputPixelSize).requireResolvedAtDrawTime()
 
     // ---- Prepared-frame lifecycle -----------------------------------------------------------------
 
@@ -655,6 +797,13 @@ internal class RenGRenderer(
                 stickerPipeline?.let { deleteStickerPipeline(binding, programs, it) }
                 geometryPipelines.values.forEach { deleteGeometryPipeline(binding, programs, it) }
                 geometryPipelines.clear()
+                // Task 9b item 1: every sticker/geometry-consumer texture cachedTexture() has ever
+                // registered gets deleted here, exactly once, on close -- the same ADR 0007/0015
+                // "close() deletes" half geometryPipelines already establishes above. The registry's
+                // own `forgetEverything()` still runs afterwards (GlLifecycleDriver.applyTerminal,
+                // once this operation succeeds and the machine reaches CLOSED), which is harmless
+                // here since every handle is already gone by then.
+                glObjectRegistry.liveKeys().forEach { key -> deleteGlObjects(binding, glObjectRegistry.handles(key)) }
                 offscreenSurface = null
                 compositePipeline = null
                 stickerPipeline = null

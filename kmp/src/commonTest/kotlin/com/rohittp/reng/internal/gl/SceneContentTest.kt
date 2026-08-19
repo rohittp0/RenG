@@ -4,12 +4,15 @@ import com.rohittp.reng.AnchoringMode
 import com.rohittp.reng.Camera
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
+import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.Placement
+import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.RenGException
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Vector3
-import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
@@ -18,6 +21,7 @@ import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class SceneContentTest {
@@ -172,7 +176,11 @@ class SceneContentTest {
     }
 
     @Test
-    fun aSceneGeometrysConsumerTextureIsUploadedAndBoundWhenSceneContentDraws() {
+    fun aSceneGeometrysConsumerTextureIsBoundWhenSceneContentDraws() {
+        // As of Task 9b, SceneGeometry.consumerTextures carries each name's ALREADY-UPLOADED GL
+        // texture name (an Int) -- uploading and caching it by ResourceKey through GlObjectRegistry
+        // is the job of whoever assembles the SceneGeometry (RenGRenderer), one layer above
+        // SceneContent, so this test asserts binding, not upload.
         val binding = RecordingGlBinding().withDeclaredNames("uMask" to 21)
         val pipeline = newGeometryPipeline(binding)
         val geometry = Geometry(
@@ -184,7 +192,7 @@ class SceneContentTest {
         val sceneGeometry = SceneGeometry(
             geometry = geometry,
             pipeline = pipeline,
-            consumerTextures = mapOf("uMask" to DecodedImage(1, 1, byteArrayOf(-1, 0, 0, -1))),
+            consumerTextures = mapOf("uMask" to 909),
         )
         val scene = Scene(
             outputPixelSize = OUTPUT_SIZE,
@@ -200,7 +208,42 @@ class SceneContentTest {
             "a SceneGeometry.consumerTextures entry must reach drawGeometry's consumerTextures, " +
                 "take a texture unit, and bind its sampler: ${binding.log}",
         )
-        assertEquals(listOf<Byte>(-1, 0, 0, -1), binding.lastTexImageBytes())
+        assertTrue(
+            binding.log.any { it == "bindTexture(0xDE1,909)" },
+            "the already-uploaded texture name must be the one bound: ${binding.log}",
+        )
+        assertTrue(binding.log.none { it.startsWith("genTextures") }, "SceneContent must never upload a texture itself")
+    }
+
+    @Test
+    fun aGeometrysConsumerUniformSnapshotIsUsedNotItsLiveMap() {
+        // Pins the item-3 fix: SceneGeometry.consumerUniforms is a separate, explicit field from
+        // Geometry.uniforms. A caller (RenGRenderer) that passes a DIFFERENT snapshot than the
+        // Geometry's own live map must see ITS snapshot drawn, not the Geometry's.
+        val binding = RecordingGlBinding().withDeclaredNames("uTint" to 20)
+        val pipeline = newGeometryPipeline(binding)
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalShaderPair(),
+            uniforms = mapOf("uTint" to ShaderValue.Scalar(0.5f)),
+        )
+        val sceneGeometry = SceneGeometry(
+            geometry = geometry,
+            pipeline = pipeline,
+            consumerUniforms = mapOf("uTint" to ShaderValue.Scalar(0.9f)),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(sceneGeometry),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+
+        assertTrue(binding.log.contains("uniform1f(20,0.9)"), "the explicit snapshot must be drawn: ${binding.log}")
+        assertTrue(!binding.log.contains("uniform1f(20,0.5)"), "the Geometry's own live map must not be read: ${binding.log}")
     }
 
     @Test
@@ -249,6 +292,73 @@ class SceneContentTest {
             mvpNear.copyOfRange(12, 16).toList() != mvpFar.copyOfRange(12, 16).toList(),
             "different world positions must produce different translations",
         )
+    }
+
+    // --- Task 9b item 2: a sticker's quad is sized from its image's own pixel dimensions -------
+
+    @Test
+    fun aStickersImageDimensionsScaleItsRotationAndScaleBlockRelativeToAUnitQuad() {
+        // CONTEXT.md: a Sticker draws "as a centred local XY quad whose width and height are the
+        // image's pixel dimensions." Before this fix STICKER_QUAD was a fixed unit square with
+        // nothing scaling it by the image's own size, so at scale 1.0 a sticker rendered one pixel
+        // across instead of its image's size. This pins that SceneContent now threads
+        // SceneSticker.imageWidthPixels/imageHeightPixels into the composed MVP as a local pre-scale.
+        //
+        // The MVP uniform location must be declared -- RecordingGlBinding.getUniformLocation
+        // returns -1 for anything undeclared, and drawOneSticker's `>= 0` guard would then skip the
+        // uniformMatrix4fv call entirely, letting this test pass while asserting nothing.
+        val mvpLocation = 3
+        val binding = RecordingGlBinding().withDeclaredNames(
+            STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to mvpLocation,
+            STICKER_TEXTURE_UNIFORM_NAME to 7,
+        )
+        val stickerPipeline = newStickerPipeline(binding)
+        val placement = Placement(
+            positionMode = AnchoringMode.SCREEN,
+            position = Vector3(0.0, 0.0, 0.0),
+            rotationMode = AnchoringMode.SCREEN,
+            rotation = Vector3(0.0, 0.0, 0.0),
+            scaleMode = AnchoringMode.SCREEN,
+            scale = 1.0,
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(SceneSticker(placement, texture = 1, imageWidthPixels = 4, imageHeightPixels = 2)),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, stickerPipeline).draw(binding)
+
+        val resolved = (resolvePlacement(placement, topDownCamera()) as SpatialOutcome.Success).value
+        val expected = composeScreenModelViewProjection(OUTPUT_SIZE, resolved, DoubleVector3(4.0, 2.0, 1.0))
+        val unitQuad = composeScreenModelViewProjection(OUTPUT_SIZE, resolved)
+
+        val actual = requireNotNull(binding.uniformMatrix4fvValues[mvpLocation]) {
+            "the sticker's MVP must have been bound"
+        }
+        assertContentEquals(expected, actual)
+        assertTrue(actual.toList() != unitQuad.toList(), "a non-1x1 image must not draw as a unit quad")
+    }
+
+    // --- Task 9b item 5: draw-time resolution failure is a typed RenGException, not error(...) --
+
+    @Test
+    fun requireResolvedAtDrawTimeConvertsAFailureToATypedRedactedRenGException() {
+        // The wrapped failure deliberately carries a DIFFERENT code and stage (GPU_RESOURCE, not
+        // DRAW) than the exception this must throw, proving requireResolvedAtDrawTime reports its
+        // own generic, redacted draw-time failure rather than merely rethrowing whatever it was
+        // handed -- exactly the shape GlFrameDrawer.kt's own driver-error path already uses for
+        // "something is wrong at draw time, nothing more specific to say."
+        val wrapped = SpatialOutcome.Failure(glOperationFailure(PipelineStage.GPU_RESOURCE, resourceKey = null))
+
+        val failure = assertFailsWith<RenGException> { wrapped.requireResolvedAtDrawTime() }
+
+        assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, failure.code)
+        assertEquals(PipelineStage.DRAW, failure.stage)
+        val rendered = failure.toString() + failure.message.orEmpty()
+        assertTrue(!rendered.contains("Mesa", ignoreCase = true))
+        assertTrue(!rendered.contains("GL_", ignoreCase = false))
     }
 
     private fun mapPlacementAt(position: Vector3): Placement = Placement(

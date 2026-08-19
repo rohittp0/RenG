@@ -88,10 +88,17 @@ internal fun createRenderer(
         clock = monotonicMillisClock,
     )
 
+    // Shared with RenGRenderer below -- Task 9b's texture-lifetime fix caches uploaded sticker and
+    // geometry-consumer textures in this exact registry, so the SAME instance GlLifecycleDriver
+    // forgets-without-deleting on context loss (ADR 0007/0015) must be the one RenGRenderer caches
+    // into and deletes from on close(); two separate GlObjectRegistry instances here would silently
+    // desynchronize that lifecycle.
+    val objectRegistry = GlObjectRegistry()
+
     val driver = GlLifecycleDriver(
         binding = binding,
         probe = probe,
-        registry = GlObjectRegistry(),
+        registry = objectRegistry,
         programs = programs,
         initialSnapshot = RendererLifecycleSnapshot(
             ownerState = RendererOwnerState.LIVE,
@@ -110,6 +117,7 @@ internal fun createRenderer(
         preparationDriver = preparationDriver,
         residentCache = residentCache,
         programs = programs,
+        glObjectRegistry = objectRegistry,
         initialGlState = glState,
     )
 }

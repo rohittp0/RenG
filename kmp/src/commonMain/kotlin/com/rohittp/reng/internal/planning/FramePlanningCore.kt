@@ -240,6 +240,19 @@ internal class FramePlanningCore(
                 resourceKey = derived.key,
                 canonicalIdentity = derived.identity,
             )
+            // Cycle F-1 Task 9b: a Geometry's consumer textures are external, static-direct
+            // resources exactly like a sticker's image or a model's texture override, so they must
+            // be traversed here too -- otherwise a consumer supplying one gets silence, no fetch and
+            // no error. Sorted by name for the same determinism reason RenGRenderer/drawGeometry
+            // sort their own texture-unit assignment: a fixed, non-locale-sensitive iteration order
+            // (plain String comparison) so the same document always traverses the same way. Reuses
+            // ResourceClass.MODEL_TEXTURE rather than adding a new enum entry -- this cycle's ABI is
+            // frozen, and a geometry consumer texture is exactly the same kind of resource (a
+            // directly-fetched, non-basemap texture payload) MODEL_TEXTURE already names; nothing
+            // about isStaticDirect or maximumBytesFor's meaning depends on which drawn thing uses it.
+            for ((_, locator) in geometry.textures.entries.sortedBy { it.key }) {
+                external(locator, ResourceClass.MODEL_TEXTURE)
+            }
         }
         return references
     }

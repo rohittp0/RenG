@@ -6,7 +6,6 @@ import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
-import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.shader.scanShaderProfile
 
 /**
@@ -198,9 +197,14 @@ internal fun deleteGeometryPipeline(
  * `frameIndex` is a `Long` narrowed to the `uint` `uFrameIndex` expects; the narrowing wraps at
  * 2^32 exactly as [GlBinding.uniform1ui] documents.
  *
- * [consumerUniforms] and [consumerTextures] are `Geometry.uniforms` and `Geometry.textures`
- * (Cycle F-1 Task 3), keyed by the consumer's own sampler/uniform names rather than the six
- * documented ones above. Each is looked up against [pipeline]'s program with
+ * [consumerUniforms] and [consumerTextures] are the [PreparedFrame][com.rohittp.reng.PreparedFrame]-time
+ * SNAPSHOTS of `Geometry.uniforms` and `Geometry.textures` (Cycle F-1 Task 3), keyed by the
+ * consumer's own sampler/uniform names rather than the six documented ones above.
+ * [consumerTextures] carries each name's ALREADY-UPLOADED GL texture object name, not a
+ * [com.rohittp.reng.internal.image.DecodedImage] — the caller assembling one frame's
+ * [SceneGeometry]s uploads (and caches, by `ResourceKey`, through `GlObjectRegistry`) once, so this
+ * function issues no [uploadTexture] call of its own and cannot be the site of Task 9b's
+ * texture-lifetime leak. Each name is looked up against [pipeline]'s program with
  * [GlBinding.getUniformLocation] **at draw time** — the same "bind only when declared" rule
  * [pipeline]'s own six locations already follow, applied here because a consumer name's location
  * cannot be cached at pipeline-creation time the way the six documented ones are: the pipeline is
@@ -210,20 +214,19 @@ internal fun deleteGeometryPipeline(
  * encoding uses) purely so the same document always assigns the same texture units; the order
  * uniforms are set in has no observable effect since each lands at its own independent location.
  *
- * **This is the first place `Geometry.uniforms`/`.textures` are read at draw time**, a second,
- * later read of the same object beyond `FramePlanningCore.plan()`'s single synchronous read. See
- * the no-mutation-after-construction contract documented on `Geometry.uniforms` — this function
- * takes a defensive `Map.toMap()` snapshot of each argument before iterating, which guards against
- * the two maps being structurally mutated mid-call, but it CANNOT close the cross-call gap between
- * a future `prepare()` and `draw()`: that requires `PreparedFrame` (Task 9) to snapshot both maps
- * when a frame is prepared, not whatever this function does with what it is handed.
+ * **`Geometry.uniforms`/`.textures` are never read here.** This function only ever sees the
+ * `PreparedFrame`-time snapshot a caller already took (`com.rohittp.reng.RenGPreparedFrame`, Task
+ * 9b) — never the live `Map` reference `Geometry` itself carries — so a consumer mutating either
+ * map after `prepare()` cannot change what a later `draw()` on the same frame renders. This closes
+ * the gap Task 7 could only document: the defensive `Map.toMap()` snapshot this function still
+ * takes below guards only against the two arguments being structurally mutated mid-call, which is a
+ * narrower, cheaper guarantee than the prepare-time snapshot that actually protects frame identity.
  *
- * Every consumer texture in [consumerTextures] uploads through [TextureContent.DATA], never
- * [TextureContent.IMAGE]: a consumer texture is a boundary mask, a signed-distance field, or values
- * packed across RGBA channels, and premultiplying any of those corrupts it silently, with no error
- * — see [uploadTexture]'s KDoc and `CONTEXT.md`'s identical precedent for terrain samples. This is
- * not a case where content decides the path (unlike a real image, which never reaches this map);
- * every entry in [consumerTextures] is DATA, unconditionally.
+ * Every consumer texture name in [consumerTextures] was uploaded through [TextureContent.DATA],
+ * never [TextureContent.IMAGE], by the caller that resolved it: a consumer texture is a boundary
+ * mask, a signed-distance field, or values packed across RGBA channels, and premultiplying any of
+ * those corrupts it silently, with no error — see [uploadTexture]'s KDoc and `CONTEXT.md`'s
+ * identical precedent for terrain samples.
  */
 internal fun drawGeometry(
     binding: GlBinding,
@@ -235,7 +238,7 @@ internal fun drawGeometry(
     boundsWestSouthEastNorthDegrees: FloatArray,
     frameIndex: Long,
     consumerUniforms: Map<String, ShaderValue> = emptyMap(),
-    consumerTextures: Map<String, DecodedImage> = emptyMap(),
+    consumerTextures: Map<String, Int> = emptyMap(),
 ) {
     require(cameraRelativeCornersXyz.size == GEOMETRY_CORNER_FLOAT_COUNT) {
         "a geometry requires exactly four camera-relative xyz corners"
@@ -251,9 +254,9 @@ internal fun drawGeometry(
     }
 
     // Defensive snapshot: guards this call's own iteration against the maps being structurally
-    // mutated mid-call. It does NOT, and cannot, close the prepare()-vs-draw() gap documented above
-    // and on Geometry.uniforms/.textures — that requires a PreparedFrame-level snapshot this
-    // function has no way to take.
+    // mutated mid-call. The prepare()-vs-draw() gap is already closed by the time either map
+    // reaches this function -- see the KDoc above -- so this is a narrower, cheaper guarantee, not
+    // the load-bearing one.
     val uniformsSnapshot = consumerUniforms.toMap()
     val texturesSnapshot = consumerTextures.toMap()
 
@@ -293,9 +296,8 @@ internal fun drawGeometry(
         }
     }
 
-    texturesSnapshot.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, image) ->
+    texturesSnapshot.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, texture) ->
         val samplerLocation = binding.getUniformLocation(pipeline.program, name)
-        val texture = uploadTexture(binding, image, TextureContent.DATA)
         binding.activeTexture(GL_TEXTURE0 + unitIndex)
         binding.bindTexture(GL_TEXTURE_2D, texture)
         if (samplerLocation >= 0) {

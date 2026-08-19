@@ -11,9 +11,17 @@ import com.rohittp.reng.internal.gl.GL_VERSION
 import com.rohittp.reng.internal.gl.RecordingGlBinding
 import com.rohittp.reng.internal.gl.RenderContextIdentity
 import com.rohittp.reng.internal.gl.RenderContextProbe
+import com.rohittp.reng.internal.gl.STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME
+import com.rohittp.reng.internal.gl.STICKER_TEXTURE_UNIFORM_NAME
+import com.rohittp.reng.internal.gl.composeScreenModelViewProjection
+import com.rohittp.reng.internal.math.DoubleVector3
+import com.rohittp.reng.internal.planning.SpatialOutcome
+import com.rohittp.reng.internal.planning.resolvePlacement
+import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -230,6 +238,185 @@ class RendererFactoryTest {
         assertTrue(binding.log.any { it.startsWith("drawArrays") }, "a sticker must actually draw")
         assertTrue(binding.log.any { it.startsWith("genTextures") }, "the sticker image must upload a fresh texture")
     }
+
+    // ---- Task 9b item 1: texture lifetime — reuse on repeat draws, delete on close ------------------
+
+    @Test
+    fun repeatedDrawsOfTheSamePreparedFrameReuseTheCachedStickerTexture() = runTest {
+        val binding = validGlesBinding()
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"))),
+        )
+        val frame = renderer.prepare(plan)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+
+        renderer.draw(frame, target)
+        renderer.draw(frame, target)
+
+        assertEquals(
+            1,
+            binding.log.count { it.startsWith("genTextures") },
+            "a repeated draw of the same prepared frame must reuse its cached texture, not re-upload it",
+        )
+        assertTrue(binding.log.count { it.startsWith("drawArrays") } >= 2, "both draws must still actually draw")
+    }
+
+    @Test
+    fun closeDeletesEveryCachedSpriteTexture() = runTest {
+        // A bare "some deleteTextures call happened" assertion would be vacuous here: close() also
+        // deletes the offscreen surface's OWN colour texture regardless of this fix, so that alone
+        // cannot distinguish "the cached sticker texture was deleted" from "nothing sticker-specific
+        // was deleted at all." This test instead extracts the sticker's OWN assigned texture name
+        // (from the bindTexture call its own draw issued) and asserts THAT specific name appears in
+        // RecordingGlBinding.deletedNames, which every delete* call appends to regardless of type.
+        val binding = validGlesBinding()
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"))),
+        )
+        val frame = renderer.prepare(plan)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        // The sticker's own bind is the FIRST bindTexture call: SceneContent draws the sticker
+        // regime before drawFrame's composite pass binds the offscreen surface's own colour texture.
+        val stickerTextureName = binding.log
+            .first { it.startsWith("bindTexture(0xDE1,") }
+            .substringAfter("0xDE1,")
+            .removeSuffix(")")
+            .toInt()
+
+        renderer.close()
+
+        assertTrue(
+            stickerTextureName in binding.deletedNames,
+            "close() must delete the specific cached sticker texture (name=$stickerTextureName), " +
+                "not merely something: ${binding.deletedNames}",
+        )
+    }
+
+    // ---- Task 9b item 2: a sticker's quad is sized from its own image's pixel dimensions ------------
+
+    @Test
+    fun aRealDecodedStickerImagesDimensionsScaleTheDrawnQuadEndToEnd() = runTest {
+        // onePixelPng (this file's own long-standing fixture, despite its name) decodes to a 2x2
+        // RGBA PNG -- see its own doc comment below. The sticker's MVP uniform location must be
+        // declared on THIS test's own binding (never the shared validGlesBinding() default, which
+        // declares no uniform names at all) or drawOneSticker's `>= 0` guard silently skips setting
+        // it, and this test would pass while asserting nothing -- exactly the trap this cycle's own
+        // task description warns about.
+        val mvpLocation = 41
+        val binding = validGlesBinding().apply {
+            declaredNames = mapOf(
+                STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to mvpLocation,
+                STICKER_TEXTURE_UNIFORM_NAME to 42,
+            )
+        }
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val placement = testPlacement()
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            stickers = listOf(Sticker(placement, ResourceLocator("https://example.invalid/a.png"))),
+        )
+
+        val frame = renderer.prepare(plan)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        val camera = (
+            resolveMercatorCamera(testCamera(), OutputPixelSize(64, 64)) as SpatialOutcome.Success
+            ).value
+        val resolved = (resolvePlacement(placement, camera) as SpatialOutcome.Success).value
+        // onePixelPng decodes to 2x2: the expected MVP bakes a (2, 2, 1) local pre-scale in, not the
+        // (1, 1, 1) a fixed unit quad (this cycle's bug before Task 9b) would have used.
+        val expected = composeScreenModelViewProjection(OutputPixelSize(64, 64), resolved, DoubleVector3(2.0, 2.0, 1.0))
+        val unitQuad = composeScreenModelViewProjection(OutputPixelSize(64, 64), resolved)
+
+        val actual = requireNotNull(binding.uniformMatrix4fvValues[mvpLocation]) {
+            "the sticker's MVP must have been bound: ${binding.log}"
+        }
+        assertContentEquals(expected, actual)
+        assertTrue(actual.toList() != unitQuad.toList(), "a real 2x2 image must not draw as a 1x1 unit quad")
+    }
+
+    // ---- Task 9b item 3: a live Geometry.uniforms mutation after prepare() must not reach draw() ----
+
+    @Test
+    fun mutatingAGeometrysUniformsMapAfterPrepareDoesNotChangeWhatDraws() = runTest {
+        val uniformLocation = 55
+        val binding = validGlesBinding().apply { declaredNames = mapOf("uTint" to uniformLocation) }
+        val renderer = createRenderer(testConfiguration(), binding, fixedProbe())
+        // A caller's own MutableMap, retained after construction -- Geometry stores this exact
+        // reference (a forced consequence of keeping Geometry a data class; see its own KDoc).
+        val liveUniforms = mutableMapOf<String, ShaderValue>("uTint" to ShaderValue.Scalar(0.25f))
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalGeometryShaderPair(),
+            uniforms = liveUniforms,
+        )
+        val plan = FramePlan(frameIndex = 0L, camera = testCamera(), geometries = listOf(geometry))
+
+        val frame = renderer.prepare(plan)
+        // Mutate AFTER prepare() returns -- the exact window Task 9b's snapshot must close.
+        liveUniforms["uTint"] = ShaderValue.Scalar(0.75f)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        assertTrue(
+            binding.log.contains("uniform1f($uniformLocation,0.25)"),
+            "the value prepare() snapshotted must be what draws: ${binding.log}",
+        )
+        assertFalse(
+            binding.log.contains("uniform1f($uniformLocation,0.75)"),
+            "a post-prepare() mutation of the caller's own map must never reach draw(): ${binding.log}",
+        )
+    }
+
+    // ---- Task 9b item 4: a Geometry consumer texture is fetched, decoded, and bound ------------------
+
+    @Test
+    fun aGeometryConsumerTextureRoundTripsThroughPrepareAndDraw() = runTest {
+        val samplerLocation = 66
+        val binding = validGlesBinding().apply { declaredNames = mapOf("uMask" to samplerLocation) }
+        val transport = CountingTransport()
+        val renderer = createRenderer(testConfiguration(transport = transport), binding, fixedProbe())
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalGeometryShaderPair(),
+            textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+        )
+        val plan = FramePlan(frameIndex = 0L, camera = testCamera(), geometries = listOf(geometry))
+
+        val frame = renderer.prepare(plan)
+        assertEquals(1, transport.executeCalls, "prepare() must fetch the geometry's own consumer texture")
+
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        assertTrue(binding.log.any { it.startsWith("genTextures") }, "the consumer texture must be uploaded")
+        assertTrue(
+            binding.log.contains("uniform1i($samplerLocation,0)"),
+            "the sampler must be bound to a texture unit: ${binding.log}",
+        )
+    }
+
+    private fun minimalGeometryShaderPair(): ShaderPair = ShaderPair(
+        vertexSource = "#version 300 es\nvoid main() {\n    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n",
+        fragmentSource = "#version 300 es\nprecision highp float;\nout vec4 rengOut;\nvoid main() {\n    rengOut = vec4(1.0);\n}\n",
+    )
 
     // ---- Test doubles and fixtures -----------------------------------------------------------------
 

@@ -31,10 +31,9 @@ immutably. Nothing about that has happened.
    task number covers, and this document for what shipped. The Cycle A and Cycle B pairs in the same
    directories are historical decision records.
 6. `docs/research/` — six Cycle C and D findings documents, plus a Cycle C erratum noted below whose
-   supporting measurement is an uncommitted file in the `reng-c-bench` worktree, not yet in this
-   repository's history. Read the relevant one before writing
-   either cycle's specification or touching the area it covers; each of the four original documents ends
-   with a checklist of what its spec must decide.
+   supporting measurement is `docs/research/2026-08-19-rentile-030-counting-stub-respike.md`. Read the
+   relevant one before writing either cycle's specification or touching the area it covers; each of the
+   four original documents ends with a checklist of what its spec must decide.
 
 Approved specifications and plans are not reopened without repository-owner review.
 
@@ -268,11 +267,10 @@ Rentile `0.3.0` — now published — adds a ninth `ResourceClass`, `GLYPH_RANGE
 and `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` both say "eight basemap classes"
 and now understate the real count by one. **Neither is edited here** — both are decision records, and the
 undercount is a fact about the world changing after they were written, not an error in what they decided.
-The measurement is at `docs/research/2026-08-19-rentile-030-counting-stub-respike.md` (currently an
-uncommitted, untracked file in the `reng-c-bench` worktree — not yet committed anywhere, and not on this
-branch): style still has no raw-store write;
-TileJSON/vector/raster/GeoJSON validate-then-write; DEM writes after only generic image validation; sprite
-JSON and PNG write before joint validation and a digest-consistent-but-invalid sprite record is terminal;
+The measurement is at `docs/research/2026-08-19-rentile-030-counting-stub-respike.md`: style still has no
+raw-store write; TileJSON/vector/raster/GeoJSON validate-then-write; DEM writes after only generic image
+validation; sprite JSON and PNG write before joint validation and a digest-consistent-but-invalid sprite
+record is terminal;
 store reads are unbounded against a transport bounded at peak 6 of 8 — every ADR 0016 claim holds unchanged
 at `0.3.0`. `GLYPH_RANGE` itself: accept is a third non-null value (`application/x-protobuf`), it writes
 before decode validation (DEM-like), and it recovers from corruption via remove-then-refetch rather than
@@ -318,13 +316,12 @@ sets, and only the measurement half is done. A wall-clock guard of 50 seconds wa
 (~49% headroom over the worst clean run; a contention run under unrelated concurrent load hit 184 seconds,
 which is a real CI-flakiness warning for a shared or busy runner, not part of the baseline).
 
-**Concern to carry forward:** `ResourceOperationScaleBenchmarkTest.kt` and this measurement were produced on
-the separate `feat/cycle-c-bench` worktree/branch (commits `85e2660`, `4b7b1ba`), which — unlike
-`feat/cycle-c-glb` — was **never merged** into `feat/cycle-c-resource-layer`. The test file is not present
-in this branch's tree, and the 542/538 test counts verified above do not include it. The measurement above
-is a real, independently verified fact, but the regression-guard test that produced it does not yet exist
-in shipped code. Merging `feat/cycle-c-bench` in (it touches only the one new test file plus `HANDOFF.md`,
-per the ledger) is outstanding work, not something this documentation task performed.
+**Resolved at integration:** `ResourceOperationScaleBenchmarkTest.kt` and this measurement were produced on
+the separate `feat/cycle-c-bench` worktree/branch (commits `85e2660`, `4b7b1ba`, `8be3e8b`), which —
+unlike `feat/cycle-c-glb` — was **not merged** into `feat/cycle-c-resource-layer` until the Cycle C/D
+gathering merge that brought this branch and `feat/cycle-d-gl-foundation` together in one tree. The 542/538
+counts recorded earlier in this document predate that merge and do not include this test; the combined
+verification the gathering merge performed does, and reconciles the new total against these parts.
 
 ### Cancellation: one gap, correctly scoped to block the MVP rather than Cycle C
 

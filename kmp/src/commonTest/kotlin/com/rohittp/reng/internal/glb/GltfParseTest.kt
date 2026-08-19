@@ -98,6 +98,15 @@ class GltfParseTest {
     }
 
     @Test
+    fun rejectsAWrongTypedMinVersionRatherThanTreatingItAsAbsent() {
+        // minVersion's safe cast previously failed silently for a non-string JSON value, falling
+        // through to the same `return` an absent minVersion takes -- the sibling `version` field
+        // already rejects the identical wrong-type case. A present-but-numeric minVersion must be
+        // rejected, not treated as though the field were never there.
+        assertEquals(GltfReject.ASSET_VERSION_UNSUPPORTED, reject(assetMinVersionWrongType))
+    }
+
+    @Test
     fun rejectsANodeCameraIndexOutOfRange() {
         // Regression: node.camera must be bounds-checked the same way node.skin already is.
         assertEquals(GltfReject.INDEX_OUT_OF_RANGE, reject(nodeWithCameraIndexOutOfRange))
@@ -324,6 +333,11 @@ class GltfParseTest {
 
     private val assetMinVersionAboveTwoZero = """
         {"asset": {"version": "2.0", "minVersion": "2.1"}}
+    """.trimIndent()
+
+    // minVersion is present but spelled as a JSON number, not the required MAJOR.MINOR string.
+    private val assetMinVersionWrongType = """
+        {"asset": {"version": "2.0", "minVersion": 2.0}}
     """.trimIndent()
 
     // No "cameras" array is declared at all, so any camera index -- even 0 -- is out of range.

@@ -175,7 +175,9 @@ private class GltfParser(
         val (major, _) = majorMinor(version) ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
         if (major != 2) reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
 
-        val minVersion = (assetMembers["minVersion"] as? JsonValue.Text)?.value ?: return
+        val minVersionMember = assetMembers["minVersion"] ?: return
+        val minVersion = (minVersionMember as? JsonValue.Text)?.value
+            ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
         val (minMajor, minMinor) = majorMinor(minVersion) ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
         if (minMajor > 2 || (minMajor == 2 && minMinor > 0)) reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
     }

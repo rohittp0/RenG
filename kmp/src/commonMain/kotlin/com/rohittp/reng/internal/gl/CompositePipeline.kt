@@ -9,6 +9,7 @@ import com.rohittp.reng.internal.shader.scanShaderProfile
 
 internal enum class InternalPipelineRole(internal val wireValue: Int) {
     COMPOSITE(1),
+    STICKER(2),
 }
 
 /**

@@ -1,11 +1,17 @@
 # Mesa cross-dialect `glLinkProgram` segfault, and why the negative check is now driver-conditional — 2026-08-19
 
-**Status: the driver is at fault, RenG is exonerated, and the approved gate is implemented exactly as
-scoped — but it does not make `LinuxGlConformanceTest` crash-free on Mesa 25.2.8.** A second, independent
-path to the same driver defect remains: `theSameBinaryDetectsTwoDialectsOnOneTarget` creates a second
-GLES-profile context in-process, and two-or-more GLES contexts each running the (correctly) unchanged
-negative check is its own reliable trigger this gate was never scoped to touch. See "What
-post-implementation verification actually found" below.
+**Status: the driver is at fault, RenG is exonerated, and Linux now skips the deliberate cross-dialect
+`glLinkProgram` entirely, regardless of driver.** The capability-gated fix described below (skip the link
+only where `GL_ARB_ES3_compatibility` is advertised) was implemented, measured under Docker against real
+Mesa 25.2.8, and found **not** to fix the crash: a GLES-profile context never advertises that desktop
+extension, so the gate's own scope left the unmodified negative link still running on the GLES side, and
+`LinuxGlConformanceTest` still crashed 15/15 through `theSameBinaryDetectsTwoDialectsOnOneTarget`'s second
+GLES-profile context (the crash-rate matrix's `GG` row, no DESKTOP context required at all). The
+owner-approved correction, implemented after that finding, is: **skip the cross-dialect negative link on
+Linux entirely, for every dialect and every driver** — measured safe at 20/20 trials, and the only option
+verified to work short of pinning an old Mesa. See "The owner-approved correction: skip the link on Linux
+entirely" below for what changed, and "What post-implementation verification actually found" for why the
+capability-gated attempt fell short.
 
 Task 17's Linux conformance fixture (`LinuxGlConformanceTest`, `SurfacelessEglContext`) intermittently
 SIGSEGVs inside the driver rather than failing an assertion. This record states what was observed, the
@@ -209,6 +215,52 @@ which is a materially different and more invasive design than the one approved f
 decision squarely inside the scope this task was told belongs to whoever owns the Cycle D Linux gate
 design, not to this fix.
 
+## The owner-approved correction: skip the link on Linux entirely
+
+Given the finding above, the owner approved the option the earlier investigation itself surfaced as the
+lowest-risk path short of pinning an old Mesa: **`assertShaderDialectMatrix` in `GlConformanceSuite.kt` now
+skips the deliberate cross-dialect `glLinkProgram` call entirely on Linux, regardless of the adopted
+context's dialect or `supportsEs3Compatibility`.** This is a strictly broader skip than the
+capability-gated one above — it is not conditioned on any capability query, because no capability query
+distinguishes the crashing case: a GLES-profile context is never entitled to accept the opposite dialect,
+yet it is exactly the profile the `GG` row shows crashing 15/15. The `oppositeShouldLink` /
+`GL_ARB_ES3_compatibility` tolerance branch and its compile-only proof (`assertGles300CompilesWithoutLinking`)
+are unchanged — they never called `glLinkProgram` in the first place, so they were never part of either
+problem, and removing them would have thrown away a proof this cycle already earned for no reason.
+
+The scoping mechanism is `CrossDialectLinkPolicy`, an internal test-only enum in `GlConformanceSuite.kt`
+with two values: `EXERCISE_LINK` (the default — compile+link the cross-dialect pair and assert the driver's
+behavior, exactly as before) and `SKIP_ON_LINUX_MESA_LINK_SEGFAULT` (never link a cross-dialect pair, on
+either dialect). Only `LinuxGlConformanceTest.kt` passes the skip value; the shared suite body in
+`GlConformanceSuite.kt` still contains the real check, gated by this explicit parameter rather than deleted
+or replaced, so it is legible at both the call site and the definition as a driver workaround rather than a
+design choice.
+
+**Consequence for what each fixture proves:** with this change, Linux's conformance suite performs zero
+cross-dialect `glLinkProgram` calls — it still proves everything else in the shared suite (context adoption,
+entry-point inventory, error-queue semantics, state round-tripping, matching-dialect compile+link, offscreen
+compositing, and lifecycle/GPU-object bookkeeping), plus, on Mesa's ES3-compatible desktop core profile, the
+existing compile-only capability proof. It does **not** prove "the wrong `#version` directive fails to
+link" on Linux at all, for either dialect, on any driver. **That assertion's entire remaining coverage now
+depends on the macOS fixture Task 18 is scoped to build.** Apple's GL is 4.1 core and, per this
+investigation, does not advertise `GL_ARB_ES3_compatibility` — so on that fixture the negative check runs
+through the suite's default `EXERCISE_LINK` policy exactly as originally designed, is both a valid
+assertion (the driver has no entitlement to accept the mismatch) and a safe one (macOS is not the driver
+with this defect), and is the only place left in the whole test suite where RenG proves its `#version`
+substitution is load-bearing rather than decorative. **Task 18's implementer must not treat wiring up
+`runGlConformanceSuite` with its default policy as optional or as "the same as Linux minus the EGL
+plumbing" — it is the sole remaining place this specific guarantee is checked at all**, and if that
+fixture is ever built in a way that also opts into `SKIP_ON_LINUX_MESA_LINK_SEGFAULT` or an equivalent
+bypass, the "wrong directive fails to link" claim would be untested across the entire codebase with no
+compiler error or ABI signal to catch it.
+
+Verification performed for this correction: the standard macOS-local gates
+(`:kmp:testAndroidHostTest :kmp:macosArm64Test :kmp:checkKotlinAbi`, plus the Linux/iOS compile-only
+targets) and a fresh Docker re-run of the full `LinuxGlConformanceTest` suite against real
+`libegl-mesa0 25.2.8-0ubuntu0.24.04.2` in `ubuntu:24.04` containers — see
+`.superpowers/sdd/2026-08-18-cycle-d-gl-foundation/task-17-linux-skip-report.md` for the exact trial count
+and outcome observed for this change specifically.
+
 ## What remains unproven
 
 - **Not observed on a real GitHub Actions `ubuntu-latest` runner.** All evidence here is Docker
@@ -221,10 +273,16 @@ design, not to this fix.
 - **The regression range is unbisected.** Only the two endpoints were tested — 23.2.1 (unaffected, 0/15)
   and 25.2.8 (affected, 29/30). No intermediate Ubuntu release (23.10, 24.10) was tried, so the exact
   Mesa version that introduced the defect is unknown.
-- **`LinuxGlConformanceTest` still crashes on Mesa 25.2.8 after this gate**, at `15/15` in fresh-container
-  verification, via `theSameBinaryDetectsTwoDialectsOnOneTarget`'s own second GLES-profile context — see
-  "What post-implementation verification actually found" above. This gate closes only the branch it was
-  scoped to close.
+- **The capability-gated attempt (commit `598cc44`) did not make `LinuxGlConformanceTest` crash-free on
+  Mesa 25.2.8**, at `15/15` in fresh-container verification, via
+  `theSameBinaryDetectsTwoDialectsOnOneTarget`'s own second GLES-profile context — see "What
+  post-implementation verification actually found" above. The owner-approved, Linux-wide skip described in
+  "The owner-approved correction" section is the fix that followed; see
+  `.superpowers/sdd/2026-08-18-cycle-d-gl-foundation/task-17-linux-skip-report.md` for its own Docker trial
+  count and result, reported with the same honesty standard as the two attempts before it.
+- **The negative "wrong directive fails to link" check now has zero coverage on Linux, on any driver.**
+  Its entire remaining coverage is the macOS fixture Task 18 is scoped to build — see "The owner-approved
+  correction" above for exactly what that means for Task 18's implementer.
 - **The container/cache environment-sensitivity noted above is not root-caused.** Whether it is Mesa's
   on-disk shader cache specifically, some other piece of per-container state, or coincidence across a
   modest sample size was not determined, and it was only checked for the two-context (`GD`/`DG`) cases,

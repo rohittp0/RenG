@@ -71,6 +71,8 @@ class PngContainerTest {
         assertEquals(PngReject.ZERO_DIMENSION, rejectionOf(zeroWidth))
         assertEquals(PngReject.PALETTE_MISSING, rejectionOf(colourTypeThreeWithoutPlte))
         assertEquals(PngReject.PALETTE_FORBIDDEN, rejectionOf(greyscaleWithPlte))
+        assertEquals(PngReject.TRNS_LENGTH, rejectionOf(greyWithZeroByteTrns))
+        assertEquals(PngReject.TRNS_LENGTH, rejectionOf(rgbWithFourByteTrns))
     }
 
     @Test
@@ -149,6 +151,12 @@ class PngContainerTest {
     // CRC'd 1x1 image (real IDAT/IEND included, though scanPng rejects from inside IHDR parsing before
     // it ever needs them).
     private val hugeWidthWrapsNegative: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, -128, 0, 0, 0, 0, 0, 0, 1, 8, 2, 0, 0, 0, -33, -33, 29, -9, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, 96, 100, 98, 6, 0, 0, 14, 0, 7, -23, -110, 55, -44, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Colour type 0 (greyscale) with a 0-byte tRNS chunk; colour type 0 requires exactly 2 bytes.
+    private val greyWithZeroByteTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0, 58, 126, -101, 85, 0, 0, 0, 0, 116, 82, 78, 83, 54, -71, 112, -52, 0, 0, 0, 10, 73, 68, 65, 84, 120, -38, 99, 72, 1, 0, 0, 102, 0, 101, -41, 40, -68, 31, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // Colour type 2 (truecolour) with a 4-byte tRNS chunk; colour type 2 requires exactly 6 bytes.
+    private val rgbWithFourByteTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 4, 116, 82, 78, 83, 0, 1, 2, 3, 25, 110, 63, -107, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 106, -11, 112, 91, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
 
     // Colour type 3 (palette) with no PLTE chunk present anywhere.
     private val colourTypeThreeWithoutPlte: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 3, 0, 0, 0, 69, 104, -3, 22, 0, 0, 0, 11, 73, 68, 65, 84, 120, -100, 99, 96, 96, 0, 0, 0, 3, 0, 1, -72, -83, 58, 99, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)

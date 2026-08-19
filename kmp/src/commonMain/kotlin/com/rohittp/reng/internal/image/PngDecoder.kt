@@ -143,6 +143,10 @@ private fun inflateExactly(bytes: ByteArray, ranges: List<IntRange>, expectedSiz
  * any scanline's filter-type byte is outside 0..4.
  */
 private fun unfilter(scratch: ByteArray, height: Int, stride: Int, bpp: Int): ByteArray? {
+    // height * stride is plain Int multiplication, unlike the Long ceiling arithmetic in
+    // decodeAdmitted. This is only safe because that ceiling (maximumDecodedBytes) is itself bounded
+    // to fit an Int by every caller today; decodePng has no caller yet. Whoever wires the first real
+    // one must keep maximumDecodedBytes within Int range, or this needs to move to checked/Long math.
     val raster = ByteArray(height * stride)
     for (row in 0 until height) {
         val rowStart = row * (stride + 1)
@@ -200,6 +204,11 @@ private fun widenToRgba(
     palette: ByteArray?,
     transparency: ByteArray?,
 ): ByteArray? {
+    // width * height * 4 is plain Int multiplication, unlike the Long ceiling arithmetic in
+    // decodeAdmitted. Safe today only because maximumDecodedBytes — the value that bounds width and
+    // height together — is itself assumed to fit an Int by every caller; decodePng has no caller yet.
+    // Whoever wires the first real one must keep maximumDecodedBytes within Int range, or this needs
+    // checked/Long math.
     val rgba = ByteArray(width * height * 4)
     var out = 0
     for (row in 0 until height) {
@@ -253,14 +262,22 @@ private fun widenToRgba(
     return rgba
 }
 
-/** Colour type 0's `tRNS` is a single 2-byte grey sample; at bit depth 8 only the low byte matters. */
+/**
+ * Colour type 0's `tRNS` is a single 2-byte grey sample; at bit depth 8 only the low byte matters.
+ * `transparency` is either `null` or exactly 2 bytes here — `scanPng` rejects any other length for
+ * colour type 0 as `Malformed(TRNS_LENGTH)` before this is ever reached, so no bounds check is needed.
+ */
 private fun greyKeyAlpha(transparency: ByteArray?, grey: Byte): Byte {
     if (transparency == null) return OPAQUE
     val keyGrey = transparency[1].toInt() and 0xFF
     return if ((grey.toInt() and 0xFF) == keyGrey) 0 else OPAQUE
 }
 
-/** Colour type 2's `tRNS` is three 2-byte samples (R, G, B); at bit depth 8 only the low bytes matter. */
+/**
+ * Colour type 2's `tRNS` is three 2-byte samples (R, G, B); at bit depth 8 only the low bytes matter.
+ * `transparency` is either `null` or exactly 6 bytes here — `scanPng` rejects any other length for
+ * colour type 2 as `Malformed(TRNS_LENGTH)` before this is ever reached, so no bounds check is needed.
+ */
 private fun rgbKeyAlpha(transparency: ByteArray?, r: Byte, g: Byte, b: Byte): Byte {
     if (transparency == null) return OPAQUE
     val keyR = transparency[1].toInt() and 0xFF

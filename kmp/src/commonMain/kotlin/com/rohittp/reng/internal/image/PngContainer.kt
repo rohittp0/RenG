@@ -66,6 +66,15 @@ internal enum class PngReject {
 
     /** A colour-type-3 raster byte indexes past the end of the `PLTE` payload it was admitted with. */
     PALETTE_INDEX_OUT_OF_RANGE,
+
+    /**
+     * A `tRNS` payload whose length does not match what colour type 0 (exactly 2 bytes) or colour type
+     * 2 (exactly 6 bytes) requires. Not [TRNS_FORBIDDEN]: `tRNS` is not forbidden for these colour
+     * types, it is merely the wrong size for one. Colour type 3's `tRNS` may legitimately be SHORTER
+     * than its palette (missing entries default opaque, per specification) and is deliberately not
+     * length-checked here — that leniency belongs to decode-time `paletteAlpha`, not to this rejection.
+     */
+    TRNS_LENGTH,
 }
 
 private val PNG_SIGNATURE = byteArrayOf(-0x77, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
@@ -195,6 +204,18 @@ internal fun scanPng(bytes: ByteArray): PngScan {
     when (admittedHeader.colourType) {
         3 -> if (!hasPalette) return PngScan.Malformed(PngReject.PALETTE_MISSING)
         0, 4 -> if (hasPalette) return PngScan.Malformed(PngReject.PALETTE_FORBIDDEN)
+    }
+
+    // The specification fixes tRNS's length exactly for colour types 0 and 2 — a wrong length there is
+    // a malformed file, not one with defaults to fill in, so it is rejected here rather than left for a
+    // decode-time reader to bounds-check (or crash on). Colour type 3's tRNS may be shorter than its
+    // palette by specification (missing entries default opaque) and is intentionally not validated
+    // here; colour types 4 and 6 forbid tRNS outright, rejected downstream once decode is reached.
+    if (transparency != null) {
+        when (admittedHeader.colourType) {
+            0 -> if (transparency.size != 2) return PngScan.Malformed(PngReject.TRNS_LENGTH)
+            2 -> if (transparency.size != 6) return PngScan.Malformed(PngReject.TRNS_LENGTH)
+        }
     }
 
     return PngScan.Admitted(admittedHeader, palette, transparency, imageDataRanges)

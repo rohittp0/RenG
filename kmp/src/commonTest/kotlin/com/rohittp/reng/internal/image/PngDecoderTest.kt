@@ -162,6 +162,41 @@ class PngDecoderTest {
         assertEquals(PngReject.DIMENSION_OUT_OF_RANGE, malformedReasonOf(dimensionOutOfRange))
     }
 
+    // scanPng validates tRNS's length for colour types 0 and 2 (exactly 2 and 6 bytes respectively) but
+    // did not before this fix round: an empty or wrongly-sized tRNS is not null, so it used to sail past
+    // a null-only check and crash inside greyKeyAlpha/rgbKeyAlpha's transparency[1]/[3]/[5] reads with
+    // ArrayIndexOutOfBoundsException. TRNS_LENGTH, not TRNS_FORBIDDEN: tRNS is not forbidden on these
+    // colour types, it is merely the wrong size, and "forbidden" would send a consumer to delete a chunk
+    // they are entitled to have. Confirmed by temporarily removing scanPng's new length check and
+    // observing greyTrnsWrongLength crash rather than fail an assertion (see task-5-report.md).
+    @Test
+    fun rejectsTrnsLengthMismatchForColourTypesZeroAndTwo() {
+        assertEquals(PngReject.TRNS_LENGTH, malformedReasonOf(greyTrnsWrongLength))
+        assertEquals(PngReject.TRNS_LENGTH, malformedReasonOf(rgbTrnsWrongLength))
+    }
+
+    // Positive counterpart to the two rejections above: a correctly-sized tRNS (2 bytes for colour type
+    // 0, 6 for colour type 2) must still decode, with the keyed pixel transparent and every other pixel
+    // opaque. Without this, a check that rejected every tRNS on these colour types would also pass the
+    // negative test above for the wrong reason.
+    @Test
+    fun appliesTrnsColourKeyForGreyscaleAndTruecolour() {
+        val grey = assertIs<PngDecodeResult.Success>(decodePng(greyTwoPixelsWithTrnsKey, 1L shl 20))
+        assertContentEquals(expectedGreyTwoPixelsWithTrnsKey, grey.image.rgbaSnapshot())
+
+        val rgb = assertIs<PngDecodeResult.Success>(decodePng(rgbTwoPixelsWithTrnsKey, 1L shl 20))
+        assertContentEquals(expectedRgbTwoPixelsWithTrnsKey, rgb.image.rgbaSnapshot())
+    }
+
+    // Colour type 3's tRNS may legitimately be SHORTER than its palette — missing entries default
+    // opaque, per specification — and that leniency (decode-time paletteAlpha) must not be broken by
+    // this fix round's length validation, which deliberately excludes colour type 3.
+    @Test
+    fun palettesShortTrnsLeavesRemainingEntriesOpaque() {
+        val result = assertIs<PngDecodeResult.Success>(decodePng(paletteWithShortTrns, 1L shl 20))
+        assertContentEquals(expectedPaletteWithShortTrns, result.image.rgbaSnapshot())
+    }
+
     private fun malformedReasonOf(bytes: ByteArray): PngReject =
         assertIs<PngDecodeResult.Malformed>(decodePng(bytes, 1L shl 20)).reason
 
@@ -453,6 +488,62 @@ class PngDecoderTest {
         -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, -128, 0, 0, 0, 0, 0, 0, 1,
         8, 2, 0, 0, 0, -33, -33, 29, -9, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, 96, 100, 98, 6,
         0, 0, 14, 0, 7, -23, -110, 55, -44, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // Colour type 0 (greyscale), 1x1, tRNS present but 0 bytes long (needs exactly 2).
+    private val greyTrnsWrongLength: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 0, 0, 0, 0, 58, 126, -101, 85, 0, 0, 0, 0, 116, 82, 78, 83, 54, -71, 112, -52, 0, 0, 0,
+        10, 73, 68, 65, 84, 120, -38, 99, 72, 1, 0, 0, 102, 0, 101, -41, 40, -68, 31, 0, 0, 0, 0, 73,
+        69, 78, 68, -82, 66, 96, -126
+    )
+
+    // Colour type 2 (truecolour), 1x1, tRNS present but 4 bytes long (needs exactly 6).
+    private val rgbTrnsWrongLength: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 4, 116, 82, 78, 83, 0, 1, 2, 3, 25, 110, 63,
+        -107, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 106, -11, 112,
+        91, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // Colour type 0, 2x1, correctly-sized 2-byte tRNS keying grey value 0x50. Pixel 1 = 0x50 (keyed,
+    // transparent), pixel 2 = 0x30 (not keyed, opaque).
+    private val greyTwoPixelsWithTrnsKey: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
+        8, 0, 0, 0, 0, -47, 73, 32, 86, 0, 0, 0, 2, 116, 82, 78, 83, 0, 80, 29, -8, -100, -52, 0,
+        0, 0, 11, 73, 68, 65, 84, 120, -38, 99, 8, 48, 0, 0, 0, -45, 0, -127, 107, -29, -87, 45, 0, 0,
+        0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    private val expectedGreyTwoPixelsWithTrnsKey: ByteArray = byteArrayOf(
+        80, 80, 80, 0, 48, 48, 48, -1
+    )
+
+    // Colour type 2, 2x1, correctly-sized 6-byte tRNS keying RGB (10,20,30). Pixel 1 = (10,20,30)
+    // (keyed, transparent), pixel 2 = (40,50,60) (not keyed, opaque).
+    private val rgbTwoPixelsWithTrnsKey: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
+        8, 2, 0, 0, 0, 123, 64, -24, -35, 0, 0, 0, 6, 116, 82, 78, 83, 0, 10, 0, 20, 0, 30, -59,
+        54, 41, -1, 0, 0, 0, 15, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, -45, 48, -78, 1, 0, 2, 55,
+        0, -45, -30, 45, -19, -97, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    private val expectedRgbTwoPixelsWithTrnsKey: ByteArray = byteArrayOf(
+        10, 20, 30, 0, 40, 50, 60, -1
+    )
+
+    // Colour type 3, 3x1, PLTE with 3 entries but tRNS with only 1 entry (alpha for index 0 = 200);
+    // indices 1 and 2 have no tRNS entry and must default to opaque (specification-mandated leniency).
+    private val paletteWithShortTrns: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 3, 0, 0, 0, 1,
+        8, 3, 0, 0, 0, 44, 62, -28, -122, 0, 0, 0, 9, 80, 76, 84, 69, 100, 0, 0, 0, 100, 0, 0,
+        0, 100, -92, -127, 77, -92, 0, 0, 0, 1, 116, 82, 78, 83, -56, -43, 89, -110, -28, 0, 0, 0, 12, 73,
+        68, 65, 84, 120, -38, 99, 96, 96, 100, 2, 0, 0, 8, 0, 4, 8, 29, 99, 10, 0, 0, 0, 0, 73,
+        69, 78, 68, -82, 66, 96, -126
+    )
+
+    private val expectedPaletteWithShortTrns: ByteArray = byteArrayOf(
+        100, 0, 0, -56, 0, 100, 0, -1, 0, 0, 100, -1
     )
 
     private val multiIdatSplitImage: ByteArray = byteArrayOf(

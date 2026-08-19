@@ -1,10 +1,18 @@
 package com.rohittp.reng.internal.gl
 
 /**
- * Every array-valued member is a [List], so [GlStateSnapshot] gets structural equality for free
- * and "byte-exact round trip" becomes a single `assertEquals` rather than a hand-written
- * comparison. `Float` list equality is bit-based, which is stricter than `==` on raw floats and
- * exactly what byte-exactness means here.
+ * Every array-valued member is a [List], so [GlStateSnapshot] gets structural equality for free,
+ * which is exactly what byte-exact comparisons of captured state need: `Float` list equality is
+ * bit-based, stricter than `==` on raw floats.
+ *
+ * Caveat: `GlStateSnapshotTest.captureRestoreCaptureIsIdenticalOnTheFake` performs a
+ * capture/restore/capture round trip, but it only proves [captureGlState] is deterministic and
+ * that this structural equality holds — it does **not** prove [restoreGlState] wrote every field
+ * back. The `RecordingGlBinding` test fake's query responses come from static maps seeded once per
+ * test and are never mutated by its write methods, so that round trip still passes even with a
+ * restore call deleted. Restore completeness is instead proven by asserting the exact write call
+ * appears in the fake's call log after `restoreGlState` runs, field by field — see the
+ * `restoreWritesBack*` tests in `GlStateSnapshotTest`.
  *
  * The three nullable members are the dialect-gated ones: [framebufferSrgbEnabled] is `null` when
  * the context is ES without `GL_EXT_sRGB_write_control`, and [drawBuffer]/[lineSmoothEnabled] are

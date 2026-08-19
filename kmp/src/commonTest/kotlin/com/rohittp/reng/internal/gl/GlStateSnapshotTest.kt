@@ -74,6 +74,109 @@ class GlStateSnapshotTest {
         assertEquals(1f, snapshot.depthClearValue)
     }
 
+    // The tests below assert directly against the fake's call log after restoreGlState runs,
+    // rather than via a capture/restore/capture round trip: RecordingGlBinding's query maps are
+    // static and are never mutated by its write methods, so a round trip on this fake proves
+    // capture is deterministic but cannot prove any individual restore call actually happened
+    // (verified by deleting the arrayBuffer restore line and observing every other test, including
+    // captureRestoreCaptureIsIdenticalOnTheFake, stay green). Asserting on the log is the only way
+    // this fake can prove a field saved during capture was actually written back during restore.
+
+    @Test fun restoreWritesBackFramebufferAndBufferBindings() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("bindFramebuffer(0x8CA9,11)"))
+        assertTrue(binding.log.contains("bindFramebuffer(0x8CA8,12)"))
+        assertTrue(binding.log.contains("bindRenderbuffer(0x8D41,13)"))
+        assertTrue(binding.log.contains("useProgram(21)"))
+        assertTrue(binding.log.contains("bindVertexArray(31)"))
+        assertTrue(binding.log.contains("bindBuffer(0x8892,41)"))
+        assertTrue(binding.log.contains("bindBuffer(0x88EC,42)"))
+        assertTrue(binding.log.contains("bindBuffer(0x8A11,43)"))
+    }
+
+    @Test fun restoreWritesBackBlendState() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("enable(0xBE2)"))
+        assertTrue(binding.log.contains("blendFuncSeparate(0x302,0x303,0x1,0x0)"))
+        assertTrue(binding.log.contains("blendEquationSeparate(0x8006,0x8006)"))
+        assertTrue(binding.log.contains("blendColor(0.0,0.0,0.0,0.0)"))
+    }
+
+    @Test fun restoreWritesBackDepthState() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("enable(0xB71)"))
+        assertTrue(binding.log.contains("depthFunc(0x201)"))
+        assertTrue(binding.log.contains("depthMask(true)"))
+        assertTrue(binding.log.contains("depthRangef(0.0,1.0)"))
+        assertTrue(binding.log.contains("clearDepthf(1.0)"))
+    }
+
+    @Test fun restoreWritesBackRasterizerAndScissorState() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("disable(0xB44)"))
+        assertTrue(binding.log.contains("cullFace(0x405)"))
+        assertTrue(binding.log.contains("frontFace(0x901)"))
+        assertTrue(binding.log.contains("viewport(0,0,64,64)"))
+        assertTrue(binding.log.contains("disable(0xC11)"))
+        assertTrue(binding.log.contains("scissor(0,0,64,64)"))
+    }
+
+    @Test fun restoreWritesBackColourWriteMaskAndClearColour() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("colorMask(true,true,true,true)"))
+        assertTrue(binding.log.contains("clearColor(0.0,0.0,0.0,0.0)"))
+    }
+
+    @Test fun restoreWritesBackPixelStoreState() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("pixelStorei(0xCF5,4)"))
+        assertTrue(binding.log.contains("pixelStorei(0xCF2,0)"))
+        assertTrue(binding.log.contains("pixelStorei(0xCF3,0)"))
+        assertTrue(binding.log.contains("pixelStorei(0xCF4,0)"))
+        assertTrue(binding.log.contains("pixelStorei(0xD05,4)"))
+    }
+
+    @Test fun restoreWritesBackDialectGatedState() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, desktopProfile(), textureUnitCount = 1)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("enable(0x8DB9)"))
+        assertTrue(binding.log.contains("drawBuffers(1)"))
+        assertEquals(GL_BACK, binding.lastDrawBuffers.single())
+        assertTrue(binding.log.contains("disable(0xB20)"))
+    }
+
+    @Test fun restoreWritesBackEveryTextureUnitsBindings() {
+        val binding = populatedBinding()
+        val snapshot = captureGlState(binding, esProfile(), textureUnitCount = 2)
+        binding.log.clear()
+        restoreGlState(binding, snapshot)
+        assertTrue(binding.log.contains("activeTexture(0x84C0)"))
+        assertTrue(binding.log.contains("activeTexture(0x84C1)"))
+        assertTrue(binding.log.contains("bindTexture(0xDE1,7)"))
+        assertTrue(binding.log.contains("bindSampler(0,2)"))
+        assertTrue(binding.log.contains("bindSampler(1,2)"))
+    }
+
     /**
      * Seeds `integers`, `floats`, `booleans`, and `enabled` for every token [captureGlState]
      * reads, across both [esProfile] and [desktopProfile]. The active texture unit is seeded at

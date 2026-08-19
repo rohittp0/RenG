@@ -279,6 +279,20 @@ and every other code unit, and performs no other substitution. A missing or diff
 `INVALID_VALUE` at `FRAME_PLANNING`, not a driver compilation failure.
 _Avoid_: Shader language, GLSL version, compatibility profile
 
+**Shader Interface**:
+The fixed attribute and uniform names RenG binds by name in a compiled **Shader Pair**, honouring the
+**Shader Profile**'s substitution rule — ADR 0008 binds a documented name only when the compiled program
+declares it, and never fails a shader for omitting one. Attributes: `aPosition` (`vec3`), `aTexCoord`
+(`vec2`). Uniforms: `uModelViewProjection` (`mat4`); `uResolution` (`vec2`); `uGeometryBounds` (`vec4`,
+west/south/east/north degrees); `uFrameIndex` (`uint`). `uGeometryBounds` is explicitly informational and
+unsuitable for placement arithmetic — placement stays camera-relative and exact through `aPosition` and
+`uModelViewProjection`, because Cycle B measured camera-relative Float error below 0.001 px and absolute
+degrees packed into a 32-bit float would discard that precision. `uFrameIndex` is narrowed from **Frame
+Plan**'s `frameIndex` (`Long`) because GLSL ES 3.00 has no 64-bit integer type, wrapping at roughly 2.3
+years of continuous 60fps; `frameIndex` is an ordering key rather than a clock, so that wrap is not a
+correctness hazard. See ADR 0024 for the hazard of renaming one of these names later.
+_Avoid_: uniform preamble, injected include, varying, built-in attribute
+
 **Basemap Tile**:
 One canonical PNG tile acquired from Rentile and drawn as the ground beneath a frame. A canonical tile
 may back multiple unwrapped world-copy draw instances when repeated Mercator worlds intersect the output.

@@ -49,11 +49,12 @@ internal class PreparationDriver(
     private val transport: Transport,
     private val store: Store,
     private val cache: ResidentCache,
+    private val classGateRunner: ClassGateRunner,
     private val maximumConcurrentOperations: Int,
     private val clock: () -> Long,
 ) {
     suspend fun run(definition: ResourceOperationDefinition): ResourceOperationOutcome = coroutineScope {
-        val executor = ResourceActionExecutor(transport, store, cache, clock)
+        val executor = ResourceActionExecutor(transport, store, cache, classGateRunner, clock)
         val semaphore = Semaphore(maximumConcurrentOperations)
         val events = Channel<ResourceOperationEvent>(Channel.UNLIMITED)
 

@@ -7,9 +7,11 @@ import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
+import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.StoredRawResourceMetadata
 import com.rohittp.reng.Transport
 import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
@@ -17,8 +19,11 @@ import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
+import com.rohittp.reng.internal.resource.ContentProvenance
+import com.rohittp.reng.internal.resource.InstallVisibility
 import com.rohittp.reng.internal.resource.ReadStore
 import com.rohittp.reng.internal.resource.RentilePrivateKey
+import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceActionId
 import com.rohittp.reng.internal.resource.ResourceCommitBinding
 import com.rohittp.reng.internal.resource.ResourceOccurrence
@@ -28,6 +33,8 @@ import com.rohittp.reng.internal.resource.ResourceOperationOutcome
 import com.rohittp.reng.internal.resource.ResourceOwnerId
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.internal.resource.ResourceRouteRegistration
+import com.rohittp.reng.internal.resource.SuppliedInstallOutcome
+import com.rohittp.reng.internal.resource.VisibilityInstallCompleted
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -36,6 +43,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlin.io.encoding.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -60,6 +68,11 @@ class PreparationDriverTest {
         assertTrue(transport.maximumObservedConcurrency <= 4)
     }
 
+    // KNOWN COVERAGE GAP (see task-13-report.md): this does NOT exercise latch replay. Its fixture
+    // (routeJoinedByTwoOwners) merges both occurrences into a single route at preRegister, so there is
+    // structurally only ever one Transport call for a reason unrelated to replay — deleting the replay
+    // branch entirely would leave this test green. Genuine coverage needs the next task's discovery
+    // machinery.
     @Test
     fun replaysALatchedOutcomeWithoutASecondExchange() = runTest {
         val transport = CountingTransport()
@@ -123,11 +136,60 @@ class PreparationDriverTest {
             transport = CountingTransport(),
             store = ThrowingStore(CancellationException("boom")),
             cache = ResidentCache(),
+            classGateRunner = RenGClassGateRunner(ResourceLimits()),
             clock = FixedClock,
         )
         assertFailsWith<CancellationException> {
             executor.execute(ReadStore(ResourceActionId(1L), 0L, RawResourceKey("raw", ResourceClass.STICKER_IMAGE)))
         }
+    }
+
+    // Guards against ValidateResourceClass ever again being (or silently becoming) the placeholder that
+    // unconditionally reported Valid: this fixture's Transport response is not a valid PNG, so a real
+    // DECODE_PNG gate must run() end to end into a typed Failure carrying RESOURCE_DECODE_FAILED. Under
+    // the old placeholder this test would have observed ResourceOperationOutcome.Success instead.
+    @Test
+    fun aGenuinelyCorruptStickerSurfacesResourceDecodeFailedRatherThanSucceeding() = runTest {
+        val transport = CountingTransport(body = corruptStickerPng)
+        val outcome = driver(transport, CountingStore()).run(oneStickerRoute())
+        val failure = assertIs<ResourceOperationOutcome.Failure>(outcome)
+        assertEquals(RenGErrorCode.RESOURCE_DECODE_FAILED, failure.failure.code)
+        assertEquals(PipelineStage.RESOURCE_DECODING, failure.failure.stage)
+    }
+
+    // Guards against InstallVisibility ever again being (or silently becoming) the placeholder that
+    // unconditionally reported Succeeded: RESIDENT-provenance content whose generation the cache no
+    // longer tracks (a real race — a concurrent free()/close(), or a superseding install for the same
+    // key — see ResourceActionExecutor.installVisibility's own KDoc) must report a typed Failure rather
+    // than a bare "succeeded". Under the old placeholder this test would have observed Succeeded with no
+    // cache call at all.
+    @Test
+    fun theExecutorReportsAFailedInstallWhenAResidentGenerationHasAlreadyVanished() = runTest {
+        val executor = ResourceActionExecutor(
+            transport = CountingTransport(),
+            store = CountingStore(),
+            cache = ResidentCache(),
+            classGateRunner = RenGClassGateRunner(ResourceLimits()),
+            clock = FixedClock,
+        )
+        val registration = registration("vanished")
+        val content = ResolvedResourceContent(
+            route = registration.route,
+            resourceKey = registration.resourceKey,
+            stored = StoredRawResource(
+                bytes = validStickerPng,
+                contentDigest = "c".repeat(64),
+                metadata = StoredRawResourceMetadata(storedAtEpochMillis = 0L),
+            ),
+            provenance = ContentProvenance.RESIDENT,
+        )
+
+        val event = executor.execute(InstallVisibility(ResourceActionId(1L), 0L, content))
+
+        val outcome = assertIs<VisibilityInstallCompleted>(event).outcome
+        val failed = assertIs<SuppliedInstallOutcome.Failed>(outcome)
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failed.failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failed.failure.stage)
     }
 }
 
@@ -142,6 +204,7 @@ private fun driver(
     transport = transport,
     store = store,
     cache = ResidentCache(),
+    classGateRunner = RenGClassGateRunner(ResourceLimits()),
     maximumConcurrentOperations = maximumConcurrentOperations,
     clock = clock,
 )
@@ -178,16 +241,19 @@ private class CountingStore : Store {
     }
 }
 
-/** Counts every [Transport.execute] call and answers every request with the same [status] and a
- *  one-byte fresh body, unless [status] is not 200 — then the body is empty, matching what a real
- *  non-2xx response looks like. */
-private class CountingTransport(private val status: Int = 200) : Transport {
+/** Counts every [Transport.execute] call and answers every request with the same [status] and [body]
+ *  (a valid PNG by default, so a route's class gates genuinely pass), unless [status] is not 200 — then
+ *  the body is empty, matching what a real non-2xx response looks like. */
+private class CountingTransport(
+    private val status: Int = 200,
+    private val body: ByteArray = validStickerPng,
+) : Transport {
     var executeCalls: Int = 0
         private set
 
     override suspend fun execute(request: TransportRequest): TransportResponse {
         executeCalls += 1
-        return response(status)
+        return response(status, body)
     }
 }
 
@@ -231,10 +297,25 @@ private class ConcurrencyRecordingTransport : Transport {
     }
 }
 
-private fun response(status: Int): TransportResponse = TransportResponse(
+private fun response(status: Int, body: ByteArray = validStickerPng): TransportResponse = TransportResponse(
     statusCode = status,
-    body = if (status == 200) byteArrayOf(1) else ByteArray(0),
+    body = if (status == 200) body else ByteArray(0),
     metadata = TransportResponseMetadata(freshUntilEpochMillis = 1_700_000_100_000L),
+)
+
+// A real, valid 2x2 truecolour PNG (colour type 2), generated once via CPython's zlib/struct/
+// zlib.crc32 modules exactly as PngDecoderTest.kt documents, so every fixture's own STICKER_IMAGE
+// content genuinely passes DECODE_PNG rather than merely resembling bytes.
+private val validStickerPng: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR42mPgEpHTMLJhcAuISsmrAAAPGAMNubnoZAAAAABJRU5ErkJggg==",
+)
+
+// Same container shape as validStickerPng, but its IDAT payload is truncated to 4 bytes: a
+// well-formed chunk (correct length and CRC over the truncated payload) whose zlib stream can never
+// inflate to the declared raster size, so DECODE_PNG must genuinely fail rather than merely differ
+// byte-for-byte from a valid file.
+private val corruptStickerPng: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABElEQVR42mPgKmwFjgAAAABJRU5ErkJggg==",
 )
 
 // ---- ResourceOperationDefinition fixtures -------------------------------------------------------

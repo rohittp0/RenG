@@ -12,6 +12,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
@@ -111,6 +112,39 @@ class ResidentCacheTest {
         val free = results.filterIsInstance<com.rohittp.reng.ResourceFreeResult>().single()
         assertEquals(1, free.deferredKeys + free.fullyFreedKeys)
         assertEquals(0, cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount)
+    }
+
+    // Reproduces, deterministically, the exact gap a separate install()+takeLease() pair leaves open:
+    // a free() landing between the two calls retires the freshly installed generation with zero
+    // leases (dropping it immediately, since nothing keeps it), so takeLease() then has no tracked
+    // generation left to lease at all -- an unhandled crash, not a graceful outcome. installAndTakeLease
+    // closes exactly this gap by performing both steps under the same lock, so a free() run immediately
+    // afterward can only retire (defer) the generation, never drop it.
+    @Test
+    fun installAndTakeLeaseClosesTheGapASeparateInstallThenLeaseSequenceLeavesOpen() {
+        val cache = ResidentCache()
+        val orphaned = cache.install(key, storedA, null)
+        cache.free(ResourceSelector.ByKey(key))
+        assertFailsWith<IllegalStateException> { cache.takeLease(orphaned) }
+
+        val lease = cache.installAndTakeLease(key, storedB, null)
+        val freeResult = cache.free(ResourceSelector.ByKey(key))
+        assertEquals(1, freeResult.deferredKeys, "the leased generation must be deferred, never dropped")
+        assertEquals(0, freeResult.fullyFreedKeys)
+        cache.releaseLease(lease)
+        assertEquals(0, cache.report(ResourceSelector.ByKey(key)).entries.single().retiredGenerationCount)
+    }
+
+    @Test
+    fun observeAndTakeLeaseReturnsNullWithNothingResidentAndLeasesWhatIsThere() {
+        val cache = ResidentCache()
+        assertNull(cache.observeAndTakeLease(key))
+
+        val generation = cache.install(key, storedA, null)
+        val lease = cache.observeAndTakeLease(key)
+        assertEquals(generation.id, requireNotNull(lease).generationId)
+        assertEquals(1, cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount)
+        cache.releaseLease(lease)
     }
 
     @Test

@@ -91,6 +91,52 @@ internal class ResidentCache {
         Lease(nextLeaseId++, generation.key, generation.id)
     }
 
+    /**
+     * Atomically installs a fresh generation for [key] and takes the caller's own lease on it in one
+     * locked step. This exists because a visibility install is one conceptual action — "install the
+     * generation and take the owner's lease" — that a separate [install] then [takeLease] pair cannot
+     * deliver under concurrency: a freshly installed generation sits at `leaseCount == 0` in the gap
+     * between the two calls, where a racing [free] or a competing installer for the same key can retire
+     * it there — dropping it immediately, with no outstanding lease to defer it — before this caller's
+     * [takeLease] ever runs. The generation still exists and the eventual lease would still technically
+     * function once taken, but [report] and retired bookkeeping never see it, and a [takeLease] call
+     * that arrives after the drop finds nothing left to track. Locking both steps together closes that
+     * gap entirely: no observer can ever see this generation with a zero lease count.
+     */
+    fun installAndTakeLease(key: ResourceKey, stored: StoredRawResource, decoded: DecodedImage?): Lease =
+        guarded {
+            val entry = entries.getOrPut(key) { Entry() }
+            entry.freed = false
+            entry.current?.let { previous ->
+                if (previous.leaseCount > 0) entry.retired += previous
+            }
+            val generation = ResidentGeneration(nextGenerationId++, key, stored, decoded)
+            val record = GenerationRecord(generation)
+            record.leaseCount += 1
+            entry.current = record
+            Lease(nextLeaseId++, key, generation.id)
+        }
+
+    /**
+     * Atomically observes the current generation for [key] and takes the caller's lease on it in one
+     * locked step, or returns `null` if there is no current generation. Closes the same class of gap as
+     * [installAndTakeLease], for a caller re-leasing an already-resident generation rather than
+     * installing a new one: a separate [current] then [takeLease] pair could observe a generation that a
+     * racing [free] or a superseding [install] has already retired with zero leases by the time
+     * [takeLease] runs, which — unlike the [installAndTakeLease] gap — is not a bug to route around but
+     * a genuine race outcome this method reports honestly as "nothing was resident to lease" rather than
+     * crashing on a generation that no longer exists.
+     */
+    fun observeAndTakeLease(key: ResourceKey): Lease? = guarded {
+        val record = entries[key]?.current
+        if (record == null) {
+            null
+        } else {
+            record.leaseCount += 1
+            Lease(nextLeaseId++, key, record.generation.id)
+        }
+    }
+
     fun releaseLease(lease: Lease) {
         guarded {
             val entry = entries[lease.key] ?: return@guarded

@@ -14,25 +14,24 @@ internal fun requireFinite(value: Double, field: String): Double {
     return value
 }
 
-internal fun requireUnicodeScalars(value: String, field: String, nonBlank: Boolean): String {
-    require(!nonBlank || value.isNotBlank()) { "$field must not be blank" }
-
+internal fun containsOnlyUnicodeScalars(value: String): Boolean {
     var index = 0
     while (index < value.length) {
-        when (value[index]) {
-            in '\uD800'..'\uDBFF' -> {
-                require(index + 1 < value.length && value[index + 1] in '\uDC00'..'\uDFFF') {
-                    "$field must contain Unicode scalar values"
-                }
-                index += 2
-            }
-            in '\uDC00'..'\uDFFF' -> {
-                throw IllegalArgumentException("$field must contain Unicode scalar values")
-            }
-            else -> index += 1
+        val unit = value[index]
+        if (unit.isHighSurrogate()) {
+            if (index + 1 >= value.length || !value[index + 1].isLowSurrogate()) return false
+            index += 2
+            continue
         }
+        if (unit.isLowSurrogate()) return false
+        index += 1
     }
+    return true
+}
 
+internal fun requireUnicodeScalars(value: String, field: String, nonBlank: Boolean): String {
+    require(!nonBlank || value.isNotBlank()) { "$field must not be blank" }
+    require(containsOnlyUnicodeScalars(value)) { "$field must contain Unicode scalar values" }
     return value
 }
 

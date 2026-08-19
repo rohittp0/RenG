@@ -2,6 +2,12 @@ package com.rohittp.reng.internal.driver
 
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceLimits
+import com.rohittp.reng.internal.glb.GlbScan
+import com.rohittp.reng.internal.glb.GltfFeatureResult
+import com.rohittp.reng.internal.glb.GltfParseResult
+import com.rohittp.reng.internal.glb.parseGltf
+import com.rohittp.reng.internal.glb.scanGlb
+import com.rohittp.reng.internal.glb.validateGltfFeatures
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.decodePng
@@ -25,22 +31,18 @@ internal fun interface ClassGateRunner {
 /**
  * RenG's own class gates. `DECODE_PNG` genuinely decodes a sticker or model-texture PNG through
  * [decodePng], gated by [limits]'s decoded-byte ceiling; `PARSE_GLB`/`VALIDATE_GLB_FEATURES` genuinely
- * scan a GLB container's JSON chunk; `VALIDATE_DEM_TERRAIN_ENCODING` decodes a DEM tile's PNG bytes and
- * inspects the result.
+ * scan and parse a GLB container's JSON chunk into a [com.rohittp.reng.internal.glb.GltfDocument] via the
+ * canonical [scanGlb]/[parseGltf]/[validateGltfFeatures] (ADR 0021's complete supported subset);
+ * `VALIDATE_DEM_TERRAIN_ENCODING` decodes a DEM tile's PNG bytes and inspects the result.
  *
- * **GLB scope note:** the canonical `scanGlb`/`parseGltf`/`validateGltfFeatures` — a full JSON value
- * tree and glTF document model, reviewed and enforcing ADR 0021's complete supported subset — live on
- * the sibling `feat/cycle-c-glb` branch (Task 10/16) and are not visible from this worktree, the same
- * cross-branch gap that left [com.rohittp.reng.internal.cache.ResidentCache] a stand-in here. Rather
- * than duplicate ~1500 lines of reviewed JSON/glTF parsing into a resource-layer task, this class
- * performs its own narrower, genuinely-real check: GLB container framing (magic, version, declared
- * length, JSON chunk bounds), a generic string-aware brace/bracket well-formedness scan of the JSON
- * chunk, and one feature check (a non-empty `extensionsRequired` array — the single rule the canonical
- * `GltfUnsupported.EXTENSION_REQUIRED` already covers, folding Draco/meshopt/Basis/every future required
- * extension into it). It is deliberately NOT full glTF semantic validation (asset.version, accessors,
- * buffer sizes, node graph, primitive/attribute/animation feature checks are all out of scope here).
- * Replace `runParseGlb`/`runValidateGlbFeatures`'s bodies with real `scanGlb`/`parseGltf`/
- * `validateGltfFeatures` calls once that branch merges, and delete the private GLB helpers below.
+ * **GLB wiring:** `PARSE_GLB` and `VALIDATE_GLB_FEATURES` each independently re-derive the parsed
+ * [com.rohittp.reng.internal.glb.GltfDocument] from [ResolvedResourceContent.stored]'s raw bytes via
+ * [parseGlbDocument] — the same redundancy [runDecodePng] and [runValidateDemTerrainEncoding] already
+ * accept for PNG, since this interface answers one gate at a time with no result cache between calls.
+ * A [GlbScan] container-framing rejection or a [GltfParseResult.Malformed] structural rejection both
+ * fail `PARSE_GLB`; `VALIDATE_GLB_FEATURES` additionally fails on either of those (a document
+ * `PARSE_GLB` would already have refused can never be "supported"), or on a genuine
+ * [GltfFeatureResult.Unsupported] feature outside ADR 0021's subset.
  *
  * **Engine-validated classes:** `BASEMAP_TILE_JSON`, `BASEMAP_VECTOR_TILE`, `BASEMAP_GEO_JSON`, and
  * `DECODE_PNG` over `BASEMAP_RASTER_TILE`/`BASEMAP_DEM_TILE` are Rentile's own firewall's job (ADR
@@ -86,23 +88,33 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
         }
     }
 
-    private fun runParseGlb(content: ResolvedResourceContent): SuppliedValidationOutcome {
-        val jsonText = scanMinimalGlbJsonChunk(content.stored.bytes) ?: return SuppliedValidationOutcome.Failed
-        return if (isWellFormedJsonObjectShape(jsonText)) {
-            SuppliedValidationOutcome.Valid
-        } else {
-            SuppliedValidationOutcome.Failed
+    private fun runParseGlb(content: ResolvedResourceContent): SuppliedValidationOutcome =
+        when (parseGlbDocument(content.stored.bytes)) {
+            is GltfParseResult.Parsed -> SuppliedValidationOutcome.Valid
+            is GltfParseResult.Malformed, null -> SuppliedValidationOutcome.Failed
+        }
+
+    private fun runValidateGlbFeatures(content: ResolvedResourceContent): SuppliedValidationOutcome {
+        val document = (parseGlbDocument(content.stored.bytes) as? GltfParseResult.Parsed)?.document
+            ?: return SuppliedValidationOutcome.Failed
+        return when (validateGltfFeatures(document)) {
+            GltfFeatureResult.Supported -> SuppliedValidationOutcome.Valid
+            is GltfFeatureResult.Unsupported -> SuppliedValidationOutcome.Failed
         }
     }
 
-    private fun runValidateGlbFeatures(content: ResolvedResourceContent): SuppliedValidationOutcome {
-        val jsonText = scanMinimalGlbJsonChunk(content.stored.bytes) ?: return SuppliedValidationOutcome.Failed
-        if (!isWellFormedJsonObjectShape(jsonText)) return SuppliedValidationOutcome.Failed
-        return if (declaresRequiredExtensions(jsonText)) {
-            SuppliedValidationOutcome.Failed
-        } else {
-            SuppliedValidationOutcome.Valid
-        }
+    /**
+     * Runs the container scan and document parse `PARSE_GLB` performs — [scanGlb] bounded by
+     * [ResourceLimits.maximumModelJsonChunkBytes], then [parseGltf] over the admitted JSON chunk and BIN
+     * chunk length — sharing those exact steps with [runValidateGlbFeatures], which needs the same parsed
+     * [com.rohittp.reng.internal.glb.GltfDocument] before it can inspect it. Returns `null` for a
+     * container-framing fault ([scanGlb] rejected); a [GltfParseResult.Malformed] result still flows
+     * through so callers see `PARSE_GLB`'s own malformation vocabulary rather than a second `null`.
+     */
+    private fun parseGlbDocument(bytes: ByteArray): GltfParseResult? {
+        val admitted = scanGlb(bytes, limits.maximumModelJsonChunkBytes) as? GlbScan.Admitted ?: return null
+        val binChunkLength = admitted.binChunk?.count()?.toLong() ?: 0L
+        return parseGltf(admitted.json, binChunkLength, MAXIMUM_GLB_NODE_DEPTH)
     }
 
     private fun reportUnobservedFirewallOutcome(gate: ResourceClassGate, resourceClass: ResourceClass): Nothing =
@@ -112,6 +124,11 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
                 "not yet take",
         )
 }
+
+/** glTF scene-graph node depth bound for `PARSE_GLB`'s [parseGltf] call: generous for anything RenG
+ *  draws, finite for a cyclic graph the specification forbids. Matches [parseGltf]'s own test suite
+ *  default. */
+private const val MAXIMUM_GLB_NODE_DEPTH = 128
 
 private const val OPAQUE_ALPHA: Byte = -1 // 0xFF unsigned
 
@@ -131,96 +148,4 @@ private fun isEightBitRgbTerrainEncoding(image: DecodedImage): Boolean {
         index += 4
     }
     return true
-}
-
-private const val GLB_MAGIC = 0x46546C67L // "glTF" little-endian
-private const val GLB_VERSION = 2L
-private const val GLB_JSON_CHUNK_TYPE = 0x4E4F534AL // "JSON" little-endian
-private const val GLB_HEADER_BYTES = 12
-private const val GLB_CHUNK_HEADER_BYTES = 8
-
-/** Reads an unsigned 32-bit little-endian integer as [Long] so no admitted value can wrap into a
- *  negative Int before it is bounds-checked. */
-private fun readUInt32LE(bytes: ByteArray, offset: Int): Long =
-    (bytes[offset].toLong() and 0xFF) or
-        ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
-        ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
-        ((bytes[offset + 3].toLong() and 0xFF) shl 24)
-
-/**
- * Scans [bytes] as a GLB container down to its JSON chunk's raw text, checking only the container
- * framing this stand-in needs: magic, version, an exact declared length, and a JSON-typed first chunk
- * fully inside the file. Returns `null` for any framing violation. Deliberately NOT the canonical
- * `scanGlb` — see this file's class-level KDoc.
- */
-private fun scanMinimalGlbJsonChunk(bytes: ByteArray): String? {
-    if (bytes.size < GLB_HEADER_BYTES + GLB_CHUNK_HEADER_BYTES) return null
-    if (readUInt32LE(bytes, 0) != GLB_MAGIC) return null
-    if (readUInt32LE(bytes, 4) != GLB_VERSION) return null
-    val declaredLength = readUInt32LE(bytes, 8)
-    if (declaredLength != bytes.size.toLong() || declaredLength % 4L != 0L) return null
-
-    val chunkLength = readUInt32LE(bytes, GLB_HEADER_BYTES)
-    val chunkType = readUInt32LE(bytes, GLB_HEADER_BYTES + 4)
-    if (chunkType != GLB_JSON_CHUNK_TYPE) return null
-    if (chunkLength % 4L != 0L) return null
-
-    val dataStart = GLB_HEADER_BYTES + GLB_CHUNK_HEADER_BYTES
-    val dataEnd = dataStart.toLong() + chunkLength
-    if (dataEnd > bytes.size.toLong()) return null
-
-    return bytes.copyOfRange(dataStart, dataEnd.toInt()).decodeToString()
-}
-
-/**
- * A generic, semantics-free JSON well-formedness check: string-aware brace/bracket balance plus a
- * top-level object shape. Not JSON grammar validation — numbers, commas, and escapes beyond a bare
- * backslash are not checked — only enough to distinguish a well-formed object from garbage, which is
- * all this stand-in's `PARSE_GLB` gate claims to do.
- */
-private fun isWellFormedJsonObjectShape(text: String): Boolean {
-    val trimmed = text.trimEnd(' ')
-    if (trimmed.isEmpty() || trimmed.first() != '{' || trimmed.last() != '}') return false
-    var depth = 0
-    var inString = false
-    var escaped = false
-    for (ch in trimmed) {
-        if (inString) {
-            when {
-                escaped -> escaped = false
-                ch == '\\' -> escaped = true
-                ch == '"' -> inString = false
-            }
-            continue
-        }
-        when (ch) {
-            '"' -> inString = true
-            '{', '[' -> depth += 1
-            '}', ']' -> {
-                depth -= 1
-                if (depth < 0) return false
-            }
-        }
-    }
-    return !inString && depth == 0
-}
-
-/**
- * Reports whether the JSON text declares a non-empty `extensionsRequired` array — the one feature check
- * this stand-in performs, covering the same fault the canonical `GltfUnsupported.EXTENSION_REQUIRED`
- * names (Draco, meshopt, Basis, and every future required extension collapse into this one rule). A
- * plain substring/bracket scan, not a JSON-object field read.
- */
-private fun declaresRequiredExtensions(text: String): Boolean {
-    val key = "\"extensionsRequired\""
-    val keyIndex = text.indexOf(key)
-    if (keyIndex < 0) return false
-    val colonIndex = text.indexOf(':', keyIndex + key.length)
-    if (colonIndex < 0) return false
-    var cursor = colonIndex + 1
-    while (cursor < text.length && text[cursor].isWhitespace()) cursor += 1
-    if (cursor >= text.length || text[cursor] != '[') return false
-    val closeIndex = text.indexOf(']', cursor)
-    if (closeIndex < 0) return false
-    return text.substring(cursor + 1, closeIndex).isNotBlank()
 }

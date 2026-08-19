@@ -1,11 +1,14 @@
 package com.rohittp.reng.internal.cache
 
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.ResourceFreeResult
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
+import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ResourceSelector
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
+import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.image.DecodedImage
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -16,6 +19,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ResidentCacheTest {
@@ -39,7 +43,7 @@ class ResidentCacheTest {
         val lease = cache.takeLease(generation)
         val result = cache.free(ResourceSelector.ByKey(key))
         assertEquals(
-            com.rohittp.reng.ResourceFreeResult(matchedKeys = 1, fullyFreedKeys = 0, deferredKeys = 1, alreadyFreeKeys = 0),
+            ResourceFreeResult(matchedKeys = 1, fullyFreedKeys = 0, deferredKeys = 1, alreadyFreeKeys = 0),
             result,
         )
         assertNull(cache.current(key))
@@ -109,24 +113,37 @@ class ResidentCacheTest {
             async { cache.free(ResourceSelector.ByKey(key)) },
             async { cache.releaseLease(lease); null },
         ).awaitAll()
-        val free = results.filterIsInstance<com.rohittp.reng.ResourceFreeResult>().single()
+        val free = results.filterIsInstance<ResourceFreeResult>().single()
         assertEquals(1, free.deferredKeys + free.fullyFreedKeys)
         assertEquals(0, cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount)
     }
 
-    // Reproduces, deterministically, the exact gap a separate install()+takeLease() pair leaves open:
-    // a free() landing between the two calls retires the freshly installed generation with zero
-    // leases (dropping it immediately, since nothing keeps it), so takeLease() then has no tracked
-    // generation left to lease at all -- an unhandled crash, not a graceful outcome. installAndTakeLease
-    // closes exactly this gap by performing both steps under the same lock, so a free() run immediately
-    // afterward can only retire (defer) the generation, never drop it.
+    // Task 13's atomic install-and-lease / observe-and-lease methods close a linearization gap a
+    // separate install()/current() then takeLease() pair leaves open: a free() landing in the window
+    // between the two calls can retire a zero-lease generation. In this class's reference-identity
+    // model, takeLease() mutates the exact object it is handed and never consults `entries`, so it
+    // never rejects a stale reference the way an id-keyed lookup could -- the gap instead manifests
+    // as a lease taken successfully on a generation this cache has already dropped from its own
+    // bookkeeping, invisible to report() and unreachable by any later free(). These tests are ported
+    // from the stand-in ResidentCache that found the gap, adapted to this model.
     @Test
     fun installAndTakeLeaseClosesTheGapASeparateInstallThenLeaseSequenceLeavesOpen() {
         val cache = ResidentCache()
+
+        // Reproduce the gap: a free() landing between install() and takeLease() drops the zero-lease
+        // generation from this cache's bookkeeping entirely before the lease is taken.
         val orphaned = cache.install(key, storedA, null)
         cache.free(ResourceSelector.ByKey(key))
-        assertFailsWith<IllegalStateException> { cache.takeLease(orphaned) }
+        val orphanedLease = cache.takeLease(orphaned)
+        assertEquals(
+            0,
+            cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount,
+            "a lease taken after the drop is invisible to this cache's own accounting",
+        )
+        cache.releaseLease(orphanedLease) // must not throw even though untracked
 
+        // installAndTakeLease closes the gap: the lease is taken atomically with the install, so a
+        // free() run immediately afterward can only retire (defer) the generation, never drop it.
         val lease = cache.installAndTakeLease(key, storedB, null)
         val freeResult = cache.free(ResourceSelector.ByKey(key))
         assertEquals(1, freeResult.deferredKeys, "the leased generation must be deferred, never dropped")
@@ -142,7 +159,7 @@ class ResidentCacheTest {
 
         val generation = cache.install(key, storedA, null)
         val lease = cache.observeAndTakeLease(key)
-        assertEquals(generation.id, requireNotNull(lease).generationId)
+        assertSame(generation, requireNotNull(lease).generation)
         assertEquals(1, cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount)
         cache.releaseLease(lease)
     }
@@ -157,19 +174,120 @@ class ResidentCacheTest {
         assertEquals(1, cache.report(ResourceSelector.ByClass(ResourceClass.STICKER_IMAGE)).entries.size)
         assertEquals(1, cache.report(ResourceSelector.ByKey(externalStickerKey)).entries.size)
     }
+
+    // The tests below are additions beyond the brief's Step 1 list, closing gaps a mutation-test pass
+    // over the Step 1 suite found: each guards a branch none of the tests above can distinguish from its
+    // absence.
+
+    @Test
+    fun aRetiredGenerationWithMultipleLeasesSurvivesUntilTheLastIsReleased() {
+        val cache = ResidentCache()
+        val generation = cache.install(key, storedA, null)
+        val firstLease = cache.takeLease(generation)
+        val secondLease = cache.takeLease(generation)
+        cache.install(key, storedB, null)
+        assertEquals(1, cache.report(ResourceSelector.ByKey(key)).entries.single().retiredGenerationCount)
+
+        cache.releaseLease(firstLease)
+        // One outstanding lease remains: releasing a generation's lease count to a positive remainder
+        // must not evict it early.
+        assertEquals(1, cache.report(ResourceSelector.ByKey(key)).entries.single().retiredGenerationCount)
+        assertEquals(1, cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount)
+
+        cache.releaseLease(secondLease)
+        assertEquals(0, cache.report(ResourceSelector.ByKey(key)).entries.single().retiredGenerationCount)
+    }
+
+    @Test
+    fun installAfterFreeClearsTheReloadMarker() {
+        val cache = ResidentCache()
+        cache.install(key, storedA, null)
+        cache.free(ResourceSelector.ByKey(key))
+        assertTrue(cache.wasFreed(key))
+
+        cache.install(key, storedB, null)
+        assertFalse(cache.wasFreed(key))
+        assertFalse(cache.report(ResourceSelector.ByKey(key)).entries.single().reloadRequired)
+    }
+
+    @Test
+    fun releasingTheSameLeaseTwiceIsRejected() {
+        val cache = ResidentCache()
+        val generation = cache.install(key, storedA, null)
+        val lease = cache.takeLease(generation)
+        cache.releaseLease(lease)
+        assertFailsWith<IllegalArgumentException> { cache.releaseLease(lease) }
+    }
+
+    @Test
+    fun closeAllDropsEveryEntryRegardlessOfLeases() {
+        val cache = ResidentCache()
+        val generation = cache.install(key, storedA, null)
+        cache.takeLease(generation)
+
+        cache.closeAll()
+
+        assertNull(cache.current(key))
+        assertEquals(0, cache.report(ResourceSelector.All).entries.size)
+    }
+
+    @Test
+    fun byKindExcludesAKeyOfADifferentKind() {
+        // selectorsMatchAllByKindByClassAndByKey only ever installs EXTERNAL keys, so it cannot tell a
+        // real ByKind filter from one that always matches. This pins that branch with a non-EXTERNAL key.
+        val cache = ResidentCache()
+        val geometryKey = ResourceKey(
+            kind = ResourceKind.GEOMETRY_PROGRAM,
+            stableId = "c".repeat(64),
+            resourceClass = null,
+        )
+        cache.install(externalStickerKey, storedA, null)
+        cache.install(geometryKey, storedB, null)
+        assertEquals(1, cache.report(ResourceSelector.ByKind(ResourceKind.EXTERNAL)).entries.size)
+        assertEquals(2, cache.report(ResourceSelector.All).entries.size)
+    }
+
+    @Test
+    fun reportTotalsSumUsageAcrossMatchedEntries() {
+        val cache = ResidentCache()
+        cache.install(externalStickerKey, storedA, decodedOf(10))
+        cache.install(externalModelKey, storedB, decodedOf(20))
+
+        val totals = cache.report(ResourceSelector.All).totals
+
+        assertEquals(storedA.bytes.size.toLong() + storedB.bytes.size.toLong(), totals.rawBytes)
+        assertEquals(30L, totals.decodedCpuBytes)
+        assertEquals(0L, totals.knownGpuBytes)
+        assertFalse(totals.hasUnknownGpuBytes)
+    }
 }
 
-private val key = ResourceKey(ResourceKind.EXTERNAL, "1".repeat(64), ResourceClass.STICKER_IMAGE)
-private val externalStickerKey = ResourceKey(ResourceKind.EXTERNAL, "2".repeat(64), ResourceClass.STICKER_IMAGE)
-private val externalModelKey = ResourceKey(ResourceKind.EXTERNAL, "3".repeat(64), ResourceClass.MODEL_GLB)
+private val key = ResourceKeyDeriver().external(
+    ResourceClass.MODEL_TEXTURE,
+    ResourceLocator("resident-cache-test-key"),
+).key
 
-private val storedA = storedResource(1)
-private val storedB = storedResource(2)
+private val externalStickerKey = ResourceKeyDeriver().external(
+    ResourceClass.STICKER_IMAGE,
+    ResourceLocator("resident-cache-test-sticker"),
+).key
 
-private fun storedResource(marker: Int): StoredRawResource = StoredRawResource(
-    bytes = byteArrayOf(marker.toByte(), marker.toByte(), marker.toByte()),
-    contentDigest = marker.toString().repeat(64).take(64),
-    metadata = StoredRawResourceMetadata(storedAtEpochMillis = 0L),
+private val externalModelKey = ResourceKeyDeriver().external(
+    ResourceClass.MODEL_GLB,
+    ResourceLocator("resident-cache-test-model"),
+).key
+
+private val storedA: StoredRawResource = storedResource("a".repeat(64))
+private val storedB: StoredRawResource = storedResource("b".repeat(64))
+
+private fun storedResource(digest: String): StoredRawResource = StoredRawResource(
+    bytes = digest.encodeToByteArray(),
+    contentDigest = digest,
+    metadata = StoredRawResourceMetadata(storedAtEpochMillis = 1L),
 )
 
-private fun decodedOf(byteCount: Int): DecodedImage = DecodedImage(width = byteCount / 4, height = 1, rgba = ByteArray(byteCount))
+private fun decodedOf(byteCount: Int): DecodedImage = DecodedImage(
+    width = 1,
+    height = 1,
+    rgba = ByteArray(byteCount),
+)

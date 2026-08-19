@@ -9,6 +9,8 @@ import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.resource.CallTransport
+import com.rohittp.reng.internal.resource.CancelRoute
+import com.rohittp.reng.internal.resource.CleanupCancellationObserved
 import com.rohittp.reng.internal.resource.ClockSampled
 import com.rohittp.reng.internal.resource.ContentProvenance
 import com.rohittp.reng.internal.resource.InstallVisibility
@@ -44,11 +46,12 @@ import kotlinx.coroutines.CancellationException
  *
  * `ResourceOperationAction` is a sealed interface with 18 subtypes. This file's `when` handles the five
  * that need a real adapter call — [SampleClock], [ObserveResident], [ReadStore], [CallTransport], and
- * [ReplayLatchedTransport] — plus three more: [WriteStore] (a real `Store.write` call, mapped the same
+ * [ReplayLatchedTransport] — plus four more: [WriteStore] (a real `Store.write` call, mapped the same
  * way as every other adapter call), [ValidateResourceClass] (a real [ClassGateRunner] call — see that
- * class for what "real" means for each gate, including the classes it does not yet observe), and
- * [InstallVisibility] (a real [ResidentCache] install-and-lease — see [installVisibility]). Every action
- * no task has reached is an unreachable `else`.
+ * class for what "real" means for each gate, including the classes it does not yet observe),
+ * [InstallVisibility] (a real [ResidentCache] install-and-lease — see [installVisibility]), and
+ * [CancelRoute] (pure internal bookkeeping — see the `when` branch below). Every action no task has
+ * reached is an unreachable `else`.
  *
  * Unlike every other `Failed` outcome here, [SuppliedInstallOutcome.Failed] carries a [FailureDescriptor]
  * this class constructs directly rather than a bare marker [ResourceOperationStateMachine] classifies —
@@ -96,6 +99,13 @@ internal class ResourceActionExecutor(
         )
 
         is InstallVisibility -> VisibilityInstallCompleted(action.actionId, installVisibility(action.content))
+
+        // Cancelling a route is internal bookkeeping, not a consumer exchange: it performs no Transport
+        // or Store call and is never wrapped in suppliedCall. It reports completion unconditionally so
+        // a sibling route that retireBufferedPrefix() is closing out -- because another route already
+        // retired via Failure or Cancelled -- can be marked resolved even though nothing else will ever
+        // produce an event for it.
+        is CancelRoute -> CleanupCancellationObserved(action.ordinal)
 
         else -> error("ResourceActionExecutor does not yet handle $action")
     }

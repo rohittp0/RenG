@@ -27,7 +27,23 @@ internal class RecordingGlBinding : GlBinding {
     var framebufferStatus: Int = GL_FRAMEBUFFER_COMPLETE
     var shaderInfoLog: String = ""
     var programInfoLog: String = ""
-    var uniformLocation: Int = 0
+
+    /**
+     * Maps a declared shader name to its GL location. Empty by default, which matches a shader
+     * declaring none of RenG's documented names: with nothing in this map, [getUniformLocation]
+     * and [getAttribLocation] both return `-1` for every name queried, exactly like a real driver
+     * returns for a name the compiled program never declared (ADR 0008's actual mechanism — a
+     * negative location, not an exception). Set it with [withDeclaredNames]; [withNoDeclaredNames]
+     * exists only so a test can say the default explicitly.
+     */
+    var declaredNames: Map<String, Int> = emptyMap()
+
+    fun withNoDeclaredNames(): RecordingGlBinding = apply { declaredNames = emptyMap() }
+
+    fun withDeclaredNames(vararg names: Pair<String, Int>): RecordingGlBinding = apply {
+        declaredNames = names.toMap()
+    }
+
     val shaderSources: MutableMap<Int, String> = mutableMapOf()
     private var nextName: Int = 1
     val deletedNames: MutableList<Int> = mutableListOf()
@@ -311,12 +327,12 @@ internal class RecordingGlBinding : GlBinding {
 
     override fun getAttribLocation(program: Int, name: String): Int {
         log += "getAttribLocation($program,$name)"
-        return uniformLocation
+        return declaredNames[name] ?: -1
     }
 
     override fun getUniformLocation(program: Int, name: String): Int {
         log += "getUniformLocation($program,$name)"
-        return uniformLocation
+        return declaredNames[name] ?: -1
     }
 
     override fun uniform1i(location: Int, value: Int) {

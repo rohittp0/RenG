@@ -250,6 +250,32 @@ class GlLifecycleDriverTest {
         assertTrue(world.binding.log.none { it.startsWith("delete") })
     }
 
+    // Fix C: only FreeResources had coverage of the exact-context guard failing under a wrong or
+    // absent context. CloseRenderer shares the exact same `beginContextDependentIfGpuObjectsExist`
+    // -> `awaitExactContext` path in RendererLifecycleStateMachine.kt whenever live GPU objects or
+    // deferred deletions exist, so the guarantee holds there too, but nothing asserted it.
+    @Test fun closingWithoutACurrentContextFailsWithoutDeletingAnything() {
+        val world = driverWorld(currentContext = null, liveHandles = true)
+        val outcome = world.driver.run(RendererLifecycleOperation.CloseRenderer) { null }
+        val failed = outcome as RendererLifecycleOutcome.Failed
+        assertEquals(RenGErrorCode.NO_CURRENT_RENDER_CONTEXT, failed.failure.code)
+        assertTrue(world.binding.log.none { it.startsWith("delete") })
+        assertTrue(world.registry.hasLiveGpuObjects())
+        assertEquals(RendererOwnerState.LIVE, world.driver.snapshot.ownerState)
+    }
+
+    @Test fun closingUnderADifferentContextFailsWithoutChangingState() {
+        val world = driverWorld(currentContext = RenderContextIdentity(0x9999L), liveHandles = true)
+        val before = world.driver.snapshot
+        val outcome = world.driver.run(RendererLifecycleOperation.CloseRenderer) { null }
+        assertEquals(
+            RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT,
+            (outcome as RendererLifecycleOutcome.Failed).failure.code,
+        )
+        assertEquals(before, world.driver.snapshot)
+        assertTrue(world.binding.log.none { it.startsWith("delete") })
+    }
+
     private fun geometryKey(): ResourceKey =
         deriver.geometryProgram(ShaderPair(VERTEX_SOURCE, FRAGMENT_SOURCE)).key
 

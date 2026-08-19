@@ -449,24 +449,51 @@ length array.
 
 ## Cycles E through J
 
-**E — basemap and terrain.** Rentile tiles decoded, uploaded and drawn as the mercator ground, with texture
-residency and eviction driven by the prepared frames that are alive, which connects directly to Cycle B's
-lease machinery. It also displaces that ground with the terrain Cycle C acquires, since nothing before it
-consumes elevation. First pixels, so golden baselines start here.
+**Reordered 2026-08-19, so an MVP can ship for waiting consumers.** Existing cycle letters stay bound to
+their existing content so no prior reference breaks. Cycle F splits into **F-1** (stickers, geometries, and
+the renderer factory — the MVP) and **F-2** (models with textures and animation). Cycle E splits across its
+basemap and terrain halves. Execution order is now: C → D → **F-1 → MVP release** → E-basemap → release →
+F-2 → release → E-terrain → G → H → I → J. Six Cycle C tasks travel off Cycle C in the same reorder — see
+"Cycle C — resource layer, as implemented" above for the full list — with tasks 14, 16, 17, 18, and 19
+(sprite/style commits, the production Rentile key resolver, the firewall adapters, engine failure
+classification, and the basemap rasterizer host) executing with the basemap half of E, and task 20
+(terrain acquisition and DEM encoding validation) executing with the terrain half.
+
+The MVP release is **internal**. Breaking the public interface in a later cycle is accepted — Cycle F-1's
+design is explicit about this. Publication itself stays immutable regardless: a later breaking change means
+a new version, never overwriting a published coordinate. All six targets publish at every release
+regardless of which are verified; only macOS and Linux are verified today, and that distinction belongs in
+release notes rather than being discovered by an Android consumer resolving an artifact nobody ran.
+
+**E-basemap.** Rentile tiles decoded, uploaded and drawn as the mercator ground, with texture residency and
+eviction driven by the prepared frames that are alive, which connects directly to Cycle B's lease machinery.
+First pixels, so golden baselines start here.
 
 Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
 while a developer's machine renders through Metal, so the reported renderer string — not the target —
 should key a baseline, or the first run somewhere new will fail on a difference that is not a regression.
 
-**F — drawn things.** Stickers, models with textures and animation-track time sampling, and geometries
-painted by consumer shader pairs. Owns the decision `CLAUDE.md` flags as ADR-worthy and still unmade: how
-the two draw regimes order within one frame, given screen-anchored things composite by z-index with no
-depth test while map-anchored things are occlusion-tested. Cycle D took ADR 0023 for its corrected GL
-restore set, so that would be **ADR 0024**. This cycle also
-fixes the documented uniform and attribute names a shader pair may declare.
+**F-1 — stickers, geometries, and the renderer factory (the MVP).** `createRenderer`, the first API that
+makes RenG operable; stickers drawn in both draw regimes; geometries painted by consumer shader pairs with
+consumer-supplied uniforms and textures; the documented shader interface (`aPosition`, `aTexCoord`,
+`uModelViewProjection`, `uResolution`, `uGeometryBounds`, `uFrameIndex`). Owns the decision `CLAUDE.md`
+flagged as ADR-worthy and now resolved as **ADR 0024**: the map regime draws first, depth-tested, and the
+screen regime composites on top as a single stack — splitting the screen regime by sign of z-index was
+rejected because it would overload the sign with regime meaning while the magnitude keeps ordering meaning.
+Ships no basemap, terrain, models, or globe; `drawBasemap` stays in `FramePlan` and degrades to one warning
+per renderer when no basemap style is configured. All pixel verification is deferred to Cycle J; this cycle
+verifies the draw path by call-log assertion (draw calls issued, uniforms and textures bound, blend state
+set, regime order honoured) rather than image comparison.
+
+**E-terrain.** Displaces the mercator ground with the terrain Cycle C acquires, since nothing before it
+consumes elevation. Runs after F-2 in the new order, moved behind models because terrain was already
+deferred once for having no consumer, while models have consumers waiting.
+
+**F-2 — models with textures and animation.** Split out of the original Cycle F so models can ship after
+the MVP and after the basemap without blocking either.
 
 **G — globe projection.** The second projection mode, re-projecting mercator tiles and every placement.
-Deliberately after F so it re-projects a complete scene.
+Deliberately after both halves of F and E so it re-projects a complete scene.
 
 **H — Android and iOS bring-up.** The one cycle no continuous integration can cover. A draft pull request
 borrows macOS and Linux hardware, but not a device; Android GL remains manual.
@@ -481,7 +508,7 @@ nothing has settled it. RenG has no serialization surface in its public ABI and 
 or plugin anywhere in the build. Two candidate owners: a public serialization API in RenG, which adds
 public surface and probably a dependency the repository policy currently forbids; or harness-side parsing
 that constructs plans through the existing public constructors, which keeps RenG dependency-free but
-duplicates the schema. Decide before Cycle I, and note that Cycle F fixes shader uniform names that a
+duplicates the schema. Decide before Cycle I, and note that Cycle F-1 fixes shader uniform names that a
 serialized plan would have to name.
 
 **J — golden-image corpus.** The gate that proves RenG still draws what it drew, wired into the same two

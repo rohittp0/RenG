@@ -24,7 +24,7 @@ class StickerPipelineTest {
     }
 
     @Test fun creationBuildsAProgramAQuadAndTwoAttributes() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createStickerPipeline(binding, ShaderDialect.GLES, GlProgramCache())
             as StickerPipelineResult.Created
         assertTrue(pipeline.pipeline.program > 0)
@@ -33,10 +33,18 @@ class StickerPipelineTest {
         assertEquals(2, binding.log.count { it.startsWith("enableVertexAttribArray") })
         assertEquals(2, binding.log.count { it.startsWith("vertexAttribPointer") })
         assertTrue(binding.log.any { it.startsWith("bufferData(0x8892,64") })
+        // The fake mirrors a real driver: an undeclared name resolves to -1. This pins that the
+        // pipeline actually queries both of its documented uniform names against the compiled program,
+        // not merely that it builds something.
+        assertEquals(
+            MODEL_VIEW_PROJECTION_LOCATION,
+            pipeline.pipeline.modelViewProjectionUniformLocation,
+        )
+        assertEquals(TEXTURE_LOCATION, pipeline.pipeline.textureUniformLocation)
     }
 
     @Test fun deletionRemovesTheQuadAndTheProgram() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val cache = GlProgramCache()
         val pipeline =
             (createStickerPipeline(binding, ShaderDialect.GLES, cache) as StickerPipelineResult.Created).pipeline
@@ -49,7 +57,7 @@ class StickerPipelineTest {
     }
 
     @Test fun theMapRegimeDrawsDepthTestedBeforeTheScreenRegimeComposites() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createdPipeline(binding)
         val mapTexture = 11
         val screenTexture = 22
@@ -87,7 +95,7 @@ class StickerPipelineTest {
     }
 
     @Test fun equalZIndexCompositesInStablePlanOrder() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createdPipeline(binding)
         val firstTexture = 11
         val secondTexture = 22
@@ -111,7 +119,7 @@ class StickerPipelineTest {
     // `equalZIndexCompositesInStablePlanOrder` unnoticed. This test uses two DIFFERENT z values instead,
     // so only the correct (ascending) direction draws the greater one last.
     @Test fun greaterZIndexComposesOnTopOfLesserZIndex() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createdPipeline(binding)
         val lowTexture = 11
         val highTexture = 22
@@ -130,7 +138,7 @@ class StickerPipelineTest {
     }
 
     @Test fun theBlendModeIsPremultipliedNotStraightAlpha() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createdPipeline(binding)
         binding.log.clear()
         drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker())))
@@ -143,11 +151,54 @@ class StickerPipelineTest {
     }
 
     @Test fun anEntirelyEmptyWorldIssuesNoGlCallsAtAll() {
-        val binding = RecordingGlBinding()
+        val binding = newBinding()
         val pipeline = createdPipeline(binding)
         binding.log.clear()
         drawStickers(binding, pipeline, StickerWorld())
         assertContentEquals(emptyList(), binding.log)
+    }
+
+    // RecordingGlBinding's getUniformLocation/getAttribLocation return -1 for any name the binding was
+    // not told to declare (matching a real driver for a name the linked program never declares). Every
+    // other test in this file uses newBinding(), which declares both of this pipeline's uniform names,
+    // so drawStickers's `>= 0` guards are exercised on their true (bind) branch throughout this suite --
+    // not merely left untested because the fake happened to answer every query the same way. This test
+    // pins that behaviour directly: with both names declared, drawing must actually issue the uniform
+    // binds, at the exact locations createStickerPipeline resolved.
+    @Test fun drawingBindsBothDeclaredUniformsAtTheirResolvedLocations() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        assertEquals(MODEL_VIEW_PROJECTION_LOCATION, pipeline.modelViewProjectionUniformLocation)
+        assertEquals(TEXTURE_LOCATION, pipeline.textureUniformLocation)
+
+        binding.log.clear()
+        drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker())))
+
+        assertTrue(
+            binding.log.any { it == "uniformMatrix4fv($MODEL_VIEW_PROJECTION_LOCATION,1,false)" },
+            "the model-view-projection uniform must be bound when the shader declares it",
+        )
+        assertTrue(
+            binding.log.any { it == "uniform1i($TEXTURE_LOCATION,0)" },
+            "the texture uniform must be bound to texture unit 0 when the shader declares it",
+        )
+    }
+
+    // The mirror image of the test above: when the shader declares neither name (RecordingGlBinding's
+    // own default), createStickerPipeline resolves both locations to -1 and drawStickers's `>= 0` guards
+    // must skip the binds entirely, exactly as they would for a real compiled program missing both
+    // uniforms.
+    @Test fun drawingSkipsBothUniformBindsWhenNeitherIsDeclared() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val pipeline = createdPipeline(binding)
+        assertEquals(-1, pipeline.modelViewProjectionUniformLocation)
+        assertEquals(-1, pipeline.textureUniformLocation)
+
+        binding.log.clear()
+        drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker())))
+
+        assertFalse(binding.log.any { it.startsWith("uniformMatrix4fv") })
+        assertFalse(binding.log.any { it.startsWith("uniform1i") })
     }
 
     private fun createdPipeline(binding: RecordingGlBinding): StickerPipeline =
@@ -156,4 +207,14 @@ class StickerPipelineTest {
 
     private fun resolvedSticker(texture: Int = 1, z: Double = 0.0): ResolvedSticker =
         ResolvedSticker(modelViewProjection = FloatArray(16), texture = texture, screenCompositeZ = z)
+
+    private fun newBinding(): RecordingGlBinding = RecordingGlBinding().withDeclaredNames(
+        STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to MODEL_VIEW_PROJECTION_LOCATION,
+        STICKER_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
+    )
+
+    private companion object {
+        const val MODEL_VIEW_PROJECTION_LOCATION: Int = 3
+        const val TEXTURE_LOCATION: Int = 7
+    }
 }

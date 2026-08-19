@@ -26,6 +26,7 @@ class GlShaderCompilerTest {
     @Test fun anEsContextCompilesTheSourceUnchanged() {
         val binding = RecordingGlBinding()
         compileShaderProgram(binding, ShaderDialect.GLES, key, vertexPlan, fragmentPlan)
+        assertEquals(2, binding.shaderSources.size)
         assertTrue(binding.shaderSources.values.all { it.startsWith("#version 300 es") })
         assertTrue(binding.shaderSources.values.none { "#version 330 core" in it })
     }

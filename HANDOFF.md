@@ -7,9 +7,11 @@ branch `feat/cycle-c-resource-layer`**, but narrower than its approved plan: six
 commits, the production Rentile key resolver, the firewall adapters, engine failure classification, the
 basemap rasterizer host, and terrain acquisition) were reordered onto the basemap cycle so a resource-layer
 MVP can ship first; see "Cycle C — resource layer, as implemented" below for exactly what shipped, what
-didn't, and what five review passes found in the PNG path. **Cycle D has an owner-approved design
-specification and written implementation plan** and is being implemented on a separate branch not covered by
-this update.
+didn't, and what five review passes found in the PNG path. **Cycle D is also implemented, on branch
+`feat/cycle-d-gl-foundation`**, with every plan task including the real-context conformance suite complete
+and independently reviewed; see "Cycle D — GL foundation, as implemented" below. Both branches have now
+been gathered into one tree by the integration merge this document reflects; neither cycle, individually or
+combined, is merged to `main`, released, or has observed merged-commit CI or publication.
 
 RenG still renders nothing and exposes no public runtime API.
 
@@ -381,41 +383,69 @@ What the artifact cannot show is behaviour: threading, actual exchange counts, p
 revalidation, cancellation depth. The document prescribes a counting-stub spike against a real Rentile
 call to close those before the specification is final.
 
-## Cycle D — GL foundation
+## Cycle D — GL foundation, as implemented
 
-The internal GL seam and its three implementations, context and dialect detection at setup, the offscreen
-surface and composite pass, the documented save-and-restore set, and shader compilation with version
-substitution and program caching. The conformance suite lands here and is what makes ADRs 0006 and 0008
-claims rather than hopes. Read `docs/research/2026-08-18-cycle-d-gl-foundation.md` first; it corrects
-three things.
+**Implemented on branch `feat/cycle-d-gl-foundation`, awaiting integration review; not merged to `main`, not
+released, `VERSION_NAME` still `0.1.0`.** Every plan task is complete and independently reviewed with its
+findings fixed, including the real-context conformance suite. It delivers the internal GL seam (eighty-four
+entry points typed at Android's width) and four platform implementations — one each in `iosMain`,
+`macosMain`, `linuxMain`, `androidMain`, per ADR 0022's measured source-set visibility rather than ADR
+0009's original claim; runtime shading-language dialect detection off `GL_SHADING_LANGUAGE_VERSION` alone,
+never the target platform; the offscreen colour-and-depth surface and its composite pass; the corrected GL
+restore set (ADR 0023, superseding ADR 0006); shader compilation with version-directive substitution and a
+program cache; the lifecycle driver that feeds real GL facts to Cycle B's pure reducer, unmodified; and the
+GL conformance suite. As before, this adds no public ABI, no renderer factory, no resource acquisition, no
+Rentile call, no decoder or parser, and no frame content.
 
-**The substitution trigger must be the context's queried shading language, never the target platform.** On
-a real llvmpipe ES context the unsubstituted source compiles and the substituted one fails; on a desktop
-context both compile; on Apple only the substituted one does. Because the consumer creates the context, one
-Linux target serves either kind, so platform-keying would inject a desktop directive into an ES context,
-which is fatal — and that is the more likely Linux case. Substituting on every desktop context is confirmed
-safe rather than merely assumed.
+Read `docs/research/2026-08-18-cycle-d-gl-foundation.md`, `docs/research/2026-08-19-mesa-cross-dialect-link-segfault.md`,
+and `docs/research/2026-08-19-mesa-bug-report-draft.md` — three things the plan got right stand as measured
+(dialect keyed on the runtime query, the restore set's corrections, the eighty-four-entry binding
+inventory), and two things were discovered only during implementation and are recorded below because they
+were not anticipated by any of the cycle's research.
 
-**The documented restore set was incomplete**, missing the colour write mask, pixel store alignment and row
-length, clear values, the array buffer binding and pack alignment; the pixel store alignment default is
-four, not one. A full save, perturb and restore round trip is now byte-exact on both a real ES and a real
-desktop context. The error queue is the one piece of state that cannot be preserved, because reading it
-clears it — a real exception to the no-modification guarantee, and one to state rather than discover.
+**A Mesa driver defect forced a Linux-wide skip of one deliberate negative check.** Mesa 25.2.8 SIGSEGVs
+inside `libgallium` during `glLinkProgram` whenever a process holds two or more EGL contexts with at least
+one GLES-profile context and performs a cross-`#version`-dialect link — order-independent, reproducible
+from a RenG-free C program, and absent on Mesa 23.2.1. It is a driver defect, not RenG's: production code
+never performs that link, only the conformance suite's deliberate "a mismatched `#version` must fail"
+check does. The owner accepted skipping that one check on Linux, for every dialect and every driver,
+through an internal `CrossDialectLinkPolicy` defaulting to `EXERCISE_LINK` with only
+`LinuxGlConformanceTest` opting into the bypass — measured at 0/20 crashes, down from 15/15. A ready-to-file
+upstream bug report exists at `docs/research/2026-08-19-mesa-bug-report-draft.md` but has **not** been
+filed.
 
-**The binding inventory is measured, not remembered**, and the earlier counts were right. An eighty-four
-name checklist of the entry points a renderer needs has no gap on any of the four implementations. Linux
-ships no GL or EGL headers at all, and the `dlsym` seam now compiles for both Linux targets from one source
-and runs against a surfaceless llvmpipe context created with no display server, including the array-based
-uploads the Android side must mirror.
+**The macOS CGL fixture is now the sole real proof that `#version` substitution is load-bearing.** Apple's
+driver reports `4.1 Metal - 90.5` and does not advertise `GL_ARB_ES3_compatibility`, so on real Apple
+silicon the cross-dialect negative check runs unskipped and passed. If that fixture ever stops exercising
+the link — a refactor that widens its capability gate, for instance — the substitution claim goes back to
+unproven everywhere, since Linux now skips its own copy of the same check. Whoever touches
+`GlConformanceSuite.kt` or the macOS fixture should know this dependency exists before they change either.
 
-**The conformance suite can run on a hosted macOS runner, provided it never requests acceleration.** A
-context is created only when the accelerated pixel format requirement is dropped, and it then reports
-`Apple Software Renderer` rather than Metal. A suite that asks for acceleration fails to obtain a context
-at all, with an error that names an invalid pixel format rather than the absence of a GPU.
+**Two defects surfaced only by driving the lifecycle machine were found and fixed.** Restructuring
+`applyTerminal` into a `when` over `RendererOwnerState` with no `else` branch — so a future added state is a
+compile error rather than a silent fallthrough — surfaced a latent bug the old fallback had been hiding:
+`profile` was not being nulled alongside `adoptedContext` on GPU-object loss, which would have let a stale
+context's dialect leak into a decision made after that context was gone. Both the restructure and the fix
+landed together. Separately, `GlProgramCache`'s cache key deliberately omits the shader dialect; that is
+safe only because `forgetWithoutDeleting()` calls both `GlObjectRegistry.forgetEverything()` and
+`GlProgramCache.forgetAll()` on every context adoption, every GPU-object-loss event, and renderer close. A
+reviewer traced the state machine and confirmed those three call sites are exhaustive. Anyone adding a
+fourth transition that can leave an adopted context behind must add the same invalidation or the cache will
+serve a program compiled under one dialect to a context running another.
 
-The seam's central design problem remains, and no research settles it: one interface must be implementable
-by pointer-based Kotlin/Native sides and by Android's JVM-array-based `GLES30`. The research document
-sketches signatures for representative calls; the specification has to choose.
+**What was verified where.** The conformance suite ran for real against llvmpipe (surfaceless EGL, both ES
+3.2 and desktop 4.5 core) and against a real CGL core-profile context on Apple silicon (`Apple M3 Max`, `4.1
+Metal - 90.5`) — both real-driver runs, both outside the ordinary `:kmp:linuxX64Test`/`:kmp:macosArm64Test`
+Gradle invocation in the Linux case, since the Linux run that found the Mesa defect was an opportunistic
+Docker verification rather than a hosted CI run. The one thing not verified anywhere yet is the hosted
+runner's no-GPU fallback (`Apple Software Renderer` on macOS when acceleration is not requested) — every
+local run so far has had a real GPU.
+
+The seam's central design problem from the research phase — one interface implementable by pointer-based
+Kotlin/Native sides and Android's JVM-array-based `GLES30` — is resolved as shipped: `Int` names and enums,
+`Boolean`/`BooleanArray`, `IntArray`, `FloatArray`, `Int` buffer sizes, `ByteArray?` payloads, and one
+`String` shader source, because Android exposes exactly `glShaderSource(int, String)` with no count or
+length array.
 
 ## Cycles E through J
 
@@ -431,7 +461,8 @@ should key a baseline, or the first run somewhere new will fail on a difference 
 **F — drawn things.** Stickers, models with textures and animation-track time sampling, and geometries
 painted by consumer shader pairs. Owns the decision `CLAUDE.md` flags as ADR-worthy and still unmade: how
 the two draw regimes order within one frame, given screen-anchored things composite by z-index with no
-depth test while map-anchored things are occlusion-tested. That would be **ADR 0023**. This cycle also
+depth test while map-anchored things are occlusion-tested. Cycle D took ADR 0023 for its corrected GL
+restore set, so that would be **ADR 0024**. This cycle also
 fixes the documented uniform and attribute names a shader pair may declare.
 
 **G — globe projection.** The second projection mode, re-projecting mercator tiles and every placement.

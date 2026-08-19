@@ -116,6 +116,21 @@ The conformance suite lands here and is the reason ADR 0006 and ADR 0008 are cla
 state identical before and after a draw, and a GLSL ES 3.00 source compiling under both a substituted
 and an unsubstituted directive. It runs against real contexts on `macosArm64` and llvmpipe.
 
+Cycle D is implemented on branch `feat/cycle-d-gl-foundation`, where every plan task including the
+real-context conformance suite is complete and each was independently reviewed with its findings fixed.
+`checkKotlinAbi` reports no public ABI change across the whole cycle. Its own gates pass locally: the
+conformance suite ran for real
+against llvmpipe (surfaceless EGL, ES 3.2 and desktop 4.5 core) and against a real CGL core-profile context
+on Apple silicon; ADR 0006's restore-set claim is corrected and superseded by ADR 0023 and verified
+byte-exact on both. A Mesa 25.2.8 driver defect made one deliberate negative check — a cross-dialect
+`glLinkProgram` — SIGSEGV in-process on Linux; the owner-approved fix skips that one check on Linux for
+every dialect, leaving the macOS fixture as the only remaining real proof that `#version` substitution is
+load-bearing. That Linux verification happened opportunistically under Docker against real Mesa, not
+through a hosted CI run of `:kmp:linuxX64Test`; the hosted runner's no-GPU software-renderer fallback on
+macOS remains untested on any machine with a real GPU. Cycle D awaits integration review; it is not merged
+and not released, so its exact merged-commit CI and publication have not been observed, and `VERSION_NAME`
+remains `0.1.0`.
+
 ## E — Basemap and terrain
 
 Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with texture

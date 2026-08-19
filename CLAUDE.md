@@ -26,12 +26,27 @@ contains no Rentile type, platform binding, or renderer factory. Cycle B has **n
 has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
 remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
 
+**Cycle D is implemented on branch `feat/cycle-d-gl-foundation` and awaits integration review.** Its
+authority is `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` and
+`docs/superpowers/plans/2026-08-18-cycle-d-gl-foundation.md`; every plan task including the real-context
+conformance suite is complete, and each was independently reviewed with its findings fixed. It adds the
+internal GL seam and its four platform implementations, runtime shading-language dialect detection, the
+offscreen colour-and-depth surface and its composite pass, the corrected GL restore set (ADR 0023), shader
+compilation with version-directive substitution and program caching, the lifecycle driver that supplies
+real GL facts to Cycle B's unmodified pure reducer, and the GL conformance suite that runs against real
+contexts on both llvmpipe and Apple silicon. Cycle D still adds no public ABI, no renderer factory, no
+resource acquisition, no Rentile call, no decoder or parser, and no frame content — the KLIB ABI dump
+contains no Rentile type, platform binding, or renderer factory. Cycle D has **not** been merged to `main`,
+has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
+remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
 preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and
 terminal renderer ownership, ADR 0018 governs canonical identities, ADR 0019 takes kotlinx-coroutines as a
-first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, and ADR 0022
-supersedes ADR 0009's source-set visibility claim). Read both before proposing anything that touches
+first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, ADR 0022
+supersedes ADR 0009's source-set visibility claim, and ADR 0023 supersedes ADR 0006's GL restore set and
+declares the GL error-queue exception). Read both before proposing anything that touches
 the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is

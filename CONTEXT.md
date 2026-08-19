@@ -126,6 +126,20 @@ context, but the consumer serializes them. Preparation invocations are serialize
 history; one batch still performs independent resource work concurrently.
 _Avoid_: Surface, device, GL session, EGL context
 
+**Restore Set**:
+The closed, documented set of GL state RenG reads before it draws and restores before it returns: the draw
+and read framebuffer, renderbuffer, program, vertex array, array buffer, pixel unpack buffer and uniform
+buffer bindings; the active texture unit and the texture and sampler binding on every unit RenG uses; blend
+enable, separate factors, separate equations and colour; depth test enable, function, write mask and range;
+cull enable, mode and winding; viewport; scissor enable and box; the colour write mask; the colour and depth
+clear values; the unpack alignment, row length, skip rows and skip pixels and the pack alignment; and, on a
+desktop **Render Context** only, the draw buffer and line smoothing. `GL_FRAMEBUFFER_SRGB` is set explicitly
+and restored wherever it is queryable. The element array buffer binding is excluded because the vertex array
+binding restores it. `GL_ACTIVE_TEXTURE` is captured first and reinstated last. The GL error queue is the one
+piece of state RenG cannot restore: reading it clears it, so RenG drains it on entry, attributes any flag
+found to the consumer, and consumes it.
+_Avoid_: GL state cache, context reset, default state, state stack
+
 **Renderer State**:
 One of three terminally ordered owner states. `LIVE` has one adopted exact **Render Context**;
 `AWAITING_CONTEXT_ADOPTION` follows **GPU Object Loss**, has no adopted context or live GL handle, and still

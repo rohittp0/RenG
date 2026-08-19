@@ -37,10 +37,21 @@ internal enum class PngReject {
     IHDR_NOT_FIRST,
     IHDR_LENGTH,
     IEND_NOT_LAST,
+
+    /** An `IEND` chunk with a non-empty payload; the specification requires it exactly empty. */
+    IEND_LENGTH,
     TRAILING_BYTES,
     CHUNK_LENGTH,
     CHUNK_CRC,
     UNKNOWN_CRITICAL_CHUNK,
+
+    /**
+     * A known critical chunk (`IHDR` or `PLTE`) appearing more than once. Not [UNKNOWN_CRITICAL_CHUNK]
+     * — a repeated `IHDR` is the best-known chunk in the format, not an unknown one, and a repeated
+     * `PLTE` previously fell through no check at all (the second silently overwrote the first, changing
+     * the rendered output). Each may appear at most once, per specification.
+     */
+    DUPLICATE_CRITICAL_CHUNK,
     COMPRESSION_METHOD,
     FILTER_METHOD,
     ZERO_DIMENSION,
@@ -178,7 +189,13 @@ internal fun scanPng(bytes: ByteArray): PngScan {
 
             header = PngHeader(width, height, bitDepth, colourType, interlaceMethod)
             sawIhdr = true
+        } else if (type == TYPE_IHDR) {
+            // A second IHDR, anywhere after the first. IHDR_NOT_FIRST only covers a non-IHDR chunk
+            // preceding the real IHDR; this is the "IHDR again, later" shape, which otherwise falls
+            // through to the generic isCritical() catch-all below and misreports as "unknown".
+            return PngScan.Malformed(PngReject.DUPLICATE_CRITICAL_CHUNK)
         } else if (type == TYPE_IEND) {
+            if (payloadLength != 0) return PngScan.Malformed(PngReject.IEND_LENGTH)
             pos = crcOffset.toInt() + 4
             if (pos.toLong() != total) return PngScan.Malformed(PngReject.TRAILING_BYTES)
             sawIend = true
@@ -186,6 +203,7 @@ internal fun scanPng(bytes: ByteArray): PngScan {
         } else if (type == TYPE_IDAT) {
             imageDataRanges.add(payloadStart until (payloadStart + payloadLength))
         } else if (type == TYPE_PLTE) {
+            if (palette != null) return PngScan.Malformed(PngReject.DUPLICATE_CRITICAL_CHUNK)
             palette = bytes.copyOfRange(payloadStart, payloadStart + payloadLength)
         } else if (type == TYPE_TRNS) {
             transparency = bytes.copyOfRange(payloadStart, payloadStart + payloadLength)

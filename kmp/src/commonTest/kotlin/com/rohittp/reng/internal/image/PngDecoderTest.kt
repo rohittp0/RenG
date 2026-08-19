@@ -197,6 +197,35 @@ class PngDecoderTest {
         assertContentEquals(expectedPaletteWithShortTrns, result.image.rgbaSnapshot())
     }
 
+    // decodeAdmitted's ceiling check was `width.toLong() * height.toLong() * 4L > maximumDecodedBytes`:
+    // correct in isolation, but width/height alone can each be up to 2^31-1 (scanPng's own admitted
+    // range), and multiplying two such values together AND by 4 overflows signed 64-bit Long, wrapping
+    // to a negative number that is never greater than any positive ceiling. Two distinct-magnitude
+    // fixtures pin two distinct failure shapes of the same root cause; neither carries real IDAT data
+    // (nor needs to — the ceiling check must reject before ever looking at pixel data), and the third
+    // assertion proves the fix isn't simply "reject everything".
+    @Test
+    fun ceilingArithmeticNeverOverflowsForAnyAdmittedDimensionPair() {
+        // width = height = 2^31-1: the exact per-dimension maximum DIMENSION_OUT_OF_RANGE admits. True
+        // declared size is ~1.8e19 bytes; unfixed, `width*height*4L` wraps to -17179869180, which is
+        // never > any positive ceiling, so a 45-byte file (no IDAT needed) defeats TooLarge entirely and
+        // crashes several calls downstream instead (see the litmus in task-5-report.md).
+        assertIs<PngDecodeResult.TooLarge>(decodePng(maxDimensionSquare, 100_000_000L))
+
+        // width=1518500249, height=1518500253: both comfortably under 2^31-1 individually, but the true
+        // width*height*4 (9223372049148251988) still exceeds Long.MAX_VALUE and wraps. Unfixed, that
+        // wrapped ceiling-check value is negative too, so TooLarge never fires here either; downstream,
+        // rawSizeLong.toInt() truncates to a SMALL POSITIVE 296902002, so the JVM actually allocates
+        // ~283MB against this 100MB ceiling — no exception, no rejection, the ceiling simply silently
+        // does not apply (see the litmus in task-5-report.md for the reproduced figures).
+        assertIs<PngDecodeResult.TooLarge>(decodePng(wrappingProductDimensions, 100_000_000L))
+
+        // Proves the fix isn't "reject everything": a real, legitimately large image exactly at its
+        // ceiling (the existing 4096x4096 fixture and ceiling from
+        // decidesTheCeilingFromHeaderDimensionsBeforeAllocating) still decodes.
+        assertIs<PngDecodeResult.Success>(decodePng(declared4096Square, 67_108_864L))
+    }
+
     private fun malformedReasonOf(bytes: ByteArray): PngReject =
         assertIs<PngDecodeResult.Malformed>(decodePng(bytes, 1L shl 20)).reason
 
@@ -488,6 +517,21 @@ class PngDecoderTest {
         -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, -128, 0, 0, 0, 0, 0, 0, 1,
         8, 2, 0, 0, 0, -33, -33, 29, -9, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, 96, 100, 98, 6,
         0, 0, 14, 0, 7, -23, -110, 55, -44, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // width=height=2^31-1 (the exact per-dimension maximum DIMENSION_OUT_OF_RANGE admits), colour type
+    // 0, no IDAT chunk at all — scanPng never requires one, and the ceiling check must reject this
+    // before ever looking at pixel data, so there is none to fake.
+    private val maxDimensionSquare: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 127, -1, -1, -1, 127, -1, -1, -1,
+        8, 0, 0, 0, 0, 49, -94, 84, -70, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // width=1518500249, height=1518500253 — both individually well within scanPng's admitted range,
+    // but width*height*4 exceeds Long.MAX_VALUE. Colour type 0, no IDAT chunk (same reasoning as above).
+    private val wrappingProductDimensions: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 90, -126, 121, -103, 90, -126, 121, -99,
+        8, 0, 0, 0, 0, 55, 114, -107, -103, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
     )
 
     // Colour type 0 (greyscale), 1x1, tRNS present but 0 bytes long (needs exactly 2).

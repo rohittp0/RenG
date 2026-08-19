@@ -73,6 +73,9 @@ class PngContainerTest {
         assertEquals(PngReject.PALETTE_FORBIDDEN, rejectionOf(greyscaleWithPlte))
         assertEquals(PngReject.TRNS_LENGTH, rejectionOf(greyWithZeroByteTrns))
         assertEquals(PngReject.TRNS_LENGTH, rejectionOf(rgbWithFourByteTrns))
+        assertEquals(PngReject.DUPLICATE_CRITICAL_CHUNK, rejectionOf(duplicateIhdr))
+        assertEquals(PngReject.DUPLICATE_CRITICAL_CHUNK, rejectionOf(duplicatePlte))
+        assertEquals(PngReject.IEND_LENGTH, rejectionOf(nonEmptyIend))
     }
 
     @Test
@@ -157,6 +160,33 @@ class PngContainerTest {
 
     // Colour type 2 (truecolour) with a 4-byte tRNS chunk; colour type 2 requires exactly 6 bytes.
     private val rgbWithFourByteTrns: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 4, 116, 82, 78, 83, 0, 1, 2, 3, 25, 110, 63, -107, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, 3, 0, 0, 104, 0, 61, 106, -11, 112, 91, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)
+
+    // A second IHDR chunk after the first (before IEND). This otherwise falls through to the generic
+    // isCritical() catch-all and misreports as UNKNOWN_CRITICAL_CHUNK — IHDR is the best-known chunk in
+    // the format, not an unknown one.
+    private val duplicateIhdr: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2,
+        8, 2, 0, 0, 0, -3, -44, -102, 115, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0,
+        2, 8, 2, 0, 0, 0, -3, -44, -102, 115, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126
+    )
+
+    // Colour type 3, two PLTE chunks. Previously the second silently overwrote `palette`, so the
+    // rendered output would silently change depending on which PLTE "won" — the specification permits
+    // only one.
+    private val duplicatePlte: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 3, 0, 0, 0, 40, -53, 52, -69, 0, 0, 0, 3, 80, 76, 84, 69, -1, 0, 0, 25, -30, 9, 55,
+        0, 0, 0, 3, 80, 76, 84, 69, 0, -1, 0, 52, 94, -64, -88, 0, 0, 0, 0, 73, 69, 78, 68, -82,
+        66, 96, -126
+    )
+
+    // A complete, validly-CRC'd 1x1 truecolour file whose IEND carries a 1-byte payload; the
+    // specification requires IEND's payload exactly empty.
+    private val nonEmptyIend: ByteArray = byteArrayOf(
+        -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+        8, 2, 0, 0, 0, -112, 119, 83, -34, 0, 0, 0, 12, 73, 68, 65, 84, 120, -38, 99, -32, 18, -111, 3,
+        0, 0, 104, 0, 61, 106, -11, 112, 91, 0, 0, 0, 1, 73, 69, 78, 68, 1, -90, 29, 127, 119
+    )
 
     // Colour type 3 (palette) with no PLTE chunk present anywhere.
     private val colourTypeThreeWithoutPlte: ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 3, 0, 0, 0, 69, 104, -3, 22, 0, 0, 0, 11, 73, 68, 65, 84, 120, -100, 99, 96, 96, 0, 0, 0, 3, 0, 1, -72, -83, 58, 99, 0, 0, 0, 0, 73, 69, 78, 68, -82, 66, 96, -126)

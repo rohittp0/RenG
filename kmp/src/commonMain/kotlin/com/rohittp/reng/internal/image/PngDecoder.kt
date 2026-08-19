@@ -64,7 +64,19 @@ private fun decodeAdmitted(bytes: ByteArray, scan: PngScan.Admitted, maximumDeco
 
     // Decide the ceiling from the header's own dimensions alone, before any array — raster or
     // output — is allocated, so a maliciously large declared size can never force a huge allocation.
-    if (width.toLong() * height.toLong() * 4L > maximumDecodedBytes) return PngDecodeResult.TooLarge
+    // width and height are each individually bounded to 1..2^31-1 by scanPng's DIMENSION_OUT_OF_RANGE
+    // and ZERO_DIMENSION checks, so their product alone cannot overflow Long: at most (2^31-1)^2 ≈
+    // 4.6e18, comfortably under Long.MAX_VALUE (~9.22e18). It is multiplying that product by 4 (for
+    // RGBA) that can overflow: width = height = 2^31-1 wraps `* 4L` to a negative Long, so the
+    // comparison is never true for any positive maximumDecodedBytes and TooLarge never fires — a
+    // 58-byte file could otherwise defeat any ceiling. Comparing by DIVISION instead keeps this check
+    // correct for every admitted dimension pair, with no wraparound: for maximumDecodedBytes >= 0,
+    // `pixelCount > maximumDecodedBytes / 4` is exactly equivalent to
+    // `pixelCount * 4 > maximumDecodedBytes` (Kotlin's Long division truncates toward zero, so for a
+    // non-negative dividend the remainder it drops is always in 0..3, which never changes which side of
+    // the comparison wins), and neither operand here is ever a product of two width/height-scale values.
+    val pixelCount = width.toLong() * height.toLong()
+    if (pixelCount > maximumDecodedBytes / 4) return PngDecodeResult.TooLarge
 
     if (scan.transparency != null && (colourType == 4 || colourType == 6)) {
         // Colour types 4 and 6 already carry a full alpha channel; a tRNS chunk is only meaningful
@@ -76,10 +88,25 @@ private fun decodeAdmitted(bytes: ByteArray, scan: PngScan.Admitted, maximumDeco
     // "bpp" for filtering purposes: bytes per complete pixel, rounded up to at least 1. Every colour
     // type scanPng admits is bit depth 8 only, so channels is already >= 1 and never fractional.
     val bpp = maxOf(1, channels)
+
+    // strideLong and rawSizeLong are each proven in range BEFORE the `.toInt()` narrowing that uses
+    // them, not after — a value that has already wrapped (as Long or as Int) cannot be rescued by a
+    // later check. strideLong cannot overflow Long on its own (width <= 2^31-1, channels <= 4, product
+    // at most ~8.6e9); bounding it to Int range here — before it feeds rawSizeLong's multiplication —
+    // is what keeps THAT multiplication (height, up to ~2.1e9, times strideLong+1, now also bounded to
+    // ~2.1e9, product at most ~4.6e18) safely under Long.MAX_VALUE too. This deliberately does not lean
+    // on the ceiling check above to establish the bound, since that check's own correctness was exactly
+    // this round's finding — this stays correct for every admitted width/height/colourType regardless
+    // of what maximumDecodedBytes the caller passes.
     val strideLong = width.toLong() * channels
-    val rawSizeLong = height.toLong() * (strideLong + 1)
-    val rawSize = rawSizeLong.toInt()
+    if (strideLong > Int.MAX_VALUE.toLong()) return PngDecodeResult.TooLarge
     val stride = strideLong.toInt()
+
+    val rawSizeLong = height.toLong() * (strideLong + 1)
+    // The `- 1` leaves room for inflateExactly's own `+ 1` guard byte without that addition overflowing
+    // Int either.
+    if (rawSizeLong > Int.MAX_VALUE - 1L) return PngDecodeResult.TooLarge
+    val rawSize = rawSizeLong.toInt()
 
     val inflated = inflateExactly(bytes, scan.imageDataRanges, rawSize)
         // The decompressed byte count doesn't match the raster size IHDR's own dimensions declare,

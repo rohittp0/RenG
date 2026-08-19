@@ -22,9 +22,10 @@ Cycle B is pure core only: public immutable values, protocols and sanitized fail
 spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven entirely by supplied
 values. There is still no renderer factory, consumer adapter call, Rentile acquisition, decoder, parser,
 production cache, GL call, shader compilation, or pixel, and no public runtime API — the KLIB ABI dump
-contains no Rentile type, platform binding, or renderer factory. Cycle B has **not** been merged to `main`,
-has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
-remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+contains no Rentile type, platform binding, or renderer factory. Cycle B has been merged to `main` locally,
+as stated above, but `main` itself is unpushed, so Cycle B has **not** been released and its exact
+merged-commit CI and publication have not been observed. `VERSION_NAME` remains `0.1.0` and the public
+`0.1.0` record remains Cycle A's.
 
 **Cycle C is implemented on branch `feat/cycle-c-resource-layer` and awaits integration review.** Its
 owner-approved design is `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and its

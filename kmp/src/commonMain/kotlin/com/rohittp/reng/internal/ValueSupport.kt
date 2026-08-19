@@ -14,6 +14,16 @@ internal fun requireFinite(value: Double, field: String): Double {
     return value
 }
 
+internal fun canonicalFloat(value: Float, field: String): Float {
+    val finiteValue = requireFiniteFloat(value, field)
+    return if (finiteValue == 0.0f) 0.0f else finiteValue
+}
+
+internal fun requireFiniteFloat(value: Float, field: String): Float {
+    require(value.isFinite()) { "$field must be finite" }
+    return value
+}
+
 internal fun requireUnicodeScalars(value: String, field: String, nonBlank: Boolean): String {
     require(!nonBlank || value.isNotBlank()) { "$field must not be blank" }
 

@@ -106,9 +106,14 @@ internal data class GltfSampler(val magFilter: Int?, val minFilter: Int?, val wr
  * form is `buffers[0]` embedded in the GLB's BIN chunk. */
 internal data class GltfBuffer(val byteLength: Long, val uri: String?)
 
-/** A fully parsed, internally consistent glTF 2.0 document: every index reference resolves, every
- * accessor's arithmetic fits its backing storage, and the node hierarchy is a set of disjoint
- * strict trees. No judgement is made yet about whether RenG can draw it -- that is
+/** A fully parsed, internally consistent glTF 2.0 document: every index *reference* resolves to
+ * an element of the array it indexes into, and every accessor's arithmetic fits its backing
+ * storage, and the node hierarchy is a set of disjoint strict trees. This is a structural
+ * guarantee, not a content one: an indices accessor's actual index *values* are checked only
+ * opportunistically, against a declared `max` when one is present -- see
+ * [GltfReject.INDEX_VALUE_OUT_OF_RANGE] for why a buffer-level bounds check is not available here,
+ * and why a `Parsed` result does not by itself guarantee every index value is in range. No
+ * judgement is made yet about whether RenG can draw the document -- that is
  * `VALIDATE_GLB_FEATURES`'s job, over this same structure. */
 internal data class GltfDocument(
     val accessors: List<GltfAccessor>,
@@ -137,23 +142,45 @@ internal data class GltfDocument(
  * the same design already established for `GlbReject.DECLARED_LENGTH_MISMATCH`: one code per kind
  * of true statement the consumer needs, not one code per JSON field.
  *
- * - [NON_INTEGER_INDEX] covers every integer-typed field read anywhere in the document -- not
+ * - [NON_INTEGER_FIELD] covers every integer-typed field read anywhere in the document -- not
  *   only a reference into another array, but any field the specification types as an integer
  *   (`count`, `componentType`, `byteOffset`, `byteLength`, `byteStride`, `mode`, an accessor's
  *   declared `max`) -- whenever the JSON number token is fractional or exponential. `1e2` is a
- *   JSON number but is not an integer spelling, so it is never accepted as one.
+ *   JSON number but is not an integer spelling, so it is never accepted as one. Named for the
+ *   field, not narrowed to "index", precisely because it also covers non-index integer fields
+ *   such as `count` and `byteStride`.
  * - [INDEX_OUT_OF_RANGE] covers a syntactically valid integer reference that names no element of
  *   the array it indexes into, and also a structurally required index field that is absent
  *   entirely -- both mean the reference cannot be resolved.
- * - [COMPONENT_TYPE] covers an accessor whose numeric shape cannot be determined: an unrecognised
- *   or missing `componentType`, and equally an unrecognised or missing `type` string -- both leave
- *   the accessor's element size undecidable, which is the same underlying problem the code names.
- * - [ACCESSOR_SPAN_EXCEEDS_BUFFER_VIEW] covers both an accessor's byte span overflowing its
- *   buffer view and a `byteStride` that is below the accessor's element size or not a multiple of
- *   the component size -- both leave element addressing incoherent.
+ * - [COMPONENT_TYPE] covers only an accessor's `componentType`: unrecognised, or absent. An
+ *   unrecognised or absent `type` string is the adjacent but distinct [ACCESSOR_TYPE] -- the two
+ *   JSON fields are easy to confuse by name, so they are not allowed to share a code; conflating
+ *   them would point a consumer debugging by code name at the wrong field.
+ * - [ACCESSOR_TYPE] covers an accessor's `type` string being unrecognised or absent, leaving the
+ *   number of components per element -- and so the element size -- undecidable.
+ * - [ACCESSOR_SPAN_EXCEEDS_BUFFER_VIEW] covers only an accessor's byte span overflowing its
+ *   buffer view. A `byteStride` that is below the accessor's element size or not a multiple of
+ *   the component size is a distinct fault, incoherent addressing rather than an overrun, and is
+ *   [BYTE_STRIDE] instead.
+ * - [BYTE_STRIDE] covers a `bufferView.byteStride` that is below the referencing accessor's
+ *   element size, or not a multiple of the component size -- addressing that cannot be resolved,
+ *   as opposed to addressing that resolves past the end of the view.
  * - [BUFFER_VIEW_EXCEEDS_BUFFER] covers both a buffer view's span overflowing its buffer and
  *   `buffers[0]`'s declared `byteLength` overflowing the actual BIN chunk -- both mean a declared
  *   size exceeds what its backing store actually provides, one level apart in the same chain.
+ * - [INDEX_VALUE_OUT_OF_RANGE] is weaker than its name alone suggests, and that gap is
+ *   deliberate, not an oversight: `parseGltf` receives `binChunkLength` only, never the BIN
+ *   chunk's bytes, so it cannot read an indices accessor's actual buffer values. This code fires
+ *   only when an indices accessor declares its own `max` (a value the specification requires to
+ *   match the buffer's true contents) and that declared value equals the reserved maximum for its
+ *   `componentType`, or is at or above the referenced attribute count. When `max` is absent
+ *   entirely, this check does not fire at all -- there is nothing to prove a violation against --
+ *   so a [GltfParseResult.Parsed] result never guarantees every index value is in range; it only
+ *   guarantees no declared `max` proves one is not. See [GltfDocument]'s own documentation for the
+ *   same caveat stated against the document as a whole.
+ * - [ASSET_VERSION_UNSUPPORTED] covers `asset.version` missing, malformed, or not major version
+ *   `2`, and `asset.minVersion` malformed or above `2.0` -- ADR 0021 assigns `asset.version`
+ *   checking to `PARSE_GLB` by name.
  */
 internal enum class GltfReject {
     ACCESSOR_SPAN_EXCEEDS_BUFFER_VIEW,
@@ -164,8 +191,11 @@ internal enum class GltfReject {
     INDEX_OUT_OF_RANGE,
     INDEX_VALUE_OUT_OF_RANGE,
     DUPLICATE_ANIMATION_NAME,
-    NON_INTEGER_INDEX,
+    NON_INTEGER_FIELD,
     COMPONENT_TYPE,
+    ACCESSOR_TYPE,
+    BYTE_STRIDE,
+    ASSET_VERSION_UNSUPPORTED,
 }
 
 internal sealed interface GltfParseResult {

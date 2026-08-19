@@ -64,7 +64,7 @@ class GltfParseTest {
     fun readsIntegerFieldsOnlyFromIntegerSpelling() {
         // 1e2 is a JSON number but is not an index.
         assertEquals(
-            GltfReject.NON_INTEGER_INDEX,
+            GltfReject.NON_INTEGER_FIELD,
             reject(bufferViewIndexWrittenAsExponent, binChunkLength = 36L),
         )
     }
@@ -73,6 +73,34 @@ class GltfParseTest {
     fun rejectsAnUnknownComponentTypeAsMalformedNotUnsupported() {
         // An unknown componentType has no known size, so accessor arithmetic is undecidable.
         assertEquals(GltfReject.COMPONENT_TYPE, reject(componentType9999))
+    }
+
+    @Test
+    fun rejectsAnUnrecognizedAccessorTypeDistinctlyFromComponentType() {
+        // "VEC5" is not one of the specification's type strings, so the component count -- and
+        // so the element size -- is undecidable. This is ACCESSOR_TYPE, not COMPONENT_TYPE: the
+        // two adjacent JSON fields (`type` and `componentType`) must not share a code, or a
+        // consumer debugging by name inspects the wrong field.
+        assertEquals(GltfReject.ACCESSOR_TYPE, reject(accessorTypeUnrecognized))
+    }
+
+    @Test
+    fun rejectsAnIncoherentByteStrideDistinctlyFromASpanOverrun() {
+        assertEquals(GltfReject.BYTE_STRIDE, reject(byteStrideBelowElementSize, binChunkLength = 36L))
+        assertEquals(GltfReject.BYTE_STRIDE, reject(byteStrideNotMultipleOfComponentSize, binChunkLength = 40L))
+    }
+
+    @Test
+    fun rejectsAnUnsupportedAssetVersion() {
+        // Two separate rules -- major version and minVersion -- so one fixture each.
+        assertEquals(GltfReject.ASSET_VERSION_UNSUPPORTED, reject(assetVersionWrongMajor))
+        assertEquals(GltfReject.ASSET_VERSION_UNSUPPORTED, reject(assetMinVersionAboveTwoZero))
+    }
+
+    @Test
+    fun rejectsANodeCameraIndexOutOfRange() {
+        // Regression: node.camera must be bounds-checked the same way node.skin already is.
+        assertEquals(GltfReject.INDEX_OUT_OF_RANGE, reject(nodeWithCameraIndexOutOfRange))
     }
 
     // ---- fixtures ----
@@ -253,6 +281,56 @@ class GltfParseTest {
           "accessors": [
             {"componentType": 9999, "count": 1, "type": "VEC3"}
           ]
+        }
+    """.trimIndent()
+
+    private val accessorTypeUnrecognized = """
+        {
+          "asset": {"version": "2.0"},
+          "accessors": [
+            {"componentType": 5126, "count": 1, "type": "VEC5"}
+          ]
+        }
+    """.trimIndent()
+
+    // byteStride (8) is below the VEC3-float element size (12).
+    private val byteStrideBelowElementSize = """
+        {
+          "asset": {"version": "2.0"},
+          "buffers": [{"byteLength": 36}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36, "byteStride": 8}],
+          "accessors": [
+            {"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3"}
+          ]
+        }
+    """.trimIndent()
+
+    // byteStride (14) is at or above the VEC3-float element size (12) but not a multiple of the
+    // 4-byte component size.
+    private val byteStrideNotMultipleOfComponentSize = """
+        {
+          "asset": {"version": "2.0"},
+          "buffers": [{"byteLength": 40}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 40, "byteStride": 14}],
+          "accessors": [
+            {"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 2, "type": "VEC3"}
+          ]
+        }
+    """.trimIndent()
+
+    private val assetVersionWrongMajor = """
+        {"asset": {"version": "3.0"}}
+    """.trimIndent()
+
+    private val assetMinVersionAboveTwoZero = """
+        {"asset": {"version": "2.0", "minVersion": "2.1"}}
+    """.trimIndent()
+
+    // No "cameras" array is declared at all, so any camera index -- even 0 -- is out of range.
+    private val nodeWithCameraIndexOutOfRange = """
+        {
+          "asset": {"version": "2.0"},
+          "nodes": [{"camera": 3}]
         }
     """.trimIndent()
 

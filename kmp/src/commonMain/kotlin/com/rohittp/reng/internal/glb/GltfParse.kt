@@ -9,7 +9,8 @@ private val COMPONENT_SIZE_BYTES: Map<Int, Int> = mapOf(
     5120 to 1, 5121 to 1, 5122 to 2, 5123 to 2, 5125 to 4, 5126 to 4,
 )
 
-/** Component count per accessor `type` string. */
+/** Component count per accessor `type` string. An unrecognised or missing string has no known
+ * count -- that is [GltfReject.ACCESSOR_TYPE], distinct from [GltfReject.COMPONENT_TYPE]. */
 private val COMPONENT_COUNT_BY_TYPE: Map<String, Int> = mapOf(
     "SCALAR" to 1, "VEC2" to 2, "VEC3" to 3, "VEC4" to 4, "MAT2" to 4, "MAT3" to 9, "MAT4" to 16,
 )
@@ -36,11 +37,9 @@ private val RESERVED_MAX_INDEX_VALUE: Map<Int, Long> = mapOf(
  * hierarchy walk so a cyclic graph -- which the specification forbids -- terminates instead of
  * recursing forever.
  *
- * `asset.version`/`asset.minVersion` are deliberately not read here: this task's [GltfReject] has
- * no code assigned to a version mismatch, [GltfDocument] has no field to retain it in, and no test
- * exercises it, so enforcing it now would mean inventing an uncovered behaviour rather than
- * reporting one. That is left as a standing gap for whichever future task is given a code and a
- * test for it, the same way an unreachable fixture is reported rather than contorted into range.
+ * `asset.version` is checked first, before any other field: ADR 0021 assigns it to `PARSE_GLB` by
+ * name, requiring major version `2` and, when present, `asset.minVersion` at most `2.0`. Neither
+ * value is retained on [GltfDocument] -- nothing downstream needs it once this gate has passed.
  */
 internal fun parseGltf(json: JsonValue.Obj, binChunkLength: Long, maximumNodeDepth: Int): GltfParseResult =
     try {
@@ -59,6 +58,18 @@ private fun arrOf(value: JsonValue?): List<JsonValue> = (value as? JsonValue.Arr
 
 private fun membersOf(value: JsonValue?): Map<String, JsonValue> = (value as? JsonValue.Obj)?.members ?: emptyMap()
 
+/** Splits a `MAJOR.MINOR` version string (glTF's own `asset.version`/`asset.minVersion` form) into
+ * its two integer components, or `null` when either half is not an integer spelling. A string with
+ * no `.` is treated as `MAJOR.0`. */
+private fun majorMinor(text: String): Pair<Int, Int>? {
+    val dotIndex = text.indexOf('.')
+    val majorText = if (dotIndex >= 0) text.substring(0, dotIndex) else text
+    val minorText = if (dotIndex >= 0) text.substring(dotIndex + 1).substringBefore('.') else "0"
+    val major = majorText.toIntOrNull() ?: return null
+    val minor = minorText.toIntOrNull() ?: return null
+    return major to minor
+}
+
 private fun numberValue(value: JsonValue?): Double? = when (value) {
     is JsonValue.Integer -> value.value.toDouble()
     is JsonValue.Real -> value.value
@@ -76,24 +87,24 @@ private fun numberList(value: JsonValue?): List<Double>? {
 }
 
 /** Reads [field] from [members] as a `Long`, requiring the JSON token to be integer-spelled
- * (rejecting [GltfReject.NON_INTEGER_INDEX] otherwise -- see that code's documentation for why an
+ * (rejecting [GltfReject.NON_INTEGER_FIELD] otherwise -- see that code's documentation for why an
  * ordinary integer field, not only an index, uses it). Returns [default] when [field] is absent. */
 private fun readLong(members: Map<String, JsonValue>, field: String, default: Long): Long {
     val value = members[field] ?: return default
-    return (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+    return (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
 }
 
 private fun readLongOrNull(members: Map<String, JsonValue>, field: String): Long? {
     val value = members[field] ?: return null
-    return (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+    return (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
 }
 
 /** Reads [field] as an index into an array of size [bound]: integer-spelled (else
- * [GltfReject.NON_INTEGER_INDEX]) and in `[0, bound)` (else [GltfReject.INDEX_OUT_OF_RANGE]).
+ * [GltfReject.NON_INTEGER_FIELD]) and in `[0, bound)` (else [GltfReject.INDEX_OUT_OF_RANGE]).
  * Returns `null` when [field] is genuinely optional and absent. */
 private fun optionalIndex(members: Map<String, JsonValue>, field: String, bound: Int): Int? {
     val value = members[field] ?: return null
-    val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+    val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
     if (index < 0 || index >= bound) reject(GltfReject.INDEX_OUT_OF_RANGE)
     return index.toInt()
 }
@@ -114,6 +125,8 @@ private class GltfParser(
     private var accessorsJsonMembers: List<Map<String, JsonValue>> = emptyList()
 
     fun parse(): GltfDocument {
+        validateAssetVersion()
+
         val extensionsRequired = arrOf(json.members["extensionsRequired"])
             .mapNotNull { (it as? JsonValue.Text)?.value }
 
@@ -126,7 +139,8 @@ private class GltfParser(
         val textures = parseTextures(images.size, samplers.size)
         val materials = parseMaterials(textures.size)
         val meshes = parseMeshes(accessors, materials.size)
-        val nodes = parseNodes(meshes.size, skinsCount)
+        val camerasCount = arrOf(json.members["cameras"]).size
+        val nodes = parseNodes(meshes.size, skinsCount, camerasCount)
         validateNodeGraph(nodes)
         val scenes = parseScenes(nodes.size)
         val defaultScene = optionalIndex(json.members, "scene", scenes.size)
@@ -147,6 +161,23 @@ private class GltfParser(
             extensionsRequired = extensionsRequired,
             buffers = buffers,
         )
+    }
+
+    /** ADR 0021 assigns `asset.version` checking to `PARSE_GLB` by name. Requires `asset.version`
+     * to be present and major version `2`; when `asset.minVersion` is also present, requires it be
+     * at most `2.0`. Both fields are `MAJOR.MINOR` text per the specification's own `asset`
+     * schema, read here without relying on JSON number spelling since they are strings, not
+     * numbers. */
+    private fun validateAssetVersion() {
+        val assetMembers = membersOf(json.members["asset"])
+        val version = (assetMembers["version"] as? JsonValue.Text)?.value
+            ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
+        val (major, _) = majorMinor(version) ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
+        if (major != 2) reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
+
+        val minVersion = (assetMembers["minVersion"] as? JsonValue.Text)?.value ?: return
+        val (minMajor, minMinor) = majorMinor(minVersion) ?: reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
+        if (minMajor > 2 || (minMajor == 2 && minMinor > 0)) reject(GltfReject.ASSET_VERSION_UNSUPPORTED)
     }
 
     private fun parseBuffers(): List<GltfBuffer> {
@@ -184,8 +215,8 @@ private class GltfParser(
         return accessorsJsonMembers.map { members ->
             val componentType = readLong(members, "componentType", default = -1L).toInt()
             val componentSize = COMPONENT_SIZE_BYTES[componentType] ?: reject(GltfReject.COMPONENT_TYPE)
-            val typeName = (members["type"] as? JsonValue.Text)?.value ?: reject(GltfReject.COMPONENT_TYPE)
-            val numComponents = COMPONENT_COUNT_BY_TYPE[typeName] ?: reject(GltfReject.COMPONENT_TYPE)
+            val typeName = (members["type"] as? JsonValue.Text)?.value ?: reject(GltfReject.ACCESSOR_TYPE)
+            val numComponents = COMPONENT_COUNT_BY_TYPE[typeName] ?: reject(GltfReject.ACCESSOR_TYPE)
             val elementSize = componentSize.toLong() * numComponents
 
             val bufferView = optionalIndex(members, "bufferView", bufferViews.size)
@@ -199,9 +230,9 @@ private class GltfParser(
                 if (view.byteStride != null &&
                     (view.byteStride < elementSize || view.byteStride % componentSize != 0L)
                 ) {
-                    // Below the element size or not a multiple of the component size: both make
-                    // element addressing incoherent, the same underlying fault as a span overrun.
-                    reject(GltfReject.ACCESSOR_SPAN_EXCEEDS_BUFFER_VIEW)
+                    // Below the element size or not a multiple of the component size: incoherent
+                    // addressing, distinct from a span overrunning the view.
+                    reject(GltfReject.BYTE_STRIDE)
                 }
                 val effectiveStride = view.byteStride ?: elementSize
                 val span = byteOffset + (count - 1) * effectiveStride + elementSize
@@ -280,7 +311,7 @@ private class GltfParser(
             val primitives = arrOf(membersOf(meshElement)["primitives"]).map { primitiveElement ->
                 val members = membersOf(primitiveElement)
                 val attributes = membersOf(members["attributes"]).mapValues { (_, value) ->
-                    val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+                    val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
                     if (index < 0 || index >= accessors.size) reject(GltfReject.INDEX_OUT_OF_RANGE)
                     index.toInt()
                 }
@@ -313,24 +344,24 @@ private class GltfParser(
         val indicesAccessor = accessors[indicesAccessorIndex]
         val maxElement = (accessorsJsonMembers[indicesAccessorIndex]["max"] as? JsonValue.Arr)
             ?.elements?.firstOrNull() ?: return
-        val declaredMax = (maxElement as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+        val declaredMax = (maxElement as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
         val reservedMax = RESERVED_MAX_INDEX_VALUE[indicesAccessor.componentType]
         if (reservedMax != null && declaredMax == reservedMax) reject(GltfReject.INDEX_VALUE_OUT_OF_RANGE)
         if (declaredMax >= attributeCount) reject(GltfReject.INDEX_VALUE_OUT_OF_RANGE)
     }
 
-    private fun parseNodes(meshesCount: Int, skinsCount: Int): List<GltfNode> {
+    private fun parseNodes(meshesCount: Int, skinsCount: Int, camerasCount: Int): List<GltfNode> {
         val nodesArray = arrOf(json.members["nodes"])
         return nodesArray.map { element ->
             val members = membersOf(element)
             val children = arrOf(members["children"]).map { value ->
-                val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+                val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
                 if (index < 0 || index >= nodesArray.size) reject(GltfReject.INDEX_OUT_OF_RANGE)
                 index.toInt()
             }
             val mesh = optionalIndex(members, "mesh", meshesCount)
             val skin = optionalIndex(members, "skin", skinsCount)
-            val camera = readLongOrNull(members, "camera")?.toInt()
+            val camera = optionalIndex(members, "camera", camerasCount)
             val matrix = numberList(members["matrix"])
             val translation = numberList(members["translation"])
             val rotation = numberList(members["rotation"])
@@ -370,7 +401,7 @@ private class GltfParser(
         arrOf(json.members["scenes"]).map { element ->
             val members = membersOf(element)
             val nodeIndices = arrOf(members["nodes"]).map { value ->
-                val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_INDEX)
+                val index = (value as? JsonValue.Integer)?.value ?: reject(GltfReject.NON_INTEGER_FIELD)
                 if (index < 0 || index >= nodesCount) reject(GltfReject.INDEX_OUT_OF_RANGE)
                 index.toInt()
             }

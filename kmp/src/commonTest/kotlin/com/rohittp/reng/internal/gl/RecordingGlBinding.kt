@@ -8,8 +8,8 @@ package com.rohittp.reng.internal.gl
  * matrices, shader source) are omitted from the log line itself since they carry no stable
  * string form, but every one of them is still recoverable from a dedicated backing field
  * ([deletedNames], [lastDrawBuffers], [bufferDataPayloads], [bufferSubDataPayloads],
- * [uniformMatrix4fvValues], [shaderSources], [pixels]) so a test can assert on exactly what
- * was passed, not merely that something of a given size was passed. Query results are driven
+ * [uniformMatrix4fvValues], [shaderSources], [pixels], [lastTexImageBytes]) so a test can assert on
+ * exactly what was passed, not merely that something of a given size was passed. Query results are driven
  * by the public mutable fields below, which tests set up before exercising a binding
  * consumer. This class lives only in `commonTest` and is never part of production source.
  */
@@ -36,6 +36,7 @@ internal class RecordingGlBinding : GlBinding {
     val bufferSubDataPayloads: MutableMap<Int, ByteArray> = mutableMapOf()
     val uniformMatrix4fvValues: MutableMap<Int, FloatArray> = mutableMapOf()
     val pixels: MutableMap<Int, ByteArray> = mutableMapOf()
+    private var lastTexImage2DPixels: ByteArray? = null
 
     private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
 
@@ -156,7 +157,11 @@ internal class RecordingGlBinding : GlBinding {
         border: Int, format: Int, type: Int, pixels: ByteArray?,
     ) {
         log += "texImage2D(${hex(target)},$level,${hex(internalFormat)},$width,$height,$border,${hex(format)},${hex(type)})"
+        lastTexImage2DPixels = pixels
     }
+
+    /** The exact bytes passed to the most recent [texImage2D] call, or empty if none was passed or made. */
+    fun lastTexImageBytes(): List<Byte> = lastTexImage2DPixels?.toList().orEmpty()
 
     override fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int) {
         log += "texStorage2D(${hex(target)},$levels,${hex(internalFormat)},$width,$height)"

@@ -11,6 +11,7 @@ import com.rohittp.reng.Placement
 import com.rohittp.reng.ProjectionMode
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Sticker
 import com.rohittp.reng.Vector3
 import kotlin.test.Test
@@ -48,11 +49,11 @@ class FramePlanCanonicalEncodingTest {
         val encoded = encoder.encode(canonicalV1RepresentativeFramePlan())
         val expectedBytes = CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray()
 
-        assertEquals(1_431, expectedBytes.size)
-        assertEquals(1_431, encoded.identity.canonicalBytes.size)
+        assertEquals(1_471, expectedBytes.size)
+        assertEquals(1_471, encoded.identity.canonicalBytes.size)
         assertContentEquals(expectedBytes, encoded.identity.canonicalBytes.bytes)
         assertEquals(
-            "reng-frame-v1:447341d0410d7aea75e07153528b87609e7d408f1b7657e231e0381fb0a40599",
+            "reng-frame-v1:def1b331bc7f074dc94a650083017f171ce9f0f1455d145652ca406b043d81c0",
             encoded.frameIdentityText(),
         )
     }
@@ -170,6 +171,53 @@ class FramePlanCanonicalEncodingTest {
     }
 
     @Test
+    fun geometriesDifferingOnlyByAUniformValueGetDifferentFrameIdentities() {
+        val base = geometryWith(uniforms = mapOf("uTint" to ShaderValue.Scalar(0.25f)))
+        val other = geometryWith(uniforms = mapOf("uTint" to ShaderValue.Scalar(0.75f)))
+        assertNotEquals(frameIdentityOf(planWith(base)), frameIdentityOf(planWith(other)))
+    }
+
+    @Test
+    fun uniformMapIterationOrderDoesNotChangeTheFrameIdentity() {
+        val forward = geometryWith(
+            uniforms = linkedMapOf("uA" to ShaderValue.Integer(1), "uB" to ShaderValue.Integer(2)),
+        )
+        val reversed = geometryWith(
+            uniforms = linkedMapOf("uB" to ShaderValue.Integer(2), "uA" to ShaderValue.Integer(1)),
+        )
+        assertEquals(frameIdentityOf(planWith(forward)), frameIdentityOf(planWith(reversed)))
+    }
+
+    @Test
+    fun texturesDifferingOnlyByLocatorGetDifferentFrameIdentities() {
+        val base = geometryWith(textures = mapOf("uMask" to ResourceLocator("a.png")))
+        val other = geometryWith(textures = mapOf("uMask" to ResourceLocator("b.png")))
+        assertNotEquals(frameIdentityOf(planWith(base)), frameIdentityOf(planWith(other)))
+    }
+
+    @Test
+    fun textureMapIterationOrderDoesNotChangeTheFrameIdentity() {
+        val forward = geometryWith(
+            textures = linkedMapOf("uA" to ResourceLocator("a.png"), "uB" to ResourceLocator("b.png")),
+        )
+        val reversed = geometryWith(
+            textures = linkedMapOf("uB" to ResourceLocator("b.png"), "uA" to ResourceLocator("a.png")),
+        )
+        assertEquals(frameIdentityOf(planWith(forward)), frameIdentityOf(planWith(reversed)))
+    }
+
+    @Test
+    fun aMat4UniformParticipatesInTheFrameIdentity() {
+        val base = geometryWith(
+            uniforms = mapOf("uModel" to ShaderValue.Mat4(FloatArray(16) { it.toFloat() })),
+        )
+        val other = geometryWith(
+            uniforms = mapOf("uModel" to ShaderValue.Mat4(FloatArray(16) { -it.toFloat() })),
+        )
+        assertNotEquals(frameIdentityOf(planWith(base)), frameIdentityOf(planWith(other)))
+    }
+
+    @Test
     fun encodedFrameUsesStructuralEqualityHashingAndFreshSegmentLists() {
         val first = encoder.encode(canonicalV1RepresentativeFramePlan())
         val equal = encoder.encode(canonicalV1RepresentativeFramePlan())
@@ -234,6 +282,25 @@ class FramePlanCanonicalEncodingTest {
         bottomRight = Vector3(0.0, 1.0, 0.0),
         shaderPair = ShaderPair(vertexSource, "fragment"),
     )
+
+    private fun geometryWith(
+        uniforms: Map<String, ShaderValue> = emptyMap(),
+        textures: Map<String, ResourceLocator> = emptyMap(),
+    ): Geometry = Geometry(
+        topLeft = Vector3(1.0, 0.0, 0.0),
+        bottomRight = Vector3(0.0, 1.0, 0.0),
+        shaderPair = ShaderPair("vertex", "fragment"),
+        uniforms = uniforms,
+        textures = textures,
+    )
+
+    private fun planWith(geometry: Geometry): FramePlan = FramePlan(
+        frameIndex = 0,
+        camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
+        geometries = listOf(geometry),
+    )
+
+    private fun frameIdentityOf(plan: FramePlan): HashedCanonicalBytes = encoder.encode(plan).identity
 
     private fun placement(): Placement = Placement(
         positionMode = AnchoringMode.MAP,

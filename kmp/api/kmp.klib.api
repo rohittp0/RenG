@@ -283,6 +283,99 @@ sealed interface com.rohittp.reng/ResourceSelector { // com.rohittp.reng/Resourc
     }
 }
 
+sealed interface com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue|null[0]
+    final class Integer : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Integer|null[0]
+        constructor <init>(kotlin/Int) // com.rohittp.reng/ShaderValue.Integer.<init>|<init>(kotlin.Int){}[0]
+
+        final val value // com.rohittp.reng/ShaderValue.Integer.value|{}value[0]
+            final fun <get-value>(): kotlin/Int // com.rohittp.reng/ShaderValue.Integer.value.<get-value>|<get-value>(){}[0]
+
+        final fun component1(): kotlin/Int // com.rohittp.reng/ShaderValue.Integer.component1|component1(){}[0]
+        final fun copy(kotlin/Int = ...): com.rohittp.reng/ShaderValue.Integer // com.rohittp.reng/ShaderValue.Integer.copy|copy(kotlin.Int){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Integer.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Integer.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Integer.toString|toString(){}[0]
+    }
+
+    final class Mat4 : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Mat4|null[0]
+        constructor <init>(kotlin/FloatArray) // com.rohittp.reng/ShaderValue.Mat4.<init>|<init>(kotlin.FloatArray){}[0]
+
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Mat4.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Mat4.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Mat4.toString|toString(){}[0]
+    }
+
+    final class Scalar : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Scalar|null[0]
+        constructor <init>(kotlin/Float) // com.rohittp.reng/ShaderValue.Scalar.<init>|<init>(kotlin.Float){}[0]
+
+        final val value // com.rohittp.reng/ShaderValue.Scalar.value|{}value[0]
+            final fun <get-value>(): kotlin/Float // com.rohittp.reng/ShaderValue.Scalar.value.<get-value>|<get-value>(){}[0]
+
+        final fun component1(): kotlin/Float // com.rohittp.reng/ShaderValue.Scalar.component1|component1(){}[0]
+        final fun copy(kotlin/Float = ...): com.rohittp.reng/ShaderValue.Scalar // com.rohittp.reng/ShaderValue.Scalar.copy|copy(kotlin.Float){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Scalar.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Scalar.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Scalar.toString|toString(){}[0]
+    }
+
+    final class Vec2 : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Vec2|null[0]
+        constructor <init>(kotlin/Float, kotlin/Float) // com.rohittp.reng/ShaderValue.Vec2.<init>|<init>(kotlin.Float;kotlin.Float){}[0]
+
+        final val x // com.rohittp.reng/ShaderValue.Vec2.x|{}x[0]
+            final fun <get-x>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec2.x.<get-x>|<get-x>(){}[0]
+        final val y // com.rohittp.reng/ShaderValue.Vec2.y|{}y[0]
+            final fun <get-y>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec2.y.<get-y>|<get-y>(){}[0]
+
+        final fun component1(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec2.component1|component1(){}[0]
+        final fun component2(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec2.component2|component2(){}[0]
+        final fun copy(kotlin/Float = ..., kotlin/Float = ...): com.rohittp.reng/ShaderValue.Vec2 // com.rohittp.reng/ShaderValue.Vec2.copy|copy(kotlin.Float;kotlin.Float){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Vec2.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Vec2.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Vec2.toString|toString(){}[0]
+    }
+
+    final class Vec3 : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Vec3|null[0]
+        constructor <init>(kotlin/Float, kotlin/Float, kotlin/Float) // com.rohittp.reng/ShaderValue.Vec3.<init>|<init>(kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+
+        final val x // com.rohittp.reng/ShaderValue.Vec3.x|{}x[0]
+            final fun <get-x>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.x.<get-x>|<get-x>(){}[0]
+        final val y // com.rohittp.reng/ShaderValue.Vec3.y|{}y[0]
+            final fun <get-y>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.y.<get-y>|<get-y>(){}[0]
+        final val z // com.rohittp.reng/ShaderValue.Vec3.z|{}z[0]
+            final fun <get-z>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.z.<get-z>|<get-z>(){}[0]
+
+        final fun component1(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.component1|component1(){}[0]
+        final fun component2(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.component2|component2(){}[0]
+        final fun component3(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec3.component3|component3(){}[0]
+        final fun copy(kotlin/Float = ..., kotlin/Float = ..., kotlin/Float = ...): com.rohittp.reng/ShaderValue.Vec3 // com.rohittp.reng/ShaderValue.Vec3.copy|copy(kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Vec3.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Vec3.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Vec3.toString|toString(){}[0]
+    }
+
+    final class Vec4 : com.rohittp.reng/ShaderValue { // com.rohittp.reng/ShaderValue.Vec4|null[0]
+        constructor <init>(kotlin/Float, kotlin/Float, kotlin/Float, kotlin/Float) // com.rohittp.reng/ShaderValue.Vec4.<init>|<init>(kotlin.Float;kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+
+        final val w // com.rohittp.reng/ShaderValue.Vec4.w|{}w[0]
+            final fun <get-w>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.w.<get-w>|<get-w>(){}[0]
+        final val x // com.rohittp.reng/ShaderValue.Vec4.x|{}x[0]
+            final fun <get-x>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.x.<get-x>|<get-x>(){}[0]
+        final val y // com.rohittp.reng/ShaderValue.Vec4.y|{}y[0]
+            final fun <get-y>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.y.<get-y>|<get-y>(){}[0]
+        final val z // com.rohittp.reng/ShaderValue.Vec4.z|{}z[0]
+            final fun <get-z>(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.z.<get-z>|<get-z>(){}[0]
+
+        final fun component1(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.component1|component1(){}[0]
+        final fun component2(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.component2|component2(){}[0]
+        final fun component3(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.component3|component3(){}[0]
+        final fun component4(): kotlin/Float // com.rohittp.reng/ShaderValue.Vec4.component4|component4(){}[0]
+        final fun copy(kotlin/Float = ..., kotlin/Float = ..., kotlin/Float = ..., kotlin/Float = ...): com.rohittp.reng/ShaderValue.Vec4 // com.rohittp.reng/ShaderValue.Vec4.copy|copy(kotlin.Float;kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ShaderValue.Vec4.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/ShaderValue.Vec4.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/ShaderValue.Vec4.toString|toString(){}[0]
+    }
+}
+
 final class com.rohittp.reng/AnimationTrack { // com.rohittp.reng/AnimationTrack|null[0]
     constructor <init>(com.rohittp.reng/AnimationSelector, kotlin/Double) // com.rohittp.reng/AnimationTrack.<init>|<init>(com.rohittp.reng.AnimationSelector;kotlin.Double){}[0]
 
@@ -371,19 +464,25 @@ final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
 }
 
 final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
-    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair){}[0]
+    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>){}[0]
 
     final val bottomRight // com.rohittp.reng/Geometry.bottomRight|{}bottomRight[0]
         final fun <get-bottomRight>(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.bottomRight.<get-bottomRight>|<get-bottomRight>(){}[0]
     final val shaderPair // com.rohittp.reng/Geometry.shaderPair|{}shaderPair[0]
         final fun <get-shaderPair>(): com.rohittp.reng/ShaderPair // com.rohittp.reng/Geometry.shaderPair.<get-shaderPair>|<get-shaderPair>(){}[0]
+    final val textures // com.rohittp.reng/Geometry.textures|{}textures[0]
+        final fun <get-textures>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/Geometry.textures.<get-textures>|<get-textures>(){}[0]
     final val topLeft // com.rohittp.reng/Geometry.topLeft|{}topLeft[0]
         final fun <get-topLeft>(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.topLeft.<get-topLeft>|<get-topLeft>(){}[0]
+    final val uniforms // com.rohittp.reng/Geometry.uniforms|{}uniforms[0]
+        final fun <get-uniforms>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/Geometry.uniforms.<get-uniforms>|<get-uniforms>(){}[0]
 
     final fun component1(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.component1|component1(){}[0]
     final fun component2(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.component2|component2(){}[0]
     final fun component3(): com.rohittp.reng/ShaderPair // com.rohittp.reng/Geometry.component3|component3(){}[0]
-    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair){}[0]
+    final fun component4(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/Geometry.component4|component4(){}[0]
+    final fun component5(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/Geometry.component5|component5(){}[0]
+    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Geometry.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Geometry.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Geometry.toString|toString(){}[0]

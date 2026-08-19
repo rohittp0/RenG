@@ -9,7 +9,9 @@ import com.rohittp.reng.Geometry
 import com.rohittp.reng.Model
 import com.rohittp.reng.Placement
 import com.rohittp.reng.ProjectionMode
+import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Sticker
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.animationTracksForCore
@@ -137,11 +139,101 @@ internal class FramePlanCanonicalEncoder(
         field(1, encodeVector(geometry.topLeft))
         field(2, encodeVector(geometry.bottomRight))
         field(3, encodeShaderPair(geometry.shaderPair))
+        field(4, encodeUniforms(geometry.uniforms))
+        field(5, encodeTextures(geometry.textures))
     }
 
     private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes = CanonicalBinary.fields {
         field(1, CanonicalBinary.exactUtf8(shaderPair.vertexSource))
         field(2, CanonicalBinary.exactUtf8(shaderPair.fragmentSource))
+    }
+
+    // A Map has no inherent iteration order, and the canonical encoding must be deterministic
+    // regardless of how a consumer happened to build the map. Sorting by Kotlin's default String
+    // ordering (a fixed UTF-16 code-unit comparison, never locale-sensitive) makes the encoded bytes
+    // depend only on the map's content, not on insertion or hash-bucket order.
+    private fun encodeUniforms(uniforms: Map<String, ShaderValue>): CanonicalBytes =
+        CanonicalBinary.list(
+            uniforms.entries.sortedBy { it.key }.map { (name, value) ->
+                CanonicalBinary.fields {
+                    field(1, CanonicalBinary.exactUtf8(name))
+                    field(2, encodeShaderValue(value))
+                }
+            },
+        )
+
+    // Same fixed code-unit key ordering as encodeUniforms, and for the same reason.
+    private fun encodeTextures(textures: Map<String, ResourceLocator>): CanonicalBytes =
+        CanonicalBinary.list(
+            textures.entries.sortedBy { it.key }.map { (name, locator) ->
+                CanonicalBinary.fields {
+                    field(1, CanonicalBinary.exactUtf8(name))
+                    field(2, CanonicalBinary.exactUtf8(locator.value))
+                }
+            },
+        )
+
+    private fun encodeShaderValue(value: ShaderValue): CanonicalBytes = CanonicalBinary.fields {
+        when (value) {
+            is ShaderValue.Scalar -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_SCALAR_WIRE_VALUE))
+                field(2, CanonicalBinary.binary64(value.value.toDouble()))
+            }
+            is ShaderValue.Vec2 -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_VEC2_WIRE_VALUE))
+                field(
+                    2,
+                    CanonicalBinary.list(
+                        listOf(
+                            CanonicalBinary.binary64(value.x.toDouble()),
+                            CanonicalBinary.binary64(value.y.toDouble()),
+                        ),
+                    ),
+                )
+            }
+            is ShaderValue.Vec3 -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_VEC3_WIRE_VALUE))
+                field(
+                    2,
+                    CanonicalBinary.list(
+                        listOf(
+                            CanonicalBinary.binary64(value.x.toDouble()),
+                            CanonicalBinary.binary64(value.y.toDouble()),
+                            CanonicalBinary.binary64(value.z.toDouble()),
+                        ),
+                    ),
+                )
+            }
+            is ShaderValue.Vec4 -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_VEC4_WIRE_VALUE))
+                field(
+                    2,
+                    CanonicalBinary.list(
+                        listOf(
+                            CanonicalBinary.binary64(value.x.toDouble()),
+                            CanonicalBinary.binary64(value.y.toDouble()),
+                            CanonicalBinary.binary64(value.z.toDouble()),
+                            CanonicalBinary.binary64(value.w.toDouble()),
+                        ),
+                    ),
+                )
+            }
+            is ShaderValue.Integer -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_INTEGER_WIRE_VALUE))
+                // Widen the Int's exact 32-bit two's-complement pattern into a nonnegative Long payload;
+                // sign-extension by toLong() is masked off, so the mapping is exact and injective.
+                field(2, CanonicalBinary.u64(value.value.toLong() and 0xFFFFFFFFL))
+            }
+            is ShaderValue.Mat4 -> {
+                field(1, CanonicalBinary.u16(SHADER_VALUE_MAT4_WIRE_VALUE))
+                field(
+                    2,
+                    CanonicalBinary.list(
+                        value.elementsForCore().map { CanonicalBinary.binary64(it.toDouble()) },
+                    ),
+                )
+            }
+        }
     }
 }
 
@@ -159,3 +251,10 @@ private val AnchoringMode.wireValue: Int
 
 private const val SELECTOR_INDEX_WIRE_VALUE: Int = 1
 private const val SELECTOR_NAME_WIRE_VALUE: Int = 2
+
+private const val SHADER_VALUE_SCALAR_WIRE_VALUE: Int = 1
+private const val SHADER_VALUE_VEC2_WIRE_VALUE: Int = 2
+private const val SHADER_VALUE_VEC3_WIRE_VALUE: Int = 3
+private const val SHADER_VALUE_VEC4_WIRE_VALUE: Int = 4
+private const val SHADER_VALUE_INTEGER_WIRE_VALUE: Int = 5
+private const val SHADER_VALUE_MAT4_WIRE_VALUE: Int = 6

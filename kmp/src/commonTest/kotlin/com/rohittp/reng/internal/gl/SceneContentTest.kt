@@ -5,8 +5,11 @@ import com.rohittp.reng.Camera
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
+import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Vector3
+import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
@@ -130,6 +133,74 @@ class SceneContentTest {
         SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
 
         assertContentEquals(expected, binding.uniformMatrix4fvValues.getValue(2))
+    }
+
+    // --- the Task 7 / Task 8 seam: a SceneGeometry's consumer data must reach drawGeometry ------
+    //
+    // Merging Task 8's SceneContent (written against drawGeometry's pre-Task-7 signature) against
+    // Task 7's added consumerUniforms/consumerTextures parameters compiles cleanly either way,
+    // because both new parameters carry defaults -- so a merge that leaves SceneContent's call
+    // site unchanged would build green and pass every pre-existing test while silently dropping
+    // every consumer uniform and texture a Geometry declares. These two tests pin the actual wire:
+    // a value present on the Geometry/SceneGeometry a caller hands SceneContent must show up in
+    // the GL calls SceneContent.draw() issues, not merely compile.
+
+    @Test
+    fun aGeometrysConsumerUniformIsBoundWhenSceneContentDraws() {
+        val binding = RecordingGlBinding().withDeclaredNames("uTint" to 20)
+        val pipeline = newGeometryPipeline(binding)
+        val geometryWithUniform = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalShaderPair(),
+            uniforms = mapOf("uTint" to ShaderValue.Scalar(0.5f)),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(SceneGeometry(geometryWithUniform, pipeline)),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+
+        assertTrue(
+            binding.log.contains("uniform1f(20,0.5)"),
+            "a Geometry.uniforms entry must reach drawGeometry's consumerUniforms and get bound: " +
+                "${binding.log}",
+        )
+    }
+
+    @Test
+    fun aSceneGeometrysConsumerTextureIsUploadedAndBoundWhenSceneContentDraws() {
+        val binding = RecordingGlBinding().withDeclaredNames("uMask" to 21)
+        val pipeline = newGeometryPipeline(binding)
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalShaderPair(),
+            textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+        )
+        val sceneGeometry = SceneGeometry(
+            geometry = geometry,
+            pipeline = pipeline,
+            consumerTextures = mapOf("uMask" to DecodedImage(1, 1, byteArrayOf(-1, 0, 0, -1))),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(sceneGeometry),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+
+        assertTrue(
+            binding.log.contains("uniform1i(21,0)"),
+            "a SceneGeometry.consumerTextures entry must reach drawGeometry's consumerTextures, " +
+                "take a texture unit, and bind its sampler: ${binding.log}",
+        )
+        assertEquals(listOf<Byte>(-1, 0, 0, -1), binding.lastTexImageBytes())
     }
 
     @Test

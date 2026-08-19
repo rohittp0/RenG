@@ -3,6 +3,7 @@ package com.rohittp.reng.internal.gl
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
+import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleMatrix4
 import com.rohittp.reng.internal.math.DoubleVector3
@@ -27,8 +28,20 @@ internal class SceneSticker(val placement: Placement, val texture: Int)
  * shader pair — for its own [Geometry.shaderPair]. Compiling and caching that program is
  * `GlProgramCache` bookkeeping that belongs to whoever assembles a [SceneContent] once per frame
  * (Cycle F-1 Task 9's renderer), not to [SceneContent] itself.
+ *
+ * [consumerTextures] is [geometry]'s own [Geometry.textures] map — keyed by the same consumer
+ * sampler names — with every [com.rohittp.reng.ResourceLocator] already resolved and decoded to a
+ * [DecodedImage], exactly the same "resolve once, upstream, then carry the resolved value" pattern
+ * [SceneSticker.texture] already establishes for a sticker's uploaded GL texture name. [geometry]'s
+ * own [Geometry.uniforms] needs no such pre-resolution step — a [com.rohittp.reng.ShaderValue] is
+ * already in the exact shape [drawGeometry]'s `consumerUniforms` parameter expects — so only
+ * textures need this extra field.
  */
-internal class SceneGeometry(val geometry: Geometry, val pipeline: GeometryPipeline)
+internal class SceneGeometry(
+    val geometry: Geometry,
+    val pipeline: GeometryPipeline,
+    val consumerTextures: Map<String, DecodedImage> = emptyMap(),
+)
 
 /**
  * Everything one frame needs [SceneContent] to draw. [outputPixelSize] and [frameIndex] feed the
@@ -98,6 +111,8 @@ internal class SceneContent(
                     resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
                     boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
                     frameIndex = scene.frameIndex,
+                    consumerUniforms = sceneGeometry.geometry.uniforms,
+                    consumerTextures = sceneGeometry.consumerTextures,
                 )
             }
         }

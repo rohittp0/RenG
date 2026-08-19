@@ -105,6 +105,23 @@ class GlLifecycleDriverTest {
         assertNull(world.driver.adoptedContext)
     }
 
+    // Regression test for the applyTerminal restructuring (Fix A): the previous implementation
+    // nulled `adoptedContext` on GPU object loss through a trailing safety net, but never touched
+    // `profile`, so a profile recorded by an earlier adoption survived a later GPU-object-loss
+    // notification. `profile` is exactly as context-derived as `adoptedContext` -- both must be
+    // forgotten together whenever the machine lands in AWAITING_CONTEXT_ADOPTION.
+    @Test fun gpuObjectLossAlsoForgetsTheProfileFromThePreviousAdoption() {
+        val world = driverWorld(currentContext = RenderContextIdentity(0x7000L), lost = true)
+        val adoption = world.driver.run(RendererLifecycleOperation.AdoptCurrentRenderContext) { null }
+        assertEquals(RendererLifecycleOutcome.Succeeded, adoption)
+        assertEquals(ShaderDialect.GLES, world.driver.profile?.dialect)
+
+        val loss = world.driver.run(RendererLifecycleOperation.NotifyGpuObjectsGone) { null }
+        assertEquals(RendererLifecycleOutcome.Succeeded, loss)
+        assertNull(world.driver.adoptedContext)
+        assertNull(world.driver.profile)
+    }
+
     @Test fun adoptionAcceptsASupportedContextAndRejectsAnUnsupportedOne() {
         val world = driverWorld(currentContext = RenderContextIdentity(0x7000L), lost = true)
         val outcome = world.driver.run(RendererLifecycleOperation.AdoptCurrentRenderContext) { null }

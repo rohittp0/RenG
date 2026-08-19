@@ -154,29 +154,60 @@ internal class GlLifecycleDriver(
         }
     }
 
+    /**
+     * Dispatches on the [RendererOwnerState] the machine actually reached, not on which
+     * [RendererLifecycleOperation] reached it. That is deliberate: it used to be a `when` over
+     * the operation with a trailing `if (snapshot.ownerState == AWAITING_CONTEXT_ADOPTION)
+     * adoptedContext = null` safety net appended after it. That net was dead code given today's
+     * single route into that state (`NotifyGpuObjectsGone`), but dead code of a dangerous shape
+     * — a second future route into `AWAITING_CONTEXT_ADOPTION` that the operation `when` above
+     * did not name would fall through to `else -> Unit`, then get "handled" by the net nulling
+     * [adoptedContext] while silently skipping [forgetWithoutDeleting], leaving a stale program
+     * cache and registry behind while looking handled.
+     *
+     * Keying on the reached state instead makes that impossible to reintroduce by accident:
+     * `RendererOwnerState` is an enum, this `when` is in return position with no `else`, so the
+     * compiler requires every state to be handled here. Adding a fourth `RendererOwnerState` — or
+     * a change that stops routing some existing transition through one of these three branches —
+     * is a build failure at this function, not a runtime path that quietly does the wrong thing.
+     */
     private fun applyTerminal(
         operation: RendererLifecycleOperation,
         outcome: RendererLifecycleOutcome,
     ) {
         if (outcome !is RendererLifecycleOutcome.Succeeded) return
-        when (operation) {
-            RendererLifecycleOperation.NotifyGpuObjectsGone -> forgetWithoutDeleting()
-            RendererLifecycleOperation.AdoptCurrentRenderContext -> {
-                forgetWithoutDeleting()
-                adoptedContext = pendingContext
-                profile = pendingProfile
-            }
 
-            RendererLifecycleOperation.CloseRenderer -> {
+        return when (snapshot.ownerState) {
+            // Reached only by NotifyGpuObjectsGone today, but the guarantee is about the state,
+            // not the operation: whatever operation leaves the machine here has just declared
+            // every GL handle gone (ADR 0007/0015), so both the GL-object bookkeeping and the
+            // context-derived fields must be forgotten together.
+            RendererOwnerState.AWAITING_CONTEXT_ADOPTION -> {
                 forgetWithoutDeleting()
                 adoptedContext = null
                 profile = null
             }
 
-            else -> Unit
-        }
-        if (snapshot.ownerState == RendererOwnerState.AWAITING_CONTEXT_ADOPTION) {
-            adoptedContext = null
+            // Reached by every operation that succeeds without changing ownership. Only a
+            // successful AdoptCurrentRenderContext needs to record anything here; every other
+            // LIVE-preserving operation is a no-op for this function.
+            RendererOwnerState.LIVE ->
+                if (operation is RendererLifecycleOperation.AdoptCurrentRenderContext) {
+                    forgetWithoutDeleting()
+                    adoptedContext = pendingContext
+                    profile = pendingProfile
+                } else {
+                    Unit
+                }
+
+            // Reached only by a successful CloseRenderer today (RendererLifecycleStateMachine is
+            // the only place that ever sets this state). Forgetting unconditionally here is
+            // still correct if that ever changes: a closed renderer must never hold a GL handle.
+            RendererOwnerState.CLOSED -> {
+                forgetWithoutDeleting()
+                adoptedContext = null
+                profile = null
+            }
         }
     }
 

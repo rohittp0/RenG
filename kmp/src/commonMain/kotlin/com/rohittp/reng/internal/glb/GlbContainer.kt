@@ -24,6 +24,16 @@ internal sealed interface GlbScan {
  * framing and padding violations, never JSON grammar violations (a JSON grammar violation inside
  * the JSON chunk that is not the strict-space padding case reported here as
  * [JSON_TRAILING_CONTENT], since the container layer has no finer-grained code to report it with).
+ *
+ * A JSON chunk that parses cleanly but whose root value is not an object is a distinct fault from
+ * both of those: every byte parsed, so nothing is "trailing", and the document obeys JSON grammar,
+ * so nothing is malformed JSON — it is simply the wrong shape for glTF, whose root **MUST** be an
+ * object. That case is [JSON_ROOT_NOT_OBJECT], and it is checked only after the strict-space
+ * padding rule passes: a byte-level fault (trailing content, or padding that is not `0x20`) is
+ * detected during the same walk and always wins over the root-shape check, because it is the
+ * more specific, earlier-discovered problem. A non-object root that also has genuinely bad
+ * padding is therefore reported as [JSON_TRAILING_CONTENT] or [JSON_PADDING_NOT_SPACE], never
+ * [JSON_ROOT_NOT_OBJECT].
  */
 internal enum class GlbReject {
     HEADER_TOO_SHORT,
@@ -40,6 +50,7 @@ internal enum class GlbReject {
     JSON_TRAILING_CONTENT,
     JSON_PADDING_NOT_SPACE,
     JSON_CHUNK_TOO_LARGE,
+    JSON_ROOT_NOT_OBJECT,
 }
 
 private const val HEADER_BYTES = 12
@@ -125,14 +136,18 @@ internal fun scanGlb(bytes: ByteArray, maximumJsonChunkBytes: Long): GlbScan {
                 when (val parsed = parseJson(bytes, dataStart, dataEnd, MAXIMUM_JSON_DEPTH)) {
                     is JsonParse.Failed -> return GlbScan.Malformed(GlbReject.JSON_TRAILING_CONTENT)
                     is JsonParse.Parsed -> {
+                        // The byte-level padding fault is checked first and wins: it is detected
+                        // during this same walk and is the more specific, earlier-discovered
+                        // problem. Only once padding is confirmed clean is the root's shape
+                        // checked, so a non-object root with bad padding still reports the
+                        // padding fault, never JSON_ROOT_NOT_OBJECT.
                         for (index in parsed.endOffset until dataEnd) {
                             if ((bytes[index].toInt() and 0xFF) != SPACE_BYTE) {
                                 return GlbScan.Malformed(GlbReject.JSON_PADDING_NOT_SPACE)
                             }
                         }
-                        val obj = parsed.value as? JsonValue.Obj
-                            ?: return GlbScan.Malformed(GlbReject.JSON_TRAILING_CONTENT)
-                        json = obj
+                        json = parsed.value as? JsonValue.Obj
+                            ?: return GlbScan.Malformed(GlbReject.JSON_ROOT_NOT_OBJECT)
                     }
                 }
             }

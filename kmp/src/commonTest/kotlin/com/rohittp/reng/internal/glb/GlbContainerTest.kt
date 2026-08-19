@@ -50,6 +50,53 @@ class GlbContainerTest {
         assertEquals(GlbReject.JSON_CHUNK_TOO_LARGE, rejectWithCeiling("02-valid-json-only", 8L))
     }
 
+    @Test
+    fun exercisesThePreviouslyUnreachedContainerRejectCodes() {
+        // 32: the JSON chunk's own chunkLength (5) is not a multiple of four, but the file's
+        // total byte count is deliberately kept a multiple of four, so the header-level length
+        // check passes and the walk reaches the per-chunk misalignment check.
+        assertEquals(GlbReject.CHUNK_LENGTH_MISALIGNED, reject("32-chunk-length-misaligned-total-aligned"))
+        // 33: the file ends 4 bytes into the first chunk's 8-byte header, with the declared
+        // length recomputed to match the truncated actual size (unlike fixture 13, which leaves
+        // the original, too-large declared length and so is caught at the header gate instead).
+        assertEquals(GlbReject.TRUNCATED_CHUNK_HEADER, reject("33-truncated-first-chunk-header"))
+        // 34: a fully-present chunk header declares chunkLength = 0xFFFFFFF0 -- a multiple of
+        // four, so it clears the misalignment check -- that overflows the actual file size.
+        assertEquals(GlbReject.TRUNCATED_CHUNK_DATA, reject("34-chunk-length-overflow-aligned"))
+    }
+
+    @Test
+    fun findsAnEarlierGateWinsFixture09() {
+        // 09 is the research document's "misaligned-chunk-length" fixture, built the naive way:
+        // the header's declared total length is set to the actual (undoctored) byte count, which
+        // itself inherits the chunk's misalignment rather than being corrected to compensate for
+        // it (that correction is what fixture 32 does instead). The header-level length check
+        // fires on either half of its OR -- not equal to the actual size, or not a multiple of
+        // four -- so it rejects here before the per-chunk chunkLength % 4 check is ever reached.
+        // The document's own separate "DECLARED_LENGTH_MISALIGNED" label for this fixture names a
+        // code this implementation does not have: Task 6/7 folded "not equal" and "not a multiple
+        // of four" into the single DECLARED_LENGTH_MISMATCH check, so this fixture cannot newly
+        // cover CHUNK_LENGTH_MISALIGNED -- fixture 32 above is what does that. Reported in full in
+        // the task-7-fix-report.md finding.
+        assertEquals(GlbReject.DECLARED_LENGTH_MISMATCH, reject("09-misaligned-chunk-length"))
+    }
+
+    @Test
+    fun rejectsANonObjectJsonRootPrecisely() {
+        // Every byte parsed cleanly in all three; the fault is the document's shape, not
+        // trailing bytes or bad padding.
+        assertEquals(GlbReject.JSON_ROOT_NOT_OBJECT, reject("root-not-object-array"))
+        assertEquals(GlbReject.JSON_ROOT_NOT_OBJECT, reject("root-not-object-number"))
+        assertEquals(GlbReject.JSON_ROOT_NOT_OBJECT, reject("root-not-object-string"))
+    }
+
+    @Test
+    fun aByteLevelPaddingFaultWinsOverTheRootShapeCheck() {
+        // [1,2,3] is a non-object root AND has a genuine non-space padding byte; the byte-level
+        // fault, detected during the same walk, must be reported instead of JSON_ROOT_NOT_OBJECT.
+        assertEquals(GlbReject.JSON_PADDING_NOT_SPACE, reject("root-not-object-array-bad-padding"))
+    }
+
     // ---- fixture-name plumbing ----
 
     private val defaultCeiling = 1_048_576L
@@ -89,6 +136,14 @@ class GlbContainerTest {
         "27-buffer-3-shorter-than-bin-chunk" -> binPaddedGlb(0x00)
         "22-bin-padded-with-zeros" -> binPaddedGlb(0x00)
         "23-bin-padded-with-spaces" -> binPaddedGlb(0x20)
+        "09-misaligned-chunk-length" -> misalignedChunkLengthUndoctoredGlb()
+        "32-chunk-length-misaligned-total-aligned" -> chunkLengthMisalignedTotalAlignedGlb()
+        "33-truncated-first-chunk-header" -> truncatedFirstChunkHeaderGlb()
+        "34-chunk-length-overflow-aligned" -> chunkLengthOverflowAlignedGlb()
+        "root-not-object-array" -> nonObjectRootGlb("[1,2,3]")
+        "root-not-object-number" -> nonObjectRootGlb("42")
+        "root-not-object-string" -> nonObjectRootGlb("\"hello\"")
+        "root-not-object-array-bad-padding" -> arrayRootWithBadPaddingGlb()
         else -> error("no fixture named $name")
     }
 
@@ -195,5 +250,67 @@ class GlbContainerTest {
     private fun binPaddedGlb(padByte: Int): ByteArray {
         val payload = byteArrayOf(1, 2, 3, 4, 5, 6) + ByteArray(2) { padByte.toByte() }
         return glbFrom(listOf(simpleJsonChunk(), chunk(binType, payload)))
+    }
+
+    /** Fixture 09: a single JSON chunk whose own `chunkLength` field (5) is not a multiple of
+     * four, built the undoctored way -- the header's declared total length is simply set to the
+     * actual byte count, which inherits the same misalignment rather than being corrected to
+     * compensate for it. This lands on the header-level DECLARED_LENGTH_MISMATCH gate before the
+     * per-chunk chunkLength % 4 check is ever reached; see [chunkLengthMisalignedTotalAlignedGlb]
+     * for the fixture that does reach it. */
+    private fun misalignedChunkLengthUndoctoredGlb(): ByteArray {
+        val chunkHeader = u32le(5L) + u32le(jsonType)
+        val payload = ByteArray(5) { 0x41 } // Arbitrary; never read at this rejection point.
+        val body = chunkHeader + payload
+        val actualTotal = 12L + body.size // 25, not a multiple of four.
+        val header = u32le(0x46546C67L) + u32le(2L) + u32le(actualTotal)
+        return header + body
+    }
+
+    /** Fixture 32: the JSON chunk's own `chunkLength` field (5) is not a multiple of four, but
+     * the file's total byte count is deliberately kept a multiple of four (20: header plus an
+     * 8-byte chunk header, with zero payload bytes actually present) so the header-level length
+     * check passes and the walk reaches the per-chunk misalignment check. */
+    private fun chunkLengthMisalignedTotalAlignedGlb(): ByteArray {
+        val chunkHeader = u32le(5L) + u32le(jsonType)
+        val actualTotal = 12L + chunkHeader.size // 20, a multiple of four.
+        val header = u32le(0x46546C67L) + u32le(2L) + u32le(actualTotal)
+        return header + chunkHeader
+    }
+
+    /** Fixture 33: the file ends 4 bytes into the first chunk's 8-byte header (only the
+     * `chunkLength` field is present, not `chunkType`), with the declared length recomputed to
+     * match the truncated actual size -- unlike fixture 13, which leaves the original, too-large
+     * declared length and so is caught at the header gate instead. */
+    private fun truncatedFirstChunkHeaderGlb(): ByteArray {
+        val partialChunkHeader = u32le(8L) // Just the chunkLength field; chunkType never arrives.
+        val actualTotal = 12L + partialChunkHeader.size // 16, a multiple of four.
+        val header = u32le(0x46546C67L) + u32le(2L) + u32le(actualTotal)
+        return header + partialChunkHeader
+    }
+
+    /** Fixture 34: a fully-present 8-byte chunk header declares `chunkLength = 0xFFFFFFF0` -- a
+     * multiple of four, so it clears the misalignment check -- that overflows the actual file
+     * size. */
+    private fun chunkLengthOverflowAlignedGlb(): ByteArray {
+        val chunkHeader = u32le(0xFFFFFFF0L) + u32le(jsonType)
+        val actualTotal = 12L + chunkHeader.size // 20, a multiple of four.
+        val header = u32le(0x46546C67L) + u32le(2L) + u32le(actualTotal)
+        return header + chunkHeader
+    }
+
+    /** A JSON chunk whose content parses cleanly but whose root value is [content]'s JSON shape,
+     * not an object -- e.g. an array, a bare number, or a bare string. */
+    private fun nonObjectRootGlb(content: String): ByteArray =
+        glbFrom(listOf(chunk(jsonType, spacePadded(content))))
+
+    /** A non-object root (`[1,2,3]`) whose one padding byte is a tab, not the mandated space
+     * byte. Tab is JSON whitespace, so the reader still returns `Parsed` (as with fixture 21) and
+     * the strict-space check -- not parseJson's own trailing-content check -- is what catches it;
+     * this is what lets the byte-level padding fault reach the same branch as the root-shape
+     * check and prove it still wins. */
+    private fun arrayRootWithBadPaddingGlb(): ByteArray {
+        val payload = "[1,2,3]".encodeToByteArray() + byteArrayOf(0x09)
+        return glbFrom(listOf(chunk(jsonType, payload)))
     }
 }

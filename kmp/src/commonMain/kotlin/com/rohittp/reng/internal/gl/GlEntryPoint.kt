@@ -68,7 +68,10 @@ internal enum class GlEntryPoint(internal val cName: String) {
     GET_UNIFORM_LOCATION("glGetUniformLocation"),
     UNIFORM_1I("glUniform1i"),
     UNIFORM_1F("glUniform1f"),
+    UNIFORM_2F("glUniform2f"),
+    UNIFORM_3F("glUniform3f"),
     UNIFORM_4F("glUniform4f"),
+    UNIFORM_1UI("glUniform1ui"),
     UNIFORM_MATRIX_4FV("glUniformMatrix4fv"),
 
     ENABLE("glEnable"),

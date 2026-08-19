@@ -103,6 +103,9 @@ import platform.gles3.glTexParameteri
 import platform.gles3.glTexStorage2D
 import platform.gles3.glUniform1f
 import platform.gles3.glUniform1i
+import platform.gles3.glUniform1ui
+import platform.gles3.glUniform2f
+import platform.gles3.glUniform3f
 import platform.gles3.glUniform4f
 import platform.gles3.glUniformMatrix4fv
 import platform.gles3.glUseProgram
@@ -437,8 +440,20 @@ internal object IosGlBinding : GlBinding {
         glUniform1f(location, value)
     }
 
+    override fun uniform2f(location: Int, x: Float, y: Float) {
+        glUniform2f(location, x, y)
+    }
+
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) {
+        glUniform3f(location, x, y, z)
+    }
+
     override fun uniform4f(location: Int, x: Float, y: Float, z: Float, w: Float) {
         glUniform4f(location, x, y, z, w)
+    }
+
+    override fun uniform1ui(location: Int, value: Int) {
+        glUniform1ui(location, value.toUInt())
     }
 
     override fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray) {

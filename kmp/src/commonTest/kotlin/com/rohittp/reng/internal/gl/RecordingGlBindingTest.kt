@@ -80,4 +80,12 @@ class RecordingGlBindingTest {
         binding.drawBuffers(2, intArrayOf(GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT0 + 1))
         assertContentEquals(intArrayOf(GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT0 + 1), binding.lastDrawBuffers)
     }
+
+    @Test fun theRecordingFakeLogsEachNewUniformSetterDistinguishably() {
+        val binding = RecordingGlBinding()
+        binding.uniform2f(location = 3, x = 1f, y = 2f)
+        binding.uniform3f(location = 4, x = 3f, y = 4f, z = 5f)
+        binding.uniform1ui(location = 5, value = 7)
+        assertEquals(listOf("uniform2f(3,1.0,2.0)", "uniform3f(4,3.0,4.0,5.0)", "uniform1ui(5,7)"), binding.log)
+    }
 }

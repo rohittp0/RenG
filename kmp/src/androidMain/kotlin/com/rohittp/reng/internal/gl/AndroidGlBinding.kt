@@ -300,8 +300,20 @@ internal object AndroidGlBinding : GlBinding {
         GLES30.glUniform1f(location, value)
     }
 
+    override fun uniform2f(location: Int, x: Float, y: Float) {
+        GLES30.glUniform2f(location, x, y)
+    }
+
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) {
+        GLES30.glUniform3f(location, x, y, z)
+    }
+
     override fun uniform4f(location: Int, x: Float, y: Float, z: Float, w: Float) {
         GLES30.glUniform4f(location, x, y, z, w)
+    }
+
+    override fun uniform1ui(location: Int, value: Int) {
+        GLES30.glUniform1ui(location, value)
     }
 
     override fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray) {

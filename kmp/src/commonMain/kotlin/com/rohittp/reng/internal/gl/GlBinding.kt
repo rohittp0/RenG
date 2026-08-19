@@ -77,7 +77,17 @@ internal interface GlBinding {
     fun getUniformLocation(program: Int, name: String): Int
     fun uniform1i(location: Int, value: Int)
     fun uniform1f(location: Int, value: Float)
+    fun uniform2f(location: Int, x: Float, y: Float)
+    fun uniform3f(location: Int, x: Float, y: Float, z: Float)
     fun uniform4f(location: Int, x: Float, y: Float, z: Float, w: Float)
+
+    /**
+     * Sets a `uint` uniform. [value] is a bit pattern, not a signed magnitude: the caller owns
+     * the narrowing from whatever wider type it started as (see `FramePlan.frameIndex`, a `Long`
+     * narrowed to fit `uFrameIndex`). Kotlin's `UInt` does not bridge cleanly through every
+     * platform binding, so the seam stays in `Int` and each platform performs its own conversion.
+     */
+    fun uniform1ui(location: Int, value: Int)
     fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray)
 
     fun enable(cap: Int)

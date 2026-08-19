@@ -5,8 +5,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class GlEntryPointRosterTest {
-    @Test fun rosterHasExactlyEightyFourEntryPoints() {
-        assertEquals(84, GlEntryPoint.entries.size)
+    @Test fun rosterHasExactlyEightySevenEntryPoints() {
+        assertEquals(87, GlEntryPoint.entries.size)
+    }
+
+    @Test fun theRosterContainsTheThreeUniformSettersTheShaderInterfaceNeeds() {
+        val cNames = GlEntryPoint.entries.map { it.cName }
+        assertTrue("glUniform2f" in cNames)
+        assertTrue("glUniform3f" in cNames)
+        assertTrue("glUniform1ui" in cNames)
     }
 
     @Test fun everyCNameIsDistinctAndWellFormed() {

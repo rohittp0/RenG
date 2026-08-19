@@ -197,8 +197,14 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
         table[GlEntryPoint.UNIFORM_1I.ordinal].reinterpret()
     private val uniform1fFn: CPointer<CFunction<(Int, Float) -> Unit>> =
         table[GlEntryPoint.UNIFORM_1F.ordinal].reinterpret()
+    private val uniform2fFn: CPointer<CFunction<(Int, Float, Float) -> Unit>> =
+        table[GlEntryPoint.UNIFORM_2F.ordinal].reinterpret()
+    private val uniform3fFn: CPointer<CFunction<(Int, Float, Float, Float) -> Unit>> =
+        table[GlEntryPoint.UNIFORM_3F.ordinal].reinterpret()
     private val uniform4fFn: CPointer<CFunction<(Int, Float, Float, Float, Float) -> Unit>> =
         table[GlEntryPoint.UNIFORM_4F.ordinal].reinterpret()
+    private val uniform1uiFn: CPointer<CFunction<(Int, UInt) -> Unit>> =
+        table[GlEntryPoint.UNIFORM_1UI.ordinal].reinterpret()
     private val uniformMatrix4fvFn: CPointer<CFunction<
         (Int, Int, UByte, CPointer<FloatVar>?) -> Unit>> =
         table[GlEntryPoint.UNIFORM_MATRIX_4FV.ordinal].reinterpret()
@@ -514,8 +520,14 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
 
     override fun uniform1f(location: Int, value: Float) = uniform1fFn(location, value)
 
+    override fun uniform2f(location: Int, x: Float, y: Float) = uniform2fFn(location, x, y)
+
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) = uniform3fFn(location, x, y, z)
+
     override fun uniform4f(location: Int, x: Float, y: Float, z: Float, w: Float) =
         uniform4fFn(location, x, y, z, w)
+
+    override fun uniform1ui(location: Int, value: Int) = uniform1uiFn(location, value.toUInt())
 
     override fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray) {
         if (value.isEmpty()) return

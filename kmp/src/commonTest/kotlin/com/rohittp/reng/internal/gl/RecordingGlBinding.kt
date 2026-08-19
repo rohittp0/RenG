@@ -322,8 +322,20 @@ internal class RecordingGlBinding : GlBinding {
         log += "uniform1f($location,$value)"
     }
 
+    override fun uniform2f(location: Int, x: Float, y: Float) {
+        log += "uniform2f($location,$x,$y)"
+    }
+
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) {
+        log += "uniform3f($location,$x,$y,$z)"
+    }
+
     override fun uniform4f(location: Int, x: Float, y: Float, z: Float, w: Float) {
         log += "uniform4f($location,$x,$y,$z,$w)"
+    }
+
+    override fun uniform1ui(location: Int, value: Int) {
+        log += "uniform1ui($location,$value)"
     }
 
     override fun uniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray) {

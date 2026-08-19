@@ -503,6 +503,15 @@ private fun assertLifecycleUnderARealContext(
 
     binding.genFramebuffers(1, names)
     val survivor = names[0]
+    // Per the GL 4.1 spec section 9.2 and the GLES 3.0 spec section 4.4.4 (both "Framebuffer
+    // Objects"): "A name returned by GenFramebuffers, but not yet associated with a framebuffer
+    // object by calling BindFramebuffer, is not the name of a framebuffer object" -- so
+    // isFramebuffer is specified to return GL_FALSE for a generated-but-never-bound name
+    // regardless of what happens to it afterward. Binding it once, here, is what makes the name
+    // "the name of a framebuffer object" at all, so the query below actually distinguishes a
+    // survivor from a deleted object instead of reporting GL_FALSE unconditionally.
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, survivor)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
     registry.register(key, listOf(GlObjectHandle(GlObjectType.FRAMEBUFFER, survivor)))
     assertEquals(
         RendererLifecycleOutcome.Succeeded,

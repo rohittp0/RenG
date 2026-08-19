@@ -21,10 +21,18 @@ class GlFrameDrawerTest {
      * brief's third assertion required the composite pass's rebind to the caller's target to be
      * strictly *after* [contentIndex]. With the reference `drawFrame` body, that rebind is the very
      * first call the composite pass issues once `content.draw` returns, so it lands at exactly
-     * `contentIndex` (proven by an instrumented run: both indices were `96`). No correct
-     * implementation can insert a gratuitous call between the content pass and the composite
-     * rebind just to satisfy a strict `>`, so this uses `>=`, which still proves the rebind never
-     * happens before content is drawn.
+     * `contentIndex` (proven by an instrumented run: both indices were `96`), so this uses `>=`.
+     *
+     * The `>=` is safe rather than a loophole: `indexOfFirst` scans the whole log from position 0,
+     * not forward from `contentIndex`, yet the framebuffer id it searches for
+     * (`world.target.value.toInt()`, `9`) is structurally unreserved during setup.
+     * [RecordingGlBinding]'s shared name counter is consumed 1-3 by `createOffscreenSurface`
+     * (colour texture, depth renderbuffer, framebuffer) and 4-8 by `createCompositePipeline`
+     * (vertex shader, fragment shader, program, vertex array, vertex buffer) — see
+     * `drawWorld()` below — so `9` is never generated before `drawFrame` runs, and `drawFrame`
+     * itself only ever binds it once, at the composite pass's rebind. The first (and only) match
+     * `indexOfFirst` can find is therefore that rebind, which cannot occur before `content.draw`
+     * returns.
      */
     @Test fun theOffscreenSurfaceIsClearedBeforeContentAndCompositedAfterIt() {
         val world = drawWorld()

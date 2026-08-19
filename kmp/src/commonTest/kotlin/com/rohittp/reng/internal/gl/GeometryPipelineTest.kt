@@ -5,7 +5,9 @@ import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Vector3
+import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
@@ -196,6 +198,127 @@ class GeometryPipelineTest {
         assertEquals(topLeftResolved.x.toFloat(), uploaded[10])
         assertEquals(topLeftResolved.y.toFloat(), uploaded[11])
         assertEquals(topLeftResolved.z.toFloat(), uploaded[12])
+    }
+
+    // --- Task 7: consumer uniforms dispatch by type, bound only when declared -----------------
+
+    @Test
+    fun consumerUniformsAreDispatchedByTypeToTheMatchingUniformSetter() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            "uScalar" to 10, "uVec2" to 11, "uVec3" to 12, "uVec4" to 13, "uInt" to 14, "uMat" to 15,
+        )
+        val pipeline = createPipeline(binding)
+        binding.log.clear()
+
+        drawGeometry(
+            binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+            consumerUniforms = mapOf(
+                "uScalar" to ShaderValue.Scalar(1f),
+                "uVec2" to ShaderValue.Vec2(1f, 2f),
+                "uVec3" to ShaderValue.Vec3(1f, 2f, 3f),
+                "uVec4" to ShaderValue.Vec4(1f, 2f, 3f, 4f),
+                "uInt" to ShaderValue.Integer(7),
+                "uMat" to ShaderValue.Mat4(FloatArray(16) { it.toFloat() }),
+            ),
+        )
+
+        // Sorted by name: uInt, uMat, uScalar, uVec2, uVec3, uVec4.
+        assertEquals(
+            listOf(
+                "uniform1i(14,7)",
+                "uniformMatrix4fv(15,1,false)",
+                "uniform1f(10,1.0)",
+                "uniform2f(11,1.0,2.0)",
+                "uniform3f(12,1.0,2.0,3.0)",
+                "uniform4f(13,1.0,2.0,3.0,4.0)",
+            ),
+            binding.log.filter { it.startsWith("uniform") },
+        )
+    }
+
+    @Test
+    fun aConsumerUniformNotDeclaredByTheProgramIsNeverSet() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val pipeline = createPipeline(binding)
+        binding.log.clear()
+
+        drawGeometry(
+            binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+            consumerUniforms = mapOf("uUnused" to ShaderValue.Scalar(1f)),
+        )
+
+        assertTrue(binding.log.none { it.startsWith("uniform") }, "an undeclared consumer name binds nothing")
+    }
+
+    // --- Task 7: consumer textures take deterministic, name-sorted units ----------------------
+
+    @Test
+    fun consumerTexturesTakeStableUnitsSortedByNameAndTheirSamplersReceiveTheUnitIndex() {
+        val binding = RecordingGlBinding().withDeclaredNames("uMaskB" to 9, "uMaskA" to 8)
+        val pipeline = createPipeline(binding)
+        binding.log.clear()
+
+        drawGeometry(
+            binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+            consumerTextures = linkedMapOf(
+                "uMaskB" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1)),
+                "uMaskA" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1)),
+            ),
+        )
+
+        // Sorted by name regardless of map insertion order: uMaskA takes unit 0, uMaskB takes unit 1.
+        assertEquals(listOf("uniform1i(8,0)", "uniform1i(9,1)"), binding.log.filter { it.startsWith("uniform1i") })
+    }
+
+    @Test
+    fun aConsumerTextureSamplerNotDeclaredByTheProgramIsNeverSet() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val pipeline = createPipeline(binding)
+        binding.log.clear()
+
+        drawGeometry(
+            binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+            consumerTextures = mapOf("uUnused" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1))),
+        )
+
+        assertTrue(binding.log.none { it.startsWith("uniform1i") })
+    }
+
+    @Test
+    fun drawGeometryRejectsMoreConsumerTexturesThanTheBudgetAllows() {
+        val binding = RecordingGlBinding()
+        val pipeline = createPipeline(binding)
+        val tooMany = (0 until MAXIMUM_CONSUMER_TEXTURES + 1).associate {
+            "uMask$it" to DecodedImage(1, 1, byteArrayOf(0, 0, 0, -1))
+        }
+
+        assertFailsWithIllegalArgument {
+            drawGeometry(
+                binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+                consumerTextures = tooMany,
+            )
+        }
+    }
+
+    // --- Task 7: the single most damaging error available here — DATA, never IMAGE ------------
+
+    @Test
+    fun consumerTexturesUploadBitExactAndAreNeverPremultiplied() {
+        val binding = RecordingGlBinding().withDeclaredNames("uMask" to 8)
+        val pipeline = createPipeline(binding)
+        binding.log.clear()
+
+        // 255, 0, 0, 128 unpremultiplied. If the implementation uploaded this through
+        // TextureContent.IMAGE instead of TextureContent.DATA, byte 0 would come out premultiplied
+        // to 128 (255 * 128 / 255, rounded), not stay 255 (as -1 in a signed byte) — silently
+        // corrupting whatever a mask or signed-distance field packed into that channel. Swapping
+        // DATA for IMAGE in GeometryPipeline's consumer-texture path must make this assertion fail.
+        drawGeometry(
+            binding, pipeline, testCorners(), IDENTITY_4X4, 1f, 1f, testBounds(), frameIndex = 0L,
+            consumerTextures = mapOf("uMask" to DecodedImage(1, 1, byteArrayOf(-1, 0, 0, -128))),
+        )
+
+        assertEquals(listOf<Byte>(-1, 0, 0, -128), binding.lastTexImageBytes())
     }
 
     // --- creation / deletion, mirroring CompositePipelineTest's shape ------------------------

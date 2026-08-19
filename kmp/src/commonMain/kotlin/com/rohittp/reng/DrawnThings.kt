@@ -3,6 +3,8 @@ package com.rohittp.reng
 import com.rohittp.reng.internal.canonicalDouble
 import com.rohittp.reng.internal.canonicalFloat
 import com.rohittp.reng.internal.freshListCopy
+import com.rohittp.reng.internal.gl.MAXIMUM_CONSUMER_TEXTURES
+import com.rohittp.reng.internal.gl.RESERVED_SHADER_NAMES
 import com.rohittp.reng.internal.requireFiniteFloat
 import com.rohittp.reng.internal.requireUnicodeScalars
 
@@ -225,7 +227,44 @@ public data class Geometry(
     public val topLeft: Vector3,
     public val bottomRight: Vector3,
     public val shaderPair: ShaderPair,
+    /**
+     * Consumer uniform values, bound by name at draw time to whichever of `shaderPair`'s programs
+     * declares that name (ADR 0008: undeclared names are silently never bound, never an error).
+     * A name matching one of RenG's six documented shader-interface names (see
+     * `internal.gl.RESERVED_SHADER_NAMES`) is rejected at construction, loudly, rather than being
+     * silently overwritten by RenG's own binding at draw time.
+     *
+     * **No-mutation-after-construction contract.** This property stores the caller's own `Map`
+     * reference directly, with no defensive copy — a forced consequence of keeping [Geometry] a
+     * `data class` so `copy()` and structural `equals` keep working the way every other RenG value
+     * type's does. `FramePlanningCore.plan()` reads this map exactly once, synchronously, and
+     * serializes it into the plan's immutable canonical bytes, so that reader can never observe a
+     * mutation. `internal.gl.drawGeometry` (Cycle F-1 Task 7) is a second, later reader of the same
+     * object at draw time: if a `PreparedFrame` (Task 9) ever retains this exact [Geometry]
+     * instance rather than a snapshot taken at `prepare()` time, a caller mutating this `Map`
+     * between `prepare()` and `draw()` would render values that differ from what the frame's
+     * recorded identity already hashed. A caller must therefore treat a `Map` passed here as
+     * immutable from the moment it is passed. Closing this gap on RenG's side requires
+     * `PreparedFrame` to snapshot [uniforms] and [textures] at `prepare()` time — this class only
+     * documents the requirement, since no `PreparedFrame` implementation exists yet to do it.
+     */
     public val uniforms: Map<String, ShaderValue> = emptyMap(),
+    /**
+     * Consumer texture bindings, by sampler name declared in `shaderPair`. Bulk data — a boundary
+     * mask, a signed-distance field, values packed across RGBA channels — travels this way rather
+     * than as a [ShaderValue], since GLSL has no array-valued uniform of usable size for it. Every
+     * texture bound through this map uploads bit-exact, never premultiplied — see
+     * `internal.gl.TextureContent.DATA` — because a consumer data payload is not decorative pixel
+     * colour and a multiply would silently corrupt it, exactly as `CONTEXT.md` documents for
+     * terrain samples.
+     *
+     * Capped at `internal.gl.MAXIMUM_CONSUMER_TEXTURES`: GLES 3.0 guarantees only sixteen fragment
+     * texture image units, and RenG's own draw of a geometry keeps headroom in that budget rather
+     * than exactly saturating it. A name colliding with a documented reserved shader name, or a map
+     * larger than the budget, is rejected at construction rather than silently dropped or wrapped at
+     * bind time. See [uniforms]'s KDoc for the identical no-mutation-after-construction contract,
+     * which applies here too.
+     */
     public val textures: Map<String, ResourceLocator> = emptyMap(),
 ) {
     init {
@@ -234,6 +273,15 @@ public data class Geometry(
         require(topLeft.x > bottomRight.x) { "topLeft latitude must be north of bottomRight latitude" }
         require(topLeft.y < bottomRight.y) { "topLeft longitude must be west of bottomRight longitude" }
         require(bottomRight.y - topLeft.y <= 360.0) { "geometry longitude span must not exceed 360 degrees" }
+        require(uniforms.keys.none { it in RESERVED_SHADER_NAMES }) {
+            "a geometry uniform must not use a name reserved for RenG's own documented shader interface"
+        }
+        require(textures.keys.none { it in RESERVED_SHADER_NAMES }) {
+            "a geometry texture must not use a name reserved for RenG's own documented shader interface"
+        }
+        require(textures.size <= MAXIMUM_CONSUMER_TEXTURES) {
+            "a geometry may declare at most $MAXIMUM_CONSUMER_TEXTURES consumer textures"
+        }
     }
 
     override fun toString(): String =

@@ -3,8 +3,10 @@ package com.rohittp.reng.internal.gl
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.shader.scanShaderProfile
 
 /**
@@ -49,6 +51,18 @@ internal val RESERVED_SHADER_NAMES: Set<String> = setOf(
     UNIFORM_GEOMETRY_BOUNDS,
     UNIFORM_FRAME_INDEX,
 )
+
+/**
+ * The most consumer textures one `Geometry` may declare.
+ *
+ * GLES 3.0 guarantees only sixteen fragment texture image units (`GL_MAX_TEXTURE_IMAGE_UNITS`).
+ * This budget stays strictly below that guaranteed minimum — rather than exactly saturating it —
+ * so RenG's own draw of a geometry keeps headroom for a unit of its own, now or in a later cycle,
+ * instead of the guarantee becoming a driver-dependent failure the moment RenG needs one. Exceeding
+ * it is rejected at `Geometry` construction (loudly, at the point of the mistake) rather than
+ * silently dropped or wrapped modulo sixteen at bind time.
+ */
+internal const val MAXIMUM_CONSUMER_TEXTURES: Int = 15
 
 /**
  * One compiled consumer geometry program plus the quad it draws with. Every location field is
@@ -183,6 +197,33 @@ internal fun deleteGeometryPipeline(
  *
  * `frameIndex` is a `Long` narrowed to the `uint` `uFrameIndex` expects; the narrowing wraps at
  * 2^32 exactly as [GlBinding.uniform1ui] documents.
+ *
+ * [consumerUniforms] and [consumerTextures] are `Geometry.uniforms` and `Geometry.textures`
+ * (Cycle F-1 Task 3), keyed by the consumer's own sampler/uniform names rather than the six
+ * documented ones above. Each is looked up against [pipeline]'s program with
+ * [GlBinding.getUniformLocation] **at draw time** — the same "bind only when declared" rule
+ * [pipeline]'s own six locations already follow, applied here because a consumer name's location
+ * cannot be cached at pipeline-creation time the way the six documented ones are: the pipeline is
+ * shared and content-keyed by [ShaderPair] alone, while the set of consumer names varies by
+ * `Geometry` instance. Both maps are iterated in ascending key order (plain `String` comparison,
+ * i.e. UTF-16 code-unit order — the same fixed, non-locale-sensitive ordering the canonical frame
+ * encoding uses) purely so the same document always assigns the same texture units; the order
+ * uniforms are set in has no observable effect since each lands at its own independent location.
+ *
+ * **This is the first place `Geometry.uniforms`/`.textures` are read at draw time**, a second,
+ * later read of the same object beyond `FramePlanningCore.plan()`'s single synchronous read. See
+ * the no-mutation-after-construction contract documented on `Geometry.uniforms` — this function
+ * takes a defensive `Map.toMap()` snapshot of each argument before iterating, which guards against
+ * the two maps being structurally mutated mid-call, but it CANNOT close the cross-call gap between
+ * a future `prepare()` and `draw()`: that requires `PreparedFrame` (Task 9) to snapshot both maps
+ * when a frame is prepared, not whatever this function does with what it is handed.
+ *
+ * Every consumer texture in [consumerTextures] uploads through [TextureContent.DATA], never
+ * [TextureContent.IMAGE]: a consumer texture is a boundary mask, a signed-distance field, or values
+ * packed across RGBA channels, and premultiplying any of those corrupts it silently, with no error
+ * — see [uploadTexture]'s KDoc and `CONTEXT.md`'s identical precedent for terrain samples. This is
+ * not a case where content decides the path (unlike a real image, which never reaches this map);
+ * every entry in [consumerTextures] is DATA, unconditionally.
  */
 internal fun drawGeometry(
     binding: GlBinding,
@@ -193,6 +234,8 @@ internal fun drawGeometry(
     resolutionHeightPixels: Float,
     boundsWestSouthEastNorthDegrees: FloatArray,
     frameIndex: Long,
+    consumerUniforms: Map<String, ShaderValue> = emptyMap(),
+    consumerTextures: Map<String, DecodedImage> = emptyMap(),
 ) {
     require(cameraRelativeCornersXyz.size == GEOMETRY_CORNER_FLOAT_COUNT) {
         "a geometry requires exactly four camera-relative xyz corners"
@@ -203,6 +246,16 @@ internal fun drawGeometry(
     require(boundsWestSouthEastNorthDegrees.size == GEOMETRY_BOUNDS_FLOAT_COUNT) {
         "geometry bounds require exactly west, south, east and north degrees"
     }
+    require(consumerTextures.size <= MAXIMUM_CONSUMER_TEXTURES) {
+        "a geometry may bind at most $MAXIMUM_CONSUMER_TEXTURES consumer textures"
+    }
+
+    // Defensive snapshot: guards this call's own iteration against the maps being structurally
+    // mutated mid-call. It does NOT, and cannot, close the prepare()-vs-draw() gap documented above
+    // and on Geometry.uniforms/.textures — that requires a PreparedFrame-level snapshot this
+    // function has no way to take.
+    val uniformsSnapshot = consumerUniforms.toMap()
+    val texturesSnapshot = consumerTextures.toMap()
 
     binding.useProgram(pipeline.program)
     binding.bindVertexArray(pipeline.vertexArray)
@@ -233,7 +286,42 @@ internal fun drawGeometry(
         binding.uniform1ui(pipeline.frameIndexLocation, frameIndex.toInt())
     }
 
+    uniformsSnapshot.entries.sortedBy { it.key }.forEach { (name, value) ->
+        val location = binding.getUniformLocation(pipeline.program, name)
+        if (location >= 0) {
+            bindConsumerUniform(binding, location, value)
+        }
+    }
+
+    texturesSnapshot.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, image) ->
+        val samplerLocation = binding.getUniformLocation(pipeline.program, name)
+        val texture = uploadTexture(binding, image, TextureContent.DATA)
+        binding.activeTexture(GL_TEXTURE0 + unitIndex)
+        binding.bindTexture(GL_TEXTURE_2D, texture)
+        if (samplerLocation >= 0) {
+            binding.uniform1i(samplerLocation, unitIndex)
+        }
+    }
+
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, GEOMETRY_VERTEX_COUNT)
+}
+
+/**
+ * Dispatches [value] to the one [GlBinding] setter matching its variant, at [location].
+ *
+ * Written as an expression body over an exhaustive `when` with **no `else` branch**, so a future
+ * [ShaderValue] variant is a compiler error here rather than a silently unset uniform — the same
+ * discipline Cycle D's `applyTerminal` applies to `RendererOwnerState`, and for the same reason: a
+ * missing branch must fail loudly at compile time, not sample as an untouched GL default at
+ * runtime.
+ */
+private fun bindConsumerUniform(binding: GlBinding, location: Int, value: ShaderValue): Unit = when (value) {
+    is ShaderValue.Scalar -> binding.uniform1f(location, value.value)
+    is ShaderValue.Vec2 -> binding.uniform2f(location, value.x, value.y)
+    is ShaderValue.Vec3 -> binding.uniform3f(location, value.x, value.y, value.z)
+    is ShaderValue.Vec4 -> binding.uniform4f(location, value.x, value.y, value.z, value.w)
+    is ShaderValue.Integer -> binding.uniform1i(location, value.value)
+    is ShaderValue.Mat4 -> binding.uniformMatrix4fv(location, 1, false, value.elementsForCore())
 }
 
 /**

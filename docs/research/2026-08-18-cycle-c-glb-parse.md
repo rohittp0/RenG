@@ -544,3 +544,26 @@ not measured against a corpus. The obvious next check, before Cycle C's spec is 
 container and JSON layers over the Khronos sample-model set and count how many assets the proposed subset
 would reject and why — that is a measurement this document lacks, and it is the one most likely to move a
 row from reject to accept.
+
+## Erratum (2026-08-19, recorded during Cycle C Task 7)
+
+The classification table above names `DECLARED_LENGTH_MISALIGNED` for fixtures 09 and 29. **No such
+reject code exists.** `GlbReject` never defined one, and the implemented scanner does not draw that
+distinction.
+
+The survey was written before the container design settled on a single strict equality comparison for
+the header's declared total length: it must equal the actual byte count exactly and be a multiple of
+four. That one check deliberately collapses five different authoring accidents — truncation, an
+inflated declared length, a misaligned length, a file ending inside a chunk header, and appended
+garbage — into `DECLARED_LENGTH_MISMATCH`. The table's finer name records a distinction the design
+intentionally chose not to make. It is not a missing feature.
+
+Consequently fixture 09 (`09-misaligned-chunk-length`) cannot isolate the chunk-level
+`CHUNK_LENGTH_MISALIGNED` gate: a misaligned chunk length inside a 4-aligned file necessarily
+misaligns the total as well, so the header gate fires first. Fixture 32
+(`32-chunk-length-misaligned-total-aligned`) is the only fixture that reaches that gate, and it does
+so by adding compensating padding — which is exactly what its name describes. `GlbContainerTest`
+asserts fixture 09's true outcome, `DECLARED_LENGTH_MISMATCH`.
+
+The table is left unedited: it is the record of what the parse survey observed, and correcting it in
+place would erase the fact that the survey proposed a distinction the implementation later folded.

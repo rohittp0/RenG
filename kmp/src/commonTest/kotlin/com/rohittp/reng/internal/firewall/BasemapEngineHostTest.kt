@@ -275,6 +275,56 @@ class BasemapEngineHostTest {
         }
     }
 
+    /**
+     * The compilation is of **the content the caller is committing**, not of whatever generation happens
+     * to be resident when the call arrives — the two are the same document on most frames and are
+     * genuinely different on exactly the frame a consumer edits their style.
+     *
+     * The ordering that makes them differ is the pure core's, and it is deliberate: `CompileBasemapStyle`
+     * is emitted before `InstallBasemapStyleVisibility`, because a style that fails to compile must not
+     * become visible. So at this point the resident generation still carries the *previous* document —
+     * reproduced literally below, by leaving the first document installed and calling with the second.
+     * Compiling the resident bytes there compiles a document the frame is not committing, while the
+     * tile-time manifest (derived after the install) describes the one it is; the engine then asks for
+     * the superseded style's urls and the firewall refuses every one of them.
+     *
+     * Keying on the caller's digest while still compiling the resident bytes would be worse than either:
+     * see [BasemapEngineHost.preparedStyle]. The key and the compiled bytes move together.
+     */
+    @Test
+    fun compilesTheContentTheCallerIsCommittingRatherThanTheGenerationResidentBeforeIt() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        val edited = hostStyleRecord(HOST_STYLE_JSON.replace(HOST_RASTER_TILE_TEMPLATE, HOST_EDITED_TILE_TEMPLATE))
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                val first = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                assertEquals(
+                    hostStyleRecord().contentDigest,
+                    cache.current(hostStyleKey)?.stored?.contentDigest,
+                    "the fixture must leave the first document resident, or it proves nothing",
+                )
+                assertNotEquals(hostStyleRecord().contentDigest, edited.contentDigest)
+
+                val second = host.preparedStyle(hostStyleKey, edited, HOST_STYLE_BASE_URI)
+
+                assertNotSame(first, second, "edited bytes are a different style")
+                assertNotEquals(
+                    first.digest,
+                    second.digest,
+                    "and what was compiled is the edited document, not the one still resident",
+                )
+                assertSame(
+                    second,
+                    host.currentPreparedStyle(hostStyleKey),
+                    "the host retains the compilation of the bytes being committed",
+                )
+            }
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun holdsNoPreparedStyleUntilOneIsCompiled() = runTest {
         val host = basemapEngineHost()

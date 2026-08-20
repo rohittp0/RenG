@@ -607,10 +607,13 @@ internal class RenGRenderer(
      * phases share one operation registry (ADR 0016).
      *
      * The manifest is asked of the engine host rather than carried out of the driver. It is the same pure
-     * function of the same two inputs the driver's own `ValidateBasemapStyle` ran — the resident style
-     * bytes and the style's own locator, which is exactly what Rentile receives as
-     * `StyleInput.Prefetched.baseUri` — so the two derivations cannot disagree. The resident generation is
-     * authoritative for the bytes, as it is for the compilation itself.
+     * function of the same two inputs the driver's own `ValidateBasemapStyle` ran — the style bytes and
+     * the style's own locator, which is exactly what Rentile receives as `StyleInput.Prefetched.baseUri`
+     * — so the two derivations cannot disagree. The bytes are read from the resident generation here,
+     * which is sound *because this runs after* the driver's `InstallBasemapStyleVisibility`: what is
+     * resident by now is this frame's own document. The compilation runs before that install, where the
+     * resident generation is still the previous frame's, and so compiles the content the driver hands it
+     * instead — see `BasemapEngineHost.preparedStyle`.
      *
      * **A basemap frame used to parse its style document twice** — once in `ValidateBasemapStyle` and
      * once again here — which was pure duplication measured at 1.9 ms per parse for a 248 KB

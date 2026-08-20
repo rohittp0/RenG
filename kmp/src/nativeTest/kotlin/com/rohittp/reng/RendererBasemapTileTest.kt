@@ -5,6 +5,7 @@ import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
@@ -195,6 +196,74 @@ class RendererBasemapTileTest {
         )
     }
 
+    /**
+     * The frame on which the consumer's own style document **changes** — the thing a downstream
+     * integrator does constantly while iterating on a style, and the one case where the compilation and
+     * the route derivation can disagree about which document the frame is on.
+     *
+     * `CompileBasemapStyle` runs strictly before `InstallBasemapStyleVisibility`, so at compile time the
+     * resident generation still carries the *previous* frame's bytes; the tile-time manifest is derived
+     * after that install, from this frame's. A compilation taken from the resident generation therefore
+     * makes the engine ask for the superseded style's tile urls while the firewall holds only the edited
+     * style's, and every tile at once fails closed as `AMBIGUOUS_RESOURCE_ROUTE` — surfacing to the
+     * caller as `BASEMAP_RENDER_FAILED` on frame two.
+     *
+     * **It has to be frame two.** The defect self-heals: by frame three the edited bytes are resident, so
+     * a test that prepares two frames and only asks whether it recovers passes without the fix. What is
+     * asserted here is that the *second* frame — the one that fails today — succeeds and renders from the
+     * edited document.
+     *
+     * The transport declares **no** `freshUntilEpochMillis`, asserted rather than assumed: a fresh style
+     * would make frame two `RESIDENT`-provenance, re-resolve nothing, and never deliver the edit at all.
+     */
+    @Test
+    fun rendersTheEditedStyleOnTheVeryFrameItsBytesChange() = runTest {
+        val transport = EditedStyleTileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        renderer.prepare(basemapPlan(frameIndex = 0L))
+        val firstDigest = assertNotNull(renderer.preparedBasemapStyle, "frame one holds its style").digest
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        val secondDigest = assertNotNull(renderer.preparedBasemapStyle, "frame two holds its style").digest
+
+        assertEquals(
+            2,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "the fixture declares no freshness, so frame two must genuinely re-resolve the style",
+        )
+        assertNotEquals(
+            firstDigest,
+            secondDigest,
+            "frame two compiled the document it is committing, not the one resident before it",
+        )
+        assertEquals(4, second.basemapTiles.size, "and rendered the ground that document describes")
+        assertEquals(
+            listOf(
+                "https://tiles.example/edited/4/1/10.png",
+                "https://tiles.example/edited/4/1/11.png",
+                "https://tiles.example/edited/4/2/10.png",
+                "https://tiles.example/edited/4/2/11.png",
+            ),
+            transport.requestedUrls()
+                .filter { it.startsWith("https://tiles.example/edited/") }
+                .distinct()
+                .sorted(),
+            "through the exact urls the edited style's own tile source composes",
+        )
+        second.basemapTiles.forEach { rendered ->
+            assertEquals(
+                basemapTileKey(secondDigest, rendered.tile, TILE_OUTPUT_SIZE),
+                rendered.key,
+                "and every rendered tile is identified by the edited style's digest",
+            )
+        }
+        assertEquals(
+            4,
+            transport.requestedUrls().count { it.startsWith("https://tiles.example/r/") },
+            "the superseded style's ground is asked for on its own frame only",
+        )
+    }
+
     @Test
     fun aFrameThatDrawsNoBasemapRendersNoGroundAtAll() = runTest {
         val transport = TileTransport()
@@ -255,6 +324,60 @@ internal class TileTransport(
                     contentType = "application/json",
                     freshUntilEpochMillis = styleFreshUntilEpochMillis,
                 ),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
+    }
+}
+
+/** [STYLE_TILE_TEMPLATE] edited, so the same style url serves a genuinely different ground source. */
+internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/edited/{z}/{x}/{y}.png"
+
+/**
+ * [STYLE_WITH_SPRITE_JSON] with its raster source repointed. Only the tile template moves, which is
+ * enough to change both the compiled style's digest and every tile url the engine composes.
+ */
+internal val EDITED_STYLE_WITH_SPRITE_JSON: String =
+    STYLE_WITH_SPRITE_JSON.replace(STYLE_TILE_TEMPLATE, EDITED_STYLE_TILE_TEMPLATE)
+
+/**
+ * A [TileTransport] whose style document is **edited between frames**: the first request for
+ * [STYLE_URL] answers [STYLE_WITH_SPRITE_JSON] and every later one answers
+ * [EDITED_STYLE_WITH_SPRITE_JSON], modelling a consumer saving a change to their own style.
+ *
+ * Which body to serve is decided from the recorder's own snapshot, taken under the same lock the append
+ * took, so the decision is ordered with respect to every other recorded call rather than read off an
+ * unguarded counter.
+ *
+ * Declares no `freshUntilEpochMillis` at all: a fresh style would be resolved from residency on frame
+ * two and the edit would never be delivered.
+ */
+internal class EditedStyleTileTransport : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = if (recorded.snapshot().count { it == STYLE_URL } <= 1) {
+                    STYLE_WITH_SPRITE_JSON.encodeToByteArray()
+                } else {
+                    EDITED_STYLE_WITH_SPRITE_JSON.encodeToByteArray()
+                },
+                metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             SPRITE_JSON_URL -> TransportResponse(
                 statusCode = 200,

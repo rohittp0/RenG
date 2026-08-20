@@ -22,14 +22,18 @@ import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.image.PngDecodeResult
+import com.rohittp.reng.internal.image.PngScan
 import com.rohittp.reng.internal.image.decodePng
+import com.rohittp.reng.internal.image.scanPng
 import com.rohittp.reng.internal.json.JsonParse
+import com.rohittp.reng.internal.json.JsonValue
 import com.rohittp.reng.internal.json.parseJson
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.internal.resource.TransportLatchKey
 import com.rohittp.reng.internal.resource.copyValidStoredResource
+import com.rohittp.reng.internal.resource.isValidMetadata
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
 import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.ResourceClass as EngineResourceClass
@@ -109,6 +113,23 @@ internal class OperationRegistry(
     private val storeReadJoin = SuspendJoin<ResourceRouteKey, EngineStoredRawResource?>()
     private val storeWriteJoin = SuspendJoin<ResourceRouteKey, Unit>()
 
+    // The sprite pair's two members, indexed by the base url Rentile's own `appendSpriteExtension`
+    // derived both of them from, so [approveSpriteMemberWrite] can name a member's sibling without
+    // guessing. Written only from [preregister] -- which [BasemapEngineHost.withOperation] runs to
+    // completion before the engine can call any answer path -- exactly like the three route indices
+    // above, which is why it needs no guard while [spriteRendezvous] does.
+    private val spriteMemberRoutes = mutableMapOf<SpriteMemberKey, ResourceRouteKey>()
+
+    // ADR 0016: "RenG jointly prevalidates the complete sprite JSON-and-PNG pair before writing either
+    // fetched member." Per-member validation cannot see the one check that actually matters here --
+    // whether each atlas entry's rect lies inside the atlas image -- and Rentile writes each member
+    // *before* compiling the pair, so without this a pair RenG can already prove will never compile is
+    // persisted into a consumer Store that has no remove operation, and fails identically on every later
+    // prepare(). [spriteRendezvous] carries each member's arrival; [spritePairJoin] runs the joint
+    // verdict exactly once per pair and replays it to whichever member did not run it.
+    private val spriteRendezvous = SpriteRendezvous()
+    private val spritePairJoin = SuspendJoin<SpriteGroupKey, Boolean>()
+
     /**
      * Declares one static prelookup route this invocation may need. Idempotent for an identical
      * repeat registration (two occurrences joining the same route); throws if a second, genuinely
@@ -147,6 +168,11 @@ internal class OperationRegistry(
             val digestIndex = EngineDigestKey(requireNotNull(expectedStableId), route.resourceClass)
             requireNoCollision(routesByEngineDigest[digestIndex], route)
             routesByEngineDigest[digestIndex] = route
+        }
+
+        spriteMemberKeyOf(route)?.let { member ->
+            requireNoCollision(spriteMemberRoutes[member], route)
+            spriteMemberRoutes[member] = route
         }
     }
 
@@ -195,8 +221,12 @@ internal class OperationRegistry(
                 recordLatchedTransportDigest(route, sha256Hex(response.bodySnapshot))
                 response.toEngineResponse()
             } catch (cancellation: CancellationException) {
+                // Deliberately NOT latched as a contentless sprite member: a cancelled route is a
+                // cancelled invocation, and a sibling parked at the rendezvous must observe that as its
+                // own cancellation rather than as a silent decline.
                 throw cancellation
             } catch (@Suppress("TooGenericExceptionCaught") adapterFailure: Throwable) {
+                markSpriteMemberWithoutContent(route)
                 throw transportFailure(route).toException()
             }
         }
@@ -218,11 +248,22 @@ internal class OperationRegistry(
                     // such a record reach it as if it were a genuine hit.
                     null
                 } else {
+                    // The mixed case the rendezvous would otherwise deadlock on: Rentile's sprite
+                    // acquirer returns a store hit's bytes without ever writing them, so the sibling's
+                    // write would wait for an arrival that is never coming. The firewall performed this
+                    // read itself and therefore holds the very bytes the pair must be validated against,
+                    // so a validated hit contributes the member here. The result is deliberately
+                    // ignored: a conflicting contribution is a write-path concern, and this path's
+                    // contract is to answer the engine's read honestly.
+                    contributeSpriteMember(route, validated)
                     validated.toEngineStoredRawResource()
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (@Suppress("TooGenericExceptionCaught") adapterFailure: Throwable) {
+                // A member whose own store read failed threw out of Rentile's `acquireRaw` before it
+                // could fetch, so it can never reach a write: release its sibling rather than park it.
+                markSpriteMemberWithoutContent(route)
                 throw storeReadFailure(route).toException()
             }
         }
@@ -239,26 +280,39 @@ internal class OperationRegistry(
         // cannot produce such a write -- every raw-store write sits immediately after a transport on the
         // same key -- but the firewall's whole premise is that the engine is untrusted, and "no latch"
         // was previously the one shape that walked straight through.
-        val latchedDigest = latchedTransportDigestFor(route) ?: throw storeWriteFailure(route).toException()
+        val latchedDigest = latchedTransportDigestFor(route) ?: throw integrityRefusal(route)
         if (latchedDigest != resource.contentDigest) {
-            throw storeWriteFailure(route).toException()
+            throw integrityRefusal(route)
         }
 
-        // The same stricter RenG record rules the read path already applies (empty bytes, digest shape,
-        // metadata validity, byte ceiling). Without them a record with a negative `storedAtEpochMillis`
-        // or a CRLF-bearing `etag` -- neither of which the digest check can see -- reached the consumer's
-        // Store through the write path while being rejected on the read path.
+        // Metadata validity is a CONTENT verdict, not an integrity one, so it declines rather than
+        // throwing. The engine echoes back the consumer's own `contentType`/`etag`/`lastModified`
+        // verbatim, so rejecting them says nothing about whether the engine fetched these bytes -- and a
+        // consumer adapter written as `etag = headers["ETag"].orEmpty()`, an ordinary idiom, yields a
+        // blank string that these rules reject. Throwing there would fail the whole acquisition and kill
+        // any style whose sprite atlas is required, which is exactly the dead-style chain the decline
+        // split exists to remove. The read path already treats the identical record as a graceful miss.
+        val renGMetadata = resource.metadata.toRenGMetadata()
+        if (!isValidMetadata(renGMetadata)) return
+
+        // What remains IS integrity: `copyValidStoredResource` re-derives SHA-256 over the bytes, so a
+        // rejection here means the engine kept the latched digest and presented different bytes.
         val validated = copyValidStoredResource(
             StoredRawResource(
                 bytes = resource.bytes,
                 contentDigest = resource.contentDigest,
-                metadata = resource.metadata.toRenGMetadata(),
+                metadata = renGMetadata,
             ),
             route.maximumResponseBytes,
             sha256,
-        ) ?: throw storeWriteFailure(route).toException()
+        ) ?: throw integrityRefusal(route)
 
         storeWriteJoin.run(route) {
+            // Inside the join, not before it, for two reasons. The join releases its own Mutex before
+            // running this block, so parking here holds no lock and blocks no other route. And the
+            // content verdict becomes this route's latched write outcome, so the engine's later attempt
+            // on the same key replays it instead of re-deciding or parking a second time.
+            if (!shouldCacheValidatedWrite(route, validated)) return@run
             try {
                 store.write(
                     RenGRawResourceKey(stableId = key.stableId, resourceClass = route.resourceClass),
@@ -270,6 +324,127 @@ internal class OperationRegistry(
                 throw storeWriteFailure(route).toException()
             }
         }
+    }
+
+    /**
+     * The one class of write refusal that stays fatal: **firewall integrity** -- the engine presenting
+     * bytes RenG cannot prove it fetched. An unresolved route, a route with no latched transport
+     * response, a body that does not match the latched response, and a record RenG's own rules reject
+     * are all statements about the engine, not about the content, so each is a loud sanitized failure.
+     *
+     * The side effect these owe the rendezvous is unchanged: a member refused here can never contribute,
+     * so its sibling must be released rather than left parked on an arrival that is now impossible. That
+     * release is latched for the registry's lifetime exactly like every other outcome here -- within one
+     * invocation "the engine's second attempt is not a consumer retry" (ADR 0016) -- which for a sprite
+     * member also makes the refusal itself sticky: a member latched without content can no longer
+     * contribute, so a second write on that member declines too. Every check above is a function of the
+     * route and the bytes the engine just fetched, so a second attempt could only differ by presenting
+     * different bytes for one member, which is the collision this file exists to refuse.
+     */
+    private suspend fun integrityRefusal(route: ResourceRouteKey): RenGException {
+        markSpriteMemberWithoutContent(route)
+        return storeWriteFailure(route).toException()
+    }
+
+    /**
+     * The other class of write outcome: a **content verdict**, which declines to cache and returns
+     * normally rather than failing the engine's acquisition.
+     *
+     * The reasoning, which is specific to what a refusal actually costs. A refused write becomes
+     * `ResourceStoreException` inside Rentile's `SpriteResourceAcquirer.writeStore`, cancels the
+     * `coroutineScope` both members run in, and escapes `acquire`. `StyleCompiler` degrades that only on
+     * the `resolveOptionalSpriteAtlas` branch; `resolveRequiredSpriteAtlas` catches nothing at all, and
+     * it is the branch chosen whenever any visible layer carries a `*-pattern` paint property or any
+     * `symbol` layer has `icon-image` without meaningful `text-field` -- that is, for essentially every
+     * real basemap style. So for the sprite pair a throwing gate has exactly two outcomes, and neither is
+     * good: content Rentile *also* rejects dies in its own `compile` moments later regardless, so the
+     * refusal only changes store state while downgrading a typed decode failure into a misleading
+     * `STORE_WRITE_FAILED`; content Rentile *accepts* becomes a permanently broken style. There is no
+     * third case, and the deltas are not hypothetical -- RenG's PNG container walk refuses bit depths
+     * other than eight, interlacing, unknown critical chunks and trailing bytes, while Rentile's sprite
+     * path reads only the signature and the `IHDR` dimensions and hands the raw bytes to Skia, which
+     * decodes all of those. An atlas that `oxipng` or `optipng` reduced to a four-bit palette is an
+     * ordinary, default-on optimisation that Rentile renders.
+     *
+     * Declining is a legal answer to the engine: Rentile's `RawResourceStore.write` returns `Unit` and
+     * its result is never read, so a normal return is indistinguishable from a successful write, and the
+     * engine proceeds with the bytes it already holds in memory.
+     *
+     * ADR 0016 is satisfied rather than bent. Its three obligations here -- prevalidate the pair "before
+     * writing either fetched member", let no atlas "become visible unless both succeed", and require
+     * terrain validation of "a fetched DEM write" -- all constrain RenG's write and visibility boundary,
+     * which is exactly what this gate still enforces: no unverified byte reaches the consumer Store, and
+     * neither member is written when the pair fails. None of them constrains the engine's own
+     * acquisition, and none of them could: the bytes reached Rentile through [executeTransport] long
+     * before any write callback, so no `writeStore` outcome can stop the engine compiling them *without
+ * also aborting the whole acquisition* -- which on a required sprite atlas kills the style outright,
+ * and on an optional one hides an atlas Rentile renders correctly. Suppressing the atlas alone is
+ * not something this seam can do.
+     */
+    private suspend fun shouldCacheValidatedWrite(route: ResourceRouteKey, validated: StoredRawResource): Boolean {
+        // Gap the read path already closed, applied to the write it was always missing from, and ADR
+        // 0016's DEM terrain obligation, which has no engine-side equivalent at all.
+        if (!passesClassSpecificWriteValidation(route.resourceClass, validated)) {
+            markSpriteMemberWithoutContent(route)
+            return false
+        }
+        return approveSpriteMemberWrite(route, validated)
+    }
+
+    /**
+     * ADR 0016's joint sprite prevalidation, as a suspending rendezvous between the pair's two member
+     * routes: this member publishes its own validated bytes, waits for its sibling's, and then both
+     * replay one joint verdict, so both members are cached or neither is. Returns `true` for every other
+     * class, which has no pair to assemble.
+     *
+     * Four ways a sibling can fail to arrive, all of which decline rather than hang:
+     *  - **never preregistered** -- declined immediately, before any wait, since this invocation can
+     *    never produce the arrival;
+     *  - **its fetch or its store read failed** -- that path latched it without content, which completes
+     *    the wait with `null`;
+     *  - **its own write was refused or declined** -- same latch;
+     *  - **the invocation is cancelled** -- the wait is an ordinary suspension point, so cancellation
+     *    surfaces here unwrapped and is latched as this route's write outcome. Cancellation is the one
+     *    thing that still propagates out of this function, because it is control flow rather than a
+     *    verdict about content.
+     *
+     * There is deliberately no timeout. Rentile launches both members' `acquireRaw` calls inside one
+     * `coroutineScope` and awaits both, so a genuine failure in one cancels the other rather than
+     * leaving it parked, and its `SingleFlight` independently cancels the shared work once its last
+     * waiter detaches -- two independent releases, neither of which needs a clock. A wall-clock bound
+     * could not tell a sibling whose fetch is merely slow from one that will never come, so it would
+     * only convert a slow consumer transport into a spurious decline.
+     */
+    private suspend fun approveSpriteMemberWrite(route: ResourceRouteKey, validated: StoredRawResource): Boolean {
+        val member = spriteMemberKeyOf(route) ?: return true
+        val sibling = SpriteMemberKey(member.group, siblingSpriteClassOf(member.resourceClass))
+        if (spriteMemberRoutes[sibling] == null) return false
+
+        val mine = SpriteMemberContent(validated.contentDigest, validated.bytes)
+        // A second, different content for one member inside one invocation means the consumer Store and
+        // the engine's fetch disagree about what this member is. The written bytes are provably the ones
+        // the engine fetched (the latched-digest check above already proved that), so this is not the
+        // engine lying and it is not an integrity refusal -- it is a pair RenG cannot decide, so it
+        // declines to cache and leaves whatever the Store already holds alone.
+        if (!spriteRendezvous.contribute(member, mine)) return false
+        val theirs = spriteRendezvous.awaitContent(sibling) ?: return false
+
+        val jsonMember = if (member.resourceClass == ResourceClass.BASEMAP_SPRITE_JSON) mine else theirs
+        val imageMember = if (member.resourceClass == ResourceClass.BASEMAP_SPRITE_IMAGE) mine else theirs
+        // Latched per pair, so both members reach the same verdict and neither re-derives it.
+        return spritePairJoin.run(member.group) {
+            spritePairIsJointlyValid(jsonMember.bytes, imageMember.bytes)
+        }
+    }
+
+    private suspend fun contributeSpriteMember(route: ResourceRouteKey, validated: StoredRawResource) {
+        val member = spriteMemberKeyOf(route) ?: return
+        spriteRendezvous.contribute(member, SpriteMemberContent(validated.contentDigest, validated.bytes))
+    }
+
+    /** Latches a sprite member as one that will contribute no content, releasing a parked sibling. */
+    private suspend fun markSpriteMemberWithoutContent(route: ResourceRouteKey) {
+        spriteMemberKeyOf(route)?.let { spriteRendezvous.markWithoutContent(it) }
     }
 
     /**
@@ -289,7 +464,29 @@ internal class OperationRegistry(
                 decodePng(stored.bytes, SPRITE_IMAGE_DECODE_CEILING_BYTES) is PngDecodeResult.Success
             ResourceClass.BASEMAP_SPRITE_JSON ->
                 parseJson(stored.bytes, 0, stored.bytes.size, SPRITE_JSON_MAXIMUM_DEPTH) is JsonParse.Parsed
+            // Deliberate, and the reason is specific rather than "nothing else needs checking". Rentile's
+            // raster, vector, TileJSON and GeoJSON acquirers each re-run their own bounded parser or
+            // decoder on a store hit and remove-then-refetch when it fails (e.g. `RasterResourceAcquirer`
+            // at Rentile 0.2.0), so a bad record in one of those classes self-heals on the next access and
+            // is never terminal. The sprite pair is the one exception -- its acquirer checks only size and
+            // digest on a hit and never parses -- which is exactly why ADR 0016 records only the sprite
+            // pair as terminal and why only it earns a class-specific gate here. Widening this branch
+            // would buy nothing and would turn a self-healing engine record into a hard RenG refusal.
             else -> true
+        }
+
+    /**
+     * Everything [passesClassSpecificReadValidation] proves, plus the one obligation ADR 0016 places on
+     * writes alone: *"A fetched DEM write additionally requires RenG's terrain encoding validation."*
+     * Rentile's DEM path is `RasterResourceAcquirer`, which reaches its raw-store write after generic
+     * bounded image validation only, so nothing but this checks that a DEM tile is actually terrain-
+     * encoded before it lands in the consumer's Store.
+     */
+    private fun passesClassSpecificWriteValidation(resourceClass: ResourceClass, stored: StoredRawResource): Boolean =
+        when (resourceClass) {
+            ResourceClass.BASEMAP_DEM_TILE ->
+                validatesDemTerrainEncoding(stored.bytes, DEM_TILE_DECODE_CEILING_BYTES)
+            else -> passesClassSpecificReadValidation(resourceClass, stored)
         }
 
     private fun redactedLocatorHex(url: String): String = sha256Hex(redactAuthenticationQuery(url))
@@ -438,6 +635,224 @@ private class SuspendJoin<K : Any, V> {
         }
     }
 }
+
+/**
+ * The two members of one sprite atlas, identified by the base url Rentile derived both from. Rentile's
+ * `SpriteResourceAcquirer` composes `<base>.json` and `<base>.png` through its own
+ * `appendSpriteExtension` (extension before the query and fragment, not after), so stripping that
+ * class's extension back off a member's locator recovers the base the two share. Rentile 0.2.0 admits
+ * exactly one string-valued `sprite` reference per style, so one invocation holds at most one pair --
+ * this derivation's job is to confirm two routes belong together, not to disambiguate among several.
+ */
+private data class SpriteGroupKey(val base: String)
+
+private data class SpriteMemberKey(val group: SpriteGroupKey, val resourceClass: ResourceClass)
+
+/** One member's validated bytes, immutable once contributed. */
+private class SpriteMemberContent(val digest: String, val bytes: ByteArray)
+
+private fun spriteMemberKeyOf(route: ResourceRouteKey): SpriteMemberKey? {
+    val extension = when (route.resourceClass) {
+        ResourceClass.BASEMAP_SPRITE_JSON -> SPRITE_JSON_EXTENSION
+        ResourceClass.BASEMAP_SPRITE_IMAGE -> SPRITE_IMAGE_EXTENSION
+        else -> return null
+    }
+    return SpriteMemberKey(SpriteGroupKey(spriteBaseUrl(route.locator.value, extension)), route.resourceClass)
+}
+
+private fun siblingSpriteClassOf(resourceClass: ResourceClass): ResourceClass =
+    if (resourceClass == ResourceClass.BASEMAP_SPRITE_JSON) {
+        ResourceClass.BASEMAP_SPRITE_IMAGE
+    } else {
+        ResourceClass.BASEMAP_SPRITE_JSON
+    }
+
+/**
+ * The exact inverse of Rentile's `appendSpriteExtension`: split the fragment, split the query, drop
+ * [extension] from the end of the path alone, and put the query and fragment back. A locator whose path
+ * does not end in [extension] is returned unchanged, which simply groups it with itself -- it then finds
+ * no sibling and its write is refused, rather than being silently paired with an unrelated route.
+ */
+private fun spriteBaseUrl(url: String, extension: String): String {
+    val fragmentIndex = url.indexOf('#').let { if (it < 0) url.length else it }
+    val withoutFragment = url.substring(0, fragmentIndex)
+    val fragment = url.substring(fragmentIndex)
+    val queryIndex = withoutFragment.indexOf('?').let { if (it < 0) withoutFragment.length else it }
+    val path = withoutFragment.substring(0, queryIndex)
+    val query = withoutFragment.substring(queryIndex)
+    val base = if (path.endsWith(extension)) path.dropLast(extension.length) else path
+    return base + query + fragment
+}
+
+/**
+ * The cross-member checks Rentile's own `SpriteResourceAcquirer.compile` performs, and only those that
+ * are unconditional and independent of Rentile's configuration: the manifest is an object of entry
+ * objects, each entry carries integer `x`/`y`/`width`/`height`, each rect is non-degenerate and lies
+ * wholly inside the atlas image, a present `pixelRatio` is finite and positive, and no entry carries the
+ * `stretchX`/`stretchY`/`content` fields Rentile refuses.
+ *
+ * Rentile's two limit-shaped checks are deliberately not mirrored, and **not** because RenG cannot know
+ * them -- it can, exactly, at the pinned version: `MAX_SPRITE_ENTRIES` is a hardcoded `100_000` in
+ * `SpriteResourceAcquirer`'s `private companion object`, and `maxRasterDimensionPx` defaults to `8192`
+ * in a `ResourceLimits` that [BasemapEngineHost] never overrides. They are omitted on coupling grounds.
+ * Copying either number binds this gate's cache policy to a value that can move without any compile-time
+ * signal -- a minor Rentile release changing the constant, or a later RenG change passing custom
+ * `resourceLimits` -- and the two ways of being wrong are not symmetric. Omitting them caches a pair that
+ * cannot compile: wasted bytes on a style that fails for its own reasons either way. Mirroring them and
+ * being stale in the strict direction declines to cache a pair the engine happily uses, which is a
+ * permanent, unannounced refetch of both members on every prepare, for a style that works. Bytes on a
+ * broken style cost less than repeated network on a working one, and an atlas above either bound is far
+ * outside anything a real basemap style ships.
+ *
+ * Only the image's IHDR is needed, so this scans the container ([scanPng]) rather than decoding it; the
+ * member gate already proved the same bytes decode in full.
+ */
+private fun spritePairIsJointlyValid(jsonBytes: ByteArray, imageBytes: ByteArray): Boolean {
+    val header = (scanPng(imageBytes) as? PngScan.Admitted)?.header ?: return false
+    val parsed = parseJson(jsonBytes, 0, jsonBytes.size, SPRITE_JSON_MAXIMUM_DEPTH) as? JsonParse.Parsed
+    val root = parsed?.value as? JsonValue.Obj ?: return false
+    return root.members.values.all { entry -> spriteEntryFitsAtlas(entry, header.width, header.height) }
+}
+
+private fun spriteEntryFitsAtlas(entry: JsonValue, imageWidth: Int, imageHeight: Int): Boolean {
+    val members = (entry as? JsonValue.Obj)?.members ?: return false
+    if (members.keys.any { it in UNSUPPORTED_SPRITE_ENTRY_FIELDS }) return false
+    val x = spriteEntryInt(members["x"]) ?: return false
+    val y = spriteEntryInt(members["y"]) ?: return false
+    val width = spriteEntryInt(members["width"]) ?: return false
+    val height = spriteEntryInt(members["height"]) ?: return false
+    if (x < 0 || y < 0 || width <= 0 || height <= 0) return false
+    // Widened deliberately: two in-range Ints can overflow their sum, and an overflowed rect would
+    // compare as comfortably inside the atlas.
+    if (x.toLong() + width.toLong() > imageWidth.toLong()) return false
+    if (y.toLong() + height.toLong() > imageHeight.toLong()) return false
+    // Absent, or present but unreadable as a number, is not a rejection: Rentile falls back to 1.0 in
+    // both cases, so refusing here would refuse a pair the engine compiles.
+    val pixelRatio = spriteEntryDouble(members["pixelRatio"]) ?: return true
+    return pixelRatio.isFinite() && pixelRatio > 0.0
+}
+
+/** Rentile reads these through `JsonPrimitive.intOrNull`, which parses a quoted primitive's content
+ *  exactly as it parses a bare one, so a string-spelled integer is admitted here for the same reason. */
+private fun spriteEntryInt(value: JsonValue?): Int? = when (value) {
+    is JsonValue.Integer -> if (value.value in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) value.value.toInt() else null
+    is JsonValue.Text -> value.value.toIntOrNull()
+    else -> null
+}
+
+private fun spriteEntryDouble(value: JsonValue?): Double? = when (value) {
+    is JsonValue.Integer -> value.value.toDouble()
+    is JsonValue.Real -> value.value
+    is JsonValue.Text -> value.value.toDoubleOrNull()
+    else -> null
+}
+
+/**
+ * ADR 0016's DEM write obligation. Mapbox Terrain-RGB and Terrarium are both plain eight-bit RGB byte
+ * triples -- mathematically indistinguishable from the decoded bytes alone, since both are only a
+ * caller-side formula's interpretation of R/G/B -- so any PNG whose source colour type carries no
+ * meaningful alpha (RenG's canonical decode leaves such pixels fully opaque) satisfies either encoding,
+ * and a genuinely four-channel encoding fails the instant any pixel is not fully opaque.
+ *
+ * **This is a seam, not a second implementation to keep.** The concurrent gate-deletion task promoted
+ * the identical check out of `RenGClassGateRunner`'s private gate path as
+ * `internal fun validatesDemTerrainEncoding(bytes: ByteArray, maximumDecodedImageBytes: Long): Boolean`
+ * in `internal/driver/ClassGateRunner.kt`, on a sibling branch that this branch's base predates -- so
+ * this file cannot call it and still compile. The signature here is deliberately identical to that one,
+ * and the sole call site passes the same two arguments, so integrating the two branches is exactly:
+ * delete this function and import that one. Nothing else moves.
+ */
+private fun validatesDemTerrainEncoding(bytes: ByteArray, maximumDecodedImageBytes: Long): Boolean {
+    val decoded = decodePng(bytes, maximumDecodedImageBytes) as? PngDecodeResult.Success ?: return false
+    val rgba = decoded.image.rgbaSnapshot()
+    var index = 3
+    while (index < rgba.size) {
+        if (rgba[index] != OPAQUE_ALPHA) return false
+        index += 4
+    }
+    return true
+}
+
+/**
+ * The sprite pair's arrival board: each member is latched exactly once, either with the validated bytes
+ * that arrived for it or as one that will contribute none, and a waiter suspends until its member
+ * reaches one of those two states. Never evicts, for the same reason [SuspendJoin] never does -- the
+ * registry it lives in is discarded when the invocation terminates (ADR 0016), so a latched "no content"
+ * can never be inherited by a later, healthy preparation.
+ *
+ * Concurrency, stated because this file has already had one unsynchronised map on a genuinely concurrent
+ * answer path: every read and write of [slots] and of a slot's own fields happens under [mutex], the
+ * suspending wait happens with **no** lock held (the deferred is captured under the lock and awaited
+ * outside it), and [mutex] is a leaf -- no other lock is ever acquired while it is held, and it is only
+ * ever acquired from a [SuspendJoin] block, which has already released its own mutex. Each slot's
+ * [Slot.arrived] is completed by exactly one caller: the one whose critical section performed the
+ * transition, which completes it after leaving the lock.
+ */
+private class SpriteRendezvous {
+    private val mutex = Mutex()
+    private val slots = mutableMapOf<SpriteMemberKey, Slot>()
+
+    /**
+     * Publishes [content] for [member]. Returns `false` -- and publishes nothing -- when this member is
+     * already latched with different content, or already latched as contributing none.
+     */
+    suspend fun contribute(member: SpriteMemberKey, content: SpriteMemberContent): Boolean {
+        var signal: CompletableDeferred<Unit>? = null
+        val accepted = mutex.withLock {
+            val slot = slots.getOrPut(member) { Slot() }
+            val existing = slot.content
+            when {
+                existing != null -> existing.digest == content.digest
+                slot.withoutContent -> false
+                else -> {
+                    slot.content = content
+                    signal = slot.arrived
+                    true
+                }
+            }
+        }
+        signal?.complete(Unit)
+        return accepted
+    }
+
+    /** Latches [member] as one that will contribute no content, releasing any sibling waiting on it. */
+    suspend fun markWithoutContent(member: SpriteMemberKey) {
+        var signal: CompletableDeferred<Unit>? = null
+        mutex.withLock {
+            val slot = slots.getOrPut(member) { Slot() }
+            if (slot.content == null && !slot.withoutContent) {
+                slot.withoutContent = true
+                signal = slot.arrived
+            }
+        }
+        signal?.complete(Unit)
+    }
+
+    /** Suspends until [member] is latched either way; `null` means no content will ever arrive. */
+    suspend fun awaitContent(member: SpriteMemberKey): SpriteMemberContent? {
+        val slot = mutex.withLock { slots.getOrPut(member) { Slot() } }
+        slot.arrived.await()
+        return mutex.withLock { slot.content }
+    }
+
+    private class Slot {
+        val arrived = CompletableDeferred<Unit>()
+        var content: SpriteMemberContent? = null
+        var withoutContent: Boolean = false
+    }
+}
+
+private const val SPRITE_JSON_EXTENSION = ".json"
+private const val SPRITE_IMAGE_EXTENSION = ".png"
+
+/** The three entry fields Rentile's sprite compiler rejects outright rather than ignoring. */
+private val UNSUPPORTED_SPRITE_ENTRY_FIELDS: Set<String> = setOf("stretchX", "stretchY", "content")
+
+private const val OPAQUE_ALPHA: Byte = -1 // 0xFF unsigned
+
+/** Generous enough for any DEM tile; only used to decide whether a fetched DEM record is terrain-encoded
+ *  at all before writing it, never to size an actual buffer. */
+private const val DEM_TILE_DECODE_CEILING_BYTES: Long = 64L * 1024L * 1024L
 
 /** Generous enough for any sticker/sprite-sized image; only used to decide whether a sprite image
  *  record decodes at all before answering the engine's read, never to size an actual buffer. */

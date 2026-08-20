@@ -218,7 +218,13 @@ private fun isValidMetadata(metadata: TransportResponseMetadata): Boolean =
         isValidOptionalMetadataText(metadata.lastModified) &&
         (metadata.freshUntilEpochMillis == null || metadata.freshUntilEpochMillis >= 0L)
 
-private fun isValidMetadata(metadata: StoredRawResourceMetadata): Boolean =
+/**
+ * Whether a stored record's metadata satisfies RenG's own record rules. `internal` because the firewall
+ * must ask this question separately from the rest of [copyValidStoredResource]: metadata validity is a
+ * verdict about content the consumer supplied, not proof that the engine fetched the bytes it is
+ * presenting, and the two carry different consequences at that seam.
+ */
+internal fun isValidMetadata(metadata: StoredRawResourceMetadata): Boolean =
     isValidOptionalMetadataText(metadata.contentType) &&
         isValidOptionalMetadataText(metadata.etag) &&
         isValidOptionalMetadataText(metadata.lastModified) &&

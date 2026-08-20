@@ -39,9 +39,9 @@ import com.rohittp.reng.internal.resource.StyleFailureKind
  * (`"tiles": [...]`) or by reference (`"url": ".../tiles.json"`, a TileJSON document). Only the inline
  * form is supported. The `url` form's templates, scheme, zoom range and bounds live in a TileJSON
  * document RenG never fetches, so supporting it means observing TileJSON bytes at the firewall and
- * reproducing a second layer of Rentile's private semantics. A `url`-form source therefore fails
- * loudly with `SOURCE_TILE_JSON_URL_UNSUPPORTED` rather than being skipped silently or answered with a
- * guessed url.
+ * reproducing a second layer of Rentile's private semantics. A `url`-form source is therefore recorded
+ * as `SOURCE_TILE_JSON_URL_UNSUPPORTED` on `BasemapStyleManifest.underivableSources` and contributes no
+ * route, rather than being dropped without trace or answered with a guessed url.
  *
  * **Over-registration, deliberately.** Which layers are active at a zoom, whether the sprite is fetched
  * at all, and which sources a retained layer actually references are all decided inside Rentile's own
@@ -50,16 +50,51 @@ import com.rohittp.reng.internal.resource.StyleFailureKind
  * answered and costs one SHA-256 in `OperationRegistry.preregister`; a missing one fails closed. Source
  * `bounds` are, for the same reason, deliberately not read: they only ever *suppress* requests.
  *
- * **Two divergences from Rentile that are RenG's own, both loud:**
- *  - RenG's `parseJson` rejects duplicate member names; Rentile's `Json { isLenient = false }` does not.
- *    Such a document is reported as `STYLE_JSON_DUPLICATE_MEMBER_NAME` -- its own code, distinct from
- *    ordinary malformed JSON, so the divergence is legible in a report rather than looking like a
- *    corrupt download.
- *  - RenG validates **every** declared source of a routable type; Rentile validates only the sources a
- *    retained layer actually references. A style carrying an unreferenced, malformed source therefore
- *    compiles in Rentile and is rejected here. That is the price of not modelling layer retention, and
- *    it is taken deliberately: the alternative -- ignoring a source RenG cannot derive routes for -- is
- *    exactly the silent under-registration this file exists to prevent.
+ * **A source RenG cannot derive is deferred, not fatal.** Eleven per-source conditions -- a `url`-form
+ * TileJSON reference first among them -- record a `BasemapSourceUnderivableReason` against that source
+ * and contribute no route, instead of rejecting the whole style. Deferring costs nothing when the
+ * source is unused: `StyleCompiler` has no loop over `sources` at all, and `compileVectorSource` /
+ * `compileRasterSource` are reached only per referencing layer, so an unreferenced source is never
+ * compiled and never fetched. When the source *is* used, the firewall refuses it at the moment it is
+ * actually needed, and that refusal is not silent: `OperationRegistry.executeTransport` throws
+ * `ambiguousRouteFailure()` with no fallback branch, which Rentile wraps and `classifyEngineFailure`
+ * maps to `RESOURCE_UNAVAILABLE` at `RESOURCE_LOOKUP` -- naming a class this cycle preregisters no
+ * route for, which makes it an attributable fingerprint rather than an anonymous outage.
+ *
+ * Rejecting the whole style upfront was strictly worse on both counts. It is no more precise:
+ * `styleFailure` names the *style's* own key and class, never the offending source. And for a style
+ * served from the consumer's own cache it is actively misleading, because `styleFailure`'s first line
+ * collapses STORE-provenance content into `STORE_INTEGRITY_FAILED` at `STORE_VALIDATION` -- so one
+ * unused `url` source would present as cache corruption and blame the consumer's store. The rule the
+ * firewall already follows applies here too: be strict only where strictness cannot break a working
+ * flow (`writeStore` is strict about a missing latch precisely because Rentile 0.2.0 cannot produce
+ * one; `removeStore` is permissive about an unregistered key).
+ *
+ * Document-level faults stay fatal, because a document that will not parse yields no routes at all and
+ * deferring would turn a precise parse failure into a total outage under a worse code. So does a
+ * malformed `terrain` block, which is not a divergence at all: `compileTerrainSource`
+ * (`StyleCompiler.kt:474-495`) throws on both of those conditions unconditionally.
+ *
+ * **Where RenG's reader is stricter than Rentile's.** Every known divergence runs in one direction --
+ * RenG refuses a document Rentile would have read -- so each can only produce a loud typed failure,
+ * never a wrong url. This list is *not* claimed exhaustive; it is what has actually been checked:
+ *  - **Duplicate member names.** RenG rejects; kotlinx keeps the last occurrence. Reported under its own
+ *    `STYLE_JSON_DUPLICATE_MEMBER_NAME` so it does not read as a corrupt download.
+ *  - **Invalid UTF-8.** Rentile decodes with `bytes.decodeToString()` (`StyleCompiler.kt:84`), the
+ *    *replacing* variant, so a malformed sequence becomes U+FFFD and the style still compiles. RenG's
+ *    five `UTF8_*` reject codes fail the document instead.
+ *  - **Number spelling.** kotlinx keeps an unquoted number token as an opaque literal, so
+ *    `"maxzoom": 014` reads as `14` there while RenG's reader rejects it as `LEADING_ZERO`. The same
+ *    holds for `BAD_FRACTION`, `BAD_EXPONENT` and `NON_FINITE_NUMBER`.
+ *  - **Nesting depth.** RenG bounds it at `STYLE_JSON_MAXIMUM_DEPTH`; kotlinx imposes no ceiling.
+ *
+ * **A second version-and-configuration-pinned assumption**, alongside the credential one above.
+ * `RasterSample.immediateChildren` and `RasterSample.ancestor` (`raster/RasterResource.kt:81-105`)
+ * compose tile urls this file never emits. They are unreachable only because `BasemapEngineHost` passes
+ * `TileSubstitutionPolicy.Disabled`, which makes `validateSubstitutionAllowance`
+ * (`DefaultBasemapRasterizer.kt:663-681`) throw as soon as any plan failure exists, before
+ * `substituteRaster` / `substituteVector` (`:786`, `:846`) can run. Enabling substitution would put
+ * live urls outside this file's coverage, and would have to extend the derivation in the same change.
  */
 
 /** A source's tile-Y direction. Rentile: `internal.style.TileScheme`. */
@@ -73,11 +108,16 @@ internal enum class BasemapTileScheme { XYZ, TMS }
 internal enum class BasemapSourceKind { VECTOR, RASTER, RASTER_DEM, GEO_JSON }
 
 /**
- * Every reason a style document yields no manifest, paired with the [StyleFailureKind] the resource
- * layer already maps onto a sanitized RenG failure -- `PARSE` becomes `RESOURCE_PARSE_FAILED` and
- * `UNSUPPORTED_FEATURE` becomes `UNSUPPORTED_RESOURCE_FEATURE`, both at `RESOURCE_PARSING`
- * (`ResourceOperationStateMachine.styleFailure`). `PARSE` means "this is not a style document RenG can
- * read"; `UNSUPPORTED_FEATURE` means "it reads, and uses something outside RenG's supported subset".
+ * Every **document-level** reason a style yields no manifest at all, paired with the [StyleFailureKind]
+ * the resource layer already maps onto a sanitized RenG failure -- `PARSE` becomes
+ * `RESOURCE_PARSE_FAILED` and `UNSUPPORTED_FEATURE` becomes `UNSUPPORTED_RESOURCE_FEATURE`, both at
+ * `RESOURCE_PARSING` (`ResourceOperationStateMachine.styleFailure`). `PARSE` means "this is not a style
+ * document RenG can read"; `UNSUPPORTED_FEATURE` means "it reads, and uses something outside RenG's
+ * supported subset".
+ *
+ * These are fatal because none of them leaves RenG with a document to derive *any* route from, so
+ * deferring one would convert a precise parse failure into a total outage under a worse code. A fault
+ * confined to a single source is not here -- see [BasemapSourceUnderivableReason].
  */
 internal enum class BasemapStyleReject(val kind: StyleFailureKind) {
     STYLE_JSON_MALFORMED(StyleFailureKind.PARSE),
@@ -85,24 +125,46 @@ internal enum class BasemapStyleReject(val kind: StyleFailureKind) {
     /** RenG's reader is stricter than Rentile's here; see this file's header. */
     STYLE_JSON_DUPLICATE_MEMBER_NAME(StyleFailureKind.PARSE),
     STYLE_ROOT_NOT_OBJECT(StyleFailureKind.PARSE),
-    STYLE_VERSION_UNSUPPORTED(StyleFailureKind.UNSUPPORTED_FEATURE),
     SOURCES_NOT_OBJECT(StyleFailureKind.PARSE),
-    SOURCE_NOT_OBJECT(StyleFailureKind.PARSE),
+    STYLE_VERSION_UNSUPPORTED(StyleFailureKind.UNSUPPORTED_FEATURE),
 
-    /** The TileJSON-reference form of a source. RenG supports inline `tiles` only. */
-    SOURCE_TILE_JSON_URL_UNSUPPORTED(StyleFailureKind.UNSUPPORTED_FEATURE),
-    SOURCE_TILES_NOT_STRINGS(StyleFailureKind.PARSE),
-    SOURCE_TILES_EMPTY(StyleFailureKind.PARSE),
-    SOURCE_REFERENCE_UNRESOLVABLE(StyleFailureKind.UNSUPPORTED_FEATURE),
-    SOURCE_SCHEME_UNSUPPORTED(StyleFailureKind.UNSUPPORTED_FEATURE),
-    SOURCE_ZOOM_NOT_INTEGER(StyleFailureKind.PARSE),
-    SOURCE_ZOOM_RANGE_INVALID(StyleFailureKind.PARSE),
-    SOURCE_TILE_SIZE_NOT_INTEGER(StyleFailureKind.PARSE),
-    SOURCE_TILE_SIZE_UNSUPPORTED(StyleFailureKind.UNSUPPORTED_FEATURE),
-    GEO_JSON_DATA_NOT_STRING(StyleFailureKind.UNSUPPORTED_FEATURE),
+    /** Not a divergence: `StyleCompiler.compileTerrainSource` (`:474-495`) throws on both of these. */
     TERRAIN_NOT_OBJECT(StyleFailureKind.PARSE),
     TERRAIN_SOURCE_NOT_STRING(StyleFailureKind.PARSE),
 }
+
+/**
+ * Every reason one declared source contributes no route, while the rest of the style derives normally.
+ *
+ * None of these is a failure. RenG cannot tell a referenced source from an unreferenced one without
+ * modelling layer retention, which it deliberately does not do, and Rentile never touches an
+ * unreferenced source -- so rejecting the style over one would break a flow that works. When the source
+ * *is* referenced, the firewall refuses the url at the moment the engine asks for it, loudly and
+ * attributably; see this file's header for the whole argument. The reason is carried on
+ * [BasemapStyleManifest.underivableSources] rather than discarded so that a later task can surface it
+ * as a diagnostic, and so that the eventual firewall refusal has a documented, greppable cause.
+ */
+internal enum class BasemapSourceUnderivableReason {
+    SOURCE_NOT_OBJECT,
+
+    /** The TileJSON-reference form of a source. RenG supports inline `tiles` only. */
+    SOURCE_TILE_JSON_URL_UNSUPPORTED,
+    SOURCE_TILES_NOT_STRINGS,
+    SOURCE_TILES_EMPTY,
+    SOURCE_REFERENCE_UNRESOLVABLE,
+    SOURCE_SCHEME_UNSUPPORTED,
+    SOURCE_ZOOM_NOT_INTEGER,
+    SOURCE_ZOOM_RANGE_INVALID,
+    SOURCE_TILE_SIZE_NOT_INTEGER,
+    SOURCE_TILE_SIZE_UNSUPPORTED,
+    GEO_JSON_DATA_NOT_STRING,
+}
+
+/** One declared source RenG could not derive an exact url for, and why. */
+internal data class UnderivableBasemapSource(
+    val sourceId: String,
+    val reason: BasemapSourceUnderivableReason,
+)
 
 /**
  * One source tile a style source will be asked for. Rentile's `RasterSample`/`VectorTileSample` carry
@@ -150,17 +212,26 @@ internal class BasemapStyleManifest(
      */
     val spriteBase: String?,
     sources: List<BasemapStyleSource>,
+    underivableSources: List<UnderivableBasemapSource>,
     /** `root["terrain"]["source"]`, or `null` when the style declares no terrain. */
     val terrainSourceId: String?,
 ) {
     private val sourceSnapshot: List<BasemapStyleSource> = freshListCopy(sources)
+    private val underivableSnapshot: List<UnderivableBasemapSource> = freshListCopy(underivableSources)
 
     /** In declaration order, restricted to the four [BasemapSourceKind]s RenG routes. */
     val sources: List<BasemapStyleSource> get() = freshListCopy(sourceSnapshot)
 
+    /**
+     * The declared sources RenG could not derive an exact url for, in declaration order, and why. Each
+     * contributes no route; none of them fails the style. Empty for a style RenG derives completely.
+     */
+    val underivableSources: List<UnderivableBasemapSource> get() = freshListCopy(underivableSnapshot)
+
     /** Redacted: [baseUri] and [spriteBase] are urls and may carry a credential. */
     override fun toString(): String =
-        "BasemapStyleManifest(sources=${sourceSnapshot.size}, sprite=${spriteBase != null}, " +
+        "BasemapStyleManifest(sources=${sourceSnapshot.size}, " +
+            "underivable=${underivableSnapshot.size}, sprite=${spriteBase != null}, " +
             "terrain=${terrainSourceId != null})"
 }
 
@@ -179,6 +250,9 @@ internal sealed interface BasemapStyleManifestOutcome {
  *
  * [baseUri] is the style's own locator (`RendererConfiguration.basemapStyle`), which is what Rentile
  * receives as `StyleInput.Prefetched.baseUri` and what it resolves every relative reference against.
+ *
+ * Rejects only the document-level faults in [BasemapStyleReject]. A fault confined to one source is
+ * recorded on [BasemapStyleManifest.underivableSources] and the rest of the style derives normally.
  */
 internal fun deriveBasemapStyleManifest(styleBytes: ByteArray, baseUri: String): BasemapStyleManifestOutcome =
     try {
@@ -384,6 +458,15 @@ private class StyleRejectSignal(val reason: BasemapStyleReject) : RuntimeExcepti
 private fun rejectStyle(reason: BasemapStyleReject): Nothing = throw StyleRejectSignal(reason)
 
 /**
+ * Internal control-flow signal for a fault confined to one source, unwound by [readSources] into an
+ * [UnderivableBasemapSource]. Never escapes that loop, and never reaches [deriveBasemapStyleManifest]'s
+ * own catch: unlike [StyleRejectSignal] it is not a failure at all.
+ */
+private class SourceUnderivableSignal(val reason: BasemapSourceUnderivableReason) : RuntimeException()
+
+private fun skipSource(reason: BasemapSourceUnderivableReason): Nothing = throw SourceUnderivableSignal(reason)
+
+/**
  * A style document nests only as deep as its expressions do. Rentile's kotlinx reader imposes no
  * ceiling at all, so any ceiling here is RenG's own; it is set well past anything a hand-written or
  * generated style reaches so that it bounds a hostile document rather than a real one.
@@ -413,12 +496,14 @@ private fun readStyleManifest(styleBytes: ByteArray, baseUri: String): BasemapSt
     if (!declaresStyleVersionEight(root.members["version"])) {
         rejectStyle(BasemapStyleReject.STYLE_VERSION_UNSUPPORTED)
     }
+    val declaredSources = readSources(root, baseUri)
     return BasemapStyleManifest(
         baseUri = baseUri,
         // Only the string form resolves: Rentile ignores the array form (StyleCompiler.kt:1646, :1687),
         // and an unresolvable relative reference leaves its atlas unresolved rather than composing a url.
         spriteBase = (root.members["sprite"] as? JsonValue.Text)?.value?.let { resolveHttpReference(baseUri, it) },
-        sources = readSources(root, baseUri),
+        sources = declaredSources.routable,
+        underivableSources = declaredSources.underivable,
         terrainSourceId = readTerrainSourceId(root),
     )
 }
@@ -443,14 +528,33 @@ private fun intPrimitiveOrNull(value: JsonValue?): Int? = when (value) {
     else -> null
 }
 
-private fun readSources(root: JsonValue.Obj, baseUri: String): List<BasemapStyleSource> {
-    val declared = root.members["sources"] ?: return emptyList()
+private class DeclaredSources(
+    val routable: List<BasemapStyleSource>,
+    val underivable: List<UnderivableBasemapSource>,
+)
+
+/**
+ * Reads every declared source, partitioning them into the ones RenG can compose exact urls for and the
+ * ones it cannot. A per-source fault is caught here and recorded; only a `sources` member that is not
+ * an object at all is fatal, because that leaves no source to record a reason against.
+ */
+private fun readSources(root: JsonValue.Obj, baseUri: String): DeclaredSources {
+    val declared = root.members["sources"] ?: return DeclaredSources(emptyList(), emptyList())
     val sources = declared as? JsonValue.Obj ?: rejectStyle(BasemapStyleReject.SOURCES_NOT_OBJECT)
-    return sources.members.mapNotNull { (sourceId, value) -> readSource(sourceId, value, baseUri) }
+    val routable = ArrayList<BasemapStyleSource>()
+    val underivable = ArrayList<UnderivableBasemapSource>()
+    sources.members.forEach { (sourceId, value) ->
+        try {
+            readSource(sourceId, value, baseUri)?.let { routable += it }
+        } catch (signal: SourceUnderivableSignal) {
+            underivable += UnderivableBasemapSource(sourceId, signal.reason)
+        }
+    }
+    return DeclaredSources(routable, underivable)
 }
 
 private fun readSource(sourceId: String, value: JsonValue, baseUri: String): BasemapStyleSource? {
-    val source = value as? JsonValue.Obj ?: rejectStyle(BasemapStyleReject.SOURCE_NOT_OBJECT)
+    val source = value as? JsonValue.Obj ?: skipSource(BasemapSourceUnderivableReason.SOURCE_NOT_OBJECT)
     return when ((source.members["type"] as? JsonValue.Text)?.value) {
         "vector" -> readTileSource(sourceId, source, baseUri, BasemapSourceKind.VECTOR, VECTOR_DEFAULT_MAXIMUM_ZOOM)
         "raster" -> readTileSource(sourceId, source, baseUri, BasemapSourceKind.RASTER, RASTER_DEFAULT_MAXIMUM_ZOOM)
@@ -476,28 +580,28 @@ private fun readTileSource(
 ): BasemapStyleSource {
     // Rentile reads the reference as a *string* primitive, so a non-string `url` is simply absent to it
     // (StyleCompiler.kt:1024, :1299) and must be absent here too.
-    if (source.members["url"] is JsonValue.Text) rejectStyle(BasemapStyleReject.SOURCE_TILE_JSON_URL_UNSUPPORTED)
+    if (source.members["url"] is JsonValue.Text) skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED)
 
     val declaredTemplates = (source.members["tiles"] as? JsonValue.Arr)?.elements.orEmpty()
     val templates = declaredTemplates.map { element ->
-        val template = (element as? JsonValue.Text)?.value ?: rejectStyle(BasemapStyleReject.SOURCE_TILES_NOT_STRINGS)
-        resolveHttpReference(baseUri, template) ?: rejectStyle(BasemapStyleReject.SOURCE_REFERENCE_UNRESOLVABLE)
+        val template = (element as? JsonValue.Text)?.value ?: skipSource(BasemapSourceUnderivableReason.SOURCE_TILES_NOT_STRINGS)
+        resolveHttpReference(baseUri, template) ?: skipSource(BasemapSourceUnderivableReason.SOURCE_REFERENCE_UNRESOLVABLE)
     }
-    if (templates.isEmpty()) rejectStyle(BasemapStyleReject.SOURCE_TILES_EMPTY)
+    if (templates.isEmpty()) skipSource(BasemapSourceUnderivableReason.SOURCE_TILES_EMPTY)
 
     val scheme = when (val declaredScheme = source.members["scheme"]) {
         null -> BasemapTileScheme.XYZ
         else -> when ((declaredScheme as? JsonValue.Text)?.value) {
             "xyz" -> BasemapTileScheme.XYZ
             "tms" -> BasemapTileScheme.TMS
-            else -> rejectStyle(BasemapStyleReject.SOURCE_SCHEME_UNSUPPORTED)
+            else -> skipSource(BasemapSourceUnderivableReason.SOURCE_SCHEME_UNSUPPORTED)
         }
     }
 
     val minZoom = maxOf(declaredZoom(source, "minzoom") ?: 0, 0)
     val maxZoom = minOf(declaredZoom(source, "maxzoom") ?: defaultMaximumZoom, defaultMaximumZoom)
     if (minZoom !in 0..MAXIMUM_SOURCE_ZOOM || maxZoom !in minZoom..MAXIMUM_SOURCE_ZOOM) {
-        rejectStyle(BasemapStyleReject.SOURCE_ZOOM_RANGE_INVALID)
+        skipSource(BasemapSourceUnderivableReason.SOURCE_ZOOM_RANGE_INVALID)
     }
 
     return BasemapStyleSource(
@@ -514,13 +618,13 @@ private fun readTileSource(
 
 private fun declaredZoom(source: JsonValue.Obj, member: String): Int? {
     val declared = source.members[member] ?: return null
-    return intPrimitiveOrNull(declared) ?: rejectStyle(BasemapStyleReject.SOURCE_ZOOM_NOT_INTEGER)
+    return intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.SOURCE_ZOOM_NOT_INTEGER)
 }
 
 private fun readTileSize(source: JsonValue.Obj): Int {
     val declared = source.members["tileSize"] ?: source.members["tile-size"] ?: return DEFAULT_RASTER_TILE_SIZE
-    val tileSize = intPrimitiveOrNull(declared) ?: rejectStyle(BasemapStyleReject.SOURCE_TILE_SIZE_NOT_INTEGER)
-    if (tileSize !in SUPPORTED_TILE_SIZES) rejectStyle(BasemapStyleReject.SOURCE_TILE_SIZE_UNSUPPORTED)
+    val tileSize = intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_NOT_INTEGER)
+    if (tileSize !in SUPPORTED_TILE_SIZES) skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_UNSUPPORTED)
     return tileSize
 }
 
@@ -528,13 +632,13 @@ private fun readGeoJsonSource(sourceId: String, source: JsonValue.Obj, baseUri: 
     // An inline `"data": { ... }` GeoJSON document is legitimate MapLibre, and Rentile refuses it
     // (StyleCompiler.kt:1007-1008). RenG says so with its own code rather than emitting no route.
     val reference = (source.members["data"] as? JsonValue.Text)?.value
-        ?: rejectStyle(BasemapStyleReject.GEO_JSON_DATA_NOT_STRING)
+        ?: skipSource(BasemapSourceUnderivableReason.GEO_JSON_DATA_NOT_STRING)
     return BasemapStyleSource(
         sourceId = sourceId,
         kind = BasemapSourceKind.GEO_JSON,
         tileTemplates = emptyList(),
         geoJsonReference = resolveHttpReference(baseUri, reference)
-            ?: rejectStyle(BasemapStyleReject.SOURCE_REFERENCE_UNRESOLVABLE),
+            ?: skipSource(BasemapSourceUnderivableReason.SOURCE_REFERENCE_UNRESOLVABLE),
         // A GeoJSON source produces no tile url at all (StyleCompiler.kt:1013-1020); these three are the
         // values Rentile compiles it with, carried only so the value stays total.
         scheme = BasemapTileScheme.XYZ,

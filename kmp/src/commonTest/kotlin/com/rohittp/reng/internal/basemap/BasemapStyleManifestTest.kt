@@ -185,6 +185,7 @@ class BasemapStyleManifestTest {
 
         assertEquals("https://styles.example/maps/sprites/basic", manifest.spriteBase)
         assertEquals("dem", manifest.terrainSourceId)
+        assertEquals(emptyList(), manifest.underivableSources)
         assertEquals(listOf("v", "r", "dem", "g"), manifest.sources.map { it.sourceId })
 
         val vector = manifest.sources.single { it.sourceId == "v" }
@@ -237,6 +238,9 @@ class BasemapStyleManifestTest {
             """{"version":8,"sources":{"i":{"type":"image","url":"https://img.example/a.png"}},"layers":[]}""",
         )
         assertEquals(emptyList(), manifest.sources)
+        // An unrouted source type is not a defect: Rentile never fetches one either, so nothing is
+        // recorded against it.
+        assertEquals(emptyList(), manifest.underivableSources)
         assertEquals(emptyList(), tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS))
         assertEquals(emptyList(), styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS))
     }
@@ -273,75 +277,133 @@ class BasemapStyleManifestTest {
 
     @Test
     fun rejectsAUrlFormSourceLoudlyForEveryTileSourceKind() {
+        // "Loudly" now means recorded and unrouted, not fatal: the style keeps deriving, and the
+        // firewall refuses the url at the moment the engine actually asks for it. Rentile never touches
+        // an unreferenced source, so failing the whole style over one would break a working flow.
         for (type in listOf("vector", "raster", "raster-dem")) {
-            val outcome = assertRejected(
-                BasemapStyleReject.SOURCE_TILE_JSON_URL_UNSUPPORTED,
+            val manifest = manifestOf(
                 """{"version":8,"sources":{"s":{"type":"$type","url":"https://tiles.example/s.json"}},"layers":[]}""",
             )
-            assertEquals(StyleFailureKind.UNSUPPORTED_FEATURE, outcome.kind)
+            assertEquals(
+                listOf(
+                    UnderivableBasemapSource("s", BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED),
+                ),
+                manifest.underivableSources,
+            )
+            assertEquals(emptyList(), manifest.sources)
+            assertEquals(emptyList(), tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS))
+            assertEquals(emptyList(), styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS))
         }
     }
 
     @Test
-    fun rejectsASourceThatDeclaresBothUrlAndTiles() {
-        assertRejected(
-            BasemapStyleReject.SOURCE_TILE_JSON_URL_UNSUPPORTED,
+    fun recordsASourceThatDeclaresBothUrlAndTilesAsUnderivable() {
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED,
             """{"version":8,"sources":{"s":{"type":"raster","url":"https://t.example/s.json",""" +
                 """"tiles":["https://t.example/{z}/{x}/{y}.png"]}},"layers":[]}""",
         )
     }
 
     @Test
-    fun rejectsSourcesRengCannotComposeAnExactUrlFor() {
-        assertRejected(
-            BasemapStyleReject.SOURCE_TILES_EMPTY,
+    fun leavesANonStringUrlMemberAbsentExactlyAsRentileDoes() {
+        // Rentile reads the reference as a *string* primitive, so `"url": null` is simply absent to it
+        // and the inline templates are used.
+        val manifest = manifestOf(
+            """{"version":8,"sources":{"r":{"type":"raster","url":null,""" +
+                """"tiles":["https://tiles.example/r/{z}/{x}/{y}.png"]}},"layers":[]}""",
+        )
+        assertEquals(emptyList(), manifest.underivableSources)
+        assertEquals(
+            listOf("https://tiles.example/r/2/1/1.png"),
+            tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
+        )
+    }
+
+    @Test
+    fun recordsEverySourceItCannotComposeAnExactUrlForWithoutFailingTheStyle() {
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILES_EMPTY,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":[]}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_TILES_EMPTY,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILES_EMPTY,
             """{"version":8,"sources":{"s":{"type":"raster"}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_TILES_NOT_STRINGS,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILES_NOT_STRINGS,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":[7]}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_SCHEME_UNSUPPORTED,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_SCHEME_UNSUPPORTED,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":["a/{z}.png"],"scheme":"quad"}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_ZOOM_NOT_INTEGER,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_ZOOM_NOT_INTEGER,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":["a/{z}.png"],"minzoom":1.5}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_ZOOM_RANGE_INVALID,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_ZOOM_RANGE_INVALID,
             """{"version":8,"sources":{"s":{"type":"vector","tiles":["a/{z}.pbf"],"minzoom":25}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_TILE_SIZE_UNSUPPORTED,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_NOT_INTEGER,
+            """{"version":8,"sources":{"s":{"type":"raster","tiles":["a/{z}.png"],"tileSize":"big"}},"layers":[]}""",
+        )
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_UNSUPPORTED,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":["a/{z}.png"],"tileSize":1024}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.GEO_JSON_DATA_NOT_STRING,
-            """{"version":8,"sources":{"g":{"type":"geojson","data":{"type":"FeatureCollection"}}},"layers":[]}""",
+        assertUnderivable(
+            BasemapSourceUnderivableReason.GEO_JSON_DATA_NOT_STRING,
+            """{"version":8,"sources":{"s":{"type":"geojson","data":{"type":"FeatureCollection"}}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_REFERENCE_UNRESOLVABLE,
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_NOT_OBJECT,
+            """{"version":8,"sources":{"s":7},"layers":[]}""",
+        )
+        assertUnderivable(
+            BasemapSourceUnderivableReason.SOURCE_REFERENCE_UNRESOLVABLE,
             """{"version":8,"sources":{"s":{"type":"raster","tiles":["a/{z}.png"]}},"layers":[]}""",
             baseUri = "styles.example/basic.json",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCES_NOT_OBJECT,
-            """{"version":8,"sources":[],"layers":[]}""",
+    }
+
+    @Test
+    fun keepsRoutingEverySiblingSourceWhenOneIsUnderivable() {
+        val manifest = manifestOf(
+            """{"version":8,"sprite":"sprites/basic","sources":{""" +
+                """"bad":{"type":"vector","url":"https://tiles.example/v.json"},""" +
+                """"r":{"type":"raster","tiles":["https://tiles.example/r/{z}/{x}/{y}.png"]},""" +
+                """"g":{"type":"geojson","data":"data/points.geojson"}},"layers":[]}""",
         )
-        assertRejected(
-            BasemapStyleReject.SOURCE_NOT_OBJECT,
-            """{"version":8,"sources":{"s":7},"layers":[]}""",
+        assertEquals(
+            listOf(UnderivableBasemapSource("bad", BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED)),
+            manifest.underivableSources,
         )
+        assertEquals(listOf("r", "g"), manifest.sources.map { it.sourceId })
+        assertEquals(
+            listOf("https://tiles.example/r/2/1/1.png"),
+            tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
+        )
+        assertEquals(
+            listOf(
+                "https://styles.example/maps/sprites/basic.json",
+                "https://styles.example/maps/sprites/basic.png",
+                "https://styles.example/maps/data/points.geojson",
+            ),
+            styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
+        )
+    }
+
+    @Test
+    fun rejectsOnlyTheDocumentLevelFaultsThatLeaveNoRouteDerivableAtAll() {
+        assertRejected(BasemapStyleReject.SOURCES_NOT_OBJECT, """{"version":8,"sources":[],"layers":[]}""")
         assertRejected(
             BasemapStyleReject.TERRAIN_NOT_OBJECT,
             """{"version":8,"terrain":7,"sources":{},"layers":[]}""",
         )
+        // Not a divergence: StyleCompiler.compileTerrainSource throws on both of these unconditionally.
         assertRejected(
             BasemapStyleReject.TERRAIN_SOURCE_NOT_STRING,
             """{"version":8,"terrain":{"exaggeration":1.0},"sources":{},"layers":[]}""",
@@ -506,9 +568,9 @@ class BasemapStyleManifestTest {
 
     @Test
     fun picksTheTemplateWithTheSameHashOverAThreeTemplateSource() {
-        // The five-template case above pins the two constants only modulo 5. A second source with a
-        // coprime template count pins them modulo 15, so only a change that is a multiple of 15 -- in
-        // the 31 term per unit of z, and in the 17 term per unit of x -- could still escape both.
+        // The five-template case above pins the two constants only modulo 5. A coprime template count
+        // raises that to 15 -- but a single-constant change of any multiple of 15 still escapes both,
+        // so a seven-template source below raises it again to 105.
         val manifest = manifestOf(
             """{"version":8,"sources":{"r":{"type":"raster","tiles":[""" +
                 """"https://a.example/{z}/{x}/{y}.png",""" +
@@ -532,6 +594,48 @@ class BasemapStyleManifestTest {
                 "https://b.example/4/0/0.png",
                 "https://a.example/2/2/0.png",
                 "https://c.example/2/3/0.png",
+            ),
+            tileTimeRoutes(manifest, tiles, ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
+        )
+    }
+
+    @Test
+    fun picksTheTemplateWithTheSameHashOverASevenTemplateSource() {
+        // Three sources with pairwise-coprime template counts (5, 3, 7) pin both constants modulo 105:
+        // every one of z = 1, 2, 3, 4 and x = 1 appears, so a change to the 31 term or the 17 term
+        // survives only if it is a multiple of 3, 5 and 7 at once. A single-constant change of 15 --
+        // which the five- and three-template cases alone would have missed -- is caught here.
+        val manifest = manifestOf(
+            """{"version":8,"sources":{"r":{"type":"raster","tiles":[""" +
+                """"https://a.example/{z}/{x}/{y}.png",""" +
+                """"https://b.example/{z}/{x}/{y}.png",""" +
+                """"https://c.example/{z}/{x}/{y}.png",""" +
+                """"https://d.example/{z}/{x}/{y}.png",""" +
+                """"https://e.example/{z}/{x}/{y}.png",""" +
+                """"https://f.example/{z}/{x}/{y}.png",""" +
+                """"https://g.example/{z}/{x}/{y}.png"]}},"layers":[]}""",
+        )
+        val tiles = listOf(
+            CanonicalBasemapTile(lod = 2, tileY = 0, canonicalX = 0),
+            CanonicalBasemapTile(lod = 2, tileY = 0, canonicalX = 1),
+            CanonicalBasemapTile(lod = 2, tileY = 0, canonicalX = 2),
+            CanonicalBasemapTile(lod = 2, tileY = 0, canonicalX = 3),
+            CanonicalBasemapTile(lod = 3, tileY = 0, canonicalX = 0),
+            CanonicalBasemapTile(lod = 4, tileY = 0, canonicalX = 0),
+            CanonicalBasemapTile(lod = 1, tileY = 0, canonicalX = 0),
+            CanonicalBasemapTile(lod = 2, tileY = 1, canonicalX = 0),
+        )
+        // index = floorMod(z * 31 + x * 17 + y, 7)
+        assertEquals(
+            listOf(
+                "https://g.example/2/0/0.png",
+                "https://c.example/2/1/0.png",
+                "https://f.example/2/2/0.png",
+                "https://b.example/2/3/0.png",
+                "https://c.example/3/0/0.png",
+                "https://f.example/4/0/0.png",
+                "https://d.example/1/0/0.png",
+                "https://a.example/2/0/1.png",
             ),
             tileTimeRoutes(manifest, tiles, ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
         )
@@ -654,6 +758,19 @@ class BasemapStyleManifestTest {
     private fun manifestOf(styleJson: String, baseUri: String = STYLE_BASE_URI): BasemapStyleManifest {
         val outcome = deriveBasemapStyleManifest(styleJson.encodeToByteArray(), baseUri)
         return assertIs<BasemapStyleManifestOutcome.Derived>(outcome).manifest
+    }
+
+    private fun assertUnderivable(
+        reason: BasemapSourceUnderivableReason,
+        styleJson: String,
+        baseUri: String = STYLE_BASE_URI,
+        sourceId: String = "s",
+    ) {
+        val manifest = manifestOf(styleJson, baseUri)
+        assertEquals(listOf(UnderivableBasemapSource(sourceId, reason)), manifest.underivableSources)
+        assertEquals(emptyList(), manifest.sources)
+        assertEquals(emptyList(), tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS))
+        assertEquals(emptyList(), styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS))
     }
 
     private fun assertRejected(

@@ -33,6 +33,7 @@ import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.internal.resource.TransportLatchKey
 import com.rohittp.reng.internal.resource.copyValidStoredResource
+import com.rohittp.reng.internal.resource.isValidMetadata
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
 import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.ResourceClass as EngineResourceClass
@@ -284,15 +285,23 @@ internal class OperationRegistry(
             throw integrityRefusal(route)
         }
 
-        // The same stricter RenG record rules the read path already applies (empty bytes, digest shape,
-        // metadata validity, byte ceiling). Without them a record with a negative `storedAtEpochMillis`
-        // or a CRLF-bearing `etag` -- neither of which the digest check can see -- reached the consumer's
-        // Store through the write path while being rejected on the read path.
+        // Metadata validity is a CONTENT verdict, not an integrity one, so it declines rather than
+        // throwing. The engine echoes back the consumer's own `contentType`/`etag`/`lastModified`
+        // verbatim, so rejecting them says nothing about whether the engine fetched these bytes -- and a
+        // consumer adapter written as `etag = headers["ETag"].orEmpty()`, an ordinary idiom, yields a
+        // blank string that these rules reject. Throwing there would fail the whole acquisition and kill
+        // any style whose sprite atlas is required, which is exactly the dead-style chain the decline
+        // split exists to remove. The read path already treats the identical record as a graceful miss.
+        val renGMetadata = resource.metadata.toRenGMetadata()
+        if (!isValidMetadata(renGMetadata)) return
+
+        // What remains IS integrity: `copyValidStoredResource` re-derives SHA-256 over the bytes, so a
+        // rejection here means the engine kept the latched digest and presented different bytes.
         val validated = copyValidStoredResource(
             StoredRawResource(
                 bytes = resource.bytes,
                 contentDigest = resource.contentDigest,
-                metadata = resource.metadata.toRenGMetadata(),
+                metadata = renGMetadata,
             ),
             route.maximumResponseBytes,
             sha256,
@@ -367,7 +376,10 @@ internal class OperationRegistry(
      * which is exactly what this gate still enforces: no unverified byte reaches the consumer Store, and
      * neither member is written when the pair fails. None of them constrains the engine's own
      * acquisition, and none of them could: the bytes reached Rentile through [executeTransport] long
-     * before any write callback, so no `writeStore` outcome can stop the engine compiling them.
+     * before any write callback, so no `writeStore` outcome can stop the engine compiling them *without
+ * also aborting the whole acquisition* -- which on a required sprite atlas kills the style outright,
+ * and on an optional one hides an atlas Rentile renders correctly. Suppressing the atlas alone is
+ * not something this seam can do.
      */
     private suspend fun shouldCacheValidatedWrite(route: ResourceRouteKey, validated: StoredRawResource): Boolean {
         // Gap the read path already closed, applied to the write it was always missing from, and ADR

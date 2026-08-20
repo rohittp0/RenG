@@ -204,11 +204,13 @@ class FirewallTest {
     }
 
     @Test
-    fun appliesRenGsOwnRecordRulesToAWriteExactlyAsToARead() = runTest {
+    fun declinesToCacheARecordWhoseMetadataRenGsOwnRulesRefuse() = runTest {
         // A digest is self-consistent with anything, including empty bytes and a record whose metadata
-        // RenG's read path would refuse outright. Before Addendum D, `writeStore` checked only the digest
-        // and the byte ceiling, so a negative `storedAtEpochMillis` or a CRLF-bearing `etag` was forwarded
-        // straight to the consumer's Store while the identical record was rejected on read.
+        // RenG's read path would refuse outright. Such a record must not reach the consumer's Store --
+        // but it must not fail the engine's acquisition either, because the metadata is the CONSUMER's
+        // own, echoed back by the engine, so refusing it proves nothing about provenance. A consumer
+        // adapter written as `etag = headers["ETag"].orEmpty()` produces a blank etag these rules reject;
+        // throwing on it would kill every style with a required sprite atlas.
         val invalidRecords = listOf(
             "negative storedAtEpochMillis" to EngineStoredRawResource(
                 bytes = VALID_STICKER_PNG,
@@ -226,11 +228,25 @@ class FirewallTest {
             val store = CountingStore()
             val fw = firewall(transport = CountingTransport(body = VALID_STICKER_PNG), store = store)
             fw.transport.execute(engineRequestFor(rasterRoute))
-            assertFailsWith<RenGException>(reason) { fw.store.write(engineKeyFor(rasterRoute), record) }
+            fw.store.write(engineKeyFor(rasterRoute), record)
             assertEquals(0, store.writeCalls, reason)
         }
 
-        // Empty bytes are their own case: they need an empty-bodied latch to get past the digest check at
+        // The idiomatic-adapter case that motivates the decline rather than a throw.
+        val blankStore = CountingStore()
+        val blankFirewall = firewall(transport = CountingTransport(body = VALID_STICKER_PNG), store = blankStore)
+        blankFirewall.transport.execute(engineRequestFor(rasterRoute))
+        blankFirewall.store.write(
+            engineKeyFor(rasterRoute),
+            EngineStoredRawResource(
+                bytes = VALID_STICKER_PNG,
+                contentDigest = sha256Hex(VALID_STICKER_PNG),
+                metadata = EngineRawResourceMetadata(etag = "", storedAtEpochMillis = 0L),
+            ),
+        )
+        assertEquals(0, blankStore.writeCalls, "a blank etag declines the cache write")
+
+        // Empty bytes stay INTEGRITY, not a content verdict: they are their own case: they need an empty-bodied latch to get past the digest check at
         // all, which is exactly how they used to slip through.
         val emptyStore = CountingStore()
         val emptyFirewall = firewall(transport = CountingTransport(body = ByteArray(0)), store = emptyStore)

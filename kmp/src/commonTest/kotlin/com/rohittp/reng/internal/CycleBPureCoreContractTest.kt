@@ -551,7 +551,7 @@ class CycleBPureCoreContractTest {
         driver.driveToPendingContent(0L, ContentProvenance.TRANSPORT_200)
         driver.event(AdvancePendingClassGates(0L))
         val gate = assertIs<ValidateResourceClass>(driver.actions.single())
-        assertEquals(ResourceClassGate.PARSE_TILEJSON, gate.gate)
+        assertEquals(ResourceClassGate.DECODE_PNG, gate.gate)
         driver.event(ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Valid))
         val write = assertIs<WriteStore>(driver.actions.single())
         assertEquals(parent.registration.rawKey, write.rawKey)

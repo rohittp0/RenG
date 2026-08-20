@@ -32,6 +32,7 @@ import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.internal.resource.TransportLatchKey
+import com.rohittp.reng.internal.driver.validatesDemTerrainEncoding
 import com.rohittp.reng.internal.resource.copyValidStoredResource
 import com.rohittp.reng.internal.resource.isValidMetadata
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
@@ -747,31 +748,6 @@ private fun spriteEntryDouble(value: JsonValue?): Double? = when (value) {
     else -> null
 }
 
-/**
- * ADR 0016's DEM write obligation. Mapbox Terrain-RGB and Terrarium are both plain eight-bit RGB byte
- * triples -- mathematically indistinguishable from the decoded bytes alone, since both are only a
- * caller-side formula's interpretation of R/G/B -- so any PNG whose source colour type carries no
- * meaningful alpha (RenG's canonical decode leaves such pixels fully opaque) satisfies either encoding,
- * and a genuinely four-channel encoding fails the instant any pixel is not fully opaque.
- *
- * **This is a seam, not a second implementation to keep.** The concurrent gate-deletion task promoted
- * the identical check out of `RenGClassGateRunner`'s private gate path as
- * `internal fun validatesDemTerrainEncoding(bytes: ByteArray, maximumDecodedImageBytes: Long): Boolean`
- * in `internal/driver/ClassGateRunner.kt`, on a sibling branch that this branch's base predates -- so
- * this file cannot call it and still compile. The signature here is deliberately identical to that one,
- * and the sole call site passes the same two arguments, so integrating the two branches is exactly:
- * delete this function and import that one. Nothing else moves.
- */
-private fun validatesDemTerrainEncoding(bytes: ByteArray, maximumDecodedImageBytes: Long): Boolean {
-    val decoded = decodePng(bytes, maximumDecodedImageBytes) as? PngDecodeResult.Success ?: return false
-    val rgba = decoded.image.rgbaSnapshot()
-    var index = 3
-    while (index < rgba.size) {
-        if (rgba[index] != OPAQUE_ALPHA) return false
-        index += 4
-    }
-    return true
-}
 
 /**
  * The sprite pair's arrival board: each member is latched exactly once, either with the validated bytes
@@ -848,7 +824,6 @@ private const val SPRITE_IMAGE_EXTENSION = ".png"
 /** The three entry fields Rentile's sprite compiler rejects outright rather than ignoring. */
 private val UNSUPPORTED_SPRITE_ENTRY_FIELDS: Set<String> = setOf("stretchX", "stretchY", "content")
 
-private const val OPAQUE_ALPHA: Byte = -1 // 0xFF unsigned
 
 /** Generous enough for any DEM tile; only used to decide whether a fetched DEM record is terrain-encoded
  *  at all before writing it, never to size an actual buffer. */

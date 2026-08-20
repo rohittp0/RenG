@@ -4,6 +4,7 @@ import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 
@@ -46,7 +47,15 @@ class BasemapEngineRenderTest {
                         tile.key,
                         "a rendered tile carries RenG's own canonical identity",
                     )
-                    assertTrue(tile.pngBytes.isNotEmpty(), "the engine produced encoded ground pixels")
+                    // Not merely non-empty: these are RenG's first rendered basemap pixels, and the
+                    // cheapest way to claim they are a PNG rather than any non-empty byte array is the
+                    // 8-byte signature the format mandates.
+                    assertTrue(tile.pngBytes.size > PNG_SIGNATURE.size, "the engine produced encoded ground pixels")
+                    assertContentEquals(
+                        PNG_SIGNATURE,
+                        tile.pngBytes.take(PNG_SIGNATURE.size).toByteArray(),
+                        "the encoded bytes carry the PNG signature",
+                    )
                     assertTrue(tile.contentKey.isNotEmpty(), "Rentile's own content key is stored beside them")
                     assertEquals(emptyList(), tile.substitutions, "tile substitution stays disabled")
                 }
@@ -56,3 +65,7 @@ class BasemapEngineRenderTest {
         }
     }
 }
+
+/** The 8 bytes every PNG datastream begins with (RFC 2083 section 3.1). */
+private val PNG_SIGNATURE: ByteArray =
+    byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)

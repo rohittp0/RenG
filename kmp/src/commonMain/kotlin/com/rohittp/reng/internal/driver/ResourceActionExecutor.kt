@@ -77,7 +77,7 @@ internal class ResourceActionExecutor(
      * verifiable at the type level rather than by inspection. Read, rather than private, so a test can
      * assert the host a driver actually handed over is the one it was built with.
      */
-    internal val basemapEngineHost: BasemapEngineHost,
+    private val basemapEngineHost: BasemapEngineHost,
     private val clock: () -> Long,
 ) {
     suspend fun execute(action: ResourceOperationAction): ResourceOperationEvent = when (action) {

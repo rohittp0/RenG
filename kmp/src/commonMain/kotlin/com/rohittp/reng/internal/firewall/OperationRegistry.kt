@@ -230,9 +230,9 @@ internal class OperationRegistry(
 
     suspend fun writeStore(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
         val route = storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)] ?: throw ambiguousRouteFailure()
-        val recomputedDigest = sha256Hex(resource.bytes)
-        if (recomputedDigest != resource.contentDigest) throw storeWriteFailure(route).toException()
-        if (resource.bytes.size.toLong() > route.maximumResponseBytes) throw storeWriteFailure(route).toException()
+        // Digest self-consistency and the byte ceiling are NOT checked here: `copyValidStoredResource`
+        // below enforces both, and throws the identical failure. Checking them twice cost a second
+        // pure-Kotlin SHA-256 over the same bytes on every engine store write.
         // ADR 0016 permits a Rentile write callback to reach the consumer "only after RenG verifies that
         // it matches the latched response". A route with NO latched transport response has nothing to
         // verify against, so it is refused outright rather than skipping verification: Rentile 0.2.0

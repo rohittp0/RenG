@@ -177,8 +177,12 @@ private fun basemapRenderFailure(): FailureDescriptor =
  * (`ResourceKeyDeriver.external`, a canonical-binary digest over kind, class, and locator), so it will not
  * compare equal to the key for the same resource in a `ResourceReportEntry`. The alternative is worse:
  * the allowlist requires an identity here, and RenG does not hold the failing locator at this seam --
- * only the rasterizer host that handed the locators to the engine does. Translating back to RenG's own
- * key belongs there, when that host lands.
+ * only the rasterizer host that handed the locators to the engine does.
+ *
+ * That host exists: [BasemapEngineHost] translates this identity back to RenG's own key on the way out,
+ * for every class `OperationRegistry` preregistered a route for. So a descriptor that escapes through the
+ * host carries a RenG key; one built here and read directly does not. Do not add a second translation
+ * path here -- this seam still does not hold the locator.
  */
 private fun externalResourceFailure(
     code: RenGErrorCode,

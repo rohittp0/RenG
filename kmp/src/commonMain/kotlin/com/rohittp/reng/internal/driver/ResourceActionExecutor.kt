@@ -2,18 +2,31 @@ package com.rohittp.reng.internal.driver
 
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.RenGException
+import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
+import com.rohittp.reng.internal.basemap.styleTimeRoutes
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
+import com.rohittp.reng.internal.resource.BasemapStyleCompilationCompleted
+import com.rohittp.reng.internal.resource.BasemapStyleCompilationOutcome
+import com.rohittp.reng.internal.resource.BasemapStyleValidationCompleted
+import com.rohittp.reng.internal.resource.BasemapStyleValidationOutcome
+import com.rohittp.reng.internal.resource.BasemapStyleVisibilityInstallCompleted
+import com.rohittp.reng.internal.resource.BasemapStyleWriteCompleted
 import com.rohittp.reng.internal.resource.CallTransport
 import com.rohittp.reng.internal.resource.CancelRoute
 import com.rohittp.reng.internal.resource.CleanupCancellationObserved
 import com.rohittp.reng.internal.resource.ClockSampled
+import com.rohittp.reng.internal.resource.CompileBasemapStyle
 import com.rohittp.reng.internal.resource.ContentProvenance
+import com.rohittp.reng.internal.resource.InstallBasemapStyleVisibility
 import com.rohittp.reng.internal.resource.InstallVisibility
 import com.rohittp.reng.internal.resource.LatchedTransportReplayCompleted
 import com.rohittp.reng.internal.resource.ObserveResident
@@ -30,8 +43,10 @@ import com.rohittp.reng.internal.resource.StoreWriteCompleted
 import com.rohittp.reng.internal.resource.SuppliedCallOutcome
 import com.rohittp.reng.internal.resource.SuppliedInstallOutcome
 import com.rohittp.reng.internal.resource.TransportCompleted
+import com.rohittp.reng.internal.resource.ValidateBasemapStyle
 import com.rohittp.reng.internal.resource.ValidateResourceClass
 import com.rohittp.reng.internal.resource.VisibilityInstallCompleted
+import com.rohittp.reng.internal.resource.WriteBasemapStyle
 import com.rohittp.reng.internal.resource.WriteStore
 import kotlinx.coroutines.CancellationException
 
@@ -47,12 +62,14 @@ import kotlinx.coroutines.CancellationException
  *
  * `ResourceOperationAction` is a sealed interface with 18 subtypes. This file's `when` handles the five
  * that need a real adapter call — [SampleClock], [ObserveResident], [ReadStore], [CallTransport], and
- * [ReplayLatchedTransport] — plus four more: [WriteStore] (a real `Store.write` call, mapped the same
- * way as every other adapter call), [ValidateResourceClass] (a real [ClassGateRunner] call — see that
- * class for what "real" means for each gate, including the classes it does not yet observe),
- * [InstallVisibility] (a real [ResidentCache] install-and-lease — see [installVisibility]), and
- * [CancelRoute] (pure internal bookkeeping — see the `when` branch below). Every action no task has
- * reached is an unreachable `else`.
+ * [ReplayLatchedTransport] — plus [WriteStore] (a real `Store.write` call, mapped the same way as every
+ * other adapter call), [ValidateResourceClass] (a real [ClassGateRunner] call — see that class for what
+ * "real" means for each gate, including the classes it does not yet observe), [InstallVisibility] (a real
+ * [ResidentCache] install-and-lease — see [installVisibility]), [CancelRoute] (pure internal bookkeeping
+ * — see the `when` branch below), and the four basemap-style commit verbs: [ValidateBasemapStyle] (pure
+ * document reading), [CompileBasemapStyle] (route preregistration plus a real engine compilation through
+ * [BasemapEngineHost]), [WriteBasemapStyle] (a real `Store.write`) and [InstallBasemapStyleVisibility] (a
+ * real install-and-lease). Every action no task has reached is an unreachable `else`.
  *
  * Unlike every other `Failed` outcome here, [SuppliedInstallOutcome.Failed] carries a [FailureDescriptor]
  * this class constructs directly rather than a bare marker [ResourceOperationStateMachine] classifies —
@@ -68,16 +85,17 @@ internal class ResourceActionExecutor(
     private val cache: ResidentCache,
     private val classGateRunner: ClassGateRunner,
     /**
-     * The renderer's one long-lived Rentile engine (basemap task 19). Deliberately a **required**
-     * parameter with no default: no action in [ResourceOperationAction]'s sealed hierarchy reaches it yet
-     * — the basemap-style commit actions ([com.rohittp.reng.internal.resource.CompileBasemapStyle] and its
-     * siblings) are the ones that will, and they fall through this class's `else` today — and a default
-     * here is precisely how a call site stays compiling while being disconnected from the thing it is
-     * supposed to drive. Making it required means every construction site had to name it, so the wiring is
-     * verifiable at the type level rather than by inspection. Read, rather than private, so a test can
-     * assert the host a driver actually handed over is the one it was built with.
+     * The renderer's one long-lived Rentile engine (ADR 0016/0017), and the only thing [CompileBasemapStyle]
+     * drives. Deliberately a **required** parameter with no default, because a default here is precisely
+     * how a call site stays compiling while being disconnected from the thing it is supposed to drive.
      */
     private val basemapEngineHost: BasemapEngineHost,
+    /**
+     * The consumer's own byte ceilings, needed to derive the style-time route manifest: a preregistered
+     * route carries the ceiling the firewall enforces on the engine's behalf, and the engine's own number
+     * is never trusted for it (ADR 0016).
+     */
+    private val resourceLimits: ResourceLimits,
     private val clock: () -> Long,
 ) {
     suspend fun execute(action: ResourceOperationAction): ResourceOperationEvent = when (action) {
@@ -119,8 +137,90 @@ internal class ResourceActionExecutor(
         // produce an event for it.
         is CancelRoute -> CleanupCancellationObserved(action.ordinal)
 
+        is ValidateBasemapStyle -> BasemapStyleValidationCompleted(
+            action.actionId,
+            validateBasemapStyle(action),
+        )
+
+        is CompileBasemapStyle -> BasemapStyleCompilationCompleted(
+            action.actionId,
+            compileBasemapStyle(action),
+        )
+
+        is WriteBasemapStyle -> BasemapStyleWriteCompleted(
+            action.actionId,
+            action.groupId,
+            suppliedCall { store.write(action.rawKey, action.resource) },
+        )
+
+        is InstallBasemapStyleVisibility -> BasemapStyleVisibilityInstallCompleted(
+            action.actionId,
+            action.groupId,
+            installVisibility(action.content),
+        )
+
         else -> error("ResourceActionExecutor does not yet handle $action")
     }
+
+    /**
+     * Reads the style document RenG just acquired and answers what the engine will fetch while compiling
+     * it. Entirely pure — no adapter call, no engine call, no clock — so it cannot be cancelled and
+     * cannot fail for any reason outside the document itself.
+     *
+     * The manifest's base URI is the style's **own locator**, which is exactly what Rentile receives as
+     * `StyleInput.Prefetched.baseUri` and resolves every relative reference against; deriving it from
+     * anything else would compose different urls from the ones the engine composes, which the firewall
+     * refuses.
+     */
+    private fun validateBasemapStyle(action: ValidateBasemapStyle): BasemapStyleValidationOutcome {
+        val derivation = deriveBasemapStyleManifest(
+            styleBytes = action.content.stored.bytes,
+            baseUri = action.content.route.locator.value,
+        )
+        return when (derivation) {
+            is BasemapStyleManifestOutcome.Rejected -> BasemapStyleValidationOutcome.Failed(derivation.kind)
+            is BasemapStyleManifestOutcome.Derived -> BasemapStyleValidationOutcome.Valid(
+                styleTimeRoutes(
+                    manifest = derivation.manifest,
+                    accessMode = action.content.route.accessMode,
+                    limits = resourceLimits,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Preregisters the manifest the validation of these exact bytes produced, then compiles them through
+     * the engine. The order is load-bearing rather than tidy: the engine's sprite and GeoJSON acquisition
+     * happens *inside* `preparedStyle`, so a route declared after it is declared too late.
+     *
+     * A [RenGException] here is the firewall's own, already sanitized and already carrying RenG's own
+     * resource identity, so it is forwarded whole rather than collapsed into a
+     * [com.rohittp.reng.internal.resource.StyleFailureKind] that would misreport it as a parse fault.
+     * Any other throwable can only be a defect in RenG's own code — [BasemapEngineHost.engineCall]
+     * converts every engine failure — so it is left to propagate rather than silently classified.
+     * [CancellationException] is never caught, exactly as everywhere else in this class.
+     */
+    private suspend fun compileBasemapStyle(action: CompileBasemapStyle): BasemapStyleCompilationOutcome =
+        try {
+            basemapEngineHost.registerRoutes(action.routes)
+            basemapEngineHost.preparedStyle(
+                styleKey = action.content.resourceKey,
+                stored = action.content.stored,
+                baseUri = action.content.route.locator.value,
+            )
+            BasemapStyleCompilationOutcome.Succeeded
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (firewallFailure: RenGException) {
+            BasemapStyleCompilationOutcome.EngineFailed(
+                FailureDescriptor(
+                    code = firewallFailure.code,
+                    stage = firewallFailure.stage,
+                    diagnostic = firewallFailure.diagnostics.firstOrNull(),
+                ),
+            )
+        }
 
     /**
      * Installs [content] into visibility: one conceptual action, "install the generation and take the

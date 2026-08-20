@@ -512,54 +512,21 @@ internal object OrderedPreparationStateMachine {
         return requests
     }
 
+    /**
+     * Delegates to the one shared derivation [buildResourceOperationDefinition], which
+     * [com.rohittp.reng.RenGRenderer] uses too. The occurrence shape -- above all one
+     * [ResourceOwnerId] per preparation item -- is a contract the pure core reads back out through
+     * `styleReferencingOwnerIds`, so two independent derivations of it is exactly how the style-owner
+     * barrier silently stops being enforced on one of the two paths.
+     */
     private fun resourceDefinition(
         invocation: PreparationInvocation,
         plannedItems: List<PlannedPreparationItem>,
-    ): ResourceOperationDefinition {
-        val occurrences = mutableListOf<ResourceOccurrence>()
-        val identities = mutableListOf<CanonicalIdentityRecord>()
-        var nextOccurrenceId = 1L
-        plannedItems.forEachIndexed { index, item ->
-            val ownerId = ResourceOwnerId(index + 1L)
-            item.plannedFrame.staticResourceTraversal.forEach { reference ->
-                identities += CanonicalIdentityRecord(
-                    resourceKey = reference.resourceKey,
-                    canonicalBytes = reference.canonicalIdentity.canonicalBytes,
-                )
-                if (reference !is StaticResourceReference.External) {
-                    return@forEach
-                }
-                val style = reference.resourceClass == ResourceClass.BASEMAP_STYLE
-                occurrences += ResourceOccurrence(
-                    id = ResourceOccurrenceId(nextOccurrenceId++),
-                    ownerId = ownerId,
-                    registration = ResourceRouteRegistration(
-                        route = ResourceRouteKey(
-                            accessMode = invocation.accessMode,
-                            locator = reference.locator,
-                            resourceClass = reference.resourceClass,
-                            maximumResponseBytes = reference.maximumResponseBytes,
-                        ),
-                        resourceKey = reference.resourceKey,
-                        rawKey = reference.rawKey,
-                        privateRentileKey = reference.privateRentileKey,
-                        canonicalBytes = reference.canonicalIdentity.canonicalBytes,
-                    ),
-                    discoveryRequired = style,
-                    commitBinding = if (style) {
-                        ResourceCommitBinding.BasemapStyle(BASEMAP_STYLE_GROUP)
-                    } else {
-                        ResourceCommitBinding.Single
-                    },
-                )
-            }
-        }
-        return ResourceOperationDefinition(
-            maximumConcurrentRoutes = invocation.environment.maximumConcurrentResourceOperations,
-            staticOccurrences = occurrences,
-            resourceIdentities = identities,
-        )
-    }
+    ): ResourceOperationDefinition = buildResourceOperationDefinition(
+        traversalsByItem = plannedItems.map { it.plannedFrame.staticResourceTraversal },
+        accessMode = invocation.accessMode,
+        maximumConcurrentRoutes = invocation.environment.maximumConcurrentResourceOperations,
+    )
 
     private fun OrderedPreparationTerminal.asOutcome(): OrderedPreparationOutcome = when (this) {
         is OrderedPreparationTerminal.Failure -> OrderedPreparationOutcome.Failure(failure)
@@ -603,5 +570,4 @@ internal object OrderedPreparationStateMachine {
 
     private fun unexpectedEvent(message: String): Nothing = throw IllegalArgumentException(message)
 
-    private val BASEMAP_STYLE_GROUP: StyleGroupId = StyleGroupId(1L)
 }

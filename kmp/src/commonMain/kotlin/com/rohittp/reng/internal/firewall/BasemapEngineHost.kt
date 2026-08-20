@@ -11,7 +11,6 @@ import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
-import com.rohittp.reng.internal.cache.ResidentGeneration
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
@@ -127,22 +126,19 @@ internal class BasemapEngineHost(
      */
     suspend fun <T> withOperation(
         accessMode: RenGResourceAccessMode,
-        routes: List<ResourceRouteKey>,
+        routes: List<ResourceRouteKey> = emptyList(),
         block: suspend () -> T,
     ): T {
         check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
-        require(routes.all { it.accessMode == accessMode }) {
-            "an operation-scoped registry is never shared across access modes"
-        }
         val registry = OperationRegistry(
             transport = consumerTransport,
             store = consumerStore,
             privateKeyResolver = privateKeyResolver,
             sha256 = sha256,
         )
-        routes.forEach(registry::preregister)
         activeOperation = FirewallOperation(accessMode, registry)
         return try {
+            registerRoutes(routes)
             block()
         } finally {
             activeOperation = null
@@ -150,15 +146,50 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * The compiled [PreparedStyle] for [styleKey], compiled lazily on first use and bound to the style's
-     * current resident generation. A later call reuses it while that exact generation is still current;
-     * once the generation is freed — or superseded by a fresh install — the next call reloads the style
-     * and recompiles, because "accessing a freed resource reloads it" rather than failing.
+     * Declares [routes] on the invocation that is already open.
+     *
+     * Preregistration cannot all happen when the invocation opens, because the routes a style's
+     * compilation will make the engine ask for are not knowable until the style document has been read —
+     * and reading it is itself work RenG's driver performs *inside* the invocation. This is therefore the
+     * incremental half of [withOperation]'s initial list, delegating to the same
+     * [OperationRegistry.preregister]: idempotent for an identical repeat (two occurrences joining one
+     * route), and a hard `AMBIGUOUS_RESOURCE_ROUTE` for a genuinely conflicting one.
+     *
+     * Declaring a route with no invocation open is the same fault [RoutedEngineTransport] reports one
+     * level later — an exchange RenG never planned — so it fails the same way, rather than silently
+     * accruing routes into a registry that does not exist.
+     */
+    fun registerRoutes(routes: List<ResourceRouteKey>) {
+        requireOpen()
+        val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+        require(routes.all { it.accessMode == operation.accessMode }) {
+            "an operation-scoped registry is never shared across access modes"
+        }
+        routes.forEach(operation.registry::preregister)
+    }
+
+    /**
+     * The compiled [PreparedStyle] for [styleKey], compiled lazily on first use and **bound to the
+     * content it was compiled from**, so a later call over byte-identical content reuses it.
+     *
+     * **Why content, not generation identity.** Binding the compilation to the resident *generation
+     * object* looks equivalent and is not, because compilation happens strictly before the style's own
+     * visibility install, and [ResidentCache.installAndTakeLease] always retires the current generation
+     * and installs a fresh one. Compilation would install `G1`, the driver's install action would
+     * replace it with `G2`, and every later lookup would miss — recompiling the style, and with it
+     * re-running the engine's entire sprite/TileJSON/GeoJSON acquisition through the consumer's own
+     * adapters, once per frame forever. Nothing about "accessing a freed resource reloads it" requires
+     * recompiling identical bytes; that rule is about residency, and residency is restored below
+     * whether or not the compilation is reused.
+     *
+     * The digest compared is the **leased generation's**, never the caller's copy, for the same reason
+     * the compilation reads the leased generation's bytes: the resident generation is authoritative.
      *
      * The lease is taken atomically with the observation or the install ([ResidentCache.observeAndTakeLease]
      * / [ResidentCache.installAndTakeLease]), never as a separate `current()`-then-`takeLease()` pair: a
      * freshly installed generation sits at `leaseCount == 0` in the gap between those two calls, where a
-     * racing `free()` can drop it out of the cache's bookkeeping entirely.
+     * racing `free()` can drop it out of the cache's bookkeeping entirely. On a reuse the retained lease
+     * moves onto whichever generation is current now, so this host never pins a retired one.
      *
      * The bytes are handed to the engine as [StyleInput.Prefetched], never [StyleInput.Remote]: RenG has
      * already acquired them through its own driver under its own key, and a `Remote` style would make the
@@ -170,14 +201,18 @@ internal class BasemapEngineHost(
         baseUri: String?,
     ): PreparedStyle {
         requireOpen()
+        val lease = cache.observeAndTakeLease(styleKey)
+            ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
+        val contentDigest = lease.generation.stored.contentDigest
+
         val existing = compiledStyle
-        if (existing != null && existing.styleKey == styleKey && cache.current(styleKey) === existing.generation) {
+        if (existing != null && existing.styleKey == styleKey && existing.contentDigest == contentDigest) {
+            cache.releaseLease(existing.lease)
+            compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, existing.prepared)
             return existing.prepared
         }
 
         releaseCompiledStyle()
-        val lease = cache.observeAndTakeLease(styleKey)
-            ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
         // The lease is taken before compilation because compilation reads the leased generation's own
         // bytes -- the resident generation is authoritative, not the caller's copy -- and is released again
         // if compilation fails, so a style that will not compile does not pin a generation for the
@@ -196,9 +231,22 @@ internal class BasemapEngineHost(
             cache.releaseLease(lease)
             throw failure
         }
-        compiledStyle = CompiledStyleBinding(styleKey, lease, prepared)
+        compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, prepared)
         return prepared
     }
+
+    /**
+     * The [PreparedStyle] this host is currently holding for [styleKey], or `null` if it holds none.
+     * Performs no engine call, no cache call and no consumer exchange whatsoever.
+     *
+     * This exists because the pure core emits no `CompileBasemapStyle` at all on a `RESIDENT`-provenance
+     * frame (`requiresStyleCompilation(RESIDENT)` is false) — correctly, since resident bytes were
+     * compiled when they were installed. The renderer therefore cannot take the frame's style from the
+     * compile action, and reads back the host's own retained compilation instead. Retained across
+     * invocations on purpose: the compilation belongs to the engine's lifetime, not to one preparation.
+     */
+    fun currentPreparedStyle(styleKey: ResourceKey): PreparedStyle? =
+        compiledStyle?.takeIf { it.styleKey == styleKey }?.prepared
 
     /**
      * Acquires everything [tiles] need — through the firewall, so through this invocation's preregistered
@@ -390,13 +438,17 @@ internal class BasemapEngineHost(
         }
     }
 
+    /**
+     * One compilation, the exact content digest it was compiled from, and the lease keeping that content
+     * resident. [contentDigest] rather than the [Lease]'s own generation is what decides reuse — see
+     * [preparedStyle].
+     */
     private class CompiledStyleBinding(
         val styleKey: ResourceKey,
+        val contentDigest: String,
         val lease: Lease,
         val prepared: PreparedStyle,
-    ) {
-        val generation: ResidentGeneration get() = lease.generation
-    }
+    )
 }
 
 /**

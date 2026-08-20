@@ -81,61 +81,71 @@ class ResourceOperationStyleCommitTest {
         }
     }
 
+    /**
+     * The route manifest is the one thing carried from validation to compilation, and losing it between
+     * the two is invisible to the pure core: the compilation would still be emitted, still succeed, and
+     * only fail closed later at the firewall when the engine asks for a url nobody preregistered. So it
+     * is asserted here, on the action itself.
+     *
+     * A validated style also releases its own traversal frontier immediately: it announced routes, not
+     * occurrences, so there is no child to wait for and [ParkedRouteBarrier.StyleChildren] is satisfied
+     * in the same transition it was entered. Its siblings are the frame's own resources, and they are
+     * ordered against the style by the *owner* barrier, not by this one.
+     */
     @Test
-    fun validationDiscoversCanonicallyOrderedChildrenAndParksBeforeAnyCompilation() {
+    fun validationCarriesItsRouteManifestIntoCompilationAndReleasesItsTraversalFrontier() {
         val driver = StyleDriver(styleDefinition(concurrency = 1))
         val validation = driver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
 
         assertFailsWith<IllegalArgumentException> {
-            BasemapStyleValidationOutcome.Valid(listOf(firstChild(), firstChild()))
+            BasemapStyleValidationOutcome.Valid(styleManifestRoutes() + styleManifestRoutes())
         }
-        val reversed = BasemapStyleValidationOutcome.Valid(listOf(secondChild(), firstChild()))
-        assertEquals(
-            listOf(firstChild().traversal, secondChild().traversal),
-            reversed.children.map(DiscoveredResourceChild::traversal),
-        )
-        assertNotSame(reversed.children, reversed.children)
+        val valid = BasemapStyleValidationOutcome.Valid(styleManifestRoutes())
+        assertNotSame(valid.routes, valid.routes)
 
-        driver.event(BasemapStyleValidationCompleted(validation.actionId, reversed))
+        driver.event(BasemapStyleValidationCompleted(validation.actionId, valid))
 
-        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
+        val compilation = assertIs<CompileBasemapStyle>(driver.actions.single())
+        assertEquals(styleManifestRoutes(), compilation.routes, "the manifest reaches the compilation")
+        assertEquals(styleManifestRoutes(), driver.style().styleTimeRoutes)
+        assertNotSame(compilation.routes, compilation.routes)
+
+        assertEquals(listOf(STYLE_ORDINAL), driver.state.activeRouteOrdinals)
+        assertTrue(driver.parked.isEmpty(), "a route manifest leaves no child to wait for")
+        assertTrue(driver.state.traversal.frontierStack.isEmpty())
         assertEquals(ResourceRouteStatus.RUNNING, driver.record(STYLE_ORDINAL).status)
         assertFalse(driver.record(STYLE_ORDINAL).visibilityInstalled)
         assertEquals(0L, driver.state.nextRetirementOrdinal)
         assertTrue(driver.state.bufferedRouteOutcomes.isEmpty())
-        assertEquals(StyleCompilationStatus.WAITING, driver.style().compilationStatus)
-        assertEquals(
-            listOf(FIRST_CHILD_LOCATOR, SECOND_CHILD_LOCATOR),
-            listOf(FIRST_CHILD_ORDINAL, SECOND_CHILD_ORDINAL).map {
-                driver.record(it).registration.route.locator.value
-            },
-        )
+        assertEquals(StyleCompilationStatus.REQUESTED, driver.style().compilationStatus)
         assertEquals(
             listOf(STICKER_A_ORDINAL, STICKER_B_ORDINAL),
             driver.state.routeRecords
                 .filter { it.registration.route.resourceClass == ResourceClass.STICKER_IMAGE }
                 .mapNotNull { it.ordinal }
                 .sorted(),
+            "the style's siblings are released into traversal, and are its own frame's resources",
         )
-        assertEquals(
-            listOf(StartRoute(FIRST_CHILD_ORDINAL, driver.record(FIRST_CHILD_ORDINAL).registration)),
-            driver.actions,
+        // No engine-keyed class ever becomes a route of this operation; that is what a manifest is for.
+        assertTrue(
+            driver.state.routeRecords.none {
+                it.registration.route.resourceClass == ResourceClass.BASEMAP_SPRITE_JSON ||
+                    it.registration.route.resourceClass == ResourceClass.BASEMAP_SPRITE_IMAGE
+            },
         )
-        driver.assertNoStyleCommitWork("children discovered", allowValidation = true)
 
-        val parkedState = driver.state
+        val compilingState = driver.state
         assertEquals(
-            "route completion requires an active route",
+            "route completion requires no in-flight adapter action",
             assertFailsWith<IllegalArgumentException> {
                 ResourceOperationStateMachine.transition(
-                    parkedState,
+                    compilingState,
                     RouteCompleted(STYLE_ORDINAL, ResourceRouteOutcome.Success),
                 )
             }.message,
         )
         assertFailsWith<IllegalArgumentException> {
-            ResourceOperationStateMachine.transition(parkedState, AdvancePendingStyleCommit(STYLE_ORDINAL))
+            ResourceOperationStateMachine.transition(compilingState, AdvancePendingStyleCommit(STYLE_ORDINAL))
         }
     }
 
@@ -418,32 +428,27 @@ class ResourceOperationStyleCommitTest {
     @Test
     fun failingOtherWorkBuffersBehindTheParkedStyleAndInstallsNothing() {
         val driver = StyleDriver(styleDefinition(concurrency = 1))
-        val validation = driver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
-        driver.event(
-            BasemapStyleValidationCompleted(
-                validation.actionId,
-                BasemapStyleValidationOutcome.Valid(listOf(firstChild(), secondChild())),
-            ),
-        )
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
+        driver.driveStyleManifest()
+        driver.completeStyleCommit()
+        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))), driver.parked)
 
-        driver.driveToPendingContent(FIRST_CHILD_ORDINAL, ContentProvenance.TRANSPORT_200)
-        driver.event(AdvancePendingClassGates(FIRST_CHILD_ORDINAL))
+        driver.driveToPendingContent(STICKER_A_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.event(AdvancePendingClassGates(STICKER_A_ORDINAL))
         val gate = assertIs<ValidateResourceClass>(driver.actions.single())
         driver.event(ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Failed))
 
         assertResourceFailure(
             outcome = driver.outcome,
-            code = RenGErrorCode.RESOURCE_PARSE_FAILED,
-            stage = PipelineStage.RESOURCE_PARSING,
+            code = RenGErrorCode.RESOURCE_DECODE_FAILED,
+            stage = PipelineStage.RESOURCE_DECODING,
             expectedField = DiagnosticField.RESOURCE.wireName,
-            resourceClass = ResourceClass.BASEMAP_TILE_JSON,
-            resourceKey = driver.candidate(FIRST_CHILD_ORDINAL).resourceKey,
-            label = "child failure",
+            resourceClass = ResourceClass.STICKER_IMAGE,
+            resourceKey = driver.candidate(STICKER_A_ORDINAL).resourceKey,
+            label = "owner work failure",
         )
         assertEquals(
             ResourceTerminalSelection.Route(
-                FIRST_CHILD_ORDINAL,
+                STICKER_A_ORDINAL,
                 ResourceRouteOutcome.Failure(assertIs<ResourceOperationOutcome.Failure>(driver.outcome).failure),
             ),
             driver.state.terminalSelection,
@@ -452,39 +457,39 @@ class ResourceOperationStyleCommitTest {
         assertEquals(ResourceRouteStatus.RESOLVED, driver.record(STYLE_ORDINAL).status)
         assertFalse(driver.record(STYLE_ORDINAL).visibilityInstalled)
         assertFalse(driver.style().visible)
-        assertEquals(StyleCompilationStatus.WAITING, driver.style().compilationStatus)
-        driver.assertNoStyleCommitWork("child failure", allowValidation = true)
+        assertEquals(StyleCompilationStatus.SUCCEEDED, driver.style().compilationStatus)
+        assertTrue(driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty())
+        assertTrue(driver.emitted.filterIsInstance<InstallBasemapStyleVisibility>().isEmpty())
         assertTrue(driver.emitted.filterIsInstance<CancelRoute>().isEmpty())
-        driver.assertNoRecoveryActions("child failure")
+        driver.assertNoRecoveryActions("owner work failure")
     }
 
     @Test
     fun aFailureAboveAnUnretiredStyleBuffersAndThenClosesItWithoutWriteOrInstall() {
         val driver = StyleDriver(styleDefinition(concurrency = 2))
-        driver.driveStyleChildren(listOf(firstChild(), secondChild()))
-        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
+        driver.driveStyleManifest()
+        val compilation = driver.actions.filterIsInstance<CompileBasemapStyle>().single()
+        driver.driveOrdinaryRoute(STICKER_A_ORDINAL)
         assertEquals(
-            listOf(BufferedRouteOutcome(FIRST_CHILD_ORDINAL, ResourceRouteOutcome.Success)),
+            listOf(BufferedRouteOutcome(STICKER_A_ORDINAL, ResourceRouteOutcome.Success)),
             driver.state.bufferedRouteOutcomes,
         )
         assertEquals(0L, driver.state.nextRetirementOrdinal)
-        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
-        val compilation = assertIs<CompileBasemapStyle>(driver.actions.single())
 
-        driver.driveToPendingContent(STICKER_A_ORDINAL, ContentProvenance.TRANSPORT_200)
-        driver.event(AdvancePendingClassGates(STICKER_A_ORDINAL))
+        driver.driveToPendingContent(STICKER_B_ORDINAL, ContentProvenance.TRANSPORT_200)
+        driver.event(AdvancePendingClassGates(STICKER_B_ORDINAL))
         val gate = assertIs<ValidateResourceClass>(driver.actions.single())
         driver.event(ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Failed))
 
         assertEquals(
-            listOf(FIRST_CHILD_ORDINAL, SECOND_CHILD_ORDINAL, STICKER_A_ORDINAL),
+            listOf(STICKER_A_ORDINAL, STICKER_B_ORDINAL),
             driver.state.bufferedRouteOutcomes.map(BufferedRouteOutcome::ordinal),
         )
         assertEquals(0L, driver.state.nextRetirementOrdinal)
         assertNull(driver.state.terminalSelection)
         assertNull(driver.outcome)
         assertIs<AwaitingStyleCompilation>(driver.record(STYLE_ORDINAL).cursor)
-        assertEquals(STICKER_A_ORDINAL, driver.state.startCeilingOrdinal)
+        assertEquals(STICKER_B_ORDINAL, driver.state.startCeilingOrdinal)
 
         driver.event(
             BasemapStyleCompilationCompleted(compilation.actionId, BasemapStyleCompilationOutcome.Succeeded),
@@ -493,7 +498,7 @@ class ResourceOperationStyleCommitTest {
         assertIs<ResourceOperationOutcome.Failure>(driver.outcome)
         assertEquals(
             ResourceTerminalSelection.Route(
-                STICKER_A_ORDINAL,
+                STICKER_B_ORDINAL,
                 ResourceRouteOutcome.Failure(assertIs<ResourceOperationOutcome.Failure>(driver.outcome).failure),
             ),
             driver.state.terminalSelection,
@@ -508,31 +513,21 @@ class ResourceOperationStyleCommitTest {
     }
 
     @Test
-    fun completionOrderChangesNeitherChildOrderNorVisibility() {
+    fun completionOrderChangesNeitherCommitOrderNorVisibility() {
         val forward = StyleDriver(styleDefinition(concurrency = 2))
-        forward.driveStyleChildren(listOf(firstChild(), secondChild()))
-        forward.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
-        forward.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
+        forward.driveStyleManifest()
         forward.completeStyleCommit()
         forward.driveOrdinaryRoute(STICKER_A_ORDINAL)
         forward.driveOrdinaryRoute(STICKER_B_ORDINAL)
         forward.finishStyleWriteAndInstall()
 
         val reversed = StyleDriver(styleDefinition(concurrency = 2))
-        reversed.driveStyleChildren(listOf(secondChild(), firstChild()))
-        reversed.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
-        reversed.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
+        reversed.driveStyleManifest()
         reversed.completeStyleCommit()
         reversed.driveOrdinaryRoute(STICKER_B_ORDINAL)
         reversed.driveOrdinaryRoute(STICKER_A_ORDINAL)
         reversed.finishStyleWriteAndInstall()
 
-        assertEquals(
-            listOf(FIRST_CHILD_LOCATOR, SECOND_CHILD_LOCATOR),
-            listOf(FIRST_CHILD_ORDINAL, SECOND_CHILD_ORDINAL).map {
-                reversed.record(it).registration.route.locator.value
-            },
-        )
         assertEquals(forward.outcome, reversed.outcome)
         assertEquals(forward.state.visibleResourcesByOwner, reversed.state.visibleResourcesByOwner)
         assertEquals(forward.style().referencingOwnerIds, reversed.style().referencingOwnerIds)
@@ -551,7 +546,7 @@ class ResourceOperationStyleCommitTest {
     }
 
     @Test
-    fun concurrencyOneParksTwiceAndKeepsEveryActionInsideOneSlot() {
+    fun concurrencyOneParksForItsOwnerBarrierAndKeepsEveryActionInsideOneSlot() {
         val driver = StyleDriver(styleDefinition(concurrency = 1))
         val validation = driver.driveToStyleValidation(ContentProvenance.TRANSPORT_200)
         driver.assertSingleSlot("validation")
@@ -559,24 +554,9 @@ class ResourceOperationStyleCommitTest {
         driver.event(
             BasemapStyleValidationCompleted(
                 validation.actionId,
-                BasemapStyleValidationOutcome.Valid(listOf(firstChild(), secondChild())),
+                BasemapStyleValidationOutcome.Valid(styleManifestRoutes()),
             ),
         )
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
-        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-        driver.assertStyleAssignedAndUnretired("parked for children")
-
-        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
-        assertEquals(listOf(SECOND_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
-        assertTrue(driver.emitted.filterIsInstance<CompileBasemapStyle>().isEmpty())
-        assertEquals(
-            listOf(BufferedRouteOutcome(FIRST_CHILD_ORDINAL, ResourceRouteOutcome.Success)),
-            driver.state.bufferedRouteOutcomes,
-        )
-        driver.assertStyleAssignedAndUnretired("first child done")
-
-        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
 
         val compilation = assertIs<CompileBasemapStyle>(driver.actions.single())
         assertEquals(STYLE_ORDINAL, compilation.ordinal)
@@ -590,6 +570,7 @@ class ResourceOperationStyleCommitTest {
                 .mapNotNull { it.ordinal }
                 .sorted(),
         )
+        driver.assertStyleAssignedAndUnretired("compiling")
 
         driver.event(
             BasemapStyleCompilationCompleted(compilation.actionId, BasemapStyleCompilationOutcome.Succeeded),
@@ -620,7 +601,7 @@ class ResourceOperationStyleCommitTest {
             BasemapStyleVisibilityInstallCompleted(install.actionId, STYLE_GROUP, SuppliedInstallOutcome.Succeeded),
         )
 
-        assertEquals(5L, driver.state.nextRetirementOrdinal)
+        assertEquals(3L, driver.state.nextRetirementOrdinal)
         assertTrue(driver.state.activeRouteOrdinals.isEmpty())
         driver.assertSingleSlot("complete")
         val success = assertIs<ResourceOperationOutcome.Success>(driver.outcome)
@@ -630,60 +611,6 @@ class ResourceOperationStyleCommitTest {
         )
         assertEquals(driver.state.visibleResourcesByOwner, success.resourceSets)
         driver.assertNoRecoveryActions("liveness trace")
-    }
-
-    @Test
-    fun aDiscoveringStyleChildAnnouncesItsOwnChildrenAndTheStyleStillInstalls() {
-        val driver = StyleDriver(styleDefinition(concurrency = 1))
-        val discovering = discoveringFirstChild()
-        driver.driveStyleChildren(listOf(discovering, secondChild()))
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
-        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-
-        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
-
-        assertTrue(driver.actions.isEmpty())
-        assertEquals(
-            PendingChildDiscovery(FIRST_CHILD_ORDINAL, driver.candidate(FIRST_CHILD_ORDINAL)),
-            driver.record(FIRST_CHILD_ORDINAL).cursor,
-        )
-        assertTrue(driver.record(FIRST_CHILD_ORDINAL).visibilityInstalled)
-        assertEquals(listOf(FIRST_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-        assertTrue(driver.state.bufferedRouteOutcomes.isEmpty())
-        driver.assertStyleAssignedAndUnretired("discovering child installed")
-
-        driver.event(RouteReadyForDiscovery(FIRST_CHILD_ORDINAL, discovering.occurrence.id))
-
-        assertEquals(
-            listOf(DiscoverChildren(FIRST_CHILD_ORDINAL, discovering.occurrence.id)),
-            driver.actions,
-        )
-        assertEquals(
-            listOf(BufferedRouteOutcome(FIRST_CHILD_ORDINAL, ResourceRouteOutcome.Success)),
-            driver.state.bufferedRouteOutcomes,
-        )
-        driver.assertStyleAssignedAndUnretired("discovering child retired")
-
-        driver.event(ChildrenDiscovered(discovering.occurrence.id, emptyList()))
-
-        assertEquals(listOf(SECOND_CHILD_ORDINAL), driver.state.activeRouteOrdinals)
-        assertTrue(driver.state.traversal.frontierStack.isEmpty())
-
-        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
-        driver.completeStyleCommit()
-        driver.driveOwnerRoutes()
-        driver.finishStyleWriteAndInstall()
-
-        assertTrue(driver.style().visible)
-        assertTrue(driver.record(STYLE_ORDINAL).visibilityInstalled)
-        assertEquals(5L, driver.state.nextRetirementOrdinal)
-        val success = assertIs<ResourceOperationOutcome.Success>(driver.outcome)
-        assertEquals(
-            listOf(ResourceOwnerId(OWNER_A), ResourceOwnerId(OWNER_B)),
-            success.resourceSets.map(OwnerResourceSet::ownerId),
-        )
-        driver.assertSingleSlot("discovering child")
-        driver.assertNoRecoveryActions("discovering child")
     }
 
     @Test
@@ -838,20 +765,21 @@ class ResourceOperationStyleCommitTest {
         driver.event(
             BasemapStyleValidationCompleted(
                 validation.actionId,
-                BasemapStyleValidationOutcome.Valid(listOf(firstChild(), secondChild())),
+                BasemapStyleValidationOutcome.Valid(styleManifestRoutes()),
             ),
         )
+        driver.completeStyleCommit()
         val parkedState = driver.state
         assertFailsWith<IllegalArgumentException> {
             copyState(
                 parkedState,
-                parkedRoutes = listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))),
+                parkedRoutes = listOf(ParkedRoute(STICKER_A_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             copyState(
                 parkedState,
-                parkedRoutes = listOf(ParkedRoute(FIRST_CHILD_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))),
+                parkedRoutes = listOf(ParkedRoute(STICKER_A_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))),
             )
         }
 
@@ -948,13 +876,13 @@ class ResourceOperationStyleCommitTest {
                 CancellationSelection(CancellationCause.CANCEL_PREPARATIONS, CancellationId(2L)),
             )
         }
-        val childInput = mutableListOf(firstChild())
-        val valid = BasemapStyleValidationOutcome.Valid(childInput)
-        childInput.clear()
-        assertEquals(listOf(firstChild()), valid.children)
-        assertEquals(BasemapStyleValidationOutcome.Valid(listOf(firstChild())), valid)
-        assertEquals(BasemapStyleValidationOutcome.Valid(listOf(firstChild())).hashCode(), valid.hashCode())
-        assertFalse(valid.toString().contains(FIRST_CHILD_LOCATOR))
+        val routeInput = styleManifestRoutes().toMutableList()
+        val valid = BasemapStyleValidationOutcome.Valid(routeInput)
+        routeInput.clear()
+        assertEquals(styleManifestRoutes(), valid.routes)
+        assertEquals(BasemapStyleValidationOutcome.Valid(styleManifestRoutes()), valid)
+        assertEquals(BasemapStyleValidationOutcome.Valid(styleManifestRoutes()).hashCode(), valid.hashCode())
+        assertFalse(valid.toString().contains(SPRITE_JSON_LOCATOR), "a manifest route can carry a credential")
         assertEquals(
             listOf("PARSE", "UNSUPPORTED_FEATURE"),
             StyleFailureKind.entries.map(StyleFailureKind::name),
@@ -1055,9 +983,7 @@ class ResourceOperationStyleCommitTest {
     @Test
     fun aStyleOwnerBarrierWaitsForInstalledVisibilityNotMereRouteResolution() {
         val driver = StyleDriver(styleDefinition(concurrency = 1))
-        driver.driveStyleChildren(listOf(firstChild(), secondChild()))
-        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
-        driver.driveOrdinaryRoute(SECOND_CHILD_ORDINAL)
+        driver.driveStyleManifest()
         driver.completeStyleCommit()
         assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))), driver.parked)
 
@@ -1093,41 +1019,7 @@ class ResourceOperationStyleCommitTest {
     }
 
     @Test
-    fun aStyleWaitsForADiscoveringChildToAnnounceItsOwnChildrenBeforeCompiling() {
-        val driver = StyleDriver(styleDefinition(concurrency = 1))
-        val discovering = discoveringFirstChild()
-        driver.driveStyleChildren(listOf(discovering))
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
-
-        driver.driveOrdinaryRoute(FIRST_CHILD_ORDINAL)
-        assertEquals(
-            PendingChildDiscovery(FIRST_CHILD_ORDINAL, driver.candidate(FIRST_CHILD_ORDINAL)),
-            driver.record(FIRST_CHILD_ORDINAL).cursor,
-        )
-
-        driver.event(RouteReadyForDiscovery(FIRST_CHILD_ORDINAL, discovering.occurrence.id))
-
-        assertEquals(
-            listOf(DiscoverChildren(FIRST_CHILD_ORDINAL, discovering.occurrence.id)),
-            driver.actions,
-        )
-        assertTrue(driver.state.traversal.frontierStack.isNotEmpty())
-        assertTrue(driver.state.traversal.eligibleFifo.isEmpty())
-        assertEquals(ResourceRouteStatus.RESOLVED, driver.record(FIRST_CHILD_ORDINAL).status)
-        assertEquals(listOf(ParkedRoute(STYLE_ORDINAL, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))), driver.parked)
-        assertEquals(StyleCompilationStatus.WAITING, driver.style().compilationStatus)
-        assertTrue(driver.emitted.filterIsInstance<CompileBasemapStyle>().isEmpty())
-
-        driver.event(ChildrenDiscovered(discovering.occurrence.id, emptyList()))
-
-        assertIs<CompileBasemapStyle>(driver.actions.single())
-        assertTrue(driver.state.traversal.frontierStack.isEmpty())
-        assertTrue(driver.parked.isEmpty())
-        assertEquals(StyleCompilationStatus.REQUESTED, driver.style().compilationStatus)
-    }
-
-    @Test
-    fun aStyleBelowTheStartCeilingStagesNoValidationAndNoChildren() {
+    fun aStyleBelowTheStartCeilingStagesNoValidationAndNoManifest() {
         val advanceDriver = StyleDriver(nonDiscoveryStyleDefinition())
         advanceDriver.driveToPendingContent(STYLE_ORDINAL, ContentProvenance.TRANSPORT_200)
         val advanceCeilinged = copyState(advanceDriver.state, startCeilingOrdinal = OTHER_OWNER_ORDINAL)
@@ -1182,14 +1074,12 @@ private const val OWNER_A: Long = 1L
 private const val OWNER_B: Long = 2L
 private const val SAMPLE_EPOCH_MILLIS: Long = 100L
 private const val STYLE_ORDINAL: Long = 0L
-private const val FIRST_CHILD_ORDINAL: Long = 1L
-private const val SECOND_CHILD_ORDINAL: Long = 2L
-private const val STICKER_A_ORDINAL: Long = 3L
-private const val STICKER_B_ORDINAL: Long = 4L
+private const val STICKER_A_ORDINAL: Long = 1L
+private const val STICKER_B_ORDINAL: Long = 2L
 private const val OTHER_OWNER_ORDINAL: Long = 1L
 private const val STYLE_LOCATOR: String = "locator-a-BASEMAP_STYLE"
-private const val FIRST_CHILD_LOCATOR: String = "locator-d-BASEMAP_TILE_JSON"
-private const val SECOND_CHILD_LOCATOR: String = "locator-e-BASEMAP_TILE_JSON"
+private const val SPRITE_JSON_LOCATOR: String = "https://sprites.example/atlas.json"
+private const val SPRITE_IMAGE_LOCATOR: String = "https://sprites.example/atlas.png"
 private val STYLE_GROUP: StyleGroupId = StyleGroupId(1L)
 private val ADAPTER_CANCELLATION: CancellationSelection =
     CancellationSelection(CancellationCause.ADAPTER, CancellationId(7L))
@@ -1405,25 +1295,35 @@ private fun StyleDriver.driveToStyleValidation(provenance: ContentProvenance): V
     return assertIs<ValidateBasemapStyle>(actions.single())
 }
 
-private fun StyleDriver.driveStyleChildren(children: List<DiscoveredResourceChild>) {
+private fun StyleDriver.driveStyleManifest(routes: List<ResourceRouteKey> = styleManifestRoutes()) {
     val validation = driveToStyleValidation(ContentProvenance.TRANSPORT_200)
-    event(BasemapStyleValidationCompleted(validation.actionId, BasemapStyleValidationOutcome.Valid(children)))
+    event(BasemapStyleValidationCompleted(validation.actionId, BasemapStyleValidationOutcome.Valid(routes)))
 }
 
 private fun StyleDriver.driveToStyleCompilation(provenance: ContentProvenance): CompileBasemapStyle {
     val validation = driveToStyleValidation(provenance)
-    event(BasemapStyleValidationCompleted(validation.actionId, BasemapStyleValidationOutcome.Valid(emptyList())))
-    return assertIs<CompileBasemapStyle>(actions.single())
+    event(
+        BasemapStyleValidationCompleted(
+            validation.actionId,
+            BasemapStyleValidationOutcome.Valid(styleManifestRoutes()),
+        ),
+    )
+    return assertIs<CompileBasemapStyle>(actions.filterIsInstance<CompileBasemapStyle>().single())
 }
 
 private fun StyleDriver.completeStyleCommit() {
-    val compilation = assertIs<CompileBasemapStyle>(actions.single())
+    val compilation = actions.filterIsInstance<CompileBasemapStyle>().single()
     event(BasemapStyleCompilationCompleted(compilation.actionId, BasemapStyleCompilationOutcome.Succeeded))
 }
 
 private fun StyleDriver.driveToStyleOwnerBarrier(provenance: ContentProvenance): ResolvedResourceContent {
     val validation = driveToStyleValidation(provenance)
-    event(BasemapStyleValidationCompleted(validation.actionId, BasemapStyleValidationOutcome.Valid(emptyList())))
+    event(
+        BasemapStyleValidationCompleted(
+            validation.actionId,
+            BasemapStyleValidationOutcome.Valid(styleManifestRoutes()),
+        ),
+    )
     if (provenance != ContentProvenance.RESIDENT) {
         completeStyleCommit()
     }
@@ -1467,6 +1367,23 @@ private fun styleDefinition(
     ) + ordinaryOccurrences(3L, OWNER_A, 'b') + ordinaryOccurrences(4L, OWNER_B, 'c'),
 )
 
+/**
+ * The manifest a validated style announces: the routes its compilation makes the engine ask for. They
+ * are engine-keyed classes RenG never fetches itself, so they never become occurrences or routes of this
+ * operation -- the whole point of announcing routes rather than children.
+ */
+private fun styleManifestRoutes(): List<ResourceRouteKey> = listOf(
+    manifestRoute(SPRITE_JSON_LOCATOR, ResourceClass.BASEMAP_SPRITE_JSON),
+    manifestRoute(SPRITE_IMAGE_LOCATOR, ResourceClass.BASEMAP_SPRITE_IMAGE),
+)
+
+private fun manifestRoute(locator: String, resourceClass: ResourceClass): ResourceRouteKey = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator(locator),
+    resourceClass = resourceClass,
+    maximumResponseBytes = 1024L,
+)
+
 private fun styleOccurrence(
     id: Long,
     ownerId: Long,
@@ -1489,42 +1406,6 @@ private fun ordinaryOccurrences(
         id = ResourceOccurrenceId(id),
         ownerId = ResourceOwnerId(ownerId),
         registration = registration(marker, ResourceClass.STICKER_IMAGE, ResourceAccessMode.RELOAD),
-        discoveryRequired = false,
-        commitBinding = ResourceCommitBinding.Single,
-    ),
-)
-
-private fun firstChild(): DiscoveredResourceChild = DiscoveredResourceChild(
-    traversal = ResourceChildTraversal.BasemapSource("alpha", BasemapSourceMember.Metadata),
-    occurrence = ResourceOccurrence(
-        id = ResourceOccurrenceId(11L),
-        ownerId = ResourceOwnerId(OWNER_A),
-        registration = registration('d', ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
-        discoveryRequired = false,
-        commitBinding = ResourceCommitBinding.Single,
-    ),
-)
-
-private fun discoveringFirstChild(): DiscoveredResourceChild {
-    val child = firstChild()
-    return DiscoveredResourceChild(
-        traversal = child.traversal,
-        occurrence = ResourceOccurrence(
-            id = child.occurrence.id,
-            ownerId = child.occurrence.ownerId,
-            registration = child.occurrence.registration,
-            discoveryRequired = true,
-            commitBinding = child.occurrence.commitBinding,
-        ),
-    )
-}
-
-private fun secondChild(): DiscoveredResourceChild = DiscoveredResourceChild(
-    traversal = ResourceChildTraversal.BasemapSource("beta", BasemapSourceMember.Metadata),
-    occurrence = ResourceOccurrence(
-        id = ResourceOccurrenceId(12L),
-        ownerId = ResourceOwnerId(OWNER_B),
-        registration = registration('e', ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
         discoveryRequired = false,
         commitBinding = ResourceCommitBinding.Single,
     ),

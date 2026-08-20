@@ -831,12 +831,16 @@ internal object ResourceOperationStateMachine {
             when (val outcome = event.outcome) {
                 is BasemapStyleValidationOutcome.Valid -> {
                     if (closeStyleBelowStartCeiling(routeIndex, style)) return
+                    // The manifest is stored here and handed straight back out on CompileBasemapStyle:
+                    // it is the one thing carried from "what does this document say?" to "what may the
+                    // engine ask for while compiling it?", and nothing else ever recomputes it.
+                    putStyleCommitState(style.withStyleTimeRoutes(outcome.routes))
                     updateRouteRecord(
                         routeIndex,
                         cursor = PendingClassGates(cursor.ordinal, cursor.content),
                     )
                     parkRoute(routeIndex, cursor.ordinal, ParkedRouteBarrier.StyleChildren(style.groupId))
-                    registerStyleChildren(routeIndex, outcome.children)
+                    releaseStyleTraversalFrontier(routeIndex)
                 }
                 is BasemapStyleValidationOutcome.Failed -> completeLookupRoute(
                     routeIndex,
@@ -868,6 +872,13 @@ internal object ResourceOperationStateMachine {
                         routeIndex,
                         ResourceRouteOutcome.Failure(styleFailure(style.stagedContent, outcome.kind)),
                     )
+                }
+                // Forwarded verbatim rather than reclassified: the firewall already sanitized it and
+                // already translated its identity out of Rentile's digest namespace, and no
+                // StyleFailureKind describes "the engine asked for a url this invocation never routed".
+                is BasemapStyleCompilationOutcome.EngineFailed -> {
+                    putStyleCommitState(style.withCompilationStatus(StyleCompilationStatus.FAILED))
+                    completeLookupRoute(routeIndex, ResourceRouteOutcome.Failure(outcome.failure))
                 }
                 is BasemapStyleCompilationOutcome.Cancelled -> {
                     putStyleCommitState(style.withCompilationStatus(StyleCompilationStatus.FAILED))
@@ -943,37 +954,28 @@ internal object ResourceOperationStateMachine {
             actions += ValidateBasemapStyle(actionId, style.ordinal, style.groupId, style.stagedContent)
         }
 
-        private fun registerStyleChildren(
-            routeIndex: Int,
-            children: List<DiscoveredResourceChild>,
-        ) {
+        /**
+         * A validated style announces **routes**, never occurrences, so it adds nothing to the
+         * occurrence graph and its depth-first frontier closes empty right here. Popping it is not
+         * bookkeeping that could be skipped: the frontier is what `discoveryRequired` opened to hold
+         * the style's siblings back until the document had been read, and
+         * [ParkedRouteBarrier.StyleChildren] cannot release while any frontier is open.
+         *
+         * A style occurrence that never declared `discoveryRequired` owns no frontier; it simply
+         * rejoins scheduling.
+         */
+        private fun releaseStyleTraversalFrontier(routeIndex: Int) {
             val frontier = frontierStack.lastOrNull()
             val parentId = frontier?.parentOccurrenceId
             val ownsFrontier = parentId != null &&
                 parentId in joinedOccurrenceIdSetsByRouteIndex[routeIndex] &&
                 occurrence(parentId).discoveryRequired
-            require(ownsFrontier || children.isEmpty()) {
-                "discovered style children require the active depth-first frontier"
-            }
             if (!ownsFrontier) {
                 startEligibleRoutes()
                 return
             }
 
-            val discoveredIds = mutableSetOf<ResourceOccurrenceId>()
-            require(
-                children.all { child ->
-                    child.occurrence.id !in occurrenceById && discoveredIds.add(child.occurrence.id)
-                },
-            ) { "discovered resource occurrence IDs must be unique" }
-
-            children.forEach { child ->
-                occurrences += child.occurrence
-                occurrenceById[child.occurrence.id] = child.occurrence
-            }
-            frontierStack[frontierStack.lastIndex] = requireNotNull(frontier).withChildren(
-                children.map { it.occurrence.id },
-            )
+            frontierStack[frontierStack.lastIndex] = requireNotNull(frontier).withChildren(emptyList())
             releaseKnownTraversal()
             scheduleEligibleOccurrences()
         }
@@ -995,7 +997,13 @@ internal object ResourceOperationStateMachine {
                     content = style.stagedContent,
                 ),
             )
-            actions += CompileBasemapStyle(actionId, style.ordinal, style.groupId, style.stagedContent)
+            actions += CompileBasemapStyle(
+                actionId = actionId,
+                ordinal = style.ordinal,
+                groupId = style.groupId,
+                content = style.stagedContent,
+                routes = style.styleTimeRoutes,
+            )
         }
 
         private fun advanceStyleAfterCompilation(

@@ -143,7 +143,8 @@ class PreparationDriverTest {
             store = ThrowingStore(CancellationException("boom")),
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
-            basemapEngineHost = basemapEngineHost(),
+            resourceLimits = ResourceLimits(),
+        basemapEngineHost = basemapEngineHost(),
             clock = FixedClock,
         )
         assertFailsWith<CancellationException> {
@@ -177,7 +178,8 @@ class PreparationDriverTest {
             store = CountingStore(),
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
-            basemapEngineHost = basemapEngineHost(),
+            resourceLimits = ResourceLimits(),
+        basemapEngineHost = basemapEngineHost(),
             clock = FixedClock,
         )
         val registration = registration("vanished")
@@ -216,6 +218,7 @@ private fun driver(
         cache = cache,
         classGateRunner = RenGClassGateRunner(ResourceLimits()),
         // The engine host shares this driver's own resident cache, exactly as RendererFactory wires them.
+        resourceLimits = ResourceLimits(),
         basemapEngineHost = basemapEngineHost(cache = cache),
         maximumConcurrentOperations = maximumConcurrentOperations,
         clock = clock,

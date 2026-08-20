@@ -63,18 +63,12 @@ import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.preparation.buildResourceOperationDefinition
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.renGFailure
-import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
-import com.rohittp.reng.internal.resource.ResourceCommitBinding
-import com.rohittp.reng.internal.resource.ResourceOccurrence
-import com.rohittp.reng.internal.resource.ResourceOccurrenceId
-import com.rohittp.reng.internal.resource.ResourceOperationDefinition
 import com.rohittp.reng.internal.resource.ResourceOperationOutcome
-import com.rohittp.reng.internal.resource.ResourceOwnerId
-import com.rohittp.reng.internal.resource.ResourceRouteKey
-import com.rohittp.reng.internal.resource.ResourceRouteRegistration
+import com.rohittp.rentile.PreparedStyle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 
@@ -296,6 +290,15 @@ internal class RenGRenderer(
     /** Once per renderer, never per frame — see the design spec's `drawBasemap` decision. */
     private var basemapWarningEmitted: Boolean = false
 
+    /**
+     * The compiled basemap style the last successful [prepare] over a basemap-drawing plan installed, or
+     * `null` if no such preparation has succeeded yet. Read back from [basemapEngineHost] rather than
+     * taken from the driver's compile action, because a `RESIDENT`-provenance frame emits no compile
+     * action at all. Cycle E-C3's `prepareTiles` is what consumes it; nothing draws with it yet.
+     */
+    internal var preparedBasemapStyle: PreparedStyle? = null
+        private set
+
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
         frameEncoder = FramePlanCanonicalEncoder(),
         frameIdentityRegistry = registry,
@@ -353,10 +356,16 @@ internal class RenGRenderer(
                     }
                 }
 
-            val decodedByKey = acquireExternalImages(
-                stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second },
-                accessMode,
-            )
+            // The style is the one traversal entry that is neither a sticker nor a texture: it is
+            // acquired, validated, compiled through the engine, written and installed by the resource
+            // driver's own basemap-style commit verbs, and never decoded as an image.
+            val styleReference = planned.staticResourceTraversal
+                .filterIsInstance<StaticResourceReference.External>()
+                .singleOrNull { it.resourceClass == ResourceClass.BASEMAP_STYLE }
+
+            val imageReferences =
+                stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second }
+            val decodedByKey = acquireFrameResources(styleReference, imageReferences, accessMode)
 
             val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
                 PreparedSticker(
@@ -446,67 +455,67 @@ internal class RenGRenderer(
     }
 
     /**
-     * Fetches every traversed external image — a sticker's, or (Task 9b) a geometry consumer
-     * texture's — through [preparationDriver], one [ResourceOccurrence] per [references] entry, each
-     * its own owner so a merged route (two entries sharing one locator) still resolves independently
-     * — then decodes each resulting resident generation's bytes through Cycle C's PNG decoder.
-     * Returns nothing and performs no adapter call at all when [references] is empty, which is what
-     * keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no configured
-     * basemap honestly free of consumer exchange too.
+     * Acquires everything one frame plan asked for that is not already in hand: the configured basemap
+     * style ([styleReference], when the plan draws one) and every traversed external image
+     * ([imageReferences] — a sticker's, or a geometry consumer texture's). Returns the decoded images by
+     * key; the style is not among them, because a style is not an image.
+     *
+     * Returns nothing and performs no adapter call at all when there is nothing to acquire, which is
+     * what keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no
+     * configured basemap honestly free of consumer exchange.
+     *
+     * **One owner for the whole frame.** The occurrence set comes from [buildResourceOperationDefinition],
+     * which assigns one [ResourceOwnerId] per preparation item rather than one per reference. That is
+     * not a detail: it is the entire content of ADR 0016's style-owner barrier, which orders the style's
+     * Store write behind the completion of every other resource the same items referenced. An owner per
+     * reference gives the style an owner with no other work, and the barrier becomes vacuously true.
+     *
+     * **The firewall invocation spans the whole driver run**, because the engine's own sprite, TileJSON
+     * and GeoJSON acquisition happens inside the style's compilation, which happens inside the driver.
+     * Opening it afterwards would leave every one of those exchanges with no registry to be recognised
+     * by, and each would fail closed as `AMBIGUOUS_RESOURCE_ROUTE`.
      *
      * A [ResourceOperationOutcome.Cancelled] outcome — reached when one route's adapter call observes
-     * its own cancellation while a sibling route is still active, exactly the multi-route scenario
-     * Task 1 fixed in [com.rohittp.reng.internal.driver.ResourceActionExecutor] — is rethrown as a
-     * genuine [CancellationException] rather than a [RenGException], consistent with keeping
-     * cancellation unwrapped throughout this codebase. This function, called from [prepare], is what
-     * makes that fixed `CancelRoute` path reachable through the public API for the first time: before
-     * this factory existed, [preparationDriver]'s multi-route machinery had no caller at all.
+     * its own cancellation while a sibling route is still active — is rethrown as a genuine
+     * [CancellationException] rather than a [RenGException], consistent with keeping cancellation
+     * unwrapped throughout this codebase.
      */
-    private suspend fun acquireExternalImages(
-        references: List<StaticResourceReference.External>,
+    private suspend fun acquireFrameResources(
+        styleReference: StaticResourceReference.External?,
+        imageReferences: List<StaticResourceReference.External>,
         accessMode: ResourceAccessMode,
     ): Map<ResourceKey, DecodedImage> {
+        val references = listOfNotNull(styleReference) + imageReferences
         if (references.isEmpty()) return emptyMap()
 
-        val occurrences = references.mapIndexed { index, reference ->
-            // ResourceOccurrenceId and ResourceOwnerId both require a strictly positive value, so
-            // this is 1-based rather than the list's own 0-based index.
-            val ordinal = (index + 1).toLong()
-            ResourceOccurrence(
-                id = ResourceOccurrenceId(ordinal),
-                ownerId = ResourceOwnerId(ordinal),
-                registration = ResourceRouteRegistration(
-                    route = ResourceRouteKey(
-                        accessMode = accessMode,
-                        locator = reference.locator,
-                        resourceClass = reference.resourceClass,
-                        maximumResponseBytes = reference.maximumResponseBytes,
-                    ),
-                    resourceKey = reference.resourceKey,
-                    rawKey = reference.rawKey,
-                    privateRentileKey = reference.privateRentileKey,
-                    canonicalBytes = reference.canonicalIdentity.canonicalBytes,
-                ),
-                discoveryRequired = false,
-                commitBinding = ResourceCommitBinding.Single,
-            )
-        }
-        val definition = ResourceOperationDefinition(
-            maximumConcurrentRoutes = minOf(configuration.maximumConcurrentResourceOperations, occurrences.size),
-            staticOccurrences = occurrences,
-            resourceIdentities = occurrences.map {
-                CanonicalIdentityRecord(it.registration.resourceKey, it.registration.canonicalBytes)
-            },
+        val definition = buildResourceOperationDefinition(
+            traversalsByItem = listOf(references),
+            accessMode = accessMode,
+            maximumConcurrentRoutes = minOf(
+                configuration.maximumConcurrentResourceOperations,
+                references.size,
+            ),
         )
 
-        when (val outcome = preparationDriver.run(definition)) {
+        val outcome = basemapEngineHost.withOperation(accessMode) {
+            val driven = preparationDriver.run(definition)
+            if (driven is ResourceOperationOutcome.Success && styleReference != null) {
+                // Read back rather than taken from the compile action: on a RESIDENT-provenance frame
+                // the pure core emits no CompileBasemapStyle at all, so there is no action to take it
+                // from. The host retains the compilation across invocations, so this is the one place
+                // the frame's style is obtainable on every frame alike. Cycle E-C3 consumes it.
+                preparedBasemapStyle = basemapEngineHost.currentPreparedStyle(styleReference.resourceKey)
+            }
+            driven
+        }
+        when (outcome) {
             is ResourceOperationOutcome.Success -> Unit
             is ResourceOperationOutcome.Failure -> throw outcome.failure.toException()
             is ResourceOperationOutcome.Cancelled ->
                 throw CancellationException("resource preparation observed a route cancellation")
         }
 
-        return references.associate { reference ->
+        return imageReferences.associate { reference ->
             val stored = residentCache.current(reference.resourceKey)?.stored
                 ?: error("a successful resource operation must leave its content resident")
             val image = when (

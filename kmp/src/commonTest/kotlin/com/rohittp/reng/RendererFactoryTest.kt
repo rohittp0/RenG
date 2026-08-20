@@ -127,8 +127,14 @@ class RendererFactoryTest {
     @Test
     fun aConfiguredBasemapStyleNeverWarns() = runTest {
         val sink = RecordingDiagnosticSink()
+        // A configured style is genuinely acquired and compiled by prepare(), so this needs a transport
+        // that serves one rather than the suite's default "must not execute" stub.
         val renderer = createRenderer(
-            testConfiguration(basemapStyle = ResourceLocator("https://example.invalid/style.json"), diagnosticSink = sink),
+            testConfiguration(
+                transport = StyleTransport(),
+                basemapStyle = ResourceLocator(STYLE_URL),
+                diagnosticSink = sink,
+            ),
             validGlesBinding(),
             fixedProbe(),
         )

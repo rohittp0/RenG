@@ -31,6 +31,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -183,8 +184,14 @@ class BasemapEngineHostTest {
         }
     }
 
+    /**
+     * "Accessing a freed resource reloads it" is a claim about **residency**, not about compilation. A
+     * freed style is genuinely reinstalled and re-leased here; its compilation is reused because the
+     * bytes are identical, and recompiling identical bytes would re-run the engine's whole sprite,
+     * TileJSON and GeoJSON acquisition for no result the caller could distinguish.
+     */
     @Test
-    fun recompilesAfterTheStyleGenerationIsFreed() = runTest {
+    fun reloadsAFreedStyleGenerationWithoutRecompilingIdenticalBytes() = runTest {
         val cache = ResidentCache()
         val host = basemapEngineHost(cache = cache)
         try {
@@ -192,8 +199,130 @@ class BasemapEngineHostTest {
                 val first = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
                 assertNotNullGeneration(cache)
                 cache.free(ResourceSelector.ByKey(hostStyleKey))
+                assertNull(cache.current(hostStyleKey), "the fixture must genuinely free the generation")
+
                 val second = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
-                assertNotSame(first, second, "a freed style generation is reloaded and recompiled")
+
+                assertSame(first, second, "identical bytes are never recompiled")
+                assertNotNullGeneration(cache)
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * The defect this binding exists to close, at its smallest reproducible size. Compilation runs
+     * strictly before the style's own visibility install, and installing always retires and replaces the
+     * current generation — so a compilation bound to a generation *object* misses on the very next
+     * lookup and recompiles, once per frame, forever. Bound to content, it survives.
+     */
+    @Test
+    fun keepsTheCompilationAcrossAFreshGenerationOfIdenticalBytes() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                val first = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                val compiledGeneration = cache.current(hostStyleKey)
+
+                // Exactly what ResourceActionExecutor.installVisibility does after CompileBasemapStyle.
+                cache.installAndTakeLease(hostStyleKey, hostStyleRecord(), decoded = null)
+                assertNotSame(
+                    compiledGeneration,
+                    cache.current(hostStyleKey),
+                    "the fixture must genuinely replace the generation the compilation observed",
+                )
+
+                val second = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+
+                assertSame(first, second, "a fresh generation of identical bytes reuses the compilation")
+                assertSame(
+                    host.currentPreparedStyle(hostStyleKey),
+                    second,
+                    "the host retains exactly what it last compiled",
+                )
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * The resident generation is authoritative, so "the content changed" means a generation carrying
+     * different bytes was installed — exactly what the driver's own visibility install does after a
+     * transport re-fetch. That, and only that, recompiles.
+     */
+    @Test
+    fun recompilesWhenTheInstalledStyleContentItselfChanges() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                val first = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                val edited = HOST_STYLE_JSON.replace("reng-basemap-host-test", "reng-basemap-host-test-2")
+                cache.installAndTakeLease(hostStyleKey, hostStyleRecord(edited), decoded = null)
+                val second = host.preparedStyle(hostStyleKey, hostStyleRecord(edited), HOST_STYLE_BASE_URI)
+                assertNotSame(first, second, "different bytes are a different style")
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    @Test
+    fun holdsNoPreparedStyleUntilOneIsCompiled() = runTest {
+        val host = basemapEngineHost()
+        try {
+            assertNull(host.currentPreparedStyle(hostStyleKey))
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+            }
+            // Retained across invocations on purpose: a RESIDENT-provenance frame emits no compile
+            // action at all, so this readback is the renderer's only way to hold the frame's style.
+            assertNotNull(host.currentPreparedStyle(hostStyleKey))
+        } finally {
+            host.close()
+        }
+    }
+
+    // ---- incremental route registration ----------------------------------------------------------
+
+    /**
+     * An invocation opened with no routes at all still admits exactly what is registered into it later —
+     * which is the whole reason the registration is incremental: the routes a style's compilation needs
+     * are not knowable until the style has been read, inside the invocation.
+     *
+     * The tile is served as a 404 so nothing rasterizes: this file runs on `androidHostTest` too, where
+     * Skia's native library is absent (see [BasemapEngineRenderTest]). What is under test is which url
+     * reaches the consumer, not what the engine does with it.
+     */
+    @Test
+    fun admitsAnEngineExchangeOnlyThroughARouteRegisteredBeforeItHappens() = runTest {
+        val transport = CountingHostTransport(statusCode = 404)
+        val host = basemapEngineHost(transport = transport)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL) {
+                // Registering the very same route twice is one occurrence joining one route, not a
+                // conflict.
+                host.registerRoutes(listOf(hostRasterRoute))
+                host.registerRoutes(listOf(hostRasterRoute))
+                val style = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                assertFailsWith<RenGException> { host.prepareTiles(style, listOf(HOST_RASTER_TILE)) }
+            }
+        } finally {
+            host.close()
+        }
+        assertEquals(listOf(HOST_RASTER_TILE_URL), transport.requestedUrls)
+    }
+
+    @Test
+    fun refusesARouteRegisteredForADifferentAccessModeOrOutsideAnyInvocation() = runTest {
+        val host = basemapEngineHost()
+        try {
+            assertFailsWith<RenGException> { host.registerRoutes(listOf(hostRasterRoute)) }
+            host.withOperation(ResourceAccessMode.CACHE_ONLY) {
+                assertFailsWith<IllegalArgumentException> { host.registerRoutes(listOf(hostRasterRoute)) }
             }
         } finally {
             host.close()

@@ -96,6 +96,7 @@ internal fun createRenderer(
         cache = residentCache,
         classGateRunner = RenGClassGateRunner(configuration.resourceLimits),
         basemapEngineHost = basemapEngineHost,
+        resourceLimits = configuration.resourceLimits,
         maximumConcurrentOperations = configuration.maximumConcurrentResourceOperations,
         clock = monotonicMillisClock,
     )

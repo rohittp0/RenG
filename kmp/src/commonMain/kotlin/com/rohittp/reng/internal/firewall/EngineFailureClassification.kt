@@ -22,8 +22,13 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
  * How many wrapper failures this classifier will peel before it gives up and fails closed. Rentile's
  * deepest real chain is three -- a [BatchRenderException] around a [TileSubstitutionException] around the
  * [ResourceAcquisitionException] that started it -- so eight is ample headroom, while still being a hard
- * bound: nothing in Rentile's types structurally forbids a longer or self-referential chain, and a
- * firewall that trusted the engine's nesting depth would hand a consumer a hang instead of a failure.
+ * bound: nothing in Rentile's types forbids a chain longer than that three-deep real one, and this
+ * classifier does not get to assume the engine's nesting stays shallow just because it does today.
+ *
+ * A *cyclic* chain is a different matter, and is structurally impossible rather than merely bounded:
+ * every `primaryFailure` is an immutable constructor `val`, so an inner failure must already exist
+ * before anything can wrap it. The loop is iterative regardless, so a deep chain terminates and fails
+ * closed -- it never hangs. The cap is a plain depth bound, not a cycle guard.
  */
 private const val MAXIMUM_UNWRAP_DEPTH: Int = 8
 

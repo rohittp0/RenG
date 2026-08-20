@@ -49,7 +49,7 @@ import kotlinx.coroutines.CancellationException
  * that need a real adapter call — [SampleClock], [ObserveResident], [ReadStore], [CallTransport], and
  * [ReplayLatchedTransport] — plus four more: [WriteStore] (a real `Store.write` call, mapped the same
  * way as every other adapter call), [ValidateResourceClass] (a real [ClassGateRunner] call — see that
- * class for what "real" means for each gate, including the classes it does not yet observe),
+ * class for what "real" means for each gate -- every gate it declares is one RenG performs itself),
  * [InstallVisibility] (a real [ResidentCache] install-and-lease — see [installVisibility]), and
  * [CancelRoute] (pure internal bookkeeping — see the `when` branch below). Every action no task has
  * reached is an unreachable `else`.

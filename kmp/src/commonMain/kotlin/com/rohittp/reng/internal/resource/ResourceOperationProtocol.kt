@@ -602,10 +602,14 @@ internal data class PendingChildDiscovery(
 }
 
 /**
- * The checks RenG itself performs over content its **own** driver acquired. There is exactly one member
- * per check RenG owns, and no member for a check the Rentile engine owns: the engine acquires all seven
- * engine-keyed basemap classes through RenG's firewall, so no TileJSON, vector tile, GeoJSON or DEM ever
- * reaches a class gate (ADR 0003's split, ADR 0016's firewall).
+ * The checks RenG itself performs over content its **own** driver acquired. No member exists for a check
+ * the Rentile engine owns: the engine acquires all seven engine-keyed basemap classes through RenG's
+ * firewall, so no TileJSON, vector tile, GeoJSON or DEM ever reaches a class gate (ADR 0003's split,
+ * ADR 0016's firewall).
+ *
+ * Not every check RenG owns is a member here. DEM terrain-encoding validation is RenG's under ADR 0016,
+ * but it belongs to the firewall's write path rather than to a driver class gate, because the driver
+ * never holds a DEM tile's bytes. "One member per check RenG owns" would be the wrong summary.
  */
 internal enum class ResourceClassGate {
     DECODE_PNG,

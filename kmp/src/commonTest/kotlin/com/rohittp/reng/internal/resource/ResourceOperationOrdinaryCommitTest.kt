@@ -5,6 +5,7 @@ import com.rohittp.reng.RawResourceKey
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.internal.firewall.engineKeyedResourceClassOf
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLocator
@@ -43,6 +44,15 @@ class ResourceOperationOrdinaryCommitTest {
         assertEquals(ResourceClass.entries.toSet() - UNGATED_CLASSES, ORDINARY_CLASS_GATES.keys)
         UNGATED_CLASSES.forEach { ungated ->
             assertNull(ordinaryResourceClassGates(ungated), ungated.name)
+        }
+        // Bind the ruling to the firewall's own partition rather than to this file's hand-written table.
+        // Without this the test compares two tables that could drift together; with it, any class the
+        // firewall says the engine keys must have no driver gate, which is what the name claims.
+        ResourceClass.entries.filter { engineKeyedResourceClassOf(it) != null }.forEach { engineKeyed ->
+            assertNull(
+                ordinaryResourceClassGates(engineKeyed),
+                "${engineKeyed.name} is engine-keyed, so RenG's driver must declare no class gate for it",
+            )
         }
     }
 

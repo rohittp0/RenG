@@ -27,6 +27,7 @@ import com.rohittp.reng.internal.json.parseJson
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
+import com.rohittp.reng.internal.resource.TransportLatchKey
 import com.rohittp.reng.internal.resource.copyValidStoredResource
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
 import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
@@ -76,8 +77,19 @@ internal class OperationRegistry(
     // The digest of the most recent successfully latched Transport response for a route, so a
     // subsequent Store write can be checked against what the engine actually fetched (ADR 0016: "a
     // Rentile write callback may perform the consumer write only after RenG verifies that it matches
-    // the latched response").
+    // the latched response"). Written from inside a SuspendJoin.run block, which releases its own
+    // Mutex before the block runs (concurrent routes' Transport calls genuinely run in parallel --
+    // ADR 0016's 256-tile batch at concurrency eight) and read from writeStore, which races those same
+    // writes for other routes -- so this map needs its own guard, distinct from transportJoin's.
+    private val lastTransportDigestMutex = Mutex()
     private val lastTransportDigestByRoute = mutableMapOf<ResourceRouteKey, String>()
+
+    private suspend fun recordLatchedTransportDigest(route: ResourceRouteKey, digest: String) {
+        lastTransportDigestMutex.withLock { lastTransportDigestByRoute[route] = digest }
+    }
+
+    private suspend fun latchedTransportDigestFor(route: ResourceRouteKey): String? =
+        lastTransportDigestMutex.withLock { lastTransportDigestByRoute[route] }
 
     private val transportJoin = SuspendJoin<TransportLatchKey, EngineTransportResponse>()
     private val storeReadJoin = SuspendJoin<ResourceRouteKey, EngineStoredRawResource?>()
@@ -142,7 +154,7 @@ internal class OperationRegistry(
                         ),
                     ),
                 )
-                lastTransportDigestByRoute[route] = sha256Hex(response.bodySnapshot)
+                recordLatchedTransportDigest(route, sha256Hex(response.bodySnapshot))
                 response.toEngineResponse()
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -183,7 +195,7 @@ internal class OperationRegistry(
         val recomputedDigest = sha256Hex(resource.bytes)
         if (recomputedDigest != resource.contentDigest) throw storeWriteFailure(route).toException()
         if (resource.bytes.size.toLong() > route.maximumResponseBytes) throw storeWriteFailure(route).toException()
-        val latchedDigest = lastTransportDigestByRoute[route]
+        val latchedDigest = latchedTransportDigestFor(route)
         if (latchedDigest != null && latchedDigest != resource.contentDigest) {
             throw storeWriteFailure(route).toException()
         }
@@ -321,20 +333,6 @@ private data class TransportIndexKey(val url: String, val engineClass: EngineRes
 
 /** The exact `(stableId, engine resource class)` pair Rentile's own [EngineRawResourceKey] carries. */
 private data class StoreIndexKey(val stableId: String, val engineClass: EngineResourceClass)
-
-/**
- * One joined Transport exchange's identity: the route plus the three allowlisted metadata values
- * (ADR 0016's "the final Transport latch key is the route plus all three exact metadata values").
- * `ifNoneMatch`/`ifModifiedSince` are measured always null and `accept` is measured non-null on
- * exactly the sprite classes -- this class does not assume either, it only latches whatever the
- * three fields actually are.
- */
-private data class TransportLatchKey(
-    val route: ResourceRouteKey,
-    val ifNoneMatch: String?,
-    val ifModifiedSince: String?,
-    val accept: String?,
-)
 
 /**
  * Which of Rentile's own [EngineResourceClass] values every declared RenG [ResourceClass] maps to on

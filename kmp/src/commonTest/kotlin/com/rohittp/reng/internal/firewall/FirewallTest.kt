@@ -31,6 +31,14 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 
 class FirewallTest {
@@ -53,13 +61,19 @@ class FirewallTest {
 
     @Test
     fun replaysALatchedFailureRatherThanRetryingTheConsumer() = runTest {
-        val transport = CountingTransport(throwable = RuntimeException("boom https://signed.example?token=SECRET"))
+        val signedUrl = "https://signed.example?token=SECRET"
+        val transport = CountingTransport(throwable = RuntimeException("boom $signedUrl"))
         val fw = firewall(transport = transport)
         val first = assertFailsWith<RenGException> { fw.transport.execute(engineRequestFor(rasterRoute)) }
         val second = assertFailsWith<RenGException> { fw.transport.execute(engineRequestFor(rasterRoute)) }
         assertEquals(1, transport.executeCalls, "a latched failure is replayed, not re-fetched")
         assertEquals(RenGErrorCode.TRANSPORT_EXECUTION_FAILED, first.code)
         assertEquals(RenGErrorCode.TRANSPORT_EXECUTION_FAILED, second.code)
+        // The adapter's own message -- which can carry a signed url -- must never be forwarded, on the
+        // Transport path exactly as much as on the Store path (`neverLetsAnEngineKeyReachADiagnostic`).
+        val rendered = first.toString() + first.diagnostics.joinToString { it.toString() }
+        assertFalse(rendered.contains(signedUrl), "the adapter's signed url must never surface")
+        assertFalse(rendered.contains("SECRET"), "the adapter's credential must never surface")
     }
 
     @Test
@@ -189,6 +203,91 @@ class FirewallTest {
         val mismatched = engineStoredResourceOf(CORRUPT_STICKER_PNG)
         assertFailsWith<RenGException> { fw.store.write(engineKeyFor(rasterRoute), mismatched) }
         assertEquals(0, store.writeCalls)
+    }
+
+    /**
+     * `runTest`'s scheduler is single-threaded and virtual-time, so none of the tests above can
+     * exercise a genuine data race on `lastTransportDigestByRoute` -- `SuspendJoin` releases its own
+     * mutex before running each route's block, so concurrent routes' Transport calls run their bodies,
+     * including the digest write, in real parallel under any multi-threaded dispatcher (ADR 0016's
+     * 256-tile batch at concurrency eight is exactly this shape). This test deliberately uses
+     * [runBlocking] with [Dispatchers.Default] -- a real, multi-threaded dispatcher on both the JVM and
+     * Kotlin/Native -- rather than [runTest], to put real concurrent pressure on that map, released
+     * through a starting gate (the [MutableStateFlow] count plus [CompletableDeferred]) so every
+     * route's write actually contends for the map at close to the same instant rather than being
+     * staggered across the thread pool by ordinary `launch` scheduling.
+     *
+     * The observable consequence of a lost or corrupted entry is not a crash: it is
+     * `writeStore`'s latched-digest check silently downgrading to a no-op for whichever route's entry
+     * went missing, which would let a tampered write through undetected. So this asserts the positive
+     * property directly, for every route: a write carrying content that does not match what was
+     * actually fetched for that exact route must still be rejected, even after thousands of other
+     * routes raced to record their own digest into the same shared map concurrently.
+     *
+     * This was measured, not assumed, to "genuinely bite," and the route count below is the result of
+     * that measurement rather than a guess: with `lastTransportDigestByRoute`'s guard reverted to a
+     * bare, unsynchronized `mutableMapOf` access, an early version of this test at 500 routes passed
+     * 10/10 local runs even with the starting gate -- an unsynchronized `HashMap`/`LinkedHashMap`'s
+     * internal resize race needs enough concurrent structural insertions to actually land two on the
+     * same instant, and 500 wasn't enough on a 14-core machine to make that likely in one short burst.
+     * Raising the count made the race progressively easier to hit: 8,000 routes failed 1/6 local runs,
+     * 20,000 failed 5/6, and 50,000 (used below) failed 10/10 -- each failure showing a route whose
+     * write, which should have been rejected as not matching what was actually fetched for it, was
+     * silently accepted instead: exactly the "latched-digest check downgraded to a no-op" failure mode
+     * this guards against. With the mutex restored, 50,000 routes passed 8/8 additional local runs
+     * (test time 0.86s on the JVM, 5.4s on `macosArm64Test`'s Kotlin/Native runtime). This is still not
+     * a deterministic proof for every schedule on every machine -- true data races never are, and a
+     * slower or single-core CI runner could plausibly need a still-higher count to hit as reliably --
+     * but it is a real, measured, currently-passing exercise of real parallelism against this exact
+     * map, not a test that cannot fail.
+     */
+    @Test
+    fun neverLosesAConcurrentlyLatchedTransportDigestUnderRealParallelism() = runBlocking {
+        val routeCount = 50_000
+        val routes = (0 until routeCount).map { index ->
+            ResourceRouteKey(
+                accessMode = ResourceAccessMode.NORMAL,
+                locator = ResourceLocator("https://tiles.example/concurrent/$index.png"),
+                resourceClass = ResourceClass.BASEMAP_RASTER_TILE,
+                maximumResponseBytes = 32L * 1024L * 1024L,
+            )
+        }
+        val registry = OperationRegistry(
+            transport = CountingTransport(body = VALID_STICKER_PNG),
+            store = CountingStore(),
+            privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
+        )
+        routes.forEach(registry::preregister)
+        val firewallTransport = FirewallTransport(registry)
+        val firewallStore = FirewallStore(registry)
+
+        // A launch loop alone tends to stagger real thread starts across the pool, spreading the
+        // routeCount map insertions out enough that the race rarely lands two of them on the same
+        // instant. This starting gate holds every coroutine at `start.await()` until all routeCount
+        // have reached it, then releases them together, so their `lastTransportDigestByRoute` writes
+        // actually contend for the same shared map at close to the same moment -- the shape a real
+        // 256-at-once Rentile batch (ADR 0016) produces, not an artificially spread-out one.
+        val readyCount = MutableStateFlow(0)
+        val start = CompletableDeferred<Unit>()
+        coroutineScope {
+            routes.forEach { route ->
+                launch(Dispatchers.Default) {
+                    readyCount.update { it + 1 }
+                    start.await()
+                    firewallTransport.execute(engineRequestFor(route))
+                }
+            }
+            readyCount.first { it == routeCount }
+            start.complete(Unit)
+        }
+
+        routes.forEach { route ->
+            assertFailsWith<RenGException>(
+                "route ${route.locator.value} lost its latched digest under concurrent Transport calls",
+            ) {
+                firewallStore.write(engineKeyFor(route), engineStoredResourceOf(CORRUPT_STICKER_PNG))
+            }
+        }
     }
 }
 

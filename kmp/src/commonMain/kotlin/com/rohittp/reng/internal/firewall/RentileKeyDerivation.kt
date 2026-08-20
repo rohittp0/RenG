@@ -41,7 +41,7 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
  * below is exhaustive over RenG's own [ResourceClass] -- an eleven-value enum this dependency's version
  * does not change -- not over [RentileResourceClass], so **this does not, and cannot, force a
  * compile-time update when a future Rentile release adds a class**: `RentileResourceClass` gaining a
- * tenth constant compiles this file unchanged, and the new constant simply stays unreachable from
+ * ninth constant compiles this file unchanged, and the new constant simply stays unreachable from
  * either branch below. What *would* fail this file's compilation is Rentile renaming or removing one of
  * the seven constants already named here, since each is referenced by exact constant, not by ordinal or
  * string. Containment against a class this table doesn't route (`GLYPH_RANGE` included) is a runtime

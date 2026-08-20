@@ -281,11 +281,14 @@ class FirewallTest {
             start.complete(Unit)
         }
 
+        // Hoisted deliberately: the record is invariant across routes, and rebuilding it inside the
+        // loop would recompute a pure-Kotlin SHA-256 digest 50,000 times for no added coverage.
+        val tamperedRecord = engineStoredResourceOf(CORRUPT_STICKER_PNG)
         routes.forEach { route ->
             assertFailsWith<RenGException>(
                 "route ${route.locator.value} lost its latched digest under concurrent Transport calls",
             ) {
-                firewallStore.write(engineKeyFor(route), engineStoredResourceOf(CORRUPT_STICKER_PNG))
+                firewallStore.write(engineKeyFor(route), tamperedRecord)
             }
         }
     }
@@ -424,6 +427,16 @@ private class CountingTransport(
     private val body: ByteArray = VALID_STICKER_PNG,
     private val throwable: Throwable? = null,
 ) : Transport {
+    /**
+     * Not thread-safe, and deliberately so: every test but
+     * [FirewallTest.neverLosesAConcurrentlyLatchedTransportDigestUnderRealParallelism] drives this from a
+     * single-threaded `runTest` scheduler, where a plain counter is exact and an atomic would only add noise.
+     *
+     * That one test genuinely races these two fields from 50,000 parallel coroutines, and gets away with it
+     * **only because it asserts on neither**. Before adding any assertion over [executeCalls] or
+     * [lastRequest] to a concurrent test -- "each route was fetched exactly once" is the obvious and
+     * tempting one -- make the counter atomic first, or the new assertion will be flaky rather than wrong.
+     */
     var executeCalls: Int = 0
         private set
     var lastRequest: TransportRequest? = null

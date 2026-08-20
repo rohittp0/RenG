@@ -610,10 +610,18 @@ internal class RenGRenderer(
      * The manifest is re-derived here rather than carried out of the driver. It is the same pure function
      * of the same two inputs the driver's own `ValidateBasemapStyle` ran — the resident style bytes and
      * the style's own locator, which is exactly what Rentile receives as `StyleInput.Prefetched.baseUri` —
-     * so the two derivations cannot disagree. What that costs was measured rather than assumed: see
-     * `internal.basemap.BasemapRouteDerivationCostTest`, which found the whole derive-and-preregister
-     * pass immaterial beside one engine tile fetch, so nothing here caches it. The resident generation is
-     * authoritative for the bytes, as it is for the compilation itself.
+     * so the two derivations cannot disagree. The resident generation is authoritative for the bytes, as
+     * it is for the compilation itself.
+     *
+     * **This means a basemap frame parses its style document twice**, and that is a measured cost rather
+     * than an assumed-free one: `internal.basemap.BasemapRouteDerivationCostTest` records both halves.
+     * Preregistration itself is immaterial (a realistic 40-tile frame names 150 routes for a few ms of
+     * CPU, less than one of the 150 tile fetches it then performs), so nothing here caches routes. The
+     * duplicated *parse* is not immaterial — it scales with document size, and a 248 KB production-shaped
+     * style costs about 1.9 ms per parse on the JVM. It is left in place deliberately: removing it means
+     * either widening the pure core's protocol to carry the manifest out of `ValidateBasemapStyle`, or
+     * adding a content-digest-bound manifest cache to [BasemapEngineHost] beside the compilation it
+     * already binds that way. Both are ownership decisions, not local tweaks.
      *
      * A rejected manifest is unreachable: the driver validated these exact bytes on this exact frame and
      * would have failed the operation otherwise, so reaching it means RenG's own derivation is not a

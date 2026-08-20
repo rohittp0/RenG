@@ -44,10 +44,10 @@ class RendererBasemapTileTest {
         val style = assertNotNull(renderer.preparedBasemapStyle, "a basemap frame holds its compiled style")
         assertEquals(
             listOf(
-                CanonicalBasemapTile(lod = 2, tileY = 1, canonicalX = 1),
-                CanonicalBasemapTile(lod = 2, tileY = 1, canonicalX = 2),
-                CanonicalBasemapTile(lod = 2, tileY = 2, canonicalX = 1),
-                CanonicalBasemapTile(lod = 2, tileY = 2, canonicalX = 2),
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 1),
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 2),
+                CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 1),
+                CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 2),
             ),
             frame.basemapTiles.map { it.tile }.sortedWith(compareBy({ it.tileY }, { it.canonicalX })),
             "every canonical tile the spatial plan selected is rendered exactly once",
@@ -86,10 +86,10 @@ class RendererBasemapTileTest {
 
         assertEquals(
             listOf(
-                "https://tiles.example/r/2/1/1.png",
-                "https://tiles.example/r/2/1/2.png",
-                "https://tiles.example/r/2/2/1.png",
-                "https://tiles.example/r/2/2/2.png",
+                "https://tiles.example/r/4/1/10.png",
+                "https://tiles.example/r/4/1/11.png",
+                "https://tiles.example/r/4/2/10.png",
+                "https://tiles.example/r/4/2/11.png",
             ),
             transport.requestedUrls().filter { it.startsWith("https://tiles.example/") }.sorted(),
             "the engine reaches the consumer only through routes RenG composed identically",
@@ -110,10 +110,11 @@ class RendererBasemapTileTest {
         val frame = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
 
         assertEquals(4, frame.basemapTiles.size, "a hillshade frame renders its ground")
-        // The union of the 3x3 neighbourhoods of (1,1), (2,1), (1,2) and (2,2) at z2 is the full
-        // 0..3 x 0..3 grid: sixteen distinct source tiles for four output tiles.
+        // The union of the 3x3 neighbourhoods of x in {1, 2}, y in {10, 11} at z4 is x in 0..3,
+        // y in 9..12: sixteen distinct source tiles for four output tiles. That block is disjoint from
+        // its own transpose too, so it catches an x/y swap on the DEM path as well as on the raster one.
         assertEquals(
-            (0..3).flatMap { y -> (0..3).map { x -> "https://dem.example/2/$x/$y.png" } }.sorted(),
+            (9..12).flatMap { y -> (0..3).map { x -> "https://dem.example/4/$x/$y.png" } }.sorted(),
             transport.requestedUrls().filter { it.startsWith("https://dem.example/") }.distinct().sorted(),
             "one output tile needs its DEM tile plus its eight neighbours",
         )

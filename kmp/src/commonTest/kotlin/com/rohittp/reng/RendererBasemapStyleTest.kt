@@ -114,8 +114,20 @@ internal fun screenPlacement(): Placement = Placement(
     scale = 1.0,
 )
 
+/**
+ * Deliberately **off the origin and off any diagonal**: at 64x64 output this selects the four tiles
+ * `x in {1, 2}, y in {10, 11}` at LOD 4, whose `(x, y)` pair set is **disjoint** from its own transpose,
+ * as is the 16-tile DEM neighbourhood around it (`x in 0..3, y in 9..12`).
+ *
+ * That is load-bearing, not decoration. The obvious camera -- `(0, 0)` at zoom 2 -- selects
+ * `x in {1, 2}, y in {1, 2}`, a set invariant under swapping x and y, so every url assertion built on it
+ * would pass unchanged if `BasemapEngineHost.engineTileIdOf` mapped `canonicalX` onto `TileId.y` and
+ * `tileY` onto `TileId.x`. A transposition there composes a plausible-but-wrong request that a symmetric
+ * preregistered set happens to accept -- exactly the silent total outage exact-url assertions exist to
+ * catch. With this camera a transposition fails closed on every tile instead.
+ */
 internal fun styleCamera(): Camera =
-    Camera(latitude = 0.0, unwrappedLongitude = 0.0, zoom = 2.0, bearing = 0.0, pitch = 0.0)
+    Camera(latitude = -55.0, unwrappedLongitude = -135.0, zoom = 4.0, bearing = 0.0, pitch = 0.0)
 
 internal fun basemapPlan(frameIndex: Long, stickers: List<Sticker> = emptyList()): FramePlan = FramePlan(
     frameIndex = frameIndex,

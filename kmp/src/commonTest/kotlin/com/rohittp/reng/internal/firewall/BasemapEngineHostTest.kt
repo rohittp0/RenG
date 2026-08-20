@@ -17,6 +17,7 @@ import com.rohittp.reng.Transport
 import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.TransportResponseMetadata
+import com.rohittp.reng.ConcurrentRecorder
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
@@ -316,6 +317,130 @@ class BasemapEngineHostTest {
         assertEquals(listOf(HOST_RASTER_TILE_URL), transport.requestedUrls)
     }
 
+    /**
+     * Which of `CanonicalBasemapTile`'s two coordinates becomes `TileId.x` and which becomes `TileId.y`,
+     * pinned against a tile whose `(x, y)` pair is **not** its own transpose.
+     *
+     * Every other tile fixture in this repo is symmetric -- `HOST_RASTER_TILE` is `(x = 0, y = 0)`, and the
+     * renderer-level frame used to select `x in {1, 2}, y in {1, 2}` -- so a swap inside
+     * `BasemapEngineHost.engineTileIdOf` composed a *different but equally acceptable* url and no test
+     * moved. That is the exact silent-total-outage shape exact-url assertions exist to catch, so it gets a
+     * test whose fixture cannot be transposed. Served as a 404, so it runs on `androidHostTest` too: what
+     * is under test is which url the engine composed, not what it did with the bytes.
+     */
+    @Test
+    fun mapsCanonicalXOntoTheEnginesTileXAndTileYOntoItsTileY() = runTest {
+        val transport = CountingHostTransport(statusCode = 404)
+        val host = basemapEngineHost(transport = transport)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostAsymmetricTileRoute)) {
+                val style = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                assertFailsWith<RenGException> { host.prepareTiles(style, listOf(HOST_ASYMMETRIC_TILE)) }
+            }
+        } finally {
+            host.close()
+        }
+        assertEquals(
+            listOf(HOST_ASYMMETRIC_TILE_URL),
+            transport.requestedUrls,
+            "canonicalX is the engine's x and tileY is its y; transposing them composes /4/11/2.png, " +
+                "which this invocation never routed, so the consumer would see no request at all",
+        )
+    }
+
+    // ---- which phase fetches which class ---------------------------------------------------------
+
+    /**
+     * The companion [partitionsTheConsumerStoreIntoTwoDisjointKeyNamespaces] is missing: that test pins
+     * *which* seven classes the engine keys, this one pins **when** it asks for them.
+     *
+     * That split is what the whole two-phase preregistration rests on -- `styleTimeRoutes` is declared
+     * before `preparedStyle` and `tileTimeRoutes` before `prepareTiles`, and a class that moved between
+     * the phases in a future Rentile would be requested with no route declared yet and fail closed on
+     * every frame. It is also the thing that makes ADR 0016's one-registry-per-invocation rule
+     * structural rather than load-bearing today: the two phases share no class, so they share no latch.
+     * If this test ever fails, re-examine that conclusion before re-examining anything else.
+     *
+     * Tiles are served as 404 so nothing rasterizes and this runs on `androidHostTest` too. Rentile plans
+     * and awaits *every* tile-time acquisition before it evaluates any failure
+     * (`DefaultBasemapRasterizer.prepareBatch` -> `planRasterResources` / `planVectorResources`, then
+     * `validateSubstitutionAllowance`), so a 404 loses no observation.
+     */
+    @Test
+    fun fetchesEveryStyleTimeClassWhileCompilingAndEveryTileTimeClassWhileBatching() = runTest {
+        val transport = PhaseRecordingHostTransport()
+        val host = basemapEngineHost(transport = transport)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, phaseStyleTimeRoutes + phaseTileTimeRoutes) {
+                val style = host.preparedStyle(
+                    styleKey = phaseStyleKey,
+                    stored = hostStyleRecord(PHASE_STYLE_JSON),
+                    baseUri = PHASE_STYLE_BASE_URI,
+                )
+
+                val whileCompiling = transport.requestedClasses().toSet()
+                assertEquals(
+                    setOf(
+                        ResourceClass.BASEMAP_SPRITE_JSON,
+                        ResourceClass.BASEMAP_SPRITE_IMAGE,
+                        ResourceClass.BASEMAP_GEO_JSON,
+                    ),
+                    whileCompiling,
+                    "compiling a style fetches the sprite pair and every GeoJSON source, and no tile",
+                )
+
+                assertFailsWith<RenGException> { host.prepareTiles(style, listOf(PHASE_TILE)) }
+
+                assertEquals(
+                    setOf(
+                        ResourceClass.BASEMAP_RASTER_TILE,
+                        ResourceClass.BASEMAP_VECTOR_TILE,
+                        ResourceClass.BASEMAP_DEM_TILE,
+                    ),
+                    transport.requestedClasses().toSet() - whileCompiling,
+                    "preparing a batch fetches every tile class, and re-fetches no style-time one",
+                )
+            }
+        } finally {
+            host.close()
+        }
+        // The seventh engine-keyed class. RenG rejects the TileJSON reference form of a source at manifest
+        // derivation (BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED), so it composes no
+        // BASEMAP_TILE_JSON route and the engine is never given a style that would make it fetch one.
+        assertTrue(
+            transport.requestedClasses().none { it == ResourceClass.BASEMAP_TILE_JSON },
+            "the TileJSON reference form is outside RenG's supported subset, so nothing fetches one",
+        )
+    }
+
+    /**
+     * Rentile fetches the sprite metadata and the sprite image as two concurrent `async` children on
+     * `Dispatchers.Default` (`SpriteResourceAcquirer.acquire`), and this cycle observed a real lost update
+     * from that parallelism about one run in ten -- on the **JVM**, whose threading is what
+     * `androidHostTest` exercises and Kotlin/Native does not. That path had no JVM test after the
+     * renderer-level basemap tests moved to `nativeTest`, so it gets one here: sprite acquisition happens
+     * entirely inside `engine.prepare`, which needs no rasterizer at all.
+     *
+     * [PhaseRecordingHostTransport] records through the same `ConcurrentRecorder` shape the renderer
+     * fixtures use, for exactly the reason above -- a counting assertion is only as trustworthy as its
+     * counter.
+     */
+    @Test
+    fun acquiresTheSpritePairConcurrentlyThroughTheFirewallWhileCompiling() = runTest {
+        val transport = PhaseRecordingHostTransport()
+        val host = basemapEngineHost(transport = transport)
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, phaseStyleTimeRoutes) {
+                host.preparedStyle(phaseStyleKey, hostStyleRecord(PHASE_STYLE_JSON), PHASE_STYLE_BASE_URI)
+            }
+        } finally {
+            host.close()
+        }
+        val urls = transport.requestedUrls()
+        assertEquals(1, urls.count { it == PHASE_SPRITE_JSON_URL }, "the atlas metadata is fetched once")
+        assertEquals(1, urls.count { it == PHASE_SPRITE_IMAGE_URL }, "the atlas image is fetched once")
+    }
+
     @Test
     fun refusesARouteRegisteredForADifferentAccessModeOrOutsideAnyInvocation() = runTest {
         val host = basemapEngineHost()
@@ -590,6 +715,126 @@ internal val hostTemplateRoute: ResourceRouteKey = ResourceRouteKey(
     resourceClass = ResourceClass.BASEMAP_RASTER_TILE,
     maximumResponseBytes = 32L * 1024L * 1024L,
 )
+
+/**
+ * A tile whose `(x, y)` pair is disjoint from its own transpose -- unlike [HOST_RASTER_TILE], which is
+ * `(0, 0)`. See [BasemapEngineHostTest.mapsCanonicalXOntoTheEnginesTileXAndTileYOntoItsTileY].
+ */
+internal val HOST_ASYMMETRIC_TILE: CanonicalBasemapTile = CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 2)
+
+internal const val HOST_ASYMMETRIC_TILE_URL: String = "https://tiles.example/r/4/2/11.png"
+
+internal val hostAsymmetricTileRoute: ResourceRouteKey = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator(HOST_ASYMMETRIC_TILE_URL),
+    resourceClass = ResourceClass.BASEMAP_RASTER_TILE,
+    maximumResponseBytes = 32L * 1024L * 1024L,
+)
+
+// ---- the phase fixture: every class RenG routes, in one style --------------------------------------
+
+internal const val PHASE_STYLE_BASE_URI: String = "https://styles.example/phase.json"
+internal const val PHASE_SPRITE_BASE_URL: String = "https://sprites.example/phase"
+internal const val PHASE_SPRITE_JSON_URL: String = "https://sprites.example/phase.json"
+internal const val PHASE_SPRITE_IMAGE_URL: String = "https://sprites.example/phase.png"
+internal const val PHASE_GEO_JSON_URL: String = "https://data.example/points.geojson"
+internal const val PHASE_RASTER_TILE_URL: String = "https://tiles.example/p/r/3/5/2.png"
+internal const val PHASE_VECTOR_TILE_URL: String = "https://tiles.example/p/v/3/5/2.pbf"
+internal const val PHASE_DEM_TILE_URL: String = "https://tiles.example/p/d/3/5/2.png"
+
+/** `TileId(z = 3, x = 5, y = 2)`, asymmetric for the same reason [HOST_ASYMMETRIC_TILE] is. */
+internal val PHASE_TILE: CanonicalBasemapTile = CanonicalBasemapTile(lod = 3, tileY = 2, canonicalX = 5)
+
+/**
+ * One style that reaches every class RenG routes: a sprite the `background-pattern` layer makes
+ * unconditional, a GeoJSON source, and a raster, vector and `raster-dem` source each drawn by the one
+ * layer kind that samples it.
+ */
+internal val PHASE_STYLE_JSON: String =
+    """{"version":8,"name":"reng-phase-test",""" +
+        """"sprite":"$PHASE_SPRITE_BASE_URL",""" +
+        """"sources":{""" +
+        """"g":{"type":"geojson","data":"$PHASE_GEO_JSON_URL"},""" +
+        """"r":{"type":"raster","tiles":["https://tiles.example/p/r/{z}/{x}/{y}.png"],"tileSize":256},""" +
+        """"v":{"type":"vector","tiles":["https://tiles.example/p/v/{z}/{x}/{y}.pbf"]},""" +
+        """"d":{"type":"raster-dem","tiles":["https://tiles.example/p/d/{z}/{x}/{y}.png"],"tileSize":256}""" +
+        """},"layers":[""" +
+        """{"id":"bg","type":"background","paint":{"background-pattern":"dot"}},""" +
+        """{"id":"raster","type":"raster","source":"r"},""" +
+        """{"id":"vector","type":"fill","source":"v","source-layer":"water"},""" +
+        """{"id":"hillshade","type":"hillshade","source":"d"},""" +
+        """{"id":"geo","type":"fill","source":"g"}""" +
+        """]}"""
+
+internal val phaseStyleKey: ResourceKey = ResourceKeyDeriver(PureKotlinSha256)
+    .external(ResourceClass.BASEMAP_STYLE, ResourceLocator(PHASE_STYLE_BASE_URI))
+    .key
+
+private fun phaseRoute(url: String, resourceClass: ResourceClass): ResourceRouteKey = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator(url),
+    resourceClass = resourceClass,
+    maximumResponseBytes = 32L * 1024L * 1024L,
+)
+
+internal val phaseStyleTimeRoutes: List<ResourceRouteKey> = listOf(
+    phaseRoute(PHASE_SPRITE_JSON_URL, ResourceClass.BASEMAP_SPRITE_JSON),
+    phaseRoute(PHASE_SPRITE_IMAGE_URL, ResourceClass.BASEMAP_SPRITE_IMAGE),
+    phaseRoute(PHASE_GEO_JSON_URL, ResourceClass.BASEMAP_GEO_JSON),
+)
+
+/**
+ * The centre tile plus the DEM neighbourhood the hillshade layer samples -- derived here the way
+ * `tileTimeRoutes` derives it, so this fixture stays a firewall fixture rather than a second
+ * implementation of the composition under test.
+ */
+internal val phaseTileTimeRoutes: List<ResourceRouteKey> =
+    listOf(
+        phaseRoute(PHASE_RASTER_TILE_URL, ResourceClass.BASEMAP_RASTER_TILE),
+        phaseRoute(PHASE_VECTOR_TILE_URL, ResourceClass.BASEMAP_VECTOR_TILE),
+    ) +
+        (1..3).flatMap { y ->
+            (4..6).map { x ->
+                phaseRoute("https://tiles.example/p/d/3/$x/$y.png", ResourceClass.BASEMAP_DEM_TILE)
+            }
+        }
+
+/**
+ * Answers a valid document for every style-time class and a 404 for every tile, recording each request's
+ * url and class through the concurrency-safe recorder the renderer fixtures use -- Rentile fetches the
+ * sprite pair on two concurrent `Dispatchers.Default` children, so a plain list loses entries.
+ */
+internal class PhaseRecordingHostTransport : Transport {
+    private val urls = ConcurrentRecorder<String>()
+    private val classes = ConcurrentRecorder<ResourceClass>()
+
+    suspend fun requestedUrls(): List<String> = urls.snapshot()
+
+    suspend fun requestedClasses(): List<ResourceClass> = classes.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        urls.record(request.locator.value)
+        classes.record(request.resourceClass)
+        return when (request.locator.value) {
+            PHASE_SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            PHASE_SPRITE_IMAGE_URL -> TransportResponse(
+                statusCode = 200,
+                body = VALID_TILE_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+            PHASE_GEO_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = """{"type":"FeatureCollection","features":[]}""".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/geo+json"),
+            )
+            else -> TransportResponse(statusCode = 404, body = ByteArray(0))
+        }
+    }
+}
 
 internal fun hostStyleRecord(json: String = HOST_STYLE_JSON): StoredRawResource {
     val bytes = json.encodeToByteArray()

@@ -8,6 +8,7 @@ import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.resource.CallTransport
 import com.rohittp.reng.internal.resource.CancelRoute
 import com.rohittp.reng.internal.resource.CleanupCancellationObserved
@@ -66,6 +67,17 @@ internal class ResourceActionExecutor(
     private val store: Store,
     private val cache: ResidentCache,
     private val classGateRunner: ClassGateRunner,
+    /**
+     * The renderer's one long-lived Rentile engine (basemap task 19). Deliberately a **required**
+     * parameter with no default: no action in [ResourceOperationAction]'s sealed hierarchy reaches it yet
+     * — the basemap-style commit actions ([com.rohittp.reng.internal.resource.CompileBasemapStyle] and its
+     * siblings) are the ones that will, and they fall through this class's `else` today — and a default
+     * here is precisely how a call site stays compiling while being disconnected from the thing it is
+     * supposed to drive. Making it required means every construction site had to name it, so the wiring is
+     * verifiable at the type level rather than by inspection. Read, rather than private, so a test can
+     * assert the host a driver actually handed over is the one it was built with.
+     */
+    internal val basemapEngineHost: BasemapEngineHost,
     private val clock: () -> Long,
 ) {
     suspend fun execute(action: ResourceOperationAction): ResourceOperationEvent = when (action) {

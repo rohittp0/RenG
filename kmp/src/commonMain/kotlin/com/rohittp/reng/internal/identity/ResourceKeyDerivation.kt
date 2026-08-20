@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.identity
 
+import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.RawResourceKey
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKind
@@ -8,6 +9,7 @@ import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.internal.gl.InternalPipelineRole
 import com.rohittp.reng.internal.gl.OffscreenSurfaceDescriptor
+import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 
 internal data class DerivedResourceKey(
     val key: ResourceKey,
@@ -101,6 +103,56 @@ internal class ResourceKeyDeriver(
         return DerivedResourceKey(
             key = ResourceKey(
                 kind = ResourceKind.OFFSCREEN_SURFACE,
+                stableId = identity.digest.lowercaseHex,
+                resourceClass = null,
+            ),
+            rawKey = null,
+            identity = identity,
+        )
+    }
+
+    /**
+     * The identity of one **rendered** basemap tile: the PNG a Rentile engine draws for one canonical
+     * tile of one prepared style at one output size. Deliberately RenG's own canonical root (ADR 0018)
+     * and never `BasemapRasterizer.outputRequestKey`, which is convenient, available at the same
+     * boundary, and wrong to index with: it is Rentile's key, governed by Rentile's derivation rules, so
+     * an engine release that changed it would silently invalidate RenG's entire rendered-tile cache with
+     * no signal at either boundary. Rentile's own `contentKey` and substitution provenance are worth
+     * storing beside the bytes, as Rentile's KDoc advises -- just never as the index.
+     *
+     * Keyed on a [CanonicalBasemapTile] rather than a [com.rohittp.reng.internal.planning.BasemapTileInstance]
+     * because `BasemapTileSelector` already emits `canonicalResources` separately from `instances`: a
+     * canonical tile is post-world-copy-dedup by construction (CONTEXT.md's **Basemap Tile**), so N
+     * unwrapped draw instances of one tile share exactly one rendered-tile resource and one engine
+     * render. Keying on `unwrappedX` or `instanceCopy` instead would re-render the same ground once per
+     * visible world copy.
+     *
+     * [styleDigest] is `PreparedStyle.digest` -- the engine's own compiled-style identity, which is a
+     * *content* input here rather than an identity namespace: two different styles must not share a
+     * rendered tile. [outputSize] is the tile's own rendered pixel size, not the frame's.
+     */
+    internal fun basemapTile(
+        styleDigest: String,
+        tile: CanonicalBasemapTile,
+        outputSize: OutputPixelSize,
+    ): DerivedResourceKey {
+        require(tile.lod >= 0 && tile.tileY >= 0 && tile.canonicalX >= 0) {
+            "a canonical basemap tile has non-negative coordinates"
+        }
+        val identity = derive(
+            CanonicalBinary.root(CanonicalRootKind.BASEMAP_TILE) {
+                field(1, CanonicalBinary.u16(ResourceKind.BASEMAP_TILE.wireValue))
+                field(2, CanonicalBinary.exactUtf8(styleDigest))
+                field(3, CanonicalBinary.u64(tile.lod.toLong()))
+                field(4, CanonicalBinary.u64(tile.tileY.toLong()))
+                field(5, CanonicalBinary.u64(tile.canonicalX.toLong()))
+                field(6, CanonicalBinary.u64(outputSize.width.toLong()))
+                field(7, CanonicalBinary.u64(outputSize.height.toLong()))
+            },
+        )
+        return DerivedResourceKey(
+            key = ResourceKey(
+                kind = ResourceKind.BASEMAP_TILE,
                 stableId = identity.digest.lowercaseHex,
                 resourceClass = null,
             ),

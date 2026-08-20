@@ -14,6 +14,7 @@ import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.internal.cache.ResidentCache
+import com.rohittp.reng.internal.firewall.basemapEngineHost
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
 import com.rohittp.reng.internal.resource.ReadStore
@@ -182,6 +183,7 @@ class DriverCancellationTest {
             store = HangingStore(),
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
+            basemapEngineHost = basemapEngineHost(),
             clock = CancellationFixedClock,
         )
         val action = ReadStore(ResourceActionId(1L), 0L, RawResourceKey("raw", ResourceClass.STICKER_IMAGE))
@@ -216,6 +218,7 @@ private fun driver(
     store = store,
     cache = cache,
     classGateRunner = classGateRunner,
+    basemapEngineHost = basemapEngineHost(cache = cache),
     maximumConcurrentOperations = maximumConcurrentOperations,
     clock = clock,
 )

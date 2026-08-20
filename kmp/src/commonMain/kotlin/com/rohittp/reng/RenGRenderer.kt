@@ -7,6 +7,7 @@ import com.rohittp.reng.internal.driver.PreparationDriver
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.CompositePipelineResult
@@ -265,6 +266,7 @@ internal class RenGRenderer(
     private val driver: GlLifecycleDriver,
     private val preparationDriver: PreparationDriver,
     private val residentCache: ResidentCache,
+    private val basemapEngineHost: BasemapEngineHost,
     private val programs: GlProgramCache,
     private val glObjectRegistry: GlObjectRegistry,
     initialGlState: InternalGlState,
@@ -799,6 +801,10 @@ internal class RenGRenderer(
                 compositePipeline = null
                 stickerPipeline = null
                 residentCache.closeAll()
+                // The renderer owns exactly one Rentile engine (ADR 0016), so closing the renderer closes
+                // it. Its close() is idempotent and, unlike everything above it here, not GL-scoped -- so
+                // it neither needs nor consults the exact current context (ADRs 0007/0015).
+                basemapEngineHost.close()
                 null
             } else {
                 unexpectedOperation(operation)

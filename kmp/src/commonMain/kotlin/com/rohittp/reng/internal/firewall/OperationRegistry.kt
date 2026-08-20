@@ -4,6 +4,7 @@ import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.RenGException
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
@@ -47,10 +48,12 @@ import kotlinx.coroutines.sync.withLock
  * `ResourceTransport`/`RawResourceStore` callbacks. [FirewallTransport] and [FirewallStore] are thin
  * adapters over this class; this is where the actual join/latch/validate work happens.
  *
- * One instance is meant to live exactly as long as one preparation invocation: "discarded when the
- * invocation terminates" (ADR 0016), never a renderer-lifetime cache and never shared across access
- * modes. Wiring a fresh instance per invocation into an actual long-lived Rentile engine instance is
- * later basemap-cycle work; this class only has to be correct once constructed and preregistered.
+ * One instance lives exactly as long as one preparation invocation: "discarded when the invocation
+ * terminates" (ADR 0016), never a renderer-lifetime cache and never shared across access modes.
+ * [BasemapEngineHost.withOperation] is what enforces that lifetime against the renderer's one long-lived
+ * Rentile engine, and it is also what makes this class's never-evicting [SuspendJoin] safe: a latched
+ * cancellation or failure replays for the registry's whole lifetime, so bounding that lifetime to one
+ * invocation is what stops a later, healthy preparation inheriting an outcome it never earned.
  *
  * [preregister] is the setup step a caller (a later task's driver) uses to declare, before Rentile is
  * ever invoked, every `(accessMode, locator, resourceClass, maximumResponseBytes)` route this
@@ -73,6 +76,17 @@ internal class OperationRegistry(
     private val routeByPrivateKey = mutableMapOf<RentilePrivateKey, ResourceRouteKey>()
     private val transportRoutes = mutableMapOf<TransportIndexKey, ResourceRouteKey>()
     private val storeRoutes = mutableMapOf<StoreIndexKey, ResourceRouteKey>()
+
+    // The same `sha256Hex(withRedactedAuthenticationQuery(url))` digest Rentile embeds in every
+    // `ResourceAcquisitionException.sanitizedResourceId` and `ResourceDecodeException.sanitizedResourceId`,
+    // read in reverse: engine digest -> the RenG route it names. [BasemapEngineHost] needs this because
+    // that digest is a FOREIGN namespace -- a consumer handed one as a `ResourceSelector.ByKey` gets a
+    // silent empty selection rather than an error -- and this registry is the only place that already
+    // holds both the locator and the digest derived from it. Indexed for every class Rentile can name in
+    // a failure, which is one wider than [storeRoutes]: [ResourceClass.BASEMAP_STYLE] has no Rentile
+    // raw-store entry but `acquireRemoteStyle` still reports `sha256Hex(redacted url)` on a style
+    // transport failure.
+    private val routesByEngineDigest = mutableMapOf<EngineDigestKey, ResourceRouteKey>()
 
     // The digest of the most recent successfully latched Transport response for a route, so a
     // subsequent Store write can be checked against what the engine actually fetched (ADR 0016: "a
@@ -115,12 +129,36 @@ internal class OperationRegistry(
         }
 
         val storeClass = engineKeyedResourceClassOf(route.resourceClass)
+        // Computed once and shared by the two indices below, and not at all for the three classes the
+        // engine never touches (sticker, GLB, model texture) -- a pure-Kotlin SHA-256 per route adds up
+        // across a 512-instance tile plan.
+        val expectedStableId = if (storeClass != null || transportClass != null) {
+            redactedLocatorHex(route.locator.value)
+        } else {
+            null
+        }
         if (storeClass != null) {
-            val expectedStableId = redactedLocatorHex(route.locator.value)
-            val storeIndex = StoreIndexKey(expectedStableId, storeClass)
+            val storeIndex = StoreIndexKey(requireNotNull(expectedStableId), storeClass)
             requireNoCollision(storeRoutes[storeIndex], route)
             storeRoutes[storeIndex] = route
         }
+
+        if (transportClass != null) {
+            val digestIndex = EngineDigestKey(requireNotNull(expectedStableId), route.resourceClass)
+            requireNoCollision(routesByEngineDigest[digestIndex], route)
+            routesByEngineDigest[digestIndex] = route
+        }
+    }
+
+    /**
+     * Translates one of Rentile's own `sanitizedResourceId` digests back into RenG's canonical
+     * [ResourceKey] for the route that digest names, or `null` when this invocation preregistered no
+     * such route. `null` is the honest answer, not a fallback: a digest this registry cannot place
+     * belongs to a resource this invocation never routed.
+     */
+    fun renGResourceKeyForEngineDigest(resourceClass: ResourceClass, engineDigest: String): ResourceKey? {
+        val route = routesByEngineDigest[EngineDigestKey(engineDigest, resourceClass)] ?: return null
+        return renGResourceKeyFor(route)
     }
 
     private fun requireNoCollision(existing: ResourceRouteKey?, route: ResourceRouteKey) {
@@ -195,20 +233,36 @@ internal class OperationRegistry(
         val recomputedDigest = sha256Hex(resource.bytes)
         if (recomputedDigest != resource.contentDigest) throw storeWriteFailure(route).toException()
         if (resource.bytes.size.toLong() > route.maximumResponseBytes) throw storeWriteFailure(route).toException()
-        val latchedDigest = latchedTransportDigestFor(route)
-        if (latchedDigest != null && latchedDigest != resource.contentDigest) {
+        // ADR 0016 permits a Rentile write callback to reach the consumer "only after RenG verifies that
+        // it matches the latched response". A route with NO latched transport response has nothing to
+        // verify against, so it is refused outright rather than skipping verification: Rentile 0.2.0
+        // cannot produce such a write -- every raw-store write sits immediately after a transport on the
+        // same key -- but the firewall's whole premise is that the engine is untrusted, and "no latch"
+        // was previously the one shape that walked straight through.
+        val latchedDigest = latchedTransportDigestFor(route) ?: throw storeWriteFailure(route).toException()
+        if (latchedDigest != resource.contentDigest) {
             throw storeWriteFailure(route).toException()
         }
+
+        // The same stricter RenG record rules the read path already applies (empty bytes, digest shape,
+        // metadata validity, byte ceiling). Without them a record with a negative `storedAtEpochMillis`
+        // or a CRLF-bearing `etag` -- neither of which the digest check can see -- reached the consumer's
+        // Store through the write path while being rejected on the read path.
+        val validated = copyValidStoredResource(
+            StoredRawResource(
+                bytes = resource.bytes,
+                contentDigest = resource.contentDigest,
+                metadata = resource.metadata.toRenGMetadata(),
+            ),
+            route.maximumResponseBytes,
+            sha256,
+        ) ?: throw storeWriteFailure(route).toException()
 
         storeWriteJoin.run(route) {
             try {
                 store.write(
                     RenGRawResourceKey(stableId = key.stableId, resourceClass = route.resourceClass),
-                    StoredRawResource(
-                        bytes = resource.bytes,
-                        contentDigest = resource.contentDigest,
-                        metadata = resource.metadata.toRenGMetadata(),
-                    ),
+                    validated,
                 )
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -333,6 +387,14 @@ private data class TransportIndexKey(val url: String, val engineClass: EngineRes
 
 /** The exact `(stableId, engine resource class)` pair Rentile's own [EngineRawResourceKey] carries. */
 private data class StoreIndexKey(val stableId: String, val engineClass: EngineResourceClass)
+
+/**
+ * `(Rentile's sanitizedResourceId, RenG resource class)`. Keyed by RenG's own [ResourceClass] rather
+ * than Rentile's, because the caller reaches this having already translated the engine's class through
+ * [rengResourceClassOf] -- and because that translation is where `STYLE` -> `BASEMAP_STYLE` is spelled
+ * out at all.
+ */
+private data class EngineDigestKey(val engineDigest: String, val resourceClass: ResourceClass)
 
 /**
  * Which of Rentile's own [EngineResourceClass] values every declared RenG [ResourceClass] maps to on

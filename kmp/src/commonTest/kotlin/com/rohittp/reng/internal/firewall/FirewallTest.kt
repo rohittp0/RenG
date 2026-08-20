@@ -174,11 +174,68 @@ class FirewallTest {
     fun writesToTheConsumerExactlyOnceWhenTheEngineWritesSelfConsistentBytes() = runTest {
         val store = CountingStore()
         val fw = firewall(store = store)
+        // The transport comes first deliberately, and is now required rather than incidental: ADR 0016
+        // permits the consumer write "only after RenG verifies that it matches the latched response", so a
+        // write on a route with no latched response is refused (see
+        // `rejectsAWriteOnARouteWithNoLatchedTransportResponse`). This is also the exact ordering Rentile
+        // 0.2.0 itself produces -- every raw-store write sits immediately after a transport on the same key.
+        fw.transport.execute(engineRequestFor(rasterRoute))
         val resource = engineStoredResourceOf(VALID_STICKER_PNG)
         fw.store.write(engineKeyFor(rasterRoute), resource)
         fw.store.write(engineKeyFor(rasterRoute), resource)
         assertEquals(1, store.writeCalls, "the engine's repeated write is not a repeated consumer write")
         assertEquals(resource.contentDigest, store.lastWrittenResource?.contentDigest)
+    }
+
+    @Test
+    fun rejectsAWriteOnARouteWithNoLatchedTransportResponse() = runTest {
+        // The gap Addendum D closed: the latched-digest check used to be "verify only if a digest exists",
+        // so an engine that wrote a route it had never fetched skipped verification entirely. Rentile 0.2.0
+        // cannot do this, but the firewall's premise is that the engine is untrusted.
+        val store = CountingStore()
+        val fw = firewall(store = store)
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(rasterRoute), engineStoredResourceOf(VALID_STICKER_PNG))
+        }
+        assertEquals(0, store.writeCalls, "an unverifiable write never reaches the consumer")
+    }
+
+    @Test
+    fun appliesRenGsOwnRecordRulesToAWriteExactlyAsToARead() = runTest {
+        // A digest is self-consistent with anything, including empty bytes and a record whose metadata
+        // RenG's read path would refuse outright. Before Addendum D, `writeStore` checked only the digest
+        // and the byte ceiling, so a negative `storedAtEpochMillis` or a CRLF-bearing `etag` was forwarded
+        // straight to the consumer's Store while the identical record was rejected on read.
+        val invalidRecords = listOf(
+            "negative storedAtEpochMillis" to EngineStoredRawResource(
+                bytes = VALID_STICKER_PNG,
+                contentDigest = sha256Hex(VALID_STICKER_PNG),
+                metadata = EngineRawResourceMetadata(storedAtEpochMillis = -1L),
+            ),
+            "header-splitting etag" to EngineStoredRawResource(
+                bytes = VALID_STICKER_PNG,
+                contentDigest = sha256Hex(VALID_STICKER_PNG),
+                metadata = EngineRawResourceMetadata(etag = "\"a\"\r\nX-Injected: 1", storedAtEpochMillis = 0L),
+            ),
+        )
+
+        invalidRecords.forEach { (reason, record) ->
+            val store = CountingStore()
+            val fw = firewall(transport = CountingTransport(body = VALID_STICKER_PNG), store = store)
+            fw.transport.execute(engineRequestFor(rasterRoute))
+            assertFailsWith<RenGException>(reason) { fw.store.write(engineKeyFor(rasterRoute), record) }
+            assertEquals(0, store.writeCalls, reason)
+        }
+
+        // Empty bytes are their own case: they need an empty-bodied latch to get past the digest check at
+        // all, which is exactly how they used to slip through.
+        val emptyStore = CountingStore()
+        val emptyFirewall = firewall(transport = CountingTransport(body = ByteArray(0)), store = emptyStore)
+        emptyFirewall.transport.execute(engineRequestFor(rasterRoute))
+        assertFailsWith<RenGException> {
+            emptyFirewall.store.write(engineKeyFor(rasterRoute), engineStoredResourceOf(ByteArray(0)))
+        }
+        assertEquals(0, emptyStore.writeCalls, "an empty record is not a valid RenG record")
     }
 
     @Test
@@ -217,12 +274,15 @@ class FirewallTest {
      * route's write actually contends for the map at close to the same instant rather than being
      * staggered across the thread pool by ordinary `launch` scheduling.
      *
-     * The observable consequence of a lost or corrupted entry is not a crash: it is
-     * `writeStore`'s latched-digest check silently downgrading to a no-op for whichever route's entry
-     * went missing, which would let a tampered write through undetected. So this asserts the positive
-     * property directly, for every route: a write carrying content that does not match what was
-     * actually fetched for that exact route must still be rejected, even after thousands of other
-     * routes raced to record their own digest into the same shared map concurrently.
+     * The observable consequence of a lost or corrupted entry is not a crash. It used to be
+     * `writeStore`'s latched-digest check silently downgrading to a no-op for whichever route's entry went
+     * missing, letting a tampered write through undetected; Addendum D's hardening (a route with no latched
+     * response is now refused outright) inverted that, so a lost entry now *rejects* a write that should
+     * have been accepted. Either way the map is what decides, so this asserts the direction that still
+     * bites: for every route, a write carrying exactly the content that was actually fetched for that
+     * route must be accepted, even after thousands of other routes raced to record their own digest into
+     * the same shared map concurrently. Asserting the old direction here would no longer be able to fail —
+     * a tampered write is rejected whether or not the digest survived.
      *
      * This was measured, not assumed, to "genuinely bite," and the route count below is the result of
      * that measurement rather than a guess: with `lastTransportDigestByRoute`'s guard reverted to a
@@ -252,9 +312,16 @@ class FirewallTest {
                 maximumResponseBytes = 32L * 1024L * 1024L,
             )
         }
+        val writtenKeys = mutableSetOf<RenGRawResourceKey>()
+        val recordingStore = object : Store {
+            override suspend fun read(key: RenGRawResourceKey): StoredRawResource? = null
+            override suspend fun write(key: RenGRawResourceKey, resource: StoredRawResource) {
+                writtenKeys += key
+            }
+        }
         val registry = OperationRegistry(
             transport = CountingTransport(body = VALID_STICKER_PNG),
-            store = CountingStore(),
+            store = recordingStore,
             privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
         )
         routes.forEach(registry::preregister)
@@ -283,14 +350,13 @@ class FirewallTest {
 
         // Hoisted deliberately: the record is invariant across routes, and rebuilding it inside the
         // loop would recompute a pure-Kotlin SHA-256 digest 50,000 times for no added coverage.
-        val tamperedRecord = engineStoredResourceOf(CORRUPT_STICKER_PNG)
+        val fetchedRecord = engineStoredResourceOf(VALID_STICKER_PNG)
         routes.forEach { route ->
-            assertFailsWith<RenGException>(
-                "route ${route.locator.value} lost its latched digest under concurrent Transport calls",
-            ) {
-                firewallStore.write(engineKeyFor(route), tamperedRecord)
-            }
+            firewallStore.write(engineKeyFor(route), fetchedRecord)
         }
+        // A route whose latched digest went missing under the race would have had this write refused, so
+        // reaching here at all is the assertion: every one of the routeCount digests survived.
+        assertEquals(routeCount, writtenKeys.size)
     }
 }
 

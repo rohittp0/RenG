@@ -3,6 +3,7 @@ package com.rohittp.reng.internal.driver
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.cache.ResidentCache
+import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.resource.AdvancePendingClassGates
 import com.rohittp.reng.internal.resource.CallTransport
 import com.rohittp.reng.internal.resource.CancellationCause
@@ -100,6 +101,7 @@ internal class PreparationDriver(
     private val store: Store,
     private val cache: ResidentCache,
     private val classGateRunner: ClassGateRunner,
+    private val basemapEngineHost: BasemapEngineHost,
     private val maximumConcurrentOperations: Int,
     private val clock: () -> Long,
 ) {
@@ -108,7 +110,8 @@ internal class PreparationDriver(
     suspend fun run(definition: ResourceOperationDefinition): ResourceOperationOutcome = coroutineScope {
         activeRunJob.value = coroutineContext[Job]
         try {
-            val executor = ResourceActionExecutor(transport, store, cache, classGateRunner, clock)
+            val executor =
+                ResourceActionExecutor(transport, store, cache, classGateRunner, basemapEngineHost, clock)
             val semaphore = Semaphore(maximumConcurrentOperations)
             val events = Channel<ResourceOperationEvent>(Channel.UNLIMITED)
 

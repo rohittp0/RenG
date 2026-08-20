@@ -125,26 +125,6 @@ class RendererFactoryTest {
     }
 
     @Test
-    fun aConfiguredBasemapStyleNeverWarns() = runTest {
-        val sink = RecordingDiagnosticSink()
-        // A configured style is genuinely acquired and compiled by prepare(), so this needs a transport
-        // that serves one rather than the suite's default "must not execute" stub.
-        val renderer = createRenderer(
-            testConfiguration(
-                transport = StyleTransport(),
-                basemapStyle = ResourceLocator(STYLE_URL),
-                diagnosticSink = sink,
-            ),
-            validGlesBinding(),
-            fixedProbe(),
-        )
-        val frame = renderer.prepare(FramePlan(frameIndex = 0L, camera = testCamera(), drawBasemap = true))
-        val target = renderer.mintRenderTarget(FramebufferName(0u))
-        renderer.draw(frame, target)
-        assertTrue(sink.diagnostics.none { it.code == DiagnosticCode.BASEMAP_NOT_CONFIGURED })
-    }
-
-    @Test
     fun drawBasemapFalseNeverWarnsEvenWithNoConfiguredStyle() = runTest {
         val sink = RecordingDiagnosticSink()
         val renderer = createRenderer(testConfiguration(diagnosticSink = sink), validGlesBinding(), fixedProbe())

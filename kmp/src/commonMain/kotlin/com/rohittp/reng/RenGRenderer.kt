@@ -1,6 +1,9 @@
 package com.rohittp.reng
 
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
+import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.driver.PreparationDriver
@@ -9,6 +12,7 @@ import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
+import com.rohittp.reng.internal.firewall.RenderedBasemapTile
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.CompositePipelineResult
 import com.rohittp.reng.internal.gl.GeometryPipeline
@@ -58,6 +62,7 @@ import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
 import com.rohittp.reng.internal.lifecycle.RendererOwnerState
 import com.rohittp.reng.internal.lifecycle.RenderTargetFact
 import com.rohittp.reng.internal.maximumBytesFor
+import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import com.rohittp.reng.internal.planning.FramePlanningCore
 import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
@@ -135,12 +140,26 @@ internal class RenGPreparedFrame(
     internal val drawBasemap: Boolean,
     stickers: List<PreparedSticker>,
     geometries: List<PreparedGeometry>,
+    /**
+     * This frame's ground, already rendered by the Rentile engine and already named by RenG's own
+     * canonical identity (ADR 0018) — one entry per **canonical** tile, so N Mercator world copies of one
+     * tile share one entry, one engine render and one later texture upload. Empty whenever the frame
+     * draws no basemap, no style is configured, or the frame selected no tile.
+     *
+     * The bytes are encoded PNG, exactly as `BasemapRasterizer.render` produced them: decoding them,
+     * uploading them and drawing the ground are later tasks, and there is no basemap draw path in
+     * `internal/gl/` yet. Everything a later task needs is here — identity and bytes — so nothing has to
+     * re-derive a tile url or re-enter the firewall to draw what this frame already fetched.
+     */
+    basemapTiles: List<RenderedBasemapTile>,
 ) : PreparedFrame {
     private val stickerSnapshot: List<PreparedSticker> = ArrayList(stickers)
     private val geometrySnapshot: List<PreparedGeometry> = ArrayList(geometries)
+    private val basemapTileSnapshot: List<RenderedBasemapTile> = ArrayList(basemapTiles)
 
     internal val stickers: List<PreparedSticker> get() = ArrayList(stickerSnapshot)
     internal val geometries: List<PreparedGeometry> get() = ArrayList(geometrySnapshot)
+    internal val basemapTiles: List<RenderedBasemapTile> get() = ArrayList(basemapTileSnapshot)
 
     internal var closed: Boolean = false
         private set
@@ -153,6 +172,17 @@ internal class RenGPreparedFrame(
         owner.closePreparedFrame(this)
     }
 }
+
+/**
+ * Everything one `prepare()` acquired through the consumer's adapters: the decoded images the frame's
+ * stickers and geometry textures need, and the ground the engine rendered for it. Two results rather
+ * than one because they are two different kinds of thing — a `Map` keyed for lookup by the caller, and
+ * an ordered list carried whole onto the prepared frame.
+ */
+private class FrameAcquisition(
+    val decodedImagesByKey: Map<ResourceKey, DecodedImage>,
+    val basemapTiles: List<RenderedBasemapTile>,
+)
 
 /** The concrete [RenderTarget] [RenGRenderer.mintRenderTarget] produces. */
 internal class RenGRenderTarget(
@@ -369,7 +399,14 @@ internal class RenGRenderer(
 
             val imageReferences =
                 stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second }
-            val decodedByKey = acquireFrameResources(styleReference, imageReferences, accessMode)
+            // Post-world-copy-dedup by construction: `canonicalResources` is what BasemapTileSelector
+            // emits separately from `instances` precisely so N visible copies of one tile are one
+            // acquisition, one engine render and one identity. It is non-null exactly when the plan draws
+            // a basemap and a style is configured (planMercatorSpatial), which is also exactly when
+            // `styleReference` is non-null.
+            val canonicalTiles = planned.spatialPlan.tileSelection?.canonicalResources.orEmpty()
+            val acquired = acquireFrameResources(styleReference, imageReferences, canonicalTiles, accessMode)
+            val decodedByKey = acquired.decodedImagesByKey
 
             val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
                 PreparedSticker(
@@ -412,6 +449,7 @@ internal class RenGRenderer(
                 drawBasemap = plan.drawBasemap,
                 stickers = stickers,
                 geometries = geometries,
+                basemapTiles = acquired.basemapTiles,
             )
         } finally {
             preparationMutex.unlock()
@@ -460,9 +498,10 @@ internal class RenGRenderer(
 
     /**
      * Acquires everything one frame plan asked for that is not already in hand: the configured basemap
-     * style ([styleReference], when the plan draws one) and every traversed external image
-     * ([imageReferences] — a sticker's, or a geometry consumer texture's). Returns the decoded images by
-     * key; the style is not among them, because a style is not an image.
+     * style ([styleReference], when the plan draws one), every traversed external image
+     * ([imageReferences] — a sticker's, or a geometry consumer texture's), and the ground itself
+     * ([canonicalTiles]). Returns the decoded images by key plus the rendered ground; the style is not
+     * among the images, because a style is not an image.
      *
      * Returns nothing and performs no adapter call at all when there is nothing to acquire, which is
      * what keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no
@@ -479,6 +518,11 @@ internal class RenGRenderer(
      * Opening it afterwards would leave every one of those exchanges with no registry to be recognised
      * by, and each would fail closed as `AMBIGUOUS_RESOURCE_ROUTE`.
      *
+     * **It also spans the tile phase**, for the reason ADR 0016 gives rather than for mechanical
+     * necessity: one operation registry belongs to one preparation invocation. The style's routes are
+     * knowable only once the document has been read (inside the driver) and the tiles' only once it has
+     * been compiled, so both phases register incrementally into the one registry this invocation owns.
+     *
      * A [ResourceOperationOutcome.Cancelled] outcome — reached when one route's adapter call observes
      * its own cancellation while a sibling route is still active — is rethrown as a genuine
      * [CancellationException] rather than a [RenGException], consistent with keeping cancellation
@@ -487,12 +531,13 @@ internal class RenGRenderer(
     private suspend fun acquireFrameResources(
         styleReference: StaticResourceReference.External?,
         imageReferences: List<StaticResourceReference.External>,
+        canonicalTiles: List<CanonicalBasemapTile>,
         accessMode: ResourceAccessMode,
-    ): Map<ResourceKey, DecodedImage> {
+    ): FrameAcquisition {
         val references = listOfNotNull(styleReference) + imageReferences
         if (references.isEmpty()) {
             preparedBasemapStyle = null
-            return emptyMap()
+            return FrameAcquisition(emptyMap(), emptyList())
         }
 
         val definition = buildResourceOperationDefinition(
@@ -504,16 +549,23 @@ internal class RenGRenderer(
             ),
         )
 
+        var basemapTiles: List<RenderedBasemapTile> = emptyList()
         val outcome = basemapEngineHost.withOperation(accessMode) {
             val driven = preparationDriver.run(definition)
             if (driven is ResourceOperationOutcome.Success) {
                 // Read back rather than taken from the compile action: on a RESIDENT-provenance frame
                 // the pure core emits no CompileBasemapStyle at all, so there is no action to take it
                 // from. The host retains the compilation across invocations, so this is the one place
-                // the frame's style is obtainable on every frame alike. Cycle E-C3 consumes it. A frame
-                // that drew no basemap clears it, so this always describes the frame just prepared.
-                preparedBasemapStyle = styleReference?.let {
-                    basemapEngineHost.currentPreparedStyle(it.resourceKey)
+                // the frame's style is obtainable on every frame alike. A frame that drew no basemap
+                // clears it, so this always describes the frame just prepared.
+                val style = if (styleReference == null) {
+                    null
+                } else {
+                    basemapEngineHost.currentPreparedStyle(styleReference.resourceKey)
+                }
+                preparedBasemapStyle = style
+                if (styleReference != null && style != null && canonicalTiles.isNotEmpty()) {
+                    basemapTiles = renderBasemapTiles(styleReference, style, canonicalTiles, accessMode)
                 }
             }
             driven
@@ -525,7 +577,7 @@ internal class RenGRenderer(
                 throw CancellationException("resource preparation observed a route cancellation")
         }
 
-        return imageReferences.associate { reference ->
+        val decodedByKey = imageReferences.associate { reference ->
             val stored = residentCache.current(reference.resourceKey)?.stored
                 ?: error("a successful resource operation must leave its content resident")
             val image = when (
@@ -546,6 +598,54 @@ internal class RenGRenderer(
                 )
             }
             reference.resourceKey to image
+        }
+        return FrameAcquisition(decodedByKey, basemapTiles)
+    }
+
+    /**
+     * Declares the tile routes this frame's style will make the engine ask for, then acquires and draws
+     * the ground through it. Called from **inside** the invocation that compiled the style, so both
+     * phases share one operation registry (ADR 0016).
+     *
+     * The manifest is re-derived here rather than carried out of the driver. It is the same pure function
+     * of the same two inputs the driver's own `ValidateBasemapStyle` ran — the resident style bytes and
+     * the style's own locator, which is exactly what Rentile receives as `StyleInput.Prefetched.baseUri` —
+     * so the two derivations cannot disagree. What that costs was measured rather than assumed: see
+     * `internal.basemap.BasemapRouteDerivationCostTest`, which found the whole derive-and-preregister
+     * pass immaterial beside one engine tile fetch, so nothing here caches it. The resident generation is
+     * authoritative for the bytes, as it is for the compilation itself.
+     *
+     * A rejected manifest is unreachable: the driver validated these exact bytes on this exact frame and
+     * would have failed the operation otherwise, so reaching it means RenG's own derivation is not a
+     * function — a defect, not a consumer condition.
+     */
+    private suspend fun renderBasemapTiles(
+        styleReference: StaticResourceReference.External,
+        style: PreparedStyle,
+        canonicalTiles: List<CanonicalBasemapTile>,
+        accessMode: ResourceAccessMode,
+    ): List<RenderedBasemapTile> {
+        val stored = residentCache.current(styleReference.resourceKey)?.stored
+            ?: error("a successful style commit must leave the style document resident")
+        val manifest = when (
+            val derived = deriveBasemapStyleManifest(stored.bytes, styleReference.locator.value)
+        ) {
+            is BasemapStyleManifestOutcome.Derived -> derived.manifest
+            is BasemapStyleManifestOutcome.Rejected ->
+                error("the resource driver already validated this exact style document")
+        }
+        basemapEngineHost.registerRoutes(
+            tileTimeRoutes(
+                manifest = manifest,
+                tiles = canonicalTiles,
+                accessMode = accessMode,
+                limits = configuration.resourceLimits,
+            ),
+        )
+        // The batch owns engine-side resources and is closed as soon as the pixels are in hand: nothing
+        // downstream of here reads it, because rendering is where a PreparedBatch's whole purpose ends.
+        return basemapEngineHost.prepareTiles(style, canonicalTiles).use { prepared ->
+            basemapEngineHost.renderTiles(prepared)
         }
     }
 

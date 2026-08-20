@@ -14,10 +14,6 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import kotlin.io.encoding.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
-import kotlin.test.assertSame
-import kotlin.test.assertTrue
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
@@ -31,61 +27,15 @@ import kotlinx.coroutines.test.runTest
  * is the only surface a caller has: an engine exchange RenG failed to preregister never reaches the
  * consumer at all (it fails closed as `AMBIGUOUS_RESOURCE_ROUTE`), and a style RenG recompiles per frame
  * shows up as the same sprite being fetched again and again.
+ *
+ * **What is here and what is not.** Since Cycle E-C3 a basemap frame that prepares *successfully* also
+ * rasterizes its ground, which needs Skia's native library -- absent from this project's `androidHostTest`
+ * runtime. Those cases therefore live in `nativeTest`'s `RendererBasemapStyleRenderTest` and
+ * `RendererBasemapTileTest`; what stays here is every case that ends before the rasterizer, which is
+ * still the whole style-failure surface and still covers Android. The fixtures below are shared by all
+ * three files.
  */
 class RendererBasemapStyleTest {
-
-    @Test
-    fun acquiresTheConfiguredStyleAndEverythingCompilingItMakesTheEngineFetch() = runTest {
-        val transport = StyleTransport()
-        val renderer = styleRenderer(transport)
-
-        renderer.prepare(basemapPlan(frameIndex = 0L))
-
-        assertEquals(
-            listOf(STYLE_URL, SPRITE_JSON_URL, SPRITE_IMAGE_URL).sorted(),
-            transport.requestedUrls().sorted(),
-            "the style is RenG's own resource; the sprite pair is the engine's, reached only through a " +
-                "preregistered route",
-        )
-    }
-
-    /**
-     * The defect a single-frame test cannot see. Compilation is bound to the style's **content**, so a
-     * second frame over identical bytes reuses it; binding it to a resident generation object instead
-     * makes every frame recompile, which re-runs the whole sprite/TileJSON/GeoJSON acquisition through
-     * the consumer's transport once per frame forever.
-     *
-     * The style itself is deliberately not fresh (the transport declares no expiry), so the driver
-     * re-resolves it from the transport on the second frame and genuinely emits a second
-     * `CompileBasemapStyle`. That is the case where recompilation is reachable at all — a fresh,
-     * `RESIDENT`-provenance frame emits no compile action, so it could never observe the defect.
-     */
-    @Test
-    fun compilesOneStyleOnceAcrossFramesRatherThanOncePerFrame() = runTest {
-        val transport = StyleTransport()
-        val renderer = styleRenderer(transport)
-
-        renderer.prepare(basemapPlan(frameIndex = 0L))
-        val spriteRequestsAfterFirstFrame = transport.requestedUrls().count { it == SPRITE_JSON_URL }
-        renderer.prepare(basemapPlan(frameIndex = 1L))
-
-        assertEquals(1, spriteRequestsAfterFirstFrame, "one frame compiles the style exactly once")
-        assertEquals(
-            1,
-            transport.requestedUrls().count { it == SPRITE_JSON_URL },
-            "a second frame over identical style bytes must reuse the compilation, not redo its whole " +
-                "resource acquisition",
-        )
-        assertEquals(
-            1,
-            transport.requestedUrls().count { it == SPRITE_IMAGE_URL },
-            "the sprite image is acquired by the same compilation as its metadata",
-        )
-        assertTrue(
-            transport.requestedUrls().count { it == STYLE_URL } >= 2,
-            "the style document itself is re-resolved per frame; only its compilation is reused",
-        )
-    }
 
     @Test
     fun aStyleThatWillNotParseIsATypedRenGFailureRatherThanAnEngineOne() = runTest {
@@ -111,83 +61,6 @@ class RendererBasemapStyleTest {
         val failure = kotlin.test.assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 0L)) }
 
         assertEquals(RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE, failure.code)
-    }
-
-    /**
-     * The renderer has to be able to hold the frame's compiled style on **every** frame, not only on the
-     * one that compiled it: the pure core emits no `CompileBasemapStyle` on a `RESIDENT`-provenance
-     * frame, so there is no compile action to take it from. Reading it back from the engine host gives
-     * one uniform seam, and the identity below is what Cycle E-C3's `prepareTiles` will be handed.
-     */
-    @Test
-    fun holdsTheOneCompiledStyleAcrossEveryFrameThatDrawsIt() = runTest {
-        val renderer = styleRenderer(StyleTransport()) as RenGRenderer
-        assertNull(renderer.preparedBasemapStyle, "nothing is compiled before the first prepare()")
-
-        renderer.prepare(basemapPlan(frameIndex = 0L))
-        val first = renderer.preparedBasemapStyle
-        renderer.prepare(basemapPlan(frameIndex = 1L))
-        val second = renderer.preparedBasemapStyle
-
-        assertNotNull(first, "a frame that draws a basemap holds its compiled style")
-        assertSame(first, second, "the same style document is the same compilation, frame after frame")
-
-        // This names the frame in front of the reader, never "the last style compiled at some point".
-        renderer.prepare(FramePlan(frameIndex = 2L, camera = styleCamera(), drawBasemap = false))
-        assertNull(renderer.preparedBasemapStyle, "a frame that draws no basemap holds no style")
-    }
-
-    /**
-     * ADR 0016: the style is written only after "successful compilation and completion of all other work
-     * for the referencing preparation items". Made observable, and deterministic, by giving the driver a
-     * single concurrency slot — the two possible orders are then fully determined by whether the style's
-     * owner is also the sticker's, which is precisely what the barrier reads.
-     *
-     * With one owner per plan item the sticker's Store write and visibility install both complete before
-     * the style's write is even requested. With an owner per reference the style's owner has no other
-     * work at all, the barrier is vacuously satisfied, and the style is written first.
-     */
-    @Test
-    fun writesTheStyleOnlyAfterEveryOtherResourceItsOwnFrameAskedFor() = runTest {
-        val transport = StyleTransport()
-        val store = RecordingStyleStore()
-        val renderer = createRenderer(
-            RendererConfiguration(
-                outputPixelSize = OutputPixelSize(64, 64),
-                transport = transport,
-                store = store,
-                basemapStyle = ResourceLocator(STYLE_URL),
-                maximumConcurrentResourceOperations = 1,
-            ),
-            styleGlBinding(),
-            RenderContextProbe { RenderContextIdentity(1L) },
-        )
-
-        renderer.prepare(
-            basemapPlan(
-                frameIndex = 0L,
-                stickers = listOf(Sticker(placement = screenPlacement(), image = ResourceLocator(STICKER_URL))),
-            ),
-        )
-
-        val styleStoreWrites = store.writes()
-
-        // Filtered to the two classes RenG's own driver writes: the engine writes its sprite pair through
-        // the firewall during compilation too, on its own concurrent coroutines, and their order relative
-        // to each other is the engine's business rather than this barrier's.
-        assertEquals(
-            listOf(ResourceClass.STICKER_IMAGE, ResourceClass.BASEMAP_STYLE),
-            styleStoreWrites.map(RawResourceKey::resourceClass).filter {
-                it == ResourceClass.STICKER_IMAGE || it == ResourceClass.BASEMAP_STYLE
-            },
-            "the style's write waits for every other resource of the item that referenced it",
-        )
-        assertTrue(
-            styleStoreWrites.map(RawResourceKey::resourceClass).containsAll(
-                listOf(ResourceClass.BASEMAP_SPRITE_JSON, ResourceClass.BASEMAP_SPRITE_IMAGE),
-            ),
-            "the engine's own sprite acquisition reached the consumer through the firewall",
-        )
     }
 
     @Test

@@ -19,8 +19,9 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
  * `TileJsonResourceAcquirer`, `GeoJsonResourceAcquirer`, `SpriteResourceAcquirer`, all of which back
  * onto `RasterResourceAcquirer` for `DEM_TILE`) key every entry by
  * `sha256Hex(url.withRedactedAuthenticationQuery())` paired with Rentile's own [RentileResourceClass] --
- * verified byte-identical between the commit ADR 0016's respike measured and the 0.2.0 this build pins
- * (`docs/research/2026-08-19-rentile-030-counting-stub-respike.md`). RenG must reproduce that exact
+ * verified by diffing Rentile's `ContentIdentity.kt` directly between its `0.2.0` release commit
+ * (`2d0a5bf`, the version `libs.versions.toml` pins) and its current `main` -- byte-identical, so the
+ * scheme below is not inferred from any single measurement run. RenG must reproduce that exact
  * derivation for the seven [ResourceClass] values Rentile itself fetches and keys, or RenG's own
  * diffing and eviction bookkeeping silently stops matching Rentile's actual cache entries: **a
  * permanent, unannounced cache miss, never a thrown failure** -- there is no failure surface for a
@@ -108,8 +109,8 @@ private val AUTHENTICATION_QUERY_PARAMETER_NAMES: Set<String> = setOf(
  * parameter names to `<name>=<redacted>` (preserving the parameter's original-case name), leaves every
  * other parameter and the fragment untouched, and returns the url unchanged when it carries no query
  * component at all. Byte-for-byte the same rewrite as Rentile's private
- * `com.rohittp.rentile.internal.withRedactedAuthenticationQuery` -- confirmed byte-identical source
- * between the respike's measurement commit and the 0.2.0 Rentile release this build pins. Any
+ * `com.rohittp.rentile.internal.withRedactedAuthenticationQuery` -- confirmed by reading that source at
+ * Rentile's `0.2.0` release commit (`2d0a5bf`) and diffing it against Rentile's current `main`. Any
  * divergence here changes the hash input for all seven engine-keyed classes and silently breaks their
  * key agreement with Rentile.
  */

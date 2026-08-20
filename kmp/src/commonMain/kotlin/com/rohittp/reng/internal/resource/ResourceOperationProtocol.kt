@@ -601,32 +601,51 @@ internal data class PendingChildDiscovery(
     }
 }
 
+/**
+ * The checks RenG itself performs over content its **own** driver acquired. There is exactly one member
+ * per check RenG owns, and no member for a check the Rentile engine owns: the engine acquires all seven
+ * engine-keyed basemap classes through RenG's firewall, so no TileJSON, vector tile, GeoJSON or DEM ever
+ * reaches a class gate (ADR 0003's split, ADR 0016's firewall).
+ */
 internal enum class ResourceClassGate {
-    PARSE_TILEJSON,
-    DECODE_VECTOR_TILE,
     DECODE_PNG,
-    VALIDATE_DEM_TERRAIN_ENCODING,
-    PARSE_GEOJSON,
     PARSE_GLB,
     VALIDATE_GLB_FEATURES,
 }
 
+/**
+ * The ordered class gates RenG runs over a resolved route's content, or `null` for a class whose routes
+ * this function does not gate at all.
+ *
+ * `null` is the answer for two different reasons, and both are structural rather than unfinished:
+ *
+ * - **The engine acquires it.** `BASEMAP_TILE_JSON`, `BASEMAP_VECTOR_TILE`, `BASEMAP_RASTER_TILE`,
+ *   `BASEMAP_DEM_TILE`, `BASEMAP_GEO_JSON`, `BASEMAP_SPRITE_JSON` and `BASEMAP_SPRITE_IMAGE` are keyed to
+ *   the Rentile engine, which fetches and validates them itself through RenG's firewall
+ *   ([com.rohittp.reng.internal.firewall.OperationRegistry]); RenG's driver only preregisters their
+ *   routes. They cannot become driver routes either: only
+ *   [com.rohittp.reng.internal.planning.StaticResourceReference.External] becomes a
+ *   [ResourceOccurrence], and its own `init` requires a static-direct class, which none of the seven is.
+ *   Re-gating them here would also fetch and validate one logical resource twice under two different
+ *   stable ids, one per key space (ADR 0016).
+ * - **Its commit path is not the ordinary one.** `BASEMAP_STYLE` commits through the style-commit path
+ *   rather than through [AdvancePendingClassGates].
+ *
+ * That leaves the three classes RenG genuinely decodes and parses for itself.
+ */
 internal fun ordinaryResourceClassGates(resourceClass: ResourceClass): List<ResourceClassGate>? =
     when (resourceClass) {
-        ResourceClass.BASEMAP_TILE_JSON -> listOf(ResourceClassGate.PARSE_TILEJSON)
-        ResourceClass.BASEMAP_VECTOR_TILE -> listOf(ResourceClassGate.DECODE_VECTOR_TILE)
-        ResourceClass.BASEMAP_RASTER_TILE -> listOf(ResourceClassGate.DECODE_PNG)
-        ResourceClass.BASEMAP_DEM_TILE -> listOf(
-            ResourceClassGate.DECODE_PNG,
-            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-        )
-        ResourceClass.BASEMAP_GEO_JSON -> listOf(ResourceClassGate.PARSE_GEOJSON)
         ResourceClass.STICKER_IMAGE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_TEXTURE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_GLB -> listOf(
             ResourceClassGate.PARSE_GLB,
             ResourceClassGate.VALIDATE_GLB_FEATURES,
         )
+        ResourceClass.BASEMAP_TILE_JSON,
+        ResourceClass.BASEMAP_VECTOR_TILE,
+        ResourceClass.BASEMAP_RASTER_TILE,
+        ResourceClass.BASEMAP_DEM_TILE,
+        ResourceClass.BASEMAP_GEO_JSON,
         ResourceClass.BASEMAP_STYLE,
         ResourceClass.BASEMAP_SPRITE_JSON,
         ResourceClass.BASEMAP_SPRITE_IMAGE,

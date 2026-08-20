@@ -434,10 +434,10 @@ class ResourceOperationStyleCommitTest {
 
         assertResourceFailure(
             outcome = driver.outcome,
-            code = RenGErrorCode.RESOURCE_PARSE_FAILED,
-            stage = PipelineStage.RESOURCE_PARSING,
+            code = RenGErrorCode.RESOURCE_DECODE_FAILED,
+            stage = PipelineStage.RESOURCE_DECODING,
             expectedField = DiagnosticField.RESOURCE.wireName,
-            resourceClass = ResourceClass.BASEMAP_TILE_JSON,
+            resourceClass = ResourceClass.MODEL_TEXTURE,
             resourceKey = driver.candidate(FIRST_CHILD_ORDINAL).resourceKey,
             label = "child failure",
         )
@@ -1188,8 +1188,8 @@ private const val STICKER_A_ORDINAL: Long = 3L
 private const val STICKER_B_ORDINAL: Long = 4L
 private const val OTHER_OWNER_ORDINAL: Long = 1L
 private const val STYLE_LOCATOR: String = "locator-a-BASEMAP_STYLE"
-private const val FIRST_CHILD_LOCATOR: String = "locator-d-BASEMAP_TILE_JSON"
-private const val SECOND_CHILD_LOCATOR: String = "locator-e-BASEMAP_TILE_JSON"
+private const val FIRST_CHILD_LOCATOR: String = "locator-d-MODEL_TEXTURE"
+private const val SECOND_CHILD_LOCATOR: String = "locator-e-MODEL_TEXTURE"
 private val STYLE_GROUP: StyleGroupId = StyleGroupId(1L)
 private val ADAPTER_CANCELLATION: CancellationSelection =
     CancellationSelection(CancellationCause.ADAPTER, CancellationId(7L))
@@ -1499,7 +1499,7 @@ private fun firstChild(): DiscoveredResourceChild = DiscoveredResourceChild(
     occurrence = ResourceOccurrence(
         id = ResourceOccurrenceId(11L),
         ownerId = ResourceOwnerId(OWNER_A),
-        registration = registration('d', ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+        registration = registration('d', ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
         discoveryRequired = false,
         commitBinding = ResourceCommitBinding.Single,
     ),
@@ -1524,7 +1524,7 @@ private fun secondChild(): DiscoveredResourceChild = DiscoveredResourceChild(
     occurrence = ResourceOccurrence(
         id = ResourceOccurrenceId(12L),
         ownerId = ResourceOwnerId(OWNER_B),
-        registration = registration('e', ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+        registration = registration('e', ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
         discoveryRequired = false,
         commitBinding = ResourceCommitBinding.Single,
     ),

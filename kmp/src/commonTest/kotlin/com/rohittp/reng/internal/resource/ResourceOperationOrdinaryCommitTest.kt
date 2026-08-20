@@ -26,12 +26,24 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ResourceOperationOrdinaryCommitTest {
+    // This file's ORDINARY_CLASS_GATES is a hand-written mirror of production's own table, and every
+    // table-driven test below trusts it. Binding the two here is what stops the mirror from drifting --
+    // and, since the production table is what decides which classes RenG gates at all, it is also the
+    // assertion that pins the ownership ruling: the seven engine-keyed classes answer `null`, so the
+    // driver can never emit a class gate over one of them.
     @Test
-    fun ordinaryClassesAreExactlyTheNonSpriteNonStyleClasses() {
-        assertEquals(
-            ResourceClass.entries.toSet() - DEFERRED_CLASSES,
-            ORDINARY_CLASS_GATES.keys,
-        )
+    fun ordinaryClassGatesMatchProductionForEveryClassAndNameNoEngineKeyedOne() {
+        ResourceClass.entries.forEach { resourceClass ->
+            assertEquals(
+                ORDINARY_CLASS_GATES[resourceClass],
+                ordinaryResourceClassGates(resourceClass),
+                resourceClass.name,
+            )
+        }
+        assertEquals(ResourceClass.entries.toSet() - UNGATED_CLASSES, ORDINARY_CLASS_GATES.keys)
+        UNGATED_CLASSES.forEach { ungated ->
+            assertNull(ordinaryResourceClassGates(ungated), ungated.name)
+        }
     }
 
     @Test
@@ -60,7 +72,7 @@ class ResourceOperationOrdinaryCommitTest {
     }
 
     @Test
-    fun advancingAMismatchedOrdinalOrDeferredClassIsRejectedWithoutChangingState() {
+    fun advancingAMismatchedOrdinalOrUngatedClassIsRejectedWithoutChangingState() {
         val driver = CommitDriver(
             twoRouteDefinition(
                 first = ResourceClass.MODEL_GLB,
@@ -91,14 +103,14 @@ class ResourceOperationOrdinaryCommitTest {
             )
         }
 
-        DEFERRED_CLASSES.forEach { deferred ->
-            val deferredDriver = CommitDriver(
-                singleRouteDefinition(deferred, ContentProvenance.TRANSPORT_200),
+        UNGATED_CLASSES.forEach { ungated ->
+            val ungatedDriver = CommitDriver(
+                singleRouteDefinition(ungated, ContentProvenance.TRANSPORT_200),
             )
-            deferredDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
-            assertFailsWith<IllegalArgumentException>(deferred.name) {
+            ungatedDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
+            assertFailsWith<IllegalArgumentException>(ungated.name) {
                 ResourceOperationStateMachine.transition(
-                    deferredDriver.state,
+                    ungatedDriver.state,
                     AdvancePendingClassGates(0L),
                 )
             }
@@ -281,10 +293,10 @@ class ResourceOperationOrdinaryCommitTest {
 
     @Test
     fun storeWriteFailureIsSanitizedWhileItsCancellationRemainsCancellation() {
-        val gates = ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_GEO_JSON)
+        val gates = ORDINARY_CLASS_GATES.getValue(ResourceClass.MODEL_TEXTURE)
 
         val failedDriver = CommitDriver(
-            singleRouteDefinition(ResourceClass.BASEMAP_GEO_JSON, ContentProvenance.TRANSPORT_200),
+            singleRouteDefinition(ResourceClass.MODEL_TEXTURE, ContentProvenance.TRANSPORT_200),
         )
         failedDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val content = failedDriver.passGates(0L, gates, "write-failure")
@@ -296,7 +308,7 @@ class ResourceOperationOrdinaryCommitTest {
             code = RenGErrorCode.STORE_WRITE_FAILED,
             stage = PipelineStage.STORE_WRITE,
             expectedField = null,
-            resourceClass = ResourceClass.BASEMAP_GEO_JSON,
+            resourceClass = ResourceClass.MODEL_TEXTURE,
             resourceKey = content.resourceKey,
             label = "write-failure",
         )
@@ -306,7 +318,7 @@ class ResourceOperationOrdinaryCommitTest {
 
         val cancellation = CancellationSelection(CancellationCause.ADAPTER, CancellationId(87L))
         val cancelledDriver = CommitDriver(
-            singleRouteDefinition(ResourceClass.BASEMAP_GEO_JSON, ContentProvenance.TRANSPORT_200),
+            singleRouteDefinition(ResourceClass.MODEL_TEXTURE, ContentProvenance.TRANSPORT_200),
         )
         cancelledDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         cancelledDriver.passGates(0L, gates, "write-cancellation")
@@ -444,7 +456,7 @@ class ResourceOperationOrdinaryCommitTest {
     @Test
     fun commitCursorsAndInstalledVisibilityAreValidatedAndBlockRetirement() {
         val driver = CommitDriver(
-            singleRouteDefinition(ResourceClass.BASEMAP_DEM_TILE, ContentProvenance.TRANSPORT_200),
+            singleRouteDefinition(ResourceClass.MODEL_TEXTURE, ContentProvenance.TRANSPORT_200),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val pendingState = driver.state
@@ -521,7 +533,7 @@ class ResourceOperationOrdinaryCommitTest {
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val parentContent = driver.passGates(
             0L,
-            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_TILE_JSON),
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.MODEL_TEXTURE),
             "parent",
         )
         val parentWrite = assertIs<WriteStore>(driver.actions.single())
@@ -555,7 +567,7 @@ class ResourceOperationOrdinaryCommitTest {
         driver.driveToPendingClassGates(1L, ContentProvenance.TRANSPORT_200)
         val childContent = driver.passGates(
             1L,
-            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_VECTOR_TILE),
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.STICKER_IMAGE),
             "child",
         )
         val childWrite = assertIs<WriteStore>(driver.actions.single())
@@ -677,7 +689,7 @@ class ResourceOperationOrdinaryCommitTest {
     @Test
     fun installedVisibilityAdmitsOnlyAPendingChildDiscoveryCursor() {
         val driver = CommitDriver(
-            singleRouteDefinition(ResourceClass.BASEMAP_DEM_TILE, ContentProvenance.TRANSPORT_200),
+            singleRouteDefinition(ResourceClass.MODEL_GLB, ContentProvenance.TRANSPORT_200),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val inFlightStates = mutableListOf(driver.state)
@@ -717,7 +729,7 @@ class ResourceOperationOrdinaryCommitTest {
         discoveryDriver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val parentContent = discoveryDriver.passGates(
             0L,
-            ORDINARY_CLASS_GATES.getValue(ResourceClass.BASEMAP_TILE_JSON),
+            ORDINARY_CLASS_GATES.getValue(ResourceClass.MODEL_TEXTURE),
             "discovery parent",
         )
         val parentWrite = assertIs<WriteStore>(discoveryDriver.actions.single())
@@ -740,7 +752,7 @@ class ResourceOperationOrdinaryCommitTest {
     @Test
     fun classGateCursorsMustNameTheirGateAtTheirOwnGateIndex() {
         val driver = CommitDriver(
-            singleRouteDefinition(ResourceClass.BASEMAP_DEM_TILE, ContentProvenance.TRANSPORT_200),
+            singleRouteDefinition(ResourceClass.MODEL_GLB, ContentProvenance.TRANSPORT_200),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
         val content = assertIs<PendingClassGates>(driver.record(0L).cursor).content
@@ -748,10 +760,10 @@ class ResourceOperationOrdinaryCommitTest {
         val message = "a class gate cursor must name its class gate at its own gate index"
 
         listOf(
-            0 to ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-            1 to ResourceClassGate.DECODE_PNG,
-            2 to ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-            -1 to ResourceClassGate.DECODE_PNG,
+            0 to ResourceClassGate.VALIDATE_GLB_FEATURES,
+            1 to ResourceClassGate.PARSE_GLB,
+            2 to ResourceClassGate.VALIDATE_GLB_FEATURES,
+            -1 to ResourceClassGate.PARSE_GLB,
         ).forEach { (gateIndex, gate) ->
             assertEquals(
                 message,
@@ -765,19 +777,13 @@ class ResourceOperationOrdinaryCommitTest {
         driver.event(AdvancePendingClassGates(0L))
         val first = assertIs<ValidateResourceClass>(driver.actions.single())
         assertEquals(
-            AwaitingClassGate(first.actionId, 0L, content, 0, ResourceClassGate.DECODE_PNG),
+            AwaitingClassGate(first.actionId, 0L, content, 0, ResourceClassGate.PARSE_GLB),
             driver.record(0L).cursor,
         )
         driver.event(ResourceClassValidationCompleted(first.actionId, SuppliedValidationOutcome.Valid))
         val second = assertIs<ValidateResourceClass>(driver.actions.single())
         assertEquals(
-            AwaitingClassGate(
-                second.actionId,
-                0L,
-                content,
-                1,
-                ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-            ),
+            AwaitingClassGate(second.actionId, 0L, content, 1, ResourceClassGate.VALIDATE_GLB_FEATURES),
             driver.record(0L).cursor,
         )
         driver.event(ResourceClassValidationCompleted(second.actionId, SuppliedValidationOutcome.Valid))
@@ -960,23 +966,28 @@ class ResourceOperationOrdinaryCommitTest {
 
 private const val FIRST_OWNER_ID: Long = 1L
 private const val SAMPLE_EPOCH_MILLIS: Long = 100L
+
+/** A real gate that is not MODEL_TEXTURE's gate at index 0, which is what `WRONG_GATE` has to mean. */
 private val WRONG_GATE: ResourceClassGate = ResourceClassGate.PARSE_GLB
 
-private val DEFERRED_CLASSES: Set<ResourceClass> = setOf(
+/**
+ * Every class whose routes run no class gate at all, for either of the two structural reasons: the seven
+ * the Rentile engine acquires and validates itself through RenG's firewall (RenG's driver only
+ * preregisters their routes), and `BASEMAP_STYLE`, whose commit path is the style commit rather than
+ * [AdvancePendingClassGates].
+ */
+private val UNGATED_CLASSES: Set<ResourceClass> = setOf(
+    ResourceClass.BASEMAP_TILE_JSON,
+    ResourceClass.BASEMAP_VECTOR_TILE,
+    ResourceClass.BASEMAP_RASTER_TILE,
+    ResourceClass.BASEMAP_DEM_TILE,
+    ResourceClass.BASEMAP_GEO_JSON,
     ResourceClass.BASEMAP_STYLE,
     ResourceClass.BASEMAP_SPRITE_JSON,
     ResourceClass.BASEMAP_SPRITE_IMAGE,
 )
 
 private val ORDINARY_CLASS_GATES: Map<ResourceClass, List<ResourceClassGate>> = mapOf(
-    ResourceClass.BASEMAP_TILE_JSON to listOf(ResourceClassGate.PARSE_TILEJSON),
-    ResourceClass.BASEMAP_VECTOR_TILE to listOf(ResourceClassGate.DECODE_VECTOR_TILE),
-    ResourceClass.BASEMAP_RASTER_TILE to listOf(ResourceClassGate.DECODE_PNG),
-    ResourceClass.BASEMAP_DEM_TILE to listOf(
-        ResourceClassGate.DECODE_PNG,
-        ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-    ),
-    ResourceClass.BASEMAP_GEO_JSON to listOf(ResourceClassGate.PARSE_GEOJSON),
     ResourceClass.STICKER_IMAGE to listOf(ResourceClassGate.DECODE_PNG),
     ResourceClass.MODEL_GLB to listOf(
         ResourceClassGate.PARSE_GLB,
@@ -986,16 +997,10 @@ private val ORDINARY_CLASS_GATES: Map<ResourceClass, List<ResourceClassGate>> = 
 )
 
 private fun expectedGateFailure(gate: ResourceClassGate): Pair<RenGErrorCode, PipelineStage> = when (gate) {
-    ResourceClassGate.PARSE_TILEJSON,
-    ResourceClassGate.PARSE_GEOJSON,
-    ResourceClassGate.PARSE_GLB,
-    -> RenGErrorCode.RESOURCE_PARSE_FAILED to PipelineStage.RESOURCE_PARSING
-    ResourceClassGate.DECODE_VECTOR_TILE,
-    ResourceClassGate.DECODE_PNG,
-    -> RenGErrorCode.RESOURCE_DECODE_FAILED to PipelineStage.RESOURCE_DECODING
-    ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-    ResourceClassGate.VALIDATE_GLB_FEATURES,
-    -> RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE to PipelineStage.RESOURCE_PARSING
+    ResourceClassGate.PARSE_GLB -> RenGErrorCode.RESOURCE_PARSE_FAILED to PipelineStage.RESOURCE_PARSING
+    ResourceClassGate.DECODE_PNG -> RenGErrorCode.RESOURCE_DECODE_FAILED to PipelineStage.RESOURCE_DECODING
+    ResourceClassGate.VALIDATE_GLB_FEATURES ->
+        RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE to PipelineStage.RESOURCE_PARSING
 }
 
 private class CommitDriver(definition: ResourceOperationDefinition) {
@@ -1166,7 +1171,7 @@ private fun singleRouteDefinition(
 private fun discoveryOccurrence(): ResourceOccurrence = ResourceOccurrence(
     id = ResourceOccurrenceId(1L),
     ownerId = ResourceOwnerId(FIRST_OWNER_ID),
-    registration = registration("a", ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+    registration = registration("a", ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
     discoveryRequired = true,
     commitBinding = ResourceCommitBinding.Single,
 )
@@ -1174,7 +1179,7 @@ private fun discoveryOccurrence(): ResourceOccurrence = ResourceOccurrence(
 private fun discoveredChild(): ResourceOccurrence = ResourceOccurrence(
     id = ResourceOccurrenceId(2L),
     ownerId = ResourceOwnerId(FIRST_OWNER_ID),
-    registration = registration("b", ResourceClass.BASEMAP_VECTOR_TILE, ResourceAccessMode.RELOAD),
+    registration = registration("b", ResourceClass.STICKER_IMAGE, ResourceAccessMode.RELOAD),
     discoveryRequired = false,
     commitBinding = ResourceCommitBinding.Single,
 )

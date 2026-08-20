@@ -523,7 +523,7 @@ class CycleBPureCoreContractTest {
         val parent = occurrence(
             id = 1L,
             ownerId = 1L,
-            registration = registration("parent", ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+            registration = registration("parent", ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
             discoveryRequired = true,
         )
         val sharedStatic = occurrence(
@@ -551,7 +551,7 @@ class CycleBPureCoreContractTest {
         driver.driveToPendingContent(0L, ContentProvenance.TRANSPORT_200)
         driver.event(AdvancePendingClassGates(0L))
         val gate = assertIs<ValidateResourceClass>(driver.actions.single())
-        assertEquals(ResourceClassGate.PARSE_TILEJSON, gate.gate)
+        assertEquals(ResourceClassGate.DECODE_PNG, gate.gate)
         driver.event(ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Valid))
         val write = assertIs<WriteStore>(driver.actions.single())
         assertEquals(parent.registration.rawKey, write.rawKey)
@@ -906,7 +906,7 @@ class CycleBPureCoreContractTest {
                 ownerId = OWNER_ONE,
                 registration = registration(
                     "style-child",
-                    ResourceClass.BASEMAP_TILE_JSON,
+                    ResourceClass.MODEL_TEXTURE,
                     ResourceAccessMode.RELOAD,
                 ),
             ),

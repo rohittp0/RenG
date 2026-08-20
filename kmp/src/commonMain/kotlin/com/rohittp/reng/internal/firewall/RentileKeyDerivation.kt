@@ -11,9 +11,9 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
 
 /**
  * Derives the private key ADR 0016's firewall latches Rentile requests under, for real, against the
- * actual Rentile 0.2.0/0.3.0 derivation -- the placeholder
- * [com.rohittp.reng.DeterministicRentilePrivateKeyResolver] this replaces only ever needed process-local
- * determinism, never agreement with Rentile's own cache keys.
+ * actual Rentile 0.2.0/0.3.0 derivation -- the placeholder `DeterministicRentilePrivateKeyResolver`
+ * this replaces (removed once `RenGRenderer` was rewired onto this class, basemap task 17) only ever
+ * needed process-local determinism, never agreement with Rentile's own cache keys.
  *
  * Rentile's raw-store paths (`VectorResourceAcquirer`, `RasterResourceAcquirer`,
  * `TileJsonResourceAcquirer`, `GeoJsonResourceAcquirer`, `SpriteResourceAcquirer`, all of which back
@@ -38,9 +38,16 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
  * ([ResourceKeyDeriver.external]), which is already proven injective in locator and class.
  *
  * Rentile 0.3.0's ninth class, `GLYPH_RANGE`, is deliberately absent from [engineKeyedResourceClassOf]:
- * it is reachable only through `acquireLabelCandidates`, which RenG never calls this cycle. The
- * exhaustive `when` below fails to compile rather than silently routing a future class through the
- * wrong branch, matching the respike's own fail-closed instruction.
+ * it is reachable only through `acquireLabelCandidates`, which RenG never calls this cycle. The `when`
+ * below is exhaustive over RenG's own [ResourceClass] -- an eleven-value enum this dependency's version
+ * does not change -- not over [RentileResourceClass], so **this does not, and cannot, force a
+ * compile-time update when a future Rentile release adds a class**: `RentileResourceClass` gaining a
+ * ninth constant compiles this file unchanged, and the new constant simply stays unreachable from
+ * either branch below. What *would* fail this file's compilation is Rentile renaming or removing one of
+ * the seven constants already named here, since each is referenced by exact constant, not by ordinal or
+ * string. Containment against a class this table doesn't route (`GLYPH_RANGE` included) is a runtime
+ * property instead: [com.rohittp.reng.internal.firewall.OperationRegistry] fails closed on any
+ * unrecognised Transport url or Store key, whether or not that class has a branch here at all.
  */
 internal class ProductionRentilePrivateKeyResolver(
     private val sha256: Sha256Function,
@@ -76,8 +83,13 @@ internal class ProductionRentilePrivateKeyResolver(
  * [ResourceClass.BASEMAP_STYLE], [ResourceClass.STICKER_IMAGE], [ResourceClass.MODEL_GLB], and
  * [ResourceClass.MODEL_TEXTURE] return `null`: the engine never keys them, so [resolve] falls through
  * to RenG's own canonical identity for those four instead.
+ *
+ * `internal` rather than file-private because [OperationRegistry][com.rohittp.reng.internal.firewall.OperationRegistry]
+ * (Cycle E basemap task 17) reuses this exact table to know which classes Rentile's own
+ * `RawResourceStore` ever keys at all -- a store-side answer must fail closed for the four classes
+ * this returns `null` for, since the engine's `RawResourceStore` never sees them.
  */
-private fun engineKeyedResourceClassOf(resourceClass: ResourceClass): RentileResourceClass? =
+internal fun engineKeyedResourceClassOf(resourceClass: ResourceClass): RentileResourceClass? =
     when (resourceClass) {
         ResourceClass.BASEMAP_TILE_JSON -> RentileResourceClass.TILE_JSON
         ResourceClass.BASEMAP_VECTOR_TILE -> RentileResourceClass.VECTOR_TILE

@@ -7,6 +7,7 @@ import com.rohittp.reng.internal.driver.PreparationDriver
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.CompositePipelineResult
 import com.rohittp.reng.internal.gl.GeometryPipeline
@@ -43,6 +44,7 @@ import com.rohittp.reng.internal.gl.uploadTexture
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
+import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.PngDecodeResult
@@ -64,8 +66,6 @@ import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.renGFailure
 import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
-import com.rohittp.reng.internal.resource.RentilePrivateKey
-import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceCommitBinding
 import com.rohittp.reng.internal.resource.ResourceOccurrence
 import com.rohittp.reng.internal.resource.ResourceOccurrenceId
@@ -81,31 +81,6 @@ import kotlinx.coroutines.sync.Mutex
 // Renderer, PreparedFrame, and RenderTarget are all `sealed`, and Kotlin requires a sealed type's
 // direct implementers to share its package (not merely its module). Every declaration below stays
 // `internal` visibility regardless -- none of it appears in the ABI dump.
-
-/**
- * A private-key derivation with no real Rentile integration wired to it yet. Deterministic per
- * `(locator, resourceClass)` so the same external resource always derives the same key within one
- * process, which is all [FramePlanningCore]'s bookkeeping needs today. Every resource class this
- * renderer actually fetches so far (`STICKER_IMAGE`) goes straight through RenG's own configured
- * [Transport] and [Store], never through Rentile's shared cache, so no real cross-tenant firewall
- * protects it yet.
- *
- * A genuine derivation now exists —
- * [com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver] reproduces Rentile's actual
- * `sha256Hex(withRedactedAuthenticationQuery(url))` key for the seven classes Rentile itself fetches
- * and keys, and RenG's own canonical identity for the four it does not (Cycle E basemap task 16). It
- * is not yet the renderer's default binding: wiring a real resolver in without the real Rentile
- * `Transport`/`Store` adapters and the operation-scoped firewall (ADR 0016) that latches through them
- * would just be a different half-wired state, and threading those adapters through renderer
- * construction is basemap task 17's job, not this file's. This object remains the active binding
- * until that wiring lands.
- */
-internal object DeterministicRentilePrivateKeyResolver : RentilePrivateKeyResolver {
-    override fun resolve(
-        locator: ResourceLocator,
-        resourceClass: ResourceClass,
-    ): RentilePrivateKey = RentilePrivateKey("${resourceClass.name}:${locator.value}")
-}
 
 /**
  * One [Sticker]'s [Placement] paired with its decoded, not-yet-uploaded image and the [ResourceKey]
@@ -299,6 +274,14 @@ internal class RenGRenderer(
     private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver()
     private val geometryPipelines: MutableMap<ResourceKey, GeometryPipeline> = mutableMapOf()
 
+    /**
+     * Reproduces Rentile's actual `sha256Hex(withRedactedAuthenticationQuery(url))` key for the seven
+     * classes Rentile itself fetches and keys, and RenG's own canonical identity for the four it does
+     * not (basemap task 16). This is a pure, stateless function of `(locator, resourceClass)`, so one
+     * shared instance is correct for every call this renderer makes across every frame preparation.
+     */
+    private val rentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256)
+
     private var offscreenSurface: OffscreenSurface? = initialGlState.offscreenSurface
     private var compositePipeline: CompositePipeline? = initialGlState.compositePipeline
     private var stickerPipeline: StickerPipeline? = initialGlState.stickerPipeline
@@ -315,7 +298,7 @@ internal class RenGRenderer(
         frameEncoder = FramePlanCanonicalEncoder(),
         frameIdentityRegistry = registry,
         resourceKeyDeriver = ResourceKeyDeriver(),
-        rentilePrivateKeyResolver = DeterministicRentilePrivateKeyResolver,
+        rentilePrivateKeyResolver = rentilePrivateKeyResolver,
     )
 
     // ---- Preparation --------------------------------------------------------------------------
@@ -437,7 +420,7 @@ internal class RenGRenderer(
             maximumResponseBytes = configuration.resourceLimits.maximumBytesFor(ResourceClass.MODEL_TEXTURE),
             resourceKey = derived.key,
             rawKey = requireNotNull(derived.rawKey),
-            privateRentileKey = DeterministicRentilePrivateKeyResolver.resolve(locator, ResourceClass.MODEL_TEXTURE),
+            privateRentileKey = rentilePrivateKeyResolver.resolve(locator, ResourceClass.MODEL_TEXTURE),
             canonicalIdentity = derived.identity,
         )
     }

@@ -1,6 +1,5 @@
 package com.rohittp.reng.internal.driver
 
-import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.internal.glb.GlbScan
 import com.rohittp.reng.internal.glb.GltfFeatureResult
@@ -29,45 +28,34 @@ internal fun interface ClassGateRunner {
 }
 
 /**
- * RenG's own class gates. `DECODE_PNG` genuinely decodes a sticker or model-texture PNG through
- * [decodePng], gated by [limits]'s decoded-byte ceiling; `PARSE_GLB`/`VALIDATE_GLB_FEATURES` genuinely
- * scan and parse a GLB container's JSON chunk into a [com.rohittp.reng.internal.glb.GltfDocument] via the
- * canonical [scanGlb]/[parseGltf]/[validateGltfFeatures] (ADR 0021's complete supported subset);
- * `VALIDATE_DEM_TERRAIN_ENCODING` decodes a DEM tile's PNG bytes and inspects the result.
+ * RenG's own class gates, and only those. `DECODE_PNG` genuinely decodes a sticker or model-texture PNG
+ * through [decodePng], gated by [limits]'s decoded-byte ceiling; `PARSE_GLB`/`VALIDATE_GLB_FEATURES`
+ * genuinely scan and parse a GLB container's JSON chunk into a
+ * [com.rohittp.reng.internal.glb.GltfDocument] via the canonical
+ * [scanGlb]/[parseGltf]/[validateGltfFeatures] (ADR 0021's complete supported subset).
+ *
+ * The gate's identity alone selects the check, with no second discrimination on the content's resource
+ * class, because [com.rohittp.reng.internal.resource.ordinaryResourceClassGates] is what pairs the two:
+ * it names `DECODE_PNG` for exactly `STICKER_IMAGE` and `MODEL_TEXTURE`, and
+ * [com.rohittp.reng.internal.resource.AwaitingClassGate]'s own `init` refuses any cursor whose gate is
+ * not that class's gate at that index. Nothing engine-keyed reaches here: the Rentile engine acquires and
+ * validates its own seven classes through RenG's firewall, so RenG's driver never routes one.
  *
  * **GLB wiring:** `PARSE_GLB` and `VALIDATE_GLB_FEATURES` each independently re-derive the parsed
  * [com.rohittp.reng.internal.glb.GltfDocument] from [ResolvedResourceContent.stored]'s raw bytes via
- * [parseGlbDocument] — the same redundancy [runDecodePng] and [runValidateDemTerrainEncoding] already
- * accept for PNG, since this interface answers one gate at a time with no result cache between calls.
- * A [GlbScan] container-framing rejection or a [GltfParseResult.Malformed] structural rejection both
- * fail `PARSE_GLB`; `VALIDATE_GLB_FEATURES` additionally fails on either of those (a document
- * `PARSE_GLB` would already have refused can never be "supported"), or on a genuine
- * [GltfFeatureResult.Unsupported] feature outside ADR 0021's subset.
- *
- * **Engine-validated classes:** `BASEMAP_TILE_JSON`, `BASEMAP_VECTOR_TILE`, `BASEMAP_GEO_JSON`, and
- * `DECODE_PNG` over `BASEMAP_RASTER_TILE`/`BASEMAP_DEM_TILE` are Rentile's own firewall's job (ADR
- * 0016/0017) — RenG reports the outcome the firewall already observed rather than re-decoding or
- * re-parsing bytes Rentile already validated. Task 18 supplies that outcome; until it lands, and wired
- * as a constructor parameter this class does not yet take, those combinations are unreached and this
- * runner says so loudly (`error`) rather than rubber-stamping them `Valid`.
+ * [parseGlbDocument] — the same redundancy [runDecodePng] already accepts for PNG, since this interface
+ * answers one gate at a time with no result cache between calls. A [GlbScan] container-framing rejection
+ * or a [GltfParseResult.Malformed] structural rejection both fail `PARSE_GLB`; `VALIDATE_GLB_FEATURES`
+ * additionally fails on either of those (a document `PARSE_GLB` would already have refused can never be
+ * "supported"), or on a genuine [GltfFeatureResult.Unsupported] feature outside ADR 0021's subset.
  */
 internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGateRunner {
-    override suspend fun run(gate: ResourceClassGate, content: ResolvedResourceContent): SuppliedValidationOutcome {
-        val resourceClass = content.route.resourceClass
-        return when (gate) {
-            ResourceClassGate.DECODE_PNG -> when (resourceClass) {
-                ResourceClass.STICKER_IMAGE, ResourceClass.MODEL_TEXTURE -> runDecodePng(content)
-                else -> reportUnobservedFirewallOutcome(gate, resourceClass)
-            }
-            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING -> runValidateDemTerrainEncoding(content)
+    override suspend fun run(gate: ResourceClassGate, content: ResolvedResourceContent): SuppliedValidationOutcome =
+        when (gate) {
+            ResourceClassGate.DECODE_PNG -> runDecodePng(content)
             ResourceClassGate.PARSE_GLB -> runParseGlb(content)
             ResourceClassGate.VALIDATE_GLB_FEATURES -> runValidateGlbFeatures(content)
-            ResourceClassGate.PARSE_TILEJSON,
-            ResourceClassGate.DECODE_VECTOR_TILE,
-            ResourceClassGate.PARSE_GEOJSON,
-            -> reportUnobservedFirewallOutcome(gate, resourceClass)
         }
-    }
 
     private fun runDecodePng(content: ResolvedResourceContent): SuppliedValidationOutcome =
         when (decodePng(content.stored.bytes, limits.maximumDecodedImageBytes)) {
@@ -77,16 +65,6 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
             PngDecodeResult.TooLarge,
             -> SuppliedValidationOutcome.Failed
         }
-
-    private fun runValidateDemTerrainEncoding(content: ResolvedResourceContent): SuppliedValidationOutcome {
-        val decoded = decodePng(content.stored.bytes, limits.maximumDecodedImageBytes)
-        val image = (decoded as? PngDecodeResult.Success)?.image ?: return SuppliedValidationOutcome.Failed
-        return if (isEightBitRgbTerrainEncoding(image)) {
-            SuppliedValidationOutcome.Valid
-        } else {
-            SuppliedValidationOutcome.Failed
-        }
-    }
 
     private fun runParseGlb(content: ResolvedResourceContent): SuppliedValidationOutcome =
         when (parseGlbDocument(content.stored.bytes)) {
@@ -116,13 +94,6 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
         val binChunkLength = admitted.binChunk?.count()?.toLong() ?: 0L
         return parseGltf(admitted.json, binChunkLength, MAXIMUM_GLB_NODE_DEPTH)
     }
-
-    private fun reportUnobservedFirewallOutcome(gate: ResourceClassGate, resourceClass: ResourceClass): Nothing =
-        error(
-            "RenGClassGateRunner does not yet observe the Rentile firewall outcome for $gate on " +
-                "$resourceClass; Task 18 supplies it, wired as a constructor parameter this class does " +
-                "not yet take",
-        )
 }
 
 /** glTF scene-graph node depth bound for `PARSE_GLB`'s [parseGltf] call: generous for anything RenG
@@ -131,6 +102,21 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
 private const val MAXIMUM_GLB_NODE_DEPTH = 128
 
 private const val OPAQUE_ALPHA: Byte = -1 // 0xFF unsigned
+
+/**
+ * Admits a DEM tile's raw PNG bytes iff they decode and carry an eight-bit RGB terrain encoding.
+ *
+ * This is no longer a class gate and has no caller in this file: RenG's driver never acquires a
+ * `BASEMAP_DEM_TILE` — the Rentile engine does, through RenG's firewall — so nothing can reach a
+ * [ResourceClassGate] over that class. ADR 0016 puts the obligation on the **write** path instead ("a
+ * fetched DEM write additionally requires RenG's terrain encoding validation"), which is
+ * [com.rohittp.reng.internal.firewall.OperationRegistry]'s. It is kept here, and `internal` rather than
+ * private, so that path can call the identical check rather than growing a second copy of it.
+ */
+internal fun validatesDemTerrainEncoding(bytes: ByteArray, maximumDecodedImageBytes: Long): Boolean {
+    val image = (decodePng(bytes, maximumDecodedImageBytes) as? PngDecodeResult.Success)?.image ?: return false
+    return isEightBitRgbTerrainEncoding(image)
+}
 
 /**
  * Admits a decoded image iff every pixel's alpha channel is fully opaque. Mapbox Terrain-RGB and

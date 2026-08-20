@@ -17,8 +17,9 @@ import kotlinx.coroutines.test.runTest
 import kotlin.io.encoding.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class ClassGateRunnerTest {
     private val defaultRunner: ClassGateRunner = RenGClassGateRunner(ResourceLimits())
@@ -50,20 +51,18 @@ class ClassGateRunnerTest {
         assertIs<SuppliedValidationOutcome.Failed>(runner.run(ResourceClassGate.DECODE_PNG, stickerContent(large4096Png)))
     }
 
+    // Terrain encoding is no longer a class gate: RenG's driver never acquires a BASEMAP_DEM_TILE, so
+    // no ResourceClassGate can ever name that class. ADR 0016 puts the obligation on the firewall's
+    // write path instead, which calls this same function. The three admission answers it must give are
+    // unchanged, so they are still pinned here -- on the function rather than through a gate that can
+    // no longer be reached.
     @Test
-    fun validatesDemTerrainEncodingOnDecodedSamples() = runTest {
-        // Rentile validates DEM only as a generic image, so terrain encoding is RenG's gate.
-        assertEquals(
-            SuppliedValidationOutcome.Valid,
-            run(ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING, demContent(mapboxDem)),
-        )
-        assertEquals(
-            SuppliedValidationOutcome.Valid,
-            run(ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING, demContent(terrariumDem)),
-        )
-        assertIs<SuppliedValidationOutcome.Failed>(
-            run(ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING, demContent(fourChannelDem)),
-        )
+    fun admitsBothEightBitRgbTerrainEncodingsAndRejectsAFourChannelOne() {
+        val ceiling = ResourceLimits().maximumDecodedImageBytes
+        assertTrue(validatesDemTerrainEncoding(mapboxDem, ceiling))
+        assertTrue(validatesDemTerrainEncoding(terrariumDem, ceiling))
+        assertFalse(validatesDemTerrainEncoding(fourChannelDem, ceiling))
+        assertFalse(validatesDemTerrainEncoding(corruptPng, ceiling), "content that cannot decode is not terrain")
     }
 
     @Test
@@ -95,18 +94,28 @@ class ClassGateRunnerTest {
         )
     }
 
-    // Documents, rather than silently rubber-stamps, the one gap this task's brief calls out by name:
-    // the six classes Rentile's own firewall validates have no real check here yet, because the
-    // firewall outcome Task 18 supplies does not exist in this worktree. A future accidental "just
-    // return Valid" for these would be exactly the always-yes anti-pattern this task replaces
-    // elsewhere; asserting the loud failure here keeps that anti-pattern from creeping back in.
+    // Every gate this runner can be handed is one RenG genuinely owns. There is no engine-validated
+    // arm any more -- not a loud `error`, and (the anti-pattern that error existed to prevent) not a
+    // silent `Valid` either -- because ResourceClassGate has no member for a check the Rentile engine
+    // performs. ResourceOperationOrdinaryCommitTest's
+    // ordinaryClassGatesMatchProductionForEveryClassAndNameNoEngineKeyedOne pins the other half: no
+    // engine-keyed class produces a gate to hand over in the first place.
     @Test
-    fun reportsEngineValidatedClassesAsNotYetObservedRatherThanRubberStampingThem() = runTest {
-        assertFailsWith<IllegalStateException> {
-            run(ResourceClassGate.PARSE_TILEJSON, content(ResourceClass.BASEMAP_TILE_JSON, validPng))
-        }
-        assertFailsWith<IllegalStateException> {
-            run(ResourceClassGate.DECODE_PNG, content(ResourceClass.BASEMAP_RASTER_TILE, validPng))
+    fun everyDeclaredGateIsOneRenGItselfPerforms() = runTest {
+        assertEquals(
+            setOf(
+                ResourceClassGate.DECODE_PNG,
+                ResourceClassGate.PARSE_GLB,
+                ResourceClassGate.VALIDATE_GLB_FEATURES,
+            ),
+            ResourceClassGate.entries.toSet(),
+        )
+        ResourceClassGate.entries.forEach { gate ->
+            val content = when (gate) {
+                ResourceClassGate.DECODE_PNG -> stickerContent(validPng)
+                ResourceClassGate.PARSE_GLB, ResourceClassGate.VALIDATE_GLB_FEATURES -> modelContent(validGlb)
+            }
+            assertEquals(SuppliedValidationOutcome.Valid, run(gate, content), gate.name)
         }
     }
 }
@@ -136,8 +145,6 @@ private fun content(
 private fun stickerContent(bytes: ByteArray) = content(ResourceClass.STICKER_IMAGE, bytes)
 
 private fun modelContent(bytes: ByteArray) = content(ResourceClass.MODEL_GLB, bytes)
-
-private fun demContent(bytes: ByteArray) = content(ResourceClass.BASEMAP_DEM_TILE, bytes)
 
 private fun storedProvenanceContent(bytes: ByteArray) =
     content(ResourceClass.STICKER_IMAGE, bytes, ContentProvenance.STORE)

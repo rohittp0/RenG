@@ -64,12 +64,14 @@ import kotlinx.coroutines.CancellationException
  * that need a real adapter call — [SampleClock], [ObserveResident], [ReadStore], [CallTransport], and
  * [ReplayLatchedTransport] — plus [WriteStore] (a real `Store.write` call, mapped the same way as every
  * other adapter call), [ValidateResourceClass] (a real [ClassGateRunner] call — see that class for what
- * "real" means for each gate, including the classes it does not yet observe), [InstallVisibility] (a real
- * [ResidentCache] install-and-lease — see [installVisibility]), [CancelRoute] (pure internal bookkeeping
- * — see the `when` branch below), and the four basemap-style commit verbs: [ValidateBasemapStyle] (pure
- * document reading), [CompileBasemapStyle] (route preregistration plus a real engine compilation through
- * [BasemapEngineHost]), [WriteBasemapStyle] (a real `Store.write`) and [InstallBasemapStyleVisibility] (a
- * real install-and-lease). Every action no task has reached is an unreachable `else`.
+ * "real" means for each gate; every gate it declares is one RenG performs itself, since the engine
+ * acquires the basemap fetch classes through the firewall and they never reach a class gate),
+ * [InstallVisibility] (a real [ResidentCache] install-and-lease — see [installVisibility]),
+ * [CancelRoute] (pure internal bookkeeping — see the `when` branch below), and the four basemap-style
+ * commit verbs: [ValidateBasemapStyle] (pure document reading), [CompileBasemapStyle] (route
+ * preregistration plus a real engine compilation through [BasemapEngineHost]), [WriteBasemapStyle] (a
+ * real `Store.write`) and [InstallBasemapStyleVisibility] (a real install-and-lease). Every action no
+ * task has reached is an unreachable `else`.
  *
  * Unlike every other `Failed` outcome here, [SuppliedInstallOutcome.Failed] carries a [FailureDescriptor]
  * this class constructs directly rather than a bare marker [ResourceOperationStateMachine] classifies —

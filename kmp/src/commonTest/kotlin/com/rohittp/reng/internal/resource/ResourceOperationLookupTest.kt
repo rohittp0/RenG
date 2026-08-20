@@ -606,7 +606,7 @@ class ResourceOperationLookupTest {
     fun discoveryRouteThatFetchedItsOwnBytesCommitsThemBeforeRetiringIntoChildDiscovery() {
         var state = startedState(
             ResourceAccessMode.RELOAD,
-            resourceClass = ResourceClass.BASEMAP_TILE_JSON,
+            resourceClass = ResourceClass.MODEL_TEXTURE,
             discoveryRequired = true,
         ).state
         val parentId = state.occurrences.single().id
@@ -637,7 +637,7 @@ class ResourceOperationLookupTest {
 
         val gated = ResourceOperationStateMachine.transition(state, AdvancePendingClassGates(0L))
         val gate = assertIs<ValidateResourceClass>(gated.actions.single())
-        assertEquals(ResourceClassGate.PARSE_TILEJSON, gate.gate)
+        assertEquals(ResourceClassGate.DECODE_PNG, gate.gate)
         assertEquals(
             "route discovery readiness requires no in-flight adapter action",
             assertFailsWith<IllegalArgumentException> {

@@ -1183,7 +1183,9 @@ class OrderedPreparationStateMachineTest {
 
         fun discoveredChild(token: String): VisibleResource = visibleResource(
             locator = ResourceLocator("$token.bin"),
-            resourceClass = ResourceClass.BASEMAP_VECTOR_TILE,
+            // A RenG-owned class deliberately: this fixture is arbitrary fodder for a lease-ordering
+            // proof, and the driver never acquires an engine-keyed class (ADR 0003, ADR 0016).
+            resourceClass = ResourceClass.MODEL_TEXTURE,
             maximumResponseBytes = DISCOVERED_CHILD_RESPONSE_BYTES,
         )
 

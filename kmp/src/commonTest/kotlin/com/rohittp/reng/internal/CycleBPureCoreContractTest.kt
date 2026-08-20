@@ -523,7 +523,7 @@ class CycleBPureCoreContractTest {
         val parent = occurrence(
             id = 1L,
             ownerId = 1L,
-            registration = registration("parent", ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+            registration = registration("parent", ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
             discoveryRequired = true,
         )
         val sharedStatic = occurrence(
@@ -904,7 +904,7 @@ class CycleBPureCoreContractTest {
             ownerId = OWNER_ONE,
             registration = registration(
                 "owner-one-sibling",
-                ResourceClass.BASEMAP_TILE_JSON,
+                ResourceClass.MODEL_TEXTURE,
                 ResourceAccessMode.RELOAD,
             ),
         )

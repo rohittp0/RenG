@@ -1565,7 +1565,7 @@ internal object ResourceOperationStateMachine {
 
         private fun ordinaryClassGates(content: ResolvedResourceContent): List<ResourceClassGate> =
             requireNotNull(ordinaryResourceClassGates(content.route.resourceClass)) {
-                "ordinary class gates require a non-sprite, non-style resource class"
+                "ordinary class gates require a resource class RenG's own driver acquires and gates"
             }
 
         private fun startStoreRead(
@@ -2488,24 +2488,17 @@ internal object ResourceOperationStateMachine {
     ): FailureDescriptor {
         if (content.provenance == ContentProvenance.STORE) return storeIntegrityFailure(content)
         return when (gate) {
-            ResourceClassGate.PARSE_TILEJSON,
-            ResourceClassGate.PARSE_GEOJSON,
-            ResourceClassGate.PARSE_GLB,
-            -> resourceFormatFailure(
+            ResourceClassGate.PARSE_GLB -> resourceFormatFailure(
                 content,
                 RenGErrorCode.RESOURCE_PARSE_FAILED,
                 PipelineStage.RESOURCE_PARSING,
             )
-            ResourceClassGate.DECODE_VECTOR_TILE,
-            ResourceClassGate.DECODE_PNG,
-            -> resourceFormatFailure(
+            ResourceClassGate.DECODE_PNG -> resourceFormatFailure(
                 content,
                 RenGErrorCode.RESOURCE_DECODE_FAILED,
                 PipelineStage.RESOURCE_DECODING,
             )
-            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-            ResourceClassGate.VALIDATE_GLB_FEATURES,
-            -> resourceFormatFailure(
+            ResourceClassGate.VALIDATE_GLB_FEATURES -> resourceFormatFailure(
                 content,
                 RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE,
                 PipelineStage.RESOURCE_PARSING,

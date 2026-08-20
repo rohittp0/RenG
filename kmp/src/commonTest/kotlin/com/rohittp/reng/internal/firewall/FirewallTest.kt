@@ -29,7 +29,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
 class FirewallTest {
@@ -262,6 +265,221 @@ class FirewallTest {
         assertEquals(0, store.writeCalls)
     }
 
+    // ---- Gap 1: class-specific validation on the write path -------------------------------------
+
+    @Test
+    fun refusesToWriteASpriteImageThatCannotDecode() = runTest {
+        // The read gate already refuses such a record; before this, `writeStore` applied only
+        // `copyValidStoredResource`'s generic record rules, so the firewall handed the consumer's Store
+        // bytes it could already prove Rentile's own sprite compiler will never accept.
+        val store = RoutedStore()
+        val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_SPRITE_IMAGE to CORRUPT_STICKER_PNG))
+        val fw = firewall(transport = transport, store = store)
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(CORRUPT_STICKER_PNG))
+        }
+        assertEquals(0, store.writeCalls, "a sprite image that cannot decode never reaches the consumer")
+    }
+
+    @Test
+    fun refusesToWriteSpriteJsonThatCannotParse() = runTest {
+        val store = RoutedStore()
+        val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_SPRITE_JSON to UNPARSEABLE_SPRITE_JSON))
+        val fw = firewall(transport = transport, store = store)
+        fw.transport.execute(engineRequestFor(spriteJsonRoute))
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(UNPARSEABLE_SPRITE_JSON))
+        }
+        assertEquals(0, store.writeCalls, "sprite json that cannot parse never reaches the consumer")
+    }
+
+    @Test
+    fun writesTheEngineRevalidatedClassesWithoutAClassSpecificWriteGate() = runTest {
+        // Deliberate, not an oversight: Rentile's raster, vector, TileJSON and GeoJSON acquirers all
+        // re-validate on a store hit and remove-then-refetch when that validation fails, so a bad record
+        // in one of those classes self-heals and is never terminal. Only the sprite pair is terminal, so
+        // only the sprite pair (and ADR 0016's DEM obligation) earns a write-path format gate. A raster
+        // tile whose bytes are not even a PNG is therefore still written.
+        val store = RoutedStore()
+        val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_RASTER_TILE to CORRUPT_STICKER_PNG))
+        val fw = firewall(transport = transport, store = store)
+        fw.transport.execute(engineRequestFor(rasterRoute))
+        fw.store.write(engineKeyFor(rasterRoute), engineStoredResourceOf(CORRUPT_STICKER_PNG))
+        assertEquals(1, store.writeCalls, "an engine-revalidated class keeps its generic-only write gate")
+    }
+
+    // ---- Gap 2: the sprite-pair rendezvous ------------------------------------------------------
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun parksASpriteMemberWriteUntilItsSiblingArrivesAndThenWritesBoth() = runTest {
+        val store = RoutedStore()
+        val fw = firewall(transport = spritePairTransport(VALID_SPRITE_JSON), store = store)
+        fw.transport.execute(engineRequestFor(spriteJsonRoute))
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+
+        val jsonWrite = launch {
+            fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(VALID_SPRITE_JSON))
+        }
+        runCurrent()
+        assertEquals(0, store.writeCalls, "a sprite member must not reach the consumer before its sibling")
+
+        val imageWrite = launch {
+            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        }
+        jsonWrite.join()
+        imageWrite.join()
+        assertEquals(2, store.writeCalls, "a jointly valid pair writes both members")
+        assertEquals(
+            setOf(ResourceClass.BASEMAP_SPRITE_JSON, ResourceClass.BASEMAP_SPRITE_IMAGE),
+            store.writtenClasses.toSet(),
+        )
+    }
+
+    @Test
+    fun refusesBothSpriteWritesWhenAnAtlasEntryLiesOutsideTheImage() = runTest {
+        // Neither member is individually malformed -- the json parses, the png decodes -- so no
+        // per-member gate can see this. Rentile writes both members and only then compiles, so without
+        // the joint gate this pair is persisted and fails identically on every later prepare().
+        val store = RoutedStore()
+        val fw = firewall(transport = spritePairTransport(OUT_OF_BOUNDS_SPRITE_JSON), store = store)
+        fw.transport.execute(engineRequestFor(spriteJsonRoute))
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+
+        var jsonFailure: Throwable? = null
+        var imageFailure: Throwable? = null
+        val jsonWrite = launch {
+            jsonFailure = runCatching {
+                fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(OUT_OF_BOUNDS_SPRITE_JSON))
+            }.exceptionOrNull()
+        }
+        val imageWrite = launch {
+            imageFailure = runCatching {
+                fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+            }.exceptionOrNull()
+        }
+        jsonWrite.join()
+        imageWrite.join()
+        assertEquals(RenGErrorCode.STORE_WRITE_FAILED, (jsonFailure as? RenGException)?.code)
+        assertEquals(RenGErrorCode.STORE_WRITE_FAILED, (imageFailure as? RenGException)?.code)
+        assertEquals(0, store.writeCalls, "neither member is written when the pair cannot compile")
+    }
+
+    @Test
+    fun validatesTheSpritePairAgainstASiblingServedFromTheStore() = runTest {
+        // The mixed case: the firewall performed the store read itself, so it holds the hit member's
+        // bytes and the fetched member's write never waits for a write that is never coming.
+        val store = RoutedStore(reads = mapOf(ResourceClass.BASEMAP_SPRITE_JSON to storedRecordOf(VALID_SPRITE_JSON)))
+        val fw = firewall(transport = spritePairTransport(VALID_SPRITE_JSON), store = store)
+        assertNotNull(fw.store.read(engineKeyFor(spriteJsonRoute)))
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+        fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        assertEquals(1, store.writeCalls, "the fetched member writes once its store-hit sibling is known")
+    }
+
+    @Test
+    fun refusesASpriteWriteWhoseStoreHitSiblingCannotCompleteThePair() = runTest {
+        val store = RoutedStore(
+            reads = mapOf(ResourceClass.BASEMAP_SPRITE_JSON to storedRecordOf(OUT_OF_BOUNDS_SPRITE_JSON)),
+        )
+        val fw = firewall(transport = spritePairTransport(VALID_SPRITE_JSON), store = store)
+        assertNotNull(fw.store.read(engineKeyFor(spriteJsonRoute)))
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        }
+        assertEquals(0, store.writeCalls)
+    }
+
+    @Test
+    fun failsRatherThanHangsWhenTheSiblingsFetchFailed() = runTest {
+        // Rentile launches both members inside one coroutineScope, so a failed member cancels the parked
+        // sibling. The firewall does not rely on that alone: a sanitized transport failure on a sprite
+        // route latches that member as one that can never arrive, so the sibling fails on its own.
+        val store = RoutedStore()
+        val transport = RoutedTransport(
+            bodies = mapOf(ResourceClass.BASEMAP_SPRITE_IMAGE to SPRITE_ATLAS_PNG),
+            failures = mapOf(ResourceClass.BASEMAP_SPRITE_JSON to RuntimeException("boom")),
+        )
+        val fw = firewall(transport = transport, store = store)
+        assertFailsWith<RenGException> { fw.transport.execute(engineRequestFor(spriteJsonRoute)) }
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        }
+        assertEquals(0, store.writeCalls)
+    }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun propagatesCancellationUnwrappedWhileParkedAtTheSpriteRendezvous() = runTest {
+        val store = RoutedStore()
+        val fw = firewall(transport = spritePairTransport(VALID_SPRITE_JSON), store = store)
+        fw.transport.execute(engineRequestFor(spriteJsonRoute))
+
+        var parkedFailure: Throwable? = null
+        val jsonWrite = launch {
+            try {
+                fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(VALID_SPRITE_JSON))
+            } catch (failure: Throwable) {
+                parkedFailure = failure
+                throw failure
+            }
+        }
+        runCurrent()
+        assertEquals(0, store.writeCalls, "the member is genuinely parked, not already written")
+        jsonWrite.cancel()
+        jsonWrite.join()
+        // Asserted on type, never identity: Kotlin's stack recovery may hand back a copy carrying the
+        // original as its immediate cause.
+        assertTrue(parkedFailure is CancellationException, "a parked rendezvous propagates cancellation")
+        assertEquals(0, store.writeCalls)
+    }
+
+    @Test
+    fun refusesASpriteWriteWhoseSiblingRouteWasNeverPreregistered() = runTest {
+        // No sibling route means no pair can ever be assembled, so the write fails closed immediately
+        // rather than parking on an arrival that this invocation can never produce.
+        val store = RoutedStore()
+        val registry = OperationRegistry(
+            transport = spritePairTransport(VALID_SPRITE_JSON),
+            store = store,
+            privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
+        ).also { it.preregister(spriteImageRoute) }
+        FirewallTransport(registry).execute(engineRequestFor(spriteImageRoute))
+        assertFailsWith<RenGException> {
+            FirewallStore(registry).write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        }
+        assertEquals(0, store.writeCalls)
+    }
+
+    // ---- Gap 3: DEM terrain-encoding validation on the write path -------------------------------
+
+    @Test
+    fun refusesADemWriteThatIsNotAnEightBitRgbTerrainEncoding() = runTest {
+        // ADR 0016: "A fetched DEM write additionally requires RenG's terrain encoding validation."
+        // Rentile's DEM path reaches its raw-store write after generic bounded image validation only.
+        val store = RoutedStore()
+        val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_DEM_TILE to TRANSLUCENT_PNG))
+        val fw = firewall(transport = transport, store = store)
+        fw.transport.execute(engineRequestFor(demRoute))
+        assertFailsWith<RenGException> {
+            fw.store.write(engineKeyFor(demRoute), engineStoredResourceOf(TRANSLUCENT_PNG))
+        }
+        assertEquals(0, store.writeCalls)
+    }
+
+    @Test
+    fun writesADemTileWhoseTerrainEncodingIsEightBitRgb() = runTest {
+        val store = RoutedStore()
+        val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_DEM_TILE to OPAQUE_RGBA_PNG))
+        val fw = firewall(transport = transport, store = store)
+        fw.transport.execute(engineRequestFor(demRoute))
+        fw.store.write(engineKeyFor(demRoute), engineStoredResourceOf(OPAQUE_RGBA_PNG))
+        assertEquals(1, store.writeCalls, "a fully opaque eight-bit encoding satisfies either DEM scheme")
+    }
+
     /**
      * `runTest`'s scheduler is single-threaded and virtual-time, so none of the tests above can
      * exercise a genuine data race on `lastTransportDigestByRoute` -- `SuspendJoin` releases its own
@@ -385,6 +603,13 @@ private val spriteImageRoute = ResourceRouteKey(
     maximumResponseBytes = 32L * 1024L * 1024L,
 )
 
+private val demRoute = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator("https://tiles.example/dem/0/0/0.png"),
+    resourceClass = ResourceClass.BASEMAP_DEM_TILE,
+    maximumResponseBytes = 32L * 1024L * 1024L,
+)
+
 private class Firewall(
     consumerTransport: Transport,
     consumerStore: Store,
@@ -397,6 +622,7 @@ private class Firewall(
         registry.preregister(rasterRoute)
         registry.preregister(spriteJsonRoute)
         registry.preregister(spriteImageRoute)
+        registry.preregister(demRoute)
     }
 
     val transport: EngineResourceTransport = FirewallTransport(registry)
@@ -412,6 +638,7 @@ private fun engineClassFor(resourceClass: ResourceClass): EngineResourceClass = 
     ResourceClass.BASEMAP_RASTER_TILE -> EngineResourceClass.RASTER_TILE
     ResourceClass.BASEMAP_SPRITE_JSON -> EngineResourceClass.SPRITE_JSON
     ResourceClass.BASEMAP_SPRITE_IMAGE -> EngineResourceClass.SPRITE_IMAGE
+    ResourceClass.BASEMAP_DEM_TILE -> EngineResourceClass.DEM_TILE
     else -> error("fixture does not exercise this class")
 }
 
@@ -535,4 +762,90 @@ private val VALID_STICKER_PNG: ByteArray = Base64.decode(
 // whose zlib stream can never inflate to the declared raster size, so DECODE_PNG genuinely fails.
 private val CORRUPT_STICKER_PNG: ByteArray = Base64.decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAABElEQVR42mPgKmwFjgAAAABJRU5ErkJggg==",
+)
+
+/** Answers each [ResourceClass] its own body, or throws that class's [failures] entry instead. The
+ *  sprite pair needs two genuinely different bodies on one firewall, which [CountingTransport]'s single
+ *  fixed body cannot express. Not thread-safe, for the same reason [CountingTransport] is not. */
+private class RoutedTransport(
+    private val bodies: Map<ResourceClass, ByteArray> = emptyMap(),
+    private val failures: Map<ResourceClass, Throwable> = emptyMap(),
+) : Transport {
+    var executeCalls: Int = 0
+        private set
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        executeCalls += 1
+        failures[request.resourceClass]?.let { throw it }
+        return TransportResponse(
+            statusCode = 200,
+            body = bodies.getValue(request.resourceClass),
+            metadata = TransportResponseMetadata(
+                contentType = "application/octet-stream",
+                freshUntilEpochMillis = FIXED_FRESH_UNTIL_EPOCH_MILLIS,
+            ),
+        )
+    }
+}
+
+/** Answers a read per [ResourceClass] (absent means a miss) and records every write's class. */
+private class RoutedStore(
+    private val reads: Map<ResourceClass, StoredRawResource> = emptyMap(),
+) : Store {
+    var readCalls: Int = 0
+        private set
+    var writeCalls: Int = 0
+        private set
+    val writtenClasses: MutableList<ResourceClass> = mutableListOf()
+
+    override suspend fun read(key: RenGRawResourceKey): StoredRawResource? {
+        readCalls += 1
+        return reads[key.resourceClass]
+    }
+
+    override suspend fun write(key: RenGRawResourceKey, resource: StoredRawResource) {
+        writeCalls += 1
+        writtenClasses += key.resourceClass
+    }
+}
+
+/** The two sprite members' real bodies, plus [jsonBody] for whichever atlas manifest a test needs. */
+private fun spritePairTransport(jsonBody: ByteArray): RoutedTransport = RoutedTransport(
+    mapOf(
+        ResourceClass.BASEMAP_SPRITE_JSON to jsonBody,
+        ResourceClass.BASEMAP_SPRITE_IMAGE to SPRITE_ATLAS_PNG,
+    ),
+)
+
+private fun storedRecordOf(bytes: ByteArray): StoredRawResource = StoredRawResource(
+    bytes = bytes,
+    contentDigest = sha256Hex(bytes),
+    metadata = StoredRawResourceMetadata(storedAtEpochMillis = 0L),
+)
+
+// The sprite atlas image every pair fixture below is measured against: the same real 2x2 truecolour PNG
+// the sticker fixture uses, so an entry rect of exactly 2x2 fits and 3x2 does not.
+private val SPRITE_ATLAS_PNG: ByteArray = VALID_STICKER_PNG
+
+private val VALID_SPRITE_JSON: ByteArray =
+    """{"icon":{"x":0,"y":0,"width":2,"height":2}}""".encodeToByteArray()
+
+// Parses, and every member gate accepts it; only the atlas image's own dimensions reveal that the
+// entry's rect runs one pixel past the right edge.
+private val OUT_OF_BOUNDS_SPRITE_JSON: ByteArray =
+    """{"icon":{"x":1,"y":0,"width":2,"height":2}}""".encodeToByteArray()
+
+private val UNPARSEABLE_SPRITE_JSON: ByteArray = "{".encodeToByteArray()
+
+// A real 2x2 colour-type-6 PNG whose last pixel carries alpha 0x80: it decodes, so generic image
+// validation admits it, but its alpha channel carries data, so it is not an eight-bit RGB terrain
+// encoding under either Mapbox Terrain-RGB or Terrarium.
+private val TRANSLUCENT_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAGklEQVR4nGPgEpH7r2Fk85/BLSDqf0peRQMAMlsGiqkec00AAAAASUVORK5CYII=",
+)
+
+// The same 2x2 colour-type-6 shape with every alpha byte 0xFF: a four-channel file whose alpha carries
+// nothing, which either terrain scheme reads as plain eight-bit RGB triples.
+private val OPAQUE_RGBA_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAGklEQVR4nGPgEpH7r2Fk85/BLSDqf0pexX8AMtoHCdC1xmkAAAAASUVORK5CYII=",
 )

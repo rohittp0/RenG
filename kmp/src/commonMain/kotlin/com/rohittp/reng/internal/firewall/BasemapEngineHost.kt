@@ -9,6 +9,9 @@ import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.basemap.BasemapStyleManifest
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -96,6 +99,8 @@ internal class BasemapEngineHost(
     private var activeOperation: FirewallOperation? = null
 
     private var compiledStyle: CompiledStyleBinding? = null
+
+    private var derivedManifest: StyleManifestBinding? = null
 
     private var closed: Boolean = false
 
@@ -249,6 +254,74 @@ internal class BasemapEngineHost(
         compiledStyle?.takeIf { it.styleKey == styleKey }?.prepared
 
     /**
+     * The [BasemapStyleManifest] for [styleKey] -- the routes the engine will ask for while compiling the
+     * style and while preparing tiles from it -- **bound to the content it was derived from**, so a later
+     * call over byte-identical content reuses it rather than reading the document again.
+     *
+     * **Why this cache exists.** `deriveBasemapStyleManifest` runs `parseJson` over the *whole* style
+     * document, and a basemap frame needs the manifest twice: once in the driver's own
+     * `ValidateBasemapStyle`, to declare the style-time routes, and once again in
+     * `RenGRenderer.renderBasemapTiles`, to declare the tile-time ones. Those two are the same pure
+     * function of the same two inputs, so the second was pure duplication -- measured at 1.9 ms per parse
+     * for a 248 KB production-shaped style on the JVM and 25.8 ms on an unoptimized native test binary
+     * (`internal.basemap.BasemapRouteDerivationCostTest`), on every basemap frame. The alternative was to
+     * widen the pure core's protocol so `ValidateBasemapStyle` carried its manifest out; this is the
+     * ownership decision that was taken instead, and it sits here rather than in the renderer because the
+     * host is the thing whose lifetime already spans frames.
+     *
+     * **Why content, not generation identity** -- and why the lease is taken first, atomically, and moved
+     * onto the current generation on reuse: identically to [preparedStyle], whose KDoc states the whole
+     * argument. The short form is that a style the consumer's transport does not declare fresh is
+     * re-resolved every frame and installed as a *fresh generation of identical bytes*, so a binding to
+     * the generation object would miss on every frame after the first and reparse the document forever,
+     * invisibly.
+     *
+     * A [BasemapStyleManifestOutcome.Rejected] outcome is returned exactly as derived and **not** bound:
+     * a document RenG cannot read is not a result to remember, and binding one would either serve a
+     * refusal as though it were an answer or leave the previous document's manifest standing for bytes it
+     * did not come from. The derivation itself is pure and never throws for any input, so unlike
+     * [preparedStyle] there is no failure path here to release the lease on -- only the rejection one.
+     *
+     * Not `suspend`, unlike [preparedStyle]: this reaches no engine and no consumer adapter, and every
+     * [ResidentCache] call it makes is ordinary non-suspending code (that class linearizes on
+     * [kotlinx.coroutines.sync.Mutex.tryLock] rather than by suspending). It does read and parse a whole
+     * style document on a miss, which is real CPU on the caller's own dispatcher -- but that is exactly
+     * as true of the driver's `ValidateBasemapStyle`, and `suspend` would not change it.
+     */
+    fun styleManifest(
+        styleKey: ResourceKey,
+        stored: StoredRawResource,
+        baseUri: String,
+    ): BasemapStyleManifestOutcome {
+        requireOpen()
+        val lease = cache.observeAndTakeLease(styleKey)
+            ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
+        val contentDigest = lease.generation.stored.contentDigest
+
+        val existing = derivedManifest
+        if (existing != null &&
+            existing.styleKey == styleKey &&
+            existing.baseUri == baseUri &&
+            existing.contentDigest == contentDigest
+        ) {
+            cache.releaseLease(existing.lease)
+            derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, existing.manifest)
+            return BasemapStyleManifestOutcome.Derived(existing.manifest)
+        }
+
+        releaseStyleManifest()
+        // The leased generation's own bytes, never the caller's copy, for the same reason the compilation
+        // reads them: the resident generation is authoritative.
+        val outcome = deriveBasemapStyleManifest(lease.generation.stored.bytes, baseUri)
+        if (outcome !is BasemapStyleManifestOutcome.Derived) {
+            cache.releaseLease(lease)
+            return outcome
+        }
+        derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, outcome.manifest)
+        return outcome
+    }
+
+    /**
      * Acquires everything [tiles] need — through the firewall, so through this invocation's preregistered
      * routes and nothing else — and returns a network-free batch. Substitution is disabled explicitly.
      */
@@ -301,6 +374,7 @@ internal class BasemapEngineHost(
         if (closed) return
         closed = true
         releaseCompiledStyle()
+        releaseStyleManifest()
         activeOperation = null
         engine.close()
     }
@@ -310,6 +384,11 @@ internal class BasemapEngineHost(
     private fun releaseCompiledStyle() {
         compiledStyle?.let { binding -> cache.releaseLease(binding.lease) }
         compiledStyle = null
+    }
+
+    private fun releaseStyleManifest() {
+        derivedManifest?.let { binding -> cache.releaseLease(binding.lease) }
+        derivedManifest = null
     }
 
     private fun requireOpen() {
@@ -448,6 +527,19 @@ internal class BasemapEngineHost(
         val contentDigest: String,
         val lease: Lease,
         val prepared: PreparedStyle,
+    )
+
+    /**
+     * One derived manifest, the exact content digest and base URI it was derived from, and the lease
+     * keeping that content resident. The base URI takes part because every relative reference in the
+     * document resolves against it, so the same bytes under a different locator are a different manifest.
+     */
+    private class StyleManifestBinding(
+        val styleKey: ResourceKey,
+        val baseUri: String,
+        val contentDigest: String,
+        val lease: Lease,
+        val manifest: BasemapStyleManifest,
     )
 }
 

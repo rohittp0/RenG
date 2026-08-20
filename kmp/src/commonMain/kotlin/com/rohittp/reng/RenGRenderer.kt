@@ -2,7 +2,6 @@ package com.rohittp.reng
 
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
-import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
 import com.rohittp.reng.internal.cache.ResidentCache
@@ -607,21 +606,20 @@ internal class RenGRenderer(
      * the ground through it. Called from **inside** the invocation that compiled the style, so both
      * phases share one operation registry (ADR 0016).
      *
-     * The manifest is re-derived here rather than carried out of the driver. It is the same pure function
-     * of the same two inputs the driver's own `ValidateBasemapStyle` ran — the resident style bytes and
-     * the style's own locator, which is exactly what Rentile receives as `StyleInput.Prefetched.baseUri` —
-     * so the two derivations cannot disagree. The resident generation is authoritative for the bytes, as
-     * it is for the compilation itself.
+     * The manifest is asked of the engine host rather than carried out of the driver. It is the same pure
+     * function of the same two inputs the driver's own `ValidateBasemapStyle` ran — the resident style
+     * bytes and the style's own locator, which is exactly what Rentile receives as
+     * `StyleInput.Prefetched.baseUri` — so the two derivations cannot disagree. The resident generation is
+     * authoritative for the bytes, as it is for the compilation itself.
      *
-     * **This means a basemap frame parses its style document twice**, and that is a measured cost rather
-     * than an assumed-free one: `internal.basemap.BasemapRouteDerivationCostTest` records both halves.
-     * Preregistration itself is immaterial (a realistic 40-tile frame names 150 routes for a few ms of
-     * CPU, less than one of the 150 tile fetches it then performs), so nothing here caches routes. The
-     * duplicated *parse* is not immaterial — it scales with document size, and a 248 KB production-shaped
-     * style costs about 1.9 ms per parse on the JVM. It is left in place deliberately: removing it means
-     * either widening the pure core's protocol to carry the manifest out of `ValidateBasemapStyle`, or
-     * adding a content-digest-bound manifest cache to [BasemapEngineHost] beside the compilation it
-     * already binds that way. Both are ownership decisions, not local tweaks.
+     * **A basemap frame used to parse its style document twice** — once in `ValidateBasemapStyle` and
+     * once again here — which was pure duplication measured at 1.9 ms per parse for a 248 KB
+     * production-shaped style on the JVM (`internal.basemap.BasemapRouteDerivationCostTest`), on every
+     * frame. [BasemapEngineHost.styleManifest] now binds the derivation to the style's content digest
+     * beside the compilation it already binds that way, so a frame over byte-identical content reads the
+     * document once. Preregistration itself stays uncached, and deliberately: it is immaterial (a
+     * realistic 40-tile frame names 150 routes for a few ms of CPU, less than one of the 150 tile fetches
+     * it then performs), and it is the one part of this that genuinely varies per frame.
      *
      * A rejected manifest is unreachable: the driver validated these exact bytes on this exact frame and
      * would have failed the operation otherwise, so reaching it means RenG's own derivation is not a
@@ -636,7 +634,11 @@ internal class RenGRenderer(
         val stored = residentCache.current(styleReference.resourceKey)?.stored
             ?: error("a successful style commit must leave the style document resident")
         val manifest = when (
-            val derived = deriveBasemapStyleManifest(stored.bytes, styleReference.locator.value)
+            val derived = basemapEngineHost.styleManifest(
+                styleKey = styleReference.resourceKey,
+                stored = stored,
+                baseUri = styleReference.locator.value,
+            )
         ) {
             is BasemapStyleManifestOutcome.Derived -> derived.manifest
             is BasemapStyleManifestOutcome.Rejected ->

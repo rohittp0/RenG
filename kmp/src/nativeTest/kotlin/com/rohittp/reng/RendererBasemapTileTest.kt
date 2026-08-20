@@ -148,6 +148,53 @@ class RendererBasemapTileTest {
         )
     }
 
+    /**
+     * The whole tile phase, twice, over a style the consumer's transport never declares fresh — which is
+     * the condition under which a per-frame style *manifest* is reachable at all, and the one
+     * `BasemapEngineHost`'s digest-bound manifest cache has to survive. Frame two resolves the document
+     * from the transport again and the driver installs a fresh generation carrying identical bytes, so a
+     * cache bound to that generation would silently reparse the entire style on every frame forever.
+     *
+     * That reuse is pure, so no consumer adapter can see it and no assertion here can: the reuse itself
+     * is asserted at its own level, by
+     * `internal.firewall.BasemapEngineHostTest.keepsTheManifestAcrossAFreshGenerationOfIdenticalBytes`.
+     * What this test does own is the end of the same path a consumer actually observes — that frame two's
+     * ground is still composed from a manifest describing *this* style, rather than from a stale or empty
+     * one, which would reach the consumer as `AMBIGUOUS_RESOURCE_ROUTE` on every tile at once.
+     *
+     * The transport declares **no** `freshUntilEpochMillis`, checked here as an assertion rather than
+     * assumed: a fresh style would make frame two `RESIDENT`-provenance, install no new generation, and
+     * leave this test passing whether the cache worked or not.
+     */
+    @Test
+    fun rendersTheSameGroundOnEveryFrameThatReResolvesTheSameStyleDocument() = runTest {
+        val transport = TileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+        val urlsAfterFirstFrame = transport.requestedUrls()
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+
+        assertEquals(
+            2,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "the fixture must genuinely re-resolve the style on frame two, or it proves nothing",
+        )
+        assertEquals(
+            first.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            second.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            "a re-resolved style of identical bytes renders exactly the same identified ground",
+        )
+        assertEquals(
+            urlsAfterFirstFrame.filter { it.startsWith("https://tiles.example/") }.sorted(),
+            transport.requestedUrls()
+                .filter { it.startsWith("https://tiles.example/") }
+                .distinct()
+                .sorted(),
+            "and asks for it through exactly the urls the first frame's manifest composed",
+        )
+    }
+
     @Test
     fun aFrameThatDrawsNoBasemapRendersNoGroundAtAll() = runTest {
         val transport = TileTransport()

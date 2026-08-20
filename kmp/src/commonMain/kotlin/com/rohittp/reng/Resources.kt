@@ -75,6 +75,17 @@ public data class ResourceLimits(
     public val maximumModelTextureBytes: Long = 32L * 1024L * 1024L,
     public val maximumDecodedImageBytes: Long = 64L * 1024L * 1024L,
     public val maximumModelJsonChunkBytes: Long = 16L * 1024L * 1024L,
+    /**
+     * The byte budget for resident GPU texture memory: everything an unleased upload -- for
+     * example a basemap tile with no live [com.rohittp.reng.internal.gl.GlObjectRegistry] lease
+     * left on it -- may keep occupying on the GPU before least-recently-used eviction reclaims it.
+     * A texture still leased by a live Prepared Frame is never evicted, even past this budget:
+     * this field bounds what MAY stay resident, never what MUST. Deliberately independent of the
+     * Tile Budget (`maximumBasemapTileInstances`) -- a tile count means a different number of
+     * bytes at every tile size and on every device, so deriving one from the other would hide the
+     * real cost from whoever configures it.
+     */
+    public val maximumResidentGpuTextureBytes: Long = 128L * 1024L * 1024L,
 ) {
     init {
         val minimum = 1L
@@ -108,6 +119,9 @@ public data class ResourceLimits(
         }
         require(maximumModelJsonChunkBytes in minimum..maximum) {
             "maximumModelJsonChunkBytes must be within the supported range"
+        }
+        require(maximumResidentGpuTextureBytes in minimum..maximum) {
+            "maximumResidentGpuTextureBytes must be within the supported range"
         }
     }
 }

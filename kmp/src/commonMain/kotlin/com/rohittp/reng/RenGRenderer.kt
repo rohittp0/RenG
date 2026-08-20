@@ -83,14 +83,22 @@ import kotlinx.coroutines.sync.Mutex
 // `internal` visibility regardless -- none of it appears in the ABI dump.
 
 /**
- * A private-key derivation with no real Rentile integration to draw on yet — no cycle has wired one
- * (`CLAUDE.md`'s repository state: "There is still no ... Rentile acquisition"). Deterministic per
+ * A private-key derivation with no real Rentile integration wired to it yet. Deterministic per
  * `(locator, resourceClass)` so the same external resource always derives the same key within one
  * process, which is all [FramePlanningCore]'s bookkeeping needs today. Every resource class this
- * cycle actually fetches (`STICKER_IMAGE`) goes straight through RenG's own configured [Transport]
- * and [Store], never through Rentile's shared cache, so no real cross-tenant firewall exists for it
- * to protect yet. Replacing this with a genuine derivation is the acquisition cycle's job, not this
- * one's.
+ * renderer actually fetches so far (`STICKER_IMAGE`) goes straight through RenG's own configured
+ * [Transport] and [Store], never through Rentile's shared cache, so no real cross-tenant firewall
+ * protects it yet.
+ *
+ * A genuine derivation now exists —
+ * [com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver] reproduces Rentile's actual
+ * `sha256Hex(withRedactedAuthenticationQuery(url))` key for the seven classes Rentile itself fetches
+ * and keys, and RenG's own canonical identity for the four it does not (Cycle E basemap task 16). It
+ * is not yet the renderer's default binding: wiring a real resolver in without the real Rentile
+ * `Transport`/`Store` adapters and the operation-scoped firewall (ADR 0016) that latches through them
+ * would just be a different half-wired state, and threading those adapters through renderer
+ * construction is basemap task 17's job, not this file's. This object remains the active binding
+ * until that wiring lands.
  */
 internal object DeterministicRentilePrivateKeyResolver : RentilePrivateKeyResolver {
     override fun resolve(

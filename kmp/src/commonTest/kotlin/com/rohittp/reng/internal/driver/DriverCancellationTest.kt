@@ -184,7 +184,7 @@ class DriverCancellationTest {
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
             resourceLimits = ResourceLimits(),
-        basemapEngineHost = basemapEngineHost(),
+            basemapEngineHost = basemapEngineHost(),
             clock = CancellationFixedClock,
         )
         val action = ReadStore(ResourceActionId(1L), 0L, RawResourceKey("raw", ResourceClass.STICKER_IMAGE))
@@ -220,7 +220,7 @@ private fun driver(
     cache = cache,
     classGateRunner = classGateRunner,
     resourceLimits = ResourceLimits(),
-        basemapEngineHost = basemapEngineHost(cache = cache),
+    basemapEngineHost = basemapEngineHost(cache = cache),
     maximumConcurrentOperations = maximumConcurrentOperations,
     clock = clock,
 )

@@ -18,6 +18,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 
 /**
@@ -41,7 +43,7 @@ class RendererBasemapStyleTest {
 
         assertEquals(
             listOf(STYLE_URL, SPRITE_JSON_URL, SPRITE_IMAGE_URL).sorted(),
-            transport.requestedUrls.sorted(),
+            transport.requestedUrls().sorted(),
             "the style is RenG's own resource; the sprite pair is the engine's, reached only through a " +
                 "preregistered route",
         )
@@ -64,23 +66,23 @@ class RendererBasemapStyleTest {
         val renderer = styleRenderer(transport)
 
         renderer.prepare(basemapPlan(frameIndex = 0L))
-        val spriteRequestsAfterFirstFrame = transport.requestedUrls.count { it == SPRITE_JSON_URL }
+        val spriteRequestsAfterFirstFrame = transport.requestedUrls().count { it == SPRITE_JSON_URL }
         renderer.prepare(basemapPlan(frameIndex = 1L))
 
         assertEquals(1, spriteRequestsAfterFirstFrame, "one frame compiles the style exactly once")
         assertEquals(
             1,
-            transport.requestedUrls.count { it == SPRITE_JSON_URL },
+            transport.requestedUrls().count { it == SPRITE_JSON_URL },
             "a second frame over identical style bytes must reuse the compilation, not redo its whole " +
                 "resource acquisition",
         )
         assertEquals(
             1,
-            transport.requestedUrls.count { it == SPRITE_IMAGE_URL },
+            transport.requestedUrls().count { it == SPRITE_IMAGE_URL },
             "the sprite image is acquired by the same compilation as its metadata",
         )
         assertTrue(
-            transport.requestedUrls.count { it == STYLE_URL } >= 2,
+            transport.requestedUrls().count { it == STYLE_URL } >= 2,
             "the style document itself is re-resolved per frame; only its compilation is reused",
         )
     }
@@ -96,7 +98,7 @@ class RendererBasemapStyleTest {
         assertEquals(PipelineStage.RESOURCE_PARSING, failure.stage)
         assertEquals(
             listOf(STYLE_URL),
-            transport.requestedUrls,
+            transport.requestedUrls(),
             "a style RenG cannot read is never handed to the engine",
         )
     }
@@ -129,6 +131,10 @@ class RendererBasemapStyleTest {
 
         assertNotNull(first, "a frame that draws a basemap holds its compiled style")
         assertSame(first, second, "the same style document is the same compilation, frame after frame")
+
+        // This names the frame in front of the reader, never "the last style compiled at some point".
+        renderer.prepare(FramePlan(frameIndex = 2L, camera = styleCamera(), drawBasemap = false))
+        assertNull(renderer.preparedBasemapStyle, "a frame that draws no basemap holds no style")
     }
 
     /**
@@ -164,18 +170,20 @@ class RendererBasemapStyleTest {
             ),
         )
 
+        val styleStoreWrites = store.writes()
+
         // Filtered to the two classes RenG's own driver writes: the engine writes its sprite pair through
         // the firewall during compilation too, on its own concurrent coroutines, and their order relative
         // to each other is the engine's business rather than this barrier's.
         assertEquals(
             listOf(ResourceClass.STICKER_IMAGE, ResourceClass.BASEMAP_STYLE),
-            store.writes.map(RawResourceKey::resourceClass).filter {
+            styleStoreWrites.map(RawResourceKey::resourceClass).filter {
                 it == ResourceClass.STICKER_IMAGE || it == ResourceClass.BASEMAP_STYLE
             },
             "the style's write waits for every other resource of the item that referenced it",
         )
         assertTrue(
-            store.writes.map(RawResourceKey::resourceClass).containsAll(
+            styleStoreWrites.map(RawResourceKey::resourceClass).containsAll(
                 listOf(ResourceClass.BASEMAP_SPRITE_JSON, ResourceClass.BASEMAP_SPRITE_IMAGE),
             ),
             "the engine's own sprite acquisition reached the consumer through the firewall",
@@ -191,7 +199,7 @@ class RendererBasemapStyleTest {
             FramePlan(frameIndex = 0L, camera = styleCamera(), drawBasemap = false),
         )
 
-        assertEquals(emptyList(), transport.requestedUrls, "drawBasemap = false acquires nothing")
+        assertEquals(emptyList(), transport.requestedUrls(), "drawBasemap = false acquires nothing")
     }
 }
 
@@ -278,11 +286,19 @@ internal fun styleGlBinding(): RecordingGlBinding = RecordingGlBinding().apply {
 internal class StyleTransport(
     private val styleJson: String = STYLE_WITH_SPRITE_JSON,
 ) : Transport {
-    val requestedUrls: MutableList<String> = mutableListOf()
+    private val recorded = ConcurrentRecorder<String>()
+
+    /**
+     * Every url this transport was asked for, in the order the appends were serialized. Suspending, and
+     * a copy, because acquiring the same lock the appends take is what gives the reading coroutine a
+     * happens-before edge on all of them; reading the backing list directly would be a race even if the
+     * appends themselves were safe.
+     */
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
 
     override suspend fun execute(request: TransportRequest): TransportResponse {
         val url = request.locator.value
-        requestedUrls += url
+        recorded.record(url)
         return when (url) {
             STYLE_URL -> TransportResponse(
                 statusCode = 200,
@@ -305,15 +321,50 @@ internal class StyleTransport(
 
 /** Records every Store exchange in call order and never answers a read, so nothing is served twice. */
 internal class RecordingStyleStore : Store {
-    val reads: MutableList<RawResourceKey> = mutableListOf()
-    val writes: MutableList<RawResourceKey> = mutableListOf()
+    private val recordedReads = ConcurrentRecorder<RawResourceKey>()
+    private val recordedWrites = ConcurrentRecorder<RawResourceKey>()
+
+    suspend fun reads(): List<RawResourceKey> = recordedReads.snapshot()
+
+    suspend fun writes(): List<RawResourceKey> = recordedWrites.snapshot()
 
     override suspend fun read(key: RawResourceKey): StoredRawResource? {
-        reads += key
+        recordedReads.record(key)
         return null
     }
 
     override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
-        writes += key
+        recordedWrites.record(key)
     }
+}
+
+/**
+ * An append-only recorder that is safe under **real** parallelism, not merely under a single test
+ * dispatcher.
+ *
+ * The adapters these fixtures implement are called from inside the Rentile engine, whose own scope is
+ * `rootJob + Dispatchers.Default` (`DefaultBasemapRasterizer.operation`), and whose sprite acquirer
+ * fetches the atlas metadata and the atlas image as two concurrent `async` children
+ * (`SpriteResourceAcquirer.acquire`). On the JVM those genuinely run on different threads, so an
+ * unguarded `ArrayList.add` from both can lose an entry.
+ *
+ * That is not a cosmetic flake. `compilesOneStyleOnceAcrossFramesRatherThanOncePerFrame` detects a
+ * per-frame recompilation by *counting* sprite urls in this list: a regression writes two entries and a
+ * lost update reduces them to one, so the very assertion that exists to catch the defect a single-frame
+ * test cannot see would silently pass. A recorder a test draws conclusions from has to be at least as
+ * trustworthy as the conclusion.
+ *
+ * A [Mutex] rather than an atomic or a concurrent collection because every recorded call site is already
+ * `suspend`, so it composes with no new dependency and no platform-specific type, and because it gives
+ * the suspending reader the same happens-before edge it gives the writers.
+ */
+internal class ConcurrentRecorder<T> {
+    private val mutex = Mutex()
+    private val entries = mutableListOf<T>()
+
+    suspend fun record(entry: T) {
+        mutex.withLock { entries += entry }
+    }
+
+    suspend fun snapshot(): List<T> = mutex.withLock { ArrayList(entries) }
 }

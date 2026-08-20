@@ -291,10 +291,14 @@ internal class RenGRenderer(
     private var basemapWarningEmitted: Boolean = false
 
     /**
-     * The compiled basemap style the last successful [prepare] over a basemap-drawing plan installed, or
-     * `null` if no such preparation has succeeded yet. Read back from [basemapEngineHost] rather than
-     * taken from the driver's compile action, because a `RESIDENT`-provenance frame emits no compile
-     * action at all. Cycle E-C3's `prepareTiles` is what consumes it; nothing draws with it yet.
+     * The compiled basemap style of the **most recently prepared frame**, or `null` when that frame drew
+     * no basemap (or when no preparation has succeeded yet). Cleared rather than left standing on a
+     * `drawBasemap = false` frame, so that a reader never has to cross-check the plan to know whether
+     * this belongs to the frame in front of it — "the last style compiled" is a subtly different claim
+     * and would be a trap for Cycle E-C3, which consumes this. Nothing draws with it yet.
+     *
+     * Read back from [basemapEngineHost] rather than taken from the driver's compile action, because a
+     * `RESIDENT`-provenance frame emits no compile action at all.
      */
     internal var preparedBasemapStyle: PreparedStyle? = null
         private set
@@ -486,7 +490,10 @@ internal class RenGRenderer(
         accessMode: ResourceAccessMode,
     ): Map<ResourceKey, DecodedImage> {
         val references = listOfNotNull(styleReference) + imageReferences
-        if (references.isEmpty()) return emptyMap()
+        if (references.isEmpty()) {
+            preparedBasemapStyle = null
+            return emptyMap()
+        }
 
         val definition = buildResourceOperationDefinition(
             traversalsByItem = listOf(references),
@@ -499,12 +506,15 @@ internal class RenGRenderer(
 
         val outcome = basemapEngineHost.withOperation(accessMode) {
             val driven = preparationDriver.run(definition)
-            if (driven is ResourceOperationOutcome.Success && styleReference != null) {
+            if (driven is ResourceOperationOutcome.Success) {
                 // Read back rather than taken from the compile action: on a RESIDENT-provenance frame
                 // the pure core emits no CompileBasemapStyle at all, so there is no action to take it
                 // from. The host retains the compilation across invocations, so this is the one place
-                // the frame's style is obtainable on every frame alike. Cycle E-C3 consumes it.
-                preparedBasemapStyle = basemapEngineHost.currentPreparedStyle(styleReference.resourceKey)
+                // the frame's style is obtainable on every frame alike. Cycle E-C3 consumes it. A frame
+                // that drew no basemap clears it, so this always describes the frame just prepared.
+                preparedBasemapStyle = styleReference?.let {
+                    basemapEngineHost.currentPreparedStyle(it.resourceKey)
+                }
             }
             driven
         }

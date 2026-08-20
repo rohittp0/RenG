@@ -341,6 +341,46 @@ class ResourceOperationStyleCommitTest {
         }
     }
 
+    /**
+     * The compilation failure that is **not** a property of the style document: the firewall refused a
+     * url RenG never preregistered, or a consumer adapter the engine reached through it failed. Its
+     * descriptor is already sanitized and already carries RenG's own resource identity by the time it
+     * gets here, so it is forwarded verbatim rather than collapsed into a [StyleFailureKind] — reporting
+     * an `AMBIGUOUS_RESOURCE_ROUTE` as `RESOURCE_PARSE_FAILED` would misdescribe a document that parses
+     * perfectly well, and would hide a firewall misconfiguration behind a content fault.
+     *
+     * The `STORE`-provenance override deliberately does **not** apply: that override exists to say "bytes
+     * this Store handed us are not what they claim to be", which is a statement about the bytes. An
+     * unrouted engine exchange says nothing about the bytes at all, whatever provenance they arrived by.
+     */
+    @Test
+    fun anEngineCompilationFailureIsForwardedVerbatimUnderEveryProvenance() {
+        ContentProvenance.entries.filter { it != ContentProvenance.RESIDENT }.forEach { provenance ->
+            val label = provenance.name
+            val driver = StyleDriver(styleDefinition(concurrency = 1, styleProvenance = provenance))
+            val compilation = driver.driveToStyleCompilation(provenance)
+
+            driver.event(
+                BasemapStyleCompilationCompleted(
+                    compilation.actionId,
+                    BasemapStyleCompilationOutcome.EngineFailed(ENGINE_ROUTE_FAILURE),
+                ),
+            )
+
+            val failure = assertIs<ResourceOperationOutcome.Failure>(driver.outcome, label)
+            assertEquals(ENGINE_ROUTE_FAILURE, failure.failure, label)
+            assertEquals(RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE, failure.failure.code, label)
+            assertEquals(PipelineStage.RESOURCE_LOOKUP, failure.failure.stage, label)
+            assertEquals(StyleCompilationStatus.FAILED, driver.style().compilationStatus, label)
+            assertFalse(driver.style().visible, label)
+            assertFalse(driver.style().writeAcknowledged, label)
+            assertFalse(driver.record(STYLE_ORDINAL).visibilityInstalled, label)
+            assertTrue(driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty(), label)
+            assertTrue(driver.emitted.filterIsInstance<InstallBasemapStyleVisibility>().isEmpty(), label)
+            driver.assertNoRecoveryActions(label)
+        }
+    }
+
     @Test
     fun styleWriteAndInstallFailuresOrCancellationsInstallNothing() {
         val writeFailureDriver = StyleDriver(styleDefinition(concurrency = 1))
@@ -1085,6 +1125,22 @@ private val ADAPTER_CANCELLATION: CancellationSelection =
     CancellationSelection(CancellationCause.ADAPTER, CancellationId(7L))
 private val STYLE_RESOURCE_KEY: ResourceKey =
     ResourceKey(ResourceKind.EXTERNAL, "a".repeat(64), ResourceClass.BASEMAP_STYLE)
+/**
+ * A failure of exactly the shape `BasemapEngineHost` produces for an engine exchange this invocation
+ * never routed -- the one this test suite forwards through
+ * [BasemapStyleCompilationOutcome.EngineFailed].
+ */
+private val ENGINE_ROUTE_FAILURE: FailureDescriptor = FailureDescriptor(
+    code = RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE,
+    stage = PipelineStage.RESOURCE_LOOKUP,
+    // Field-for-field what BasemapEngineHost.unplannedEngineExchangeFailure builds: AMBIGUOUS_RESOURCE_ROUTE
+    // allowlists DiagnosticField.RESOURCE alone, so naming a resource class here would not construct.
+    diagnostic = failureContextDiagnostic(
+        stage = PipelineStage.RESOURCE_LOOKUP,
+        fieldName = DiagnosticField.RESOURCE,
+    ),
+)
+
 private val INSTALL_FAILURE: FailureDescriptor = FailureDescriptor(
     code = RenGErrorCode.RESOURCE_UNAVAILABLE,
     stage = PipelineStage.RESOURCE_LOOKUP,

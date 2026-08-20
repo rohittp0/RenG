@@ -75,8 +75,13 @@ internal class ProductionRentilePrivateKeyResolver(
  * [ResourceClass.BASEMAP_STYLE], [ResourceClass.STICKER_IMAGE], [ResourceClass.MODEL_GLB], and
  * [ResourceClass.MODEL_TEXTURE] return `null`: the engine never keys them, so [resolve] falls through
  * to RenG's own canonical identity for those four instead.
+ *
+ * `internal` rather than file-private because [OperationRegistry][com.rohittp.reng.internal.firewall.OperationRegistry]
+ * (Cycle E basemap task 17) reuses this exact table to know which classes Rentile's own
+ * `RawResourceStore` ever keys at all -- a store-side answer must fail closed for the four classes
+ * this returns `null` for, since the engine's `RawResourceStore` never sees them.
  */
-private fun engineKeyedResourceClassOf(resourceClass: ResourceClass): RentileResourceClass? =
+internal fun engineKeyedResourceClassOf(resourceClass: ResourceClass): RentileResourceClass? =
     when (resourceClass) {
         ResourceClass.BASEMAP_TILE_JSON -> RentileResourceClass.TILE_JSON
         ResourceClass.BASEMAP_VECTOR_TILE -> RentileResourceClass.VECTOR_TILE

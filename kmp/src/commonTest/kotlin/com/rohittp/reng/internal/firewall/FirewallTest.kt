@@ -268,29 +268,32 @@ class FirewallTest {
     // ---- Gap 1: class-specific validation on the write path -------------------------------------
 
     @Test
-    fun refusesToWriteASpriteImageThatCannotDecode() = runTest {
+    fun declinesToCacheASpriteImageThatCannotDecode() = runTest {
         // The read gate already refuses such a record; before this, `writeStore` applied only
         // `copyValidStoredResource`'s generic record rules, so the firewall handed the consumer's Store
-        // bytes it could already prove Rentile's own sprite compiler will never accept.
+        // bytes it could already prove RenG will never read back.
+        //
+        // The write returns normally. A content verdict declines to cache; it does not fail the engine's
+        // acquisition, because Rentile's `writeStore` turns a thrown failure into `ResourceStoreException`
+        // and `StyleCompiler.resolveRequiredSpriteAtlas` catches nothing -- so failing here would break
+        // every style with a pattern fill or a POI icon, including for bytes Rentile decodes perfectly
+        // well (a bit-depth-reduced atlas, which RenG's stricter container walk refuses and Skia does not).
+        // Zero consumer writes is the assertion that actually encodes ADR 0016's obligation.
         val store = RoutedStore()
         val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_SPRITE_IMAGE to CORRUPT_STICKER_PNG))
         val fw = firewall(transport = transport, store = store)
         fw.transport.execute(engineRequestFor(spriteImageRoute))
-        assertFailsWith<RenGException> {
-            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(CORRUPT_STICKER_PNG))
-        }
+        fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(CORRUPT_STICKER_PNG))
         assertEquals(0, store.writeCalls, "a sprite image that cannot decode never reaches the consumer")
     }
 
     @Test
-    fun refusesToWriteSpriteJsonThatCannotParse() = runTest {
+    fun declinesToCacheSpriteJsonThatCannotParse() = runTest {
         val store = RoutedStore()
         val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_SPRITE_JSON to UNPARSEABLE_SPRITE_JSON))
         val fw = firewall(transport = transport, store = store)
         fw.transport.execute(engineRequestFor(spriteJsonRoute))
-        assertFailsWith<RenGException> {
-            fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(UNPARSEABLE_SPRITE_JSON))
-        }
+        fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(UNPARSEABLE_SPRITE_JSON))
         assertEquals(0, store.writeCalls, "sprite json that cannot parse never reaches the consumer")
     }
 
@@ -338,7 +341,7 @@ class FirewallTest {
     }
 
     @Test
-    fun refusesBothSpriteWritesWhenAnAtlasEntryLiesOutsideTheImage() = runTest {
+    fun declinesToCacheBothSpriteMembersWhenAnAtlasEntryLiesOutsideTheImage() = runTest {
         // Neither member is individually malformed -- the json parses, the png decodes -- so no
         // per-member gate can see this. Rentile writes both members and only then compiles, so without
         // the joint gate this pair is persisted and fails identically on every later prepare().
@@ -347,22 +350,15 @@ class FirewallTest {
         fw.transport.execute(engineRequestFor(spriteJsonRoute))
         fw.transport.execute(engineRequestFor(spriteImageRoute))
 
-        var jsonFailure: Throwable? = null
-        var imageFailure: Throwable? = null
+        // Both writes return normally -- one joint verdict, replayed, declining both members' caches.
         val jsonWrite = launch {
-            jsonFailure = runCatching {
-                fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(OUT_OF_BOUNDS_SPRITE_JSON))
-            }.exceptionOrNull()
+            fw.store.write(engineKeyFor(spriteJsonRoute), engineStoredResourceOf(OUT_OF_BOUNDS_SPRITE_JSON))
         }
         val imageWrite = launch {
-            imageFailure = runCatching {
-                fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
-            }.exceptionOrNull()
+            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
         }
         jsonWrite.join()
         imageWrite.join()
-        assertEquals(RenGErrorCode.STORE_WRITE_FAILED, (jsonFailure as? RenGException)?.code)
-        assertEquals(RenGErrorCode.STORE_WRITE_FAILED, (imageFailure as? RenGException)?.code)
         assertEquals(0, store.writeCalls, "neither member is written when the pair cannot compile")
     }
 
@@ -379,24 +375,28 @@ class FirewallTest {
     }
 
     @Test
-    fun refusesASpriteWriteWhoseStoreHitSiblingCannotCompleteThePair() = runTest {
+    fun declinesToCacheASpriteMemberWhoseStoreHitSiblingCannotCompleteThePair() = runTest {
         val store = RoutedStore(
             reads = mapOf(ResourceClass.BASEMAP_SPRITE_JSON to storedRecordOf(OUT_OF_BOUNDS_SPRITE_JSON)),
         )
         val fw = firewall(transport = spritePairTransport(VALID_SPRITE_JSON), store = store)
         assertNotNull(fw.store.read(engineKeyFor(spriteJsonRoute)))
         fw.transport.execute(engineRequestFor(spriteImageRoute))
-        assertFailsWith<RenGException> {
-            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
-        }
+        fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
         assertEquals(0, store.writeCalls)
     }
 
     @Test
-    fun failsRatherThanHangsWhenTheSiblingsFetchFailed() = runTest {
+    fun declinesRatherThanHangsWhenTheSiblingsAdapterThrew() = runTest {
         // Rentile launches both members inside one coroutineScope, so a failed member cancels the parked
         // sibling. The firewall does not rely on that alone: a sanitized transport failure on a sprite
-        // route latches that member as one that can never arrive, so the sibling fails on its own.
+        // route latches that member as one that will contribute no content, so the sibling resolves on
+        // its own -- and, being a content verdict rather than an integrity refusal, it declines quietly.
+        //
+        // This is the consumer-adapter-throws shape. The far more common real one -- a 403 or 404, which
+        // returns *successfully* through RenG's transport -- is
+        // `leavesASpriteMemberParkedWhenItsSiblingFetchReturnedANonSuccessStatus` below, and it resolves
+        // by a different mechanism.
         val store = RoutedStore()
         val transport = RoutedTransport(
             bodies = mapOf(ResourceClass.BASEMAP_SPRITE_IMAGE to SPRITE_ATLAS_PNG),
@@ -405,9 +405,51 @@ class FirewallTest {
         val fw = firewall(transport = transport, store = store)
         assertFailsWith<RenGException> { fw.transport.execute(engineRequestFor(spriteJsonRoute)) }
         fw.transport.execute(engineRequestFor(spriteImageRoute))
-        assertFailsWith<RenGException> {
-            fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+        assertEquals(0, store.writeCalls)
+    }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun leavesASpriteMemberParkedWhenItsSiblingFetchReturnedANonSuccessStatus() = runTest {
+        // The single most common real sprite failure, and its shape is genuinely different from an
+        // adapter that throws. A 403 or 404 is a *successful* consumer exchange: RenG returns the
+        // response and latches its body digest, so the member is neither contributed nor latched
+        // contentless. Rentile is what rejects it -- `acquireRaw` throws `ResourceAcquisitionException`
+        // on `statusCode !in 200..299`, before ever calling `writeStore` -- so the firewall never learns
+        // that this member is finished, and the parked sibling is released by exactly one mechanism: the
+        // `coroutineScope` cancellation that failure triggers. This test pins that the sibling really is
+        // parked (not written, not silently declined) and that cancellation is what frees it.
+        val store = RoutedStore()
+        val transport = RoutedTransport(
+            bodies = mapOf(
+                ResourceClass.BASEMAP_SPRITE_JSON to FORBIDDEN_BODY,
+                ResourceClass.BASEMAP_SPRITE_IMAGE to SPRITE_ATLAS_PNG,
+            ),
+            statusCodes = mapOf(ResourceClass.BASEMAP_SPRITE_JSON to 403),
+        )
+        val fw = firewall(transport = transport, store = store)
+        val forbidden = fw.transport.execute(engineRequestFor(spriteJsonRoute))
+        assertEquals(403, forbidden.statusCode, "a non-success status is a successful consumer exchange")
+        fw.transport.execute(engineRequestFor(spriteImageRoute))
+
+        var parkedFailure: Throwable? = null
+        val imageWrite = launch {
+            try {
+                fw.store.write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
+            } catch (failure: Throwable) {
+                parkedFailure = failure
+                throw failure
+            }
         }
+        runCurrent()
+        assertEquals(0, store.writeCalls, "the surviving member is parked, not cached")
+        assertNull(parkedFailure, "and it is parked rather than resolved, because nothing latched a verdict")
+
+        // Exactly what Rentile's own coroutineScope does when the 403 member's async fails.
+        imageWrite.cancel()
+        imageWrite.join()
+        assertTrue(parkedFailure is CancellationException, "the engine scope's cancellation is the release")
         assertEquals(0, store.writeCalls)
     }
 
@@ -438,8 +480,8 @@ class FirewallTest {
     }
 
     @Test
-    fun refusesASpriteWriteWhoseSiblingRouteWasNeverPreregistered() = runTest {
-        // No sibling route means no pair can ever be assembled, so the write fails closed immediately
+    fun declinesToCacheASpriteMemberWhoseSiblingRouteWasNeverPreregistered() = runTest {
+        // No sibling route means no pair can ever be assembled, so the member declines immediately
         // rather than parking on an arrival that this invocation can never produce.
         val store = RoutedStore()
         val registry = OperationRegistry(
@@ -448,25 +490,23 @@ class FirewallTest {
             privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
         ).also { it.preregister(spriteImageRoute) }
         FirewallTransport(registry).execute(engineRequestFor(spriteImageRoute))
-        assertFailsWith<RenGException> {
-            FirewallStore(registry).write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
-        }
+        FirewallStore(registry).write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
         assertEquals(0, store.writeCalls)
     }
 
     // ---- Gap 3: DEM terrain-encoding validation on the write path -------------------------------
 
     @Test
-    fun refusesADemWriteThatIsNotAnEightBitRgbTerrainEncoding() = runTest {
+    fun declinesToCacheADemTileThatIsNotAnEightBitRgbTerrainEncoding() = runTest {
         // ADR 0016: "A fetched DEM write additionally requires RenG's terrain encoding validation."
         // Rentile's DEM path reaches its raw-store write after generic bounded image validation only.
+        // The write still *requires* the check -- a negative verdict means no write -- which is the whole
+        // of what the ADR sentence constrains.
         val store = RoutedStore()
         val transport = RoutedTransport(mapOf(ResourceClass.BASEMAP_DEM_TILE to TRANSLUCENT_PNG))
         val fw = firewall(transport = transport, store = store)
         fw.transport.execute(engineRequestFor(demRoute))
-        assertFailsWith<RenGException> {
-            fw.store.write(engineKeyFor(demRoute), engineStoredResourceOf(TRANSLUCENT_PNG))
-        }
+        fw.store.write(engineKeyFor(demRoute), engineStoredResourceOf(TRANSLUCENT_PNG))
         assertEquals(0, store.writeCalls)
     }
 
@@ -770,6 +810,7 @@ private val CORRUPT_STICKER_PNG: ByteArray = Base64.decode(
 private class RoutedTransport(
     private val bodies: Map<ResourceClass, ByteArray> = emptyMap(),
     private val failures: Map<ResourceClass, Throwable> = emptyMap(),
+    private val statusCodes: Map<ResourceClass, Int> = emptyMap(),
 ) : Transport {
     var executeCalls: Int = 0
         private set
@@ -778,7 +819,7 @@ private class RoutedTransport(
         executeCalls += 1
         failures[request.resourceClass]?.let { throw it }
         return TransportResponse(
-            statusCode = 200,
+            statusCode = statusCodes[request.resourceClass] ?: 200,
             body = bodies.getValue(request.resourceClass),
             metadata = TransportResponseMetadata(
                 contentType = "application/octet-stream",
@@ -849,3 +890,7 @@ private val TRANSLUCENT_PNG: ByteArray = Base64.decode(
 private val OPAQUE_RGBA_PNG: ByteArray = Base64.decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAGklEQVR4nGPgEpH7r2Fk85/BLSDqf0pexX8AMtoHCdC1xmkAAAAASUVORK5CYII=",
 )
+
+// A 403's body: an ordinary error page, not sprite content. It travels through RenG's transport as a
+// perfectly successful exchange and latches its own digest; Rentile is what rejects the status.
+private val FORBIDDEN_BODY: ByteArray = "forbidden".encodeToByteArray()

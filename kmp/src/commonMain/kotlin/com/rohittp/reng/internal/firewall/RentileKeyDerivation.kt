@@ -93,6 +93,33 @@ private fun engineKeyedResourceClassOf(resourceClass: ResourceClass): RentileRes
         -> null
     }
 
+/**
+ * The same RenG-to-Rentile resource-class correspondence [engineKeyedResourceClassOf] encodes, read in the
+ * other direction: given the [RentileResourceClass] an engine failure reports, which [ResourceClass] is
+ * RenG talking about? Derived from that single mapping rather than restating it, so the correspondence
+ * cannot drift between the key RenG derives for a resource and the class RenG names when acquiring it
+ * fails.
+ *
+ * [RentileResourceClass.STYLE] is the one entry that is not recoverable by inversion, and it is spelled
+ * out here rather than left to fail closed. [engineKeyedResourceClassOf] answers a narrower question --
+ * "does the engine key this class in its own raw store?" -- and returns `null` for
+ * [ResourceClass.BASEMAP_STYLE] because RenG deliberately keys the style itself (see the KDoc there). The
+ * correspondence is nonetheless real, and reachable: Rentile's `DefaultBasemapRasterizer` throws
+ * `ResourceAcquisitionException(resourceClass = STYLE, ...)` on both style transport paths whenever the
+ * style arrives as `StyleInput.Remote`, and RenG's own `RendererConfiguration.basemapStyle` is a
+ * [com.rohittp.reng.ResourceLocator]. Dropping it would turn an ordinary "the style would not fetch" into
+ * an opaque `BASEMAP_RENDER_FAILED`.
+ *
+ * `null` for anything else -- a ninth class a future Rentile adds, `GLYPH_RANGE` first among them -- is
+ * the fail-closed answer: the caller reports a failure that names no resource rather than guessing at one.
+ */
+internal fun rengResourceClassOf(engineResourceClass: RentileResourceClass): ResourceClass? =
+    if (engineResourceClass == RentileResourceClass.STYLE) {
+        ResourceClass.BASEMAP_STYLE
+    } else {
+        ResourceClass.entries.firstOrNull { engineKeyedResourceClassOf(it) == engineResourceClass }
+    }
+
 private val AUTHENTICATION_QUERY_PARAMETER_NAMES: Set<String> = setOf(
     "access_token",
     "apikey",

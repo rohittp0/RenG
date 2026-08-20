@@ -252,7 +252,13 @@ private fun isValidOptionalMetadataText(value: String?): Boolean {
     return true
 }
 
-private fun isLowercaseSha256(value: String): Boolean =
+/**
+ * Whether [value] is the lowercase SHA-256 hex digest every established resource identity in RenG is
+ * spelled as -- `ResourceKey.stableId`'s own precondition, checked rather than assumed wherever a digest
+ * arrives from outside RenG's own derivation (a consumer's store entry, or the engine's sanitized
+ * resource id at the firewall) and must not be allowed to throw out of the `init` that would reject it.
+ */
+internal fun isLowercaseSha256(value: String): Boolean =
     value.length == SHA256_HEX_LENGTH && value.all { it in '0'..'9' || it in 'a'..'f' }
 
 private const val SHA256_HEX_LENGTH: Int = 64

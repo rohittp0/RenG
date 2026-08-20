@@ -59,3 +59,28 @@ operation-aware multiplexer is more stateful than a simple adapter, but its life
 already-serialized preparation contract. One long-lived Rentile instance passed sequential mode isolation,
 actual raster/vector/DEM/TileJSON/GeoJSON/style/sprite paths, a 256-tile batch at concurrency eight,
 cancellation/redaction checks, six-target compilation, and identical Android/macOS executable suites.
+
+## Erratum (2026-08-20, Cycle E basemap preflight)
+
+This ADR's opening states the firewall's guarantees were proved "across all eight basemap resource classes,"
+and its closing paragraph names the paths measured — raster, vector, DEM, TileJSON, GeoJSON, style, and
+sprite — the same eight classes under seven descriptors (sprite covers two). Rentile `0.3.0` added a ninth,
+`GLYPH_RANGE`, measured in `docs/research/2026-08-19-rentile-030-counting-stub-respike.md`. "Eight" was an
+accurate count of the `0.1.5` artifact this ADR's own spike actually drove; only Rentile's later surface
+growth made the count stale.
+
+`GLYPH_RANGE` carries `accept = application/x-protobuf`. Like `BASEMAP_DEM_TILE` — and unlike
+`BASEMAP_SPRITE_JSON`/`BASEMAP_SPRITE_IMAGE` — it reaches Rentile's raw-store write before its own decode
+validation runs. And unlike the sprite pair's terminal poisoning, a digest mismatch on a stored `GLYPH_RANGE`
+record recovers by remove-then-refetch, the same non-terminal shape this ADR already describes for the
+TileJSON/vector/raster/DEM/GeoJSON majority.
+
+It is reachable only through a new entry point, `acquireLabelCandidates(style, tiles, resourceAccess)`, never
+through `prepare`, `prepareBatch`, or `render` — the three methods this ADR's firewall is built against. RenG
+does not call `acquireLabelCandidates`, so `GLYPH_RANGE` stays deliberately outside this firewall: this ADR's
+guarantees hold for the classes reachable from the entry points RenG actually drives, and adding a row for a
+class RenG never routes would be exactly the failure the respike was run to rule out — enumerating a class
+without adopting the entry point that reaches it. The firewall's existing posture toward a class it does not
+enumerate is unchanged by this erratum: it fails closed on an unrecognised URL or resource class rather than
+special-casing one it cannot handle, which is what keeps `GLYPH_RANGE` safely absent rather than silently
+mishandled.

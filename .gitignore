@@ -12,3 +12,7 @@ local.properties
 **/build/
 __pycache__/
 *.py[cod]
+
+# Subagent-driven-development scratch: ledgers, briefs, reports, review packages.
+# Per-plan working state, never part of the published record.
+.superpowers/

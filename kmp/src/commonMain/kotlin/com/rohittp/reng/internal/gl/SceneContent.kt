@@ -10,10 +10,13 @@ import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleMatrix4
 import com.rohittp.reng.internal.math.DoubleVector3
+import com.rohittp.reng.internal.planning.BasemapTileInstance
+import com.rohittp.reng.internal.planning.BasemapTileQuad
 import com.rohittp.reng.internal.planning.DrawRegime
 import com.rohittp.reng.internal.planning.ResolvedGeometry
 import com.rohittp.reng.internal.planning.ResolvedPlacement
 import com.rohittp.reng.internal.planning.SpatialOutcome
+import com.rohittp.reng.internal.planning.resolveBasemapTileQuad
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
@@ -77,27 +80,57 @@ internal class SceneGeometry(
 )
 
 /**
+ * One unwrapped basemap tile draw instance paired with the GL texture its rendered PNG already
+ * uploaded to (whoever assembles a [SceneContent] runs the decode, upload and residency lease once
+ * per frame, exactly as it does for [SceneSticker.texture]).
+ *
+ * [instance] is carried raw and resolved here at draw time — the same shape [SceneSticker] uses for
+ * its [Placement], and for the same reason ([SceneContent]'s class KDoc): the resolution is a pure
+ * function of [instance] and the frame's camera. N world copies of one canonical tile appear as N
+ * entries sharing one [texture], because
+ * [com.rohittp.reng.internal.firewall.basemapTileKey]'s instance overload projects the copy away
+ * while [com.rohittp.reng.internal.planning.resolveBasemapTileQuad] keeps it.
+ */
+internal class SceneGroundTile(
+    val instance: BasemapTileInstance,
+    val texture: Int,
+)
+
+/**
  * Everything one frame needs [SceneContent] to draw. [outputPixelSize] and [frameIndex] feed the
  * documented `uResolution` / `uFrameIndex` uniforms directly; they play no part in placement
  * resolution itself, since [camera] already folded the output size into its projection matrix.
+ *
+ * [groundTiles] is empty whenever the frame draws no basemap, no style is configured, or the frame
+ * selected no tile.
  */
 internal class Scene(
     val outputPixelSize: OutputPixelSize,
     val frameIndex: Long,
     val stickers: List<SceneSticker> = emptyList(),
     val geometries: List<SceneGeometry> = emptyList(),
+    val groundTiles: List<SceneGroundTile> = emptyList(),
 )
 
 /**
  * The [GlFrameContent] Cycle D always left a seam for: its own KDoc says "Cycle D draws no frame
  * content of its own; Cycle E replaces this with the real scene draw." This is that replacement.
  *
- * **Ordering (ADR 0024).** The map regime draws first, depth-tested: every [Geometry] (map-anchored
- * by definition — `CONTEXT.md` says "A Geometry carries no Placement") and every map-anchored
- * sticker. The screen regime then composites on top with depth testing off. [drawStickers] already
- * runs both sticker halves of that order in one call, so [draw] only has to draw every geometry
- * *before* calling it — the ambient depth-test-enabled state that leaves behind for the map-anchored
- * stickers is exactly the state geometries drew under too.
+ * **Ordering (ADRs 0024 and 0025).** The map regime draws first, depth-tested; the screen regime
+ * then composites on top with depth testing off. Within the map regime the order is fixed by ADR
+ * 0025 as: the **ground** first, then every [Geometry] (map-anchored by definition — `CONTEXT.md`
+ * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every map-anchored
+ * sticker in `FramePlan.stickers` order. [drawStickers] already runs both sticker halves of that
+ * order in one call, so [draw] only has to draw the ground and then every geometry *before* calling
+ * it — the ambient depth-test-enabled state that leaves behind for the map-anchored stickers is
+ * exactly the state the ground and the geometries drew under too.
+ *
+ * That order used to be arbitrary and is now load-bearing. `drawFrame` tests `GL_GEQUAL`, not
+ * `GL_GREATER` (ADR 0025), so a fragment at exactly the depth already in the buffer passes and
+ * overwrites — which is what stops a coplanar altitude-0 `Geometry` or map-anchored sticker being
+ * silently deleted by the ground beneath it, and which makes "later declared wins a tie" the rule a
+ * consumer may rely on. The ground goes first because it is the backdrop everything else paints
+ * onto.
  *
  * **Why resolving [Placement]/[Geometry] here does not put spatial-failure handling inside a GL
  * draw call.** Cycle F-1 Tasks 5 and 6 pushed placement and geometry resolution out of
@@ -126,10 +159,28 @@ internal class SceneContent(
     private val camera: ResolvedMercatorCamera,
     private val scene: Scene,
     private val stickerPipeline: StickerPipeline,
+    private val groundPipeline: GroundPipeline,
 ) : GlFrameContent {
 
     override fun draw(binding: GlBinding) {
-        if (scene.geometries.isEmpty() && scene.stickers.isEmpty()) return
+        if (scene.groundTiles.isEmpty() && scene.geometries.isEmpty() && scene.stickers.isEmpty()) return
+
+        if (scene.groundTiles.isNotEmpty()) {
+            binding.enable(GL_DEPTH_TEST)
+            drawGround(
+                binding = binding,
+                pipeline = groundPipeline,
+                tiles = scene.groundTiles.map { tile ->
+                    ResolvedGroundTile(
+                        modelViewProjection = composeGroundModelViewProjection(
+                            camera,
+                            resolveBasemapTileQuad(tile.instance, camera),
+                        ),
+                        texture = tile.texture,
+                    )
+                },
+            )
+        }
 
         if (scene.geometries.isNotEmpty()) {
             binding.enable(GL_DEPTH_TEST)
@@ -262,6 +313,36 @@ private fun Geometry.boundsWestSouthEastNorth(): FloatArray = floatArrayOf(
  */
 internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): FloatArray =
     (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+
+/**
+ * Composes one ground tile's model-view-projection matrix.
+ *
+ * The model matrix is expressed in **map** space — `Translate(centre) * Scale(side, side, 1)` on the
+ * `z = 0` plane — and [ResolvedMercatorCamera.viewMatrix] is applied after it, deliberately unlike
+ * [composeMapModelViewProjection], which applies its rotation and scale in *camera* space. A sticker
+ * quad is oriented by its own resolved [ResolvedPlacement.directionTransform] and faces the camera
+ * when that transform is the identity; a ground tile lies flat on the map whatever the camera's
+ * pitch, so its local axes are map axes and it must be transformed before the view, not after.
+ *
+ * Every term stays `Double` until the single narrowing in [toColumnMajorFloatArray], and the quad
+ * arrives already camera-relative from
+ * [com.rohittp.reng.internal.planning.resolveBasemapTileQuad], so no absolute Mercator coordinate is
+ * ever narrowed to `Float`.
+ */
+internal fun composeGroundModelViewProjection(
+    camera: ResolvedMercatorCamera,
+    quad: BasemapTileQuad,
+): FloatArray {
+    val mapSpaceModel = DoubleMatrix4.fromRows(
+        listOf(
+            listOf(quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels),
+            listOf(0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels),
+            listOf(0.0, 0.0, 1.0, 0.0),
+            listOf(0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+    return (camera.projectionMatrix * camera.viewMatrix * mapSpaceModel).toColumnMajorFloatArray()
+}
 
 /**
  * Composes a map-anchored sticker or model's model-view-projection matrix from

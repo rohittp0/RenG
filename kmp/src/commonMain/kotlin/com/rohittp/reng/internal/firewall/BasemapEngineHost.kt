@@ -417,6 +417,16 @@ internal class BasemapEngineHost(
         basemapTileKey(style.digest, tile, tileOutputSize, sha256)
 
     /**
+     * The same identity for one unwrapped draw [instance], which the world-copy-projecting overload of
+     * [basemapTileKey] reduces to its canonical tile. Asked of the host rather than derived by the
+     * caller so that [tileOutputSize] -- an engine render option, not a renderer configuration value --
+     * stays owned in exactly one place; a caller that guessed it would derive a key naming a tile the
+     * engine never rendered.
+     */
+    fun renderedTileKey(styleDigest: String, instance: BasemapTileInstance): ResourceKey =
+        basemapTileKey(styleDigest, instance, tileOutputSize, sha256)
+
+    /**
      * Idempotent. Releases the compiled style's lease, then closes the engine — whose own `close()` is
      * documented idempotent, non-blocking, and non-throwing, and needs no GL context of any kind.
      */

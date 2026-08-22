@@ -7,9 +7,15 @@ import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.shader.scanShaderProfile
 
+/**
+ * Every pipeline RenG compiles for its own use. The wire value is part of a canonical identity
+ * (ADR 0018), so entries are only ever appended -- renumbering one would change the [ResourceKey] of
+ * an existing pipeline.
+ */
 internal enum class InternalPipelineRole(internal val wireValue: Int) {
     COMPOSITE(1),
     STICKER(2),
+    GROUND(3),
 }
 
 /**

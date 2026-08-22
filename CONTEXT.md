@@ -221,7 +221,11 @@ ellipsoidal altitude metres)`. `MERCATOR` preparation applies the **Camera** lat
 to every map position and **Geometry** corner; out-of-domain values fail rather than clamp or wrap. Altitude
 accepts any finite value, but planning rejects values that cannot remain finite through camera-relative Double
 and GPU-bound Float conversion. Those failures report `mapPosition.altitude` or `geometry.altitude`; latitude
-and world-copy failures retain their corresponding latitude or unwrapped-longitude field.
+and world-copy failures retain their corresponding latitude or unwrapped-longitude field. Depth comparison is
+greater-or-equal, so a drawn thing at exactly the depth already drawn there is visible rather than discarded;
+altitude-0 content over the ground is the ordinary case of that. Exact depth ties resolve by draw order,
+which is the **Basemap Tile** ground first, then **Geometry**s in list order, then map-anchored drawn things
+in list order, with later entries on top (ADR 0025).
 _Avoid_: World mode, 3D mode, geo mode
 
 **Draw Regime**:

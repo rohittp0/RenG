@@ -106,7 +106,13 @@ internal fun createRenderer(
     // forgets-without-deleting on context loss (ADR 0007/0015) must be the one RenGRenderer caches
     // into and deletes from on close(); two separate GlObjectRegistry instances here would silently
     // desynchronize that lifecycle.
-    val objectRegistry = GlObjectRegistry()
+    //
+    // The byte budget is threaded from the caller's own ResourceLimits rather than left at
+    // GlObjectRegistry's default. Defaulting it here made `maximumResidentGpuTextureBytes` a
+    // documented public knob with no effect at all -- every renderer used the default 128 MB
+    // whatever the consumer configured -- which is precisely the shape of bug the basemap ground's
+    // one-megabyte-per-tile residency turns from theoretical into expensive.
+    val objectRegistry = GlObjectRegistry(configuration.resourceLimits.maximumResidentGpuTextureBytes)
 
     val driver = GlLifecycleDriver(
         binding = binding,

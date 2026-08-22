@@ -89,6 +89,7 @@ internal const val GL_DEPTH_RANGE: Int = 0x0B70
 internal const val GL_DEPTH_CLEAR_VALUE: Int = 0x0B73
 internal const val GL_LESS: Int = 0x0201
 internal const val GL_GREATER: Int = 0x0204
+internal const val GL_GEQUAL: Int = 0x0206
 
 internal const val GL_CULL_FACE: Int = 0x0B44
 internal const val GL_CULL_FACE_MODE: Int = 0x0B45

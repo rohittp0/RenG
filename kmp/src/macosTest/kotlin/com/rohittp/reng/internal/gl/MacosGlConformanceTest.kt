@@ -1,5 +1,7 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BASEMAP_READBACK_PIXELS
+import com.rohittp.reng.runBasemapReadbackSuite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -22,6 +24,26 @@ class MacosGlConformanceTest {
             // A hosted runner reports "Apple Software Renderer"; a developer's machine reports
             // "4.1 Metal - 90.5". Cycle E must key golden baselines by this string and the dialect.
             println("RenG conformance renderer: ${report.rendererName} / ${report.versionText}")
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /**
+     * Cycle E's gate, on a real Apple core-profile context — the desktop-dialect half of the pair
+     * whose GLES half runs in `LinuxGlConformanceTest`. See `runBasemapReadbackSuite` for exactly
+     * what this catches and what it does not.
+     */
+    @Test fun theBasemapReadbackSuitePassesOnARealAppleCoreProfileContext() {
+        val fixture = CglCoreProfileContext.create()
+        try {
+            val binding = when (val result = openPlatformGlBinding()) {
+                is GlBindingResult.Bound -> result.binding
+                is GlBindingResult.Unsupported -> throw AssertionError("platform.OpenGL3 must bind")
+            }
+            binding.viewport(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
+            binding.scissor(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
+            runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
         } finally {
             fixture.destroy()
         }

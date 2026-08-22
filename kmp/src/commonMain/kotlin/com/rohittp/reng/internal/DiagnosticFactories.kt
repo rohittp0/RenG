@@ -154,6 +154,12 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
     ),
     PipelineStage.SHADER_COMPILATION to setOf(DiagnosticField.SHADER_PAIR),
     PipelineStage.RENDER_TARGET to setOf(DiagnosticField.RENDER_TARGET),
+    // A rendered basemap tile is the one resource RenG decodes at DRAW rather than during
+    // preparation, because decoding it is skipped entirely whenever its GL texture is still
+    // resident -- see `RenGRenderer.performDraw`. Naming the tile is the whole value of the
+    // failure; without this entry the only reportable shape would be a bare GPU_OPERATION_FAILED,
+    // which sends a consumer to inspect GL state for a fault that is in their resource limits.
+    PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE),
 )
 
 private sealed interface FailureRule {
@@ -382,11 +388,20 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             externalResourceRule,
         )
 
-        RenGErrorCode.RESOURCE_DECODE_FAILED -> ruleAt(
-            stage,
-            PipelineStage.RESOURCE_DECODING,
-            externalResourceRule,
-        )
+        RenGErrorCode.RESOURCE_DECODE_FAILED -> when (stage) {
+            PipelineStage.RESOURCE_DECODING -> externalResourceRule
+
+            // A rendered basemap tile is decoded at DRAW rather than at RESOURCE_DECODING, and it is
+            // not an external resource: RenG's own engine produced its bytes, and its identity is a
+            // BASEMAP_TILE key (ADR 0018) with no resource class, which REQUIRED_EXTERNAL rejects.
+            // Widening the RESOURCE_DECODING rule to admit it would weaken the guarantee every
+            // consumer-supplied image failure already relies on, so this is a second, narrower pair
+            // instead: same code, the stage it actually fires from, and an identity requirement that
+            // still insists the failure names the tile it is about.
+            PipelineStage.DRAW -> establishedResourceRule
+
+            else -> null
+        }
 
         RenGErrorCode.RESOURCE_PARSE_FAILED -> ruleAt(
             stage,

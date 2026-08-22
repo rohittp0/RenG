@@ -154,15 +154,15 @@ class FramePlanningCoreTest {
             ),
         )
 
-        val heldBelowItsHistorylessSelection = planSuccess(
+        val heldAboveItsHistorylessSelection = planSuccess(
             planningCore,
             request(
                 plan = framePlan(
                     frameIndex = 3L,
-                    camera = Camera(0.0, 0.0, 2.6, 0.0, 0.0),
+                    camera = Camera(0.0, 0.0, 2.4, 0.0, 0.0),
                     drawBasemap = false,
                 ),
-                previousSelectedLod = 2,
+                previousSelectedLod = 3,
             ),
         )
         val sameZoomWithoutHistory = planSuccess(
@@ -170,7 +170,7 @@ class FramePlanningCoreTest {
             request(
                 plan = framePlan(
                     frameIndex = 4L,
-                    camera = Camera(0.0, 0.0, 2.6, 0.0, 0.0),
+                    camera = Camera(0.0, 0.0, 2.4, 0.0, 0.0),
                     drawBasemap = false,
                 ),
             ),
@@ -180,8 +180,8 @@ class FramePlanningCoreTest {
         assertEquals(3, withoutHistory.spatialPlan.lodObservation.selectedLod)
         assertEquals(4, hysteresisWithBasemap.spatialPlan.lodObservation.selectedLod)
         assertNotNull(hysteresisWithBasemap.spatialPlan.tileSelection)
-        assertEquals(2, heldBelowItsHistorylessSelection.spatialPlan.lodObservation.selectedLod)
-        assertEquals(3, sameZoomWithoutHistory.spatialPlan.lodObservation.selectedLod)
+        assertEquals(3, heldAboveItsHistorylessSelection.spatialPlan.lodObservation.selectedLod)
+        assertEquals(2, sameZoomWithoutHistory.spatialPlan.lodObservation.selectedLod)
     }
 
     @Test

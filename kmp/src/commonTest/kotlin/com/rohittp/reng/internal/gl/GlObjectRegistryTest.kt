@@ -103,7 +103,11 @@ class GlObjectRegistryTest {
         val lease1 = registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
         registry.releaseLease(lease1, binding)
 
-        registry.touch(tileKey(0)) // 1 becomes least-recently-used
+        // A draw reuses tile 0: it leases the resident texture and releases the lease when it is done,
+        // which is the only thing that makes a budget-tracked texture most-recently-used. Tile 1 is now
+        // the least recently used.
+        val reuse0 = assertNotNull(registry.leaseResident(tileKey(0)))
+        registry.releaseLease(reuse0.lease, binding)
 
         val lease2 = registry.registerTexture(tileKey(2), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES)
         registry.releaseLease(lease2, binding)
@@ -222,6 +226,96 @@ class GlObjectRegistryTest {
 
         assertTrue(binding.deletedNames.isEmpty(), "the reload cancels the pending deletion")
         assertNotNull(registry.resident(key))
+    }
+
+    // ---- Task E-J: reusing a resident texture leases it exactly as uploading one does ----------
+
+    @Test fun aTextureLeasedForReuseIsAsExemptFromEvictionAsAFreshlyUploadedOne() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 2 * ONE_TILE_BYTES)
+        val upload = registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.releaseLease(upload, binding)
+
+        // A later draw finds tile 0 still on the GPU and reuses it, then uploads two more tiles, taking
+        // the resident total to three over a two-tile budget.
+        val reuse = assertNotNull(registry.leaseResident(tileKey(0)))
+        assertEquals(
+            GlObjectHandle(GlObjectType.TEXTURE, 100),
+            reuse.handle,
+            "reuse must hand back the resident texture",
+        )
+        val lease1 = registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
+        val lease2 = registry.registerTexture(tileKey(2), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES)
+        registry.releaseLease(lease1, binding)
+        registry.releaseLease(lease2, binding)
+
+        assertEquals(
+            GlObjectHandle(GlObjectType.TEXTURE, 100),
+            registry.resident(tileKey(0)),
+            "the tile the draw is reusing must outrank the budget exactly as the tiles it uploaded do",
+        )
+        assertFalse(100 in binding.deletedNames, "a reused tile's GL name must not be deleted under its own draw")
+
+        // And it is only exempt for as long as the draw holds it: the release puts it back in the order,
+        // where two further tiles' worth of pressure works down to it like any other unleased entry.
+        registry.releaseLease(reuse.lease, binding)
+        val lease3 = registry.registerTexture(tileKey(3), GlObjectHandle(GlObjectType.TEXTURE, 103), ONE_TILE_BYTES)
+        registry.releaseLease(lease3, binding)
+        val lease4 = registry.registerTexture(tileKey(4), GlObjectHandle(GlObjectType.TEXTURE, 104), ONE_TILE_BYTES)
+        registry.releaseLease(lease4, binding)
+        assertTrue(
+            100 in binding.deletedNames,
+            "once the draw is done, a reused tile is an eviction candidate again",
+        )
+    }
+
+    @Test fun reuseCountsOneMoreClaimOnOneTextureRatherThanOneMoreTexture() {
+        val binding = RecordingGlBinding()
+        // A budget below one tile: anything unleased dies at the next release.
+        val registry = GlObjectRegistry(residentTextureByteBudget = 1L)
+        val key = tileKey(0)
+        val upload = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        val reuse = assertNotNull(registry.leaseResident(key))
+
+        registry.releaseLease(upload, binding)
+        assertTrue(binding.deletedNames.isEmpty(), "one released claim of two is not the last one")
+        assertNotNull(registry.resident(key))
+
+        registry.releaseLease(reuse.lease, binding)
+        assertEquals(
+            listOf(100),
+            binding.deletedNames,
+            "two claims and two releases delete the one texture once -- an unbalanced count leaks or " +
+                "double-deletes it",
+        )
+    }
+
+    @Test fun onlyABudgetTrackedTextureCanBeLeasedForReuse() {
+        val registry = GlObjectRegistry()
+        registry.register(surfaceKey, listOf(GlObjectHandle(GlObjectType.TEXTURE, 4)))
+
+        assertNull(
+            registry.leaseResident(surfaceKey),
+            "a register() texture carries no byte size, so leasing it would put a zero-byte candidate " +
+                "in the eviction order",
+        )
+        assertNull(registry.leaseResident(tileKey(0)), "a key with no live texture has nothing to reuse")
+    }
+
+    @Test fun aTextureRetiredByAFreeIsNotHandedToTheNextDrawForReuse() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4 * ONE_TILE_BYTES)
+        val key = tileKey(0)
+        val lease = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.defer(key, DeletionId(1L))
+
+        assertNull(
+            registry.leaseResident(key),
+            "a retired generation is never resurrected: the next draw uploads a fresh texture instead",
+        )
+
+        registry.releaseLease(lease, binding)
+        assertEquals(listOf(100), binding.deletedNames, "and the refused reuse did not delay the retired deletion")
     }
 
     @Test fun contextLossForgetsTexturesWhileTheDecodedImageStaysLeased() {

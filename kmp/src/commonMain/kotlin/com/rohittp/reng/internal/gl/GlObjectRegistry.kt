@@ -18,8 +18,10 @@ internal enum class GlObjectType {
 internal data class GlObjectHandle(val type: GlObjectType, val name: Int)
 
 /**
- * A single-use claim that keeps a [GlObjectRegistry.registerTexture] entry exempt from every deletion
- * path in [GlObjectRegistry] -- byte-budgeted eviction and [GlObjectRegistry.defer] alike -- mirroring
+ * A single-use claim that keeps a budget-tracked texture entry -- one [GlObjectRegistry.registerTexture]
+ * created, whether this claim came from that call or from a later [GlObjectRegistry.leaseResident] on the
+ * same key -- exempt from every deletion path in [GlObjectRegistry], byte-budgeted eviction and
+ * [GlObjectRegistry.defer] alike, mirroring
  * [com.rohittp.reng.internal.cache.Lease]'s shape at the GPU layer: Cycle B's lease answers what MUST
  * stay resident, this one answers the same question for the GL texture behind it. Consumed by exactly
  * one matching [GlObjectRegistry.releaseLease] call; releasing it again is a caller error rather than a
@@ -37,6 +39,13 @@ internal class TextureLease internal constructor(internal val key: ResourceKey) 
         released = true
     }
 }
+
+/**
+ * A reusable GL texture and the [TextureLease] taken on it, handed back together by
+ * [GlObjectRegistry.leaseResident] so that reusing a texture and uploading one leave the caller holding
+ * the same thing: a GL name plus one claim to release when the draw is done.
+ */
+internal class LeasedTexture(internal val handle: GlObjectHandle, internal val lease: TextureLease)
 
 /**
  * Owns every live GL object handle this renderer holds, plus a byte-budgeted, least-recently-used
@@ -58,7 +67,7 @@ internal class GlObjectRegistry(
     private val live: LinkedHashMap<ResourceKey, MutableList<GlObjectHandle>> = LinkedHashMap()
     private val queued: LinkedHashMap<DeletionId, List<GlObjectHandle>> = LinkedHashMap()
 
-    // Budget-tracked texture residency (registerTexture/releaseLease only). textureByteSizes
+    // Budget-tracked texture residency (registerTexture/leaseResident/releaseLease only). textureByteSizes
     // covers every budget-tracked key regardless of lease state, so its sum is the true resident
     // total; unleasedOrder holds only the currently-unleased subset, oldest (least-recently-used)
     // first, and is exactly the eviction candidate list.
@@ -90,8 +99,44 @@ internal class GlObjectRegistry(
         retiredPendingLastLease.remove(key)
         live.getOrPut(key) { mutableListOf() }.add(handle)
         textureByteSizes[key] = byteSize
+        return takeLease(key)
+    }
+
+    /**
+     * Takes a lease on [key]'s already-resident budget-tracked texture and hands back both, or returns
+     * `null` when there is nothing here to reuse.
+     *
+     * This is [registerTexture]'s other half, and deliberately its exact shape: the two ways a draw can
+     * come by a ground texture -- upload it, or find last frame's still on the GPU -- both hand back a
+     * [TextureLease] the caller must release exactly once, so a reused texture is protected for the draw
+     * that reuses it by the same mechanism and to the same degree as a freshly uploaded one. Returning
+     * the handle and the lease together is what makes that hard to get wrong: a caller cannot obtain the
+     * GL name of a reusable texture from here without also taking the claim that keeps it alive.
+     *
+     * `null` means one of three things, and the caller's answer to all three is the same -- upload it and
+     * register it. Either the key has no live texture at all; or it has one that [register] rather than
+     * [registerTexture] put there, which is untracked by the byte budget and so must never enter the
+     * eviction order this lease/release cycle feeds (a zero-byte candidate would be deleted without
+     * moving the total it is being deleted to reduce); or its deletion is already pending on the release
+     * of a lease taken before a [defer] retired it, and handing that texture to a new draw would extend
+     * a life a free has already ended -- "a retired generation is never resurrected, even when identical
+     * bytes return", so the reload is the fresh upload, exactly as [registerTexture] documents.
+     */
+    internal fun leaseResident(key: ResourceKey): LeasedTexture? {
+        if (key !in textureByteSizes) return null
+        if (key in retiredPendingLastLease) return null
+        val handle = live[key]?.firstOrNull { it.type == GlObjectType.TEXTURE } ?: return null
+        return LeasedTexture(handle = handle, lease = takeLease(key))
+    }
+
+    /**
+     * The one place a [TextureLease] is minted: counts one more claim on [key] and withdraws it from the
+     * eviction order, since a leased entry is never a candidate there. Both [registerTexture] and
+     * [leaseResident] route through here so neither can drift into counting a lease the other does not.
+     */
+    private fun takeLease(key: ResourceKey): TextureLease {
         textureLeaseCounts[key] = (textureLeaseCounts[key] ?: 0) + 1
-        unleasedOrder.remove(key) // re-leasing a currently-unleased entry withdraws it from eviction.
+        unleasedOrder.remove(key)
         return TextureLease(key)
     }
 
@@ -100,6 +145,10 @@ internal class GlObjectRegistry(
      * [defer] retired while it was leased is deleted here and now, since the lease that was delaying its
      * deletion is gone; any other key simply becomes evictable and moves to the most-recently-used end of
      * the LRU order. [evictOverBudget] then runs either way.
+     *
+     * That re-insertion is the whole of this class's "recently used" signal, and it is why no separate
+     * mark-as-used call exists: a draw that used a texture held a lease on it for its own duration, so
+     * releasing that lease is precisely the moment the texture was last used.
      *
      * Both of those delete GL textures, and ADR 0015 requires the renderer's exact GL context to be
      * current for any GL delete call -- [binding] is threaded through for exactly that call, so
@@ -123,13 +172,6 @@ internal class GlObjectRegistry(
             unleasedOrder[key] = Unit
         }
         evictOverBudget(binding)
-    }
-
-    /** Marks [key] most-recently-used without changing its lease state; a no-op if not currently unleased. */
-    internal fun touch(key: ResourceKey) {
-        if (unleasedOrder.remove(key) != null) {
-            unleasedOrder[key] = Unit
-        }
     }
 
     /** The resident [GlObjectHandle] for [key], whether registered via [register] or [registerTexture]. */

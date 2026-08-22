@@ -1041,19 +1041,23 @@ internal class RenGRenderer(
      * already on the GPU.
      *
      * **Residency, not a per-frame upload.** A tile whose GL texture is still registered is neither
-     * decoded nor uploaded again -- it is only [GlObjectRegistry.touch]ed, so it moves to the
-     * most-recently-used end of the eviction order. That is the whole point of the byte budget: panning
-     * back over ground already seen must cost nothing, and a 512x512 tile costs a megabyte of decode
-     * plus a megabyte of upload every time it is missed.
+     * decoded nor uploaded again -- [GlObjectRegistry.leaseResident] hands back the texture already on
+     * the GPU. That is the whole point of the byte budget: panning back over ground already seen must
+     * cost nothing, and a 512x512 tile costs a megabyte of decode plus a megabyte of upload every time
+     * it is missed.
      *
-     * **Leases, and why they are draw-scoped.** A freshly registered texture arrives leased, so nothing
-     * this frame needs can be evicted by a sibling tile's registration part-way through the same draw --
+     * **Leases, and why they are draw-scoped.** Both branches leave this loop holding a lease, and they
+     * have to: a lease is what "an in-flight draw holds for its own duration" means, and a tile this
+     * draw reuses is as much in use as one it just uploaded. A texture with an open lease is
+     * structurally unreachable to eviction ([GlObjectRegistry] iterates only its unleased keys), so
+     * nothing this frame needs can be evicted by a sibling tile part-way through the same draw --
      * "exceeding the budget because a live frame still needs a tile is the correct outcome; breaking a
-     * drawable frame to honour a cache limit is not". The lease is released by [performDraw]'s `finally`
-     * rather than held for the prepared frame's lifetime, because eviction issues GL deletes and ADR 0015
-     * requires the exact context to be current for those -- which is guaranteed inside a `Draw` operation
-     * and guaranteed by nothing at `PreparedFrame.close()`. Between draws the tile stays resident,
-     * unleased, up to the budget.
+     * drawable frame to honour a cache limit is not". Releasing the lease is also what marks the tile
+     * most-recently-used, so the reuse branch needs no separate touch. The lease is released by
+     * [performDraw]'s `finally` rather than held for the prepared frame's lifetime, because eviction
+     * issues GL deletes and ADR 0015 requires the exact context to be current for those -- which is
+     * guaranteed inside a `Draw` operation and guaranteed by nothing at `PreparedFrame.close()`. Between
+     * draws the tile stays resident, unleased, up to the budget.
      *
      * A tile is uploaded as [TextureContent.IMAGE]: a basemap tile is an image, its alpha is a coverage
      * value, and it is filtered under every pitched camera, which is exactly what premultiplication
@@ -1076,10 +1080,10 @@ internal class RenGRenderer(
                 tiles += SceneGroundTile(instance = groundInstance.instance, texture = cached)
                 continue
             }
-            val resident = glObjectRegistry.resident(key)
-            val texture = if (resident != null) {
-                glObjectRegistry.touch(key)
-                resident.name
+            val reused = glObjectRegistry.leaseResident(key)
+            val texture = if (reused != null) {
+                groundLeases += reused.lease
+                reused.handle.name
             } else {
                 val rendered = requireNotNull(renderedByKey[key]) {
                     "prepare() already proved every ground instance names a rendered tile"

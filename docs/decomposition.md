@@ -8,8 +8,10 @@ verification of that commit's first public completion record.
 Cycle 0 is complete: the original graphics contract is recorded in ADRs 0001–0012 and `CONTEXT.md`;
 ADRs 0014–0015 supersede its preparation-ordering and exact-context deletion details, ADRs 0016–0017
 add the strict Rentile firewall and terminal renderer ownership rules, ADR 0018 fixes canonical content
-identities, and ADRs 0019–0022 record the coroutines dependency, PNG decode ownership, the GLB subset, and the
-corrected GL source-set visibility. Everything below
+identities, ADRs 0019–0022 record the coroutines dependency, PNG decode ownership, the GLB subset, and the
+corrected GL source-set visibility, ADR 0023 corrects the GL restore set, and ADRs 0024–0026 fix the
+draw-regime order, the map-regime depth rule and draw order for coplanar content, and the single
+world-anchored light models are shaded by. Everything below
 inherits the current decisions rather than revisiting them without new evidence.
 
 ## Order
@@ -38,7 +40,7 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | D | The GL seam and its three implementations | Real-context conformance on macOS and llvmpipe |
 | F-1 | Stickers, geometries, and the renderer factory — the MVP | Call-log draw-path assertions; ADR 0024's draw-regime order honoured |
 | *(internal MVP release)* | All six targets published; only macOS and Linux verified | — |
-| E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; golden baseline per reported renderer |
+| E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; analytical readback over a real GL context |
 | F-2 | Models with textures and animation | Analytical readback over a real GL context |
 | E-labels | Map text drawn as screen-space primitives from Rentile label candidates | Labels legible and collision-free over a moving camera |
 | E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
@@ -46,6 +48,11 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | G | Globe projection | Golden baselines at both projection modes |
 | I | macOS harness: plans in, video out | A rendered sequence encodes and plays |
 | J | Golden-image corpus gate | Corpus job wired into `ci.yml` and `publish.yml` |
+
+**Where the sequence stands.** A, B, C, D and F-1 are released: A as `0.1.0`, and B, C, D and F-1 together
+as `0.2.0`. E-basemap is complete and gathered on `feat/cycle-e-basemap`, unmerged and unreleased —
+merging it to `main` is what starts its publication. Everything from F-2 onward is unstarted, though F-2
+and E-labels have both been spiked; see `HANDOFF.md` for what those spikes settled.
 
 **Pixel verification is deferred to Cycle J** by owner decision, recorded at
 `docs/superpowers/specs/2026-08-19-cycle-f1-stickers-and-geometries-design.md:204-205`. The gate rows for
@@ -56,7 +63,7 @@ black because its mipmap filter has no mipmaps — and it cannot tell anyone whe
 right. That remains Cycle J's job, and these cycles should not imply otherwise.
 
 **A visual harness runs earlier than Cycle I.** Pulled forward on the reasoning that RenG has drawn a
-basemap no human has looked at: analytical assertions prove relationships, not resemblance. It lives in
+basemap no human has looked at: analytical assertions prove relationships, not resemblance. It belongs in
 `consumer-smoke` under a `macosArm64`-only source set rather than in its own directory, because
 `tools/check_repository_policy.py` permits Kotlin source in exactly two places — `kmp/src` and
 `consumer-smoke` — and because the six-target resolution proof is what protects every release and should
@@ -70,8 +77,8 @@ published coordinate.
 ## A — Build and publication skeleton
 
 The `:kmp` module with `android`, `iosArm64`, `iosSimulatorArm64`, `macosArm64`, `linuxX64`, and
-`linuxArm64`; `explicitApi()` and Kotlin ABI validation; `com.rohittp.rentile:kmp:0.1.5` resolving from
-`https://maven.rohittp.com` with no `mavenLocal()`; the standalone `consumer-smoke` build; the
+`linuxArm64`; `explicitApi()` and Kotlin ABI validation; `com.rohittp.rentile:kmp` resolving from
+`https://maven.rohittp.com` with no `mavenLocal()`, at whatever version `gradle/libs.versions.toml` pins; the standalone `consumer-smoke` build; the
 dependency-free `docs/` site; `VERSION_NAME` as the sole checked-in version input. `:app` is deleted —
 it is Android Studio's skeleton and nothing in it is RenG.
 
@@ -83,12 +90,10 @@ metadata, credential-free resolution for all six targets, and the final immutabl
 `com/rohittp/reng/kmp/<version>/reng-release-completion-v1.json`; POM and metadata availability alone are
 not completion proof. See ADR 0013.
 
-That outcome is satisfied, and Cycle B's design specification and implementation plan were subsequently
-approved. Cycle B is implemented on branch `docs/cycle-b-resource-contract`, where every plan task including
-the cross-engine contract proof is complete and each was independently reviewed with its findings fixed. Its
-own gates pass: `checkKotlinAbi` reports no public ABI change, and the Android host, `linuxX64`, and
-`macosArm64` suites all pass. Cycle B awaits integration review; it is not merged and not released, so its
-exact merged-commit CI and publication have not been observed.
+That outcome is satisfied. Cycle B is complete, merged, and **released inside `0.2.0`**: every plan task
+including the cross-engine contract proof was finished and independently reviewed with its findings fixed,
+`checkKotlinAbi` reported no public ABI change, and the Android host, `linuxX64` and `macosArm64` suites all
+passed.
 
 Cycle A is publicly complete from exact source commit
 `af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`
@@ -96,6 +101,13 @@ succeeded, public six-target resolution passed, and the immutable `0.1.0` comple
 anonymously. The required documentation follow-up keeps README and served-doc version display
 metadata-driven. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision
 records.
+
+The second release, `0.2.0`, completed the same way from exact source commit
+`a2cbe6a965247f221f7e279a962b40306baac21b`, carrying Cycles B, C, D and F-1 together: both CI jobs and the
+publication workflow passed on that commit and its immutable completion record verifies anonymously. The
+first attempt failed closed before any R2 write, on a test ceiling calibrated for developer hardware;
+nothing was published, so the same version was retried after the ceiling was replaced. Recovery by explicit
+retry, never by overwrite, is exactly ADR 0013's intent.
 
 ## B — Public API surface and pure core
 
@@ -133,9 +145,8 @@ Kotlin decoder needs an inflate implementation. GLB parsing is glTF 2.0 binary: 
 binary chunk, tractable in pure Kotlin, but the supported feature subset must be written down rather
 than discovered.
 
-Both spikes landed and the design specification and implementation plan were approved. Cycle C is
-implemented on branch `feat/cycle-c-resource-layer` and awaits integration review; it ships the plan's
-tasks 1 through 13 and 15 — the coroutines dependency and public-surface growth, the inflate/CRC-32 seam,
+Both spikes landed, the design specification and implementation plan were approved, and Cycle C **released
+inside `0.2.0`**. It ships the plan's tasks 1 through 13 and 15 — the coroutines dependency and public-surface growth, the inflate/CRC-32 seam,
 PNG container parsing and decode (own-authored, no Skiko, hardened by a 300,000-input fuzz test after five
 adversarial review passes found six distinct defects), strict UTF-8 and a hand-rolled JSON reader, GLB
 container scanning and glTF parsing with the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates, the resident cache,
@@ -143,10 +154,16 @@ the resource driver's class gates and Store writes, and cancellation through the
 reordered the remaining six tasks onto Cycle E instead, so an MVP can ship before basemap work is ready:
 sprite/style commits, the production Rentile private-key resolver, the firewall transport/store adapters,
 engine failure classification, and the basemap rasterizer host travel to E's basemap half, and terrain
-acquisition travels to E's terrain half. This cycle therefore proxies nothing to Rentile yet, decodes no
-basemap tile, and draws no map text or pixel; six Rentile-firewall-validated gate/class combinations fail
-loudly rather than fake success, pending that later firewall. `HANDOFF.md` carries the scheduler-cost
-measurement taken here and an erratum owed against ADR 0016's basemap-class count.
+acquisition travels to E's terrain half. As released, this cycle therefore proxied nothing to Rentile,
+decoded no basemap tile, and drew no pixel — all of which the basemap cycle then closed.
+
+An earlier version of this paragraph said "six Rentile-firewall-validated gate/class combinations fail
+loudly rather than fake success". That was wrong twice: the enumerated set was five, and it is now **zero**.
+The basemap cycle deleted those gates rather than implementing them, because the Rentile engine acquires
+and validates those classes itself through RenG's firewall and RenG's driver never routes one;
+`ResourceClassGate` is down to `DECODE_PNG`, `PARSE_GLB` and `VALIDATE_GLB_FEATURES`. `HANDOFF.md` carries
+the scheduler-cost measurement taken here, which shipped unfixed. The erratum once owed against ADR 0016's
+basemap-class count has been written and is appended to the ADR itself.
 
 ## D — GL foundation
 
@@ -161,8 +178,8 @@ The conformance suite lands here and is the reason ADR 0006 and ADR 0008 are cla
 state identical before and after a draw, and a GLSL ES 3.00 source compiling under both a substituted
 and an unsubstituted directive. It runs against real contexts on `macosArm64` and llvmpipe.
 
-Cycle D is implemented on branch `feat/cycle-d-gl-foundation`, where every plan task including the
-real-context conformance suite is complete and each was independently reviewed with its findings fixed.
+Cycle D **released inside `0.2.0`**. Every plan task including the real-context conformance suite is
+complete and each was independently reviewed with its findings fixed.
 `checkKotlinAbi` reports no public ABI change across the whole cycle. Its own gates pass locally: the
 conformance suite ran for real
 against llvmpipe (surfaceless EGL, ES 3.2 and desktop 4.5 core) and against a real CGL core-profile context
@@ -172,9 +189,8 @@ byte-exact on both. A Mesa 25.2.8 driver defect made one deliberate negative che
 every dialect, leaving the macOS fixture as the only remaining real proof that `#version` substitution is
 load-bearing. That Linux verification happened opportunistically under Docker against real Mesa, not
 through a hosted CI run of `:kmp:linuxX64Test`; the hosted runner's no-GPU software-renderer fallback on
-macOS remains untested on any machine with a real GPU. Cycle D awaits integration review; it is not merged
-and not released, so its exact merged-commit CI and publication have not been observed, and `VERSION_NAME`
-remains `0.1.0`.
+macOS remains untested on any machine with a real GPU. The seam has grown since Cycle D closed — count
+`GlEntryPoint` rather than quoting a number from prose.
 
 ## E — Basemap, labels and terrain
 
@@ -195,16 +211,34 @@ from text inside decoded vector tiles. The request is at
 `docs/research/2026-08-22-rentile-glyph-closure-request.md`. Placed before terrain on consumer value: a
 map without text serves fewer consumers than a flat one does.
 
-**E-basemap.** Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with
-texture residency and eviction driven by the prepared frames that are alive. This is the first cycle that
-produces pixels, so it is also where per-platform golden baselines start — never cross-platform pixel
-equality, since llvmpipe and Apple's GL will not agree. It also picks up five of Cycle C's deferred tasks:
-sprite/style commits, the production Rentile private-key resolver, the firewall transport/store adapters,
-engine failure classification, and the basemap rasterizer host.
+**E-basemap — complete and gathered on `feat/cycle-e-basemap`, unmerged and unreleased.** Rentile PNG
+tiles decoded, uploaded, and drawn as the mercator ground under a camera, with texture residency and
+eviction bounded by an explicit GPU byte budget and driven by the prepared frames that are alive. It picked
+up five of Cycle C's deferred tasks — sprite/style commits, the production Rentile private-key resolver,
+the firewall transport/store adapters, engine failure classification, and the basemap rasterizer host — and
+added a sixth thing nobody planned for: sources that declare their tiles by reference through a TileJSON
+document, which 96 of the sources across the owner's 34-style corpus use, against 2 inline. Without it the
+ground drew for none of the 34.
 
-Baselines need a finer key than the platform. A hosted macOS runner renders through a software renderer
-while a developer's machine renders through Metal, so the reported renderer string — not the target —
-keys a baseline, or the first run on new hardware fails on a difference that is not a regression.
+This is the first cycle that produces pixels, and its gate is **analytical readback with no stored
+baselines**: a 128×128 frame through the public API, read back whole, with relationships asserted — no
+interior pixel is the clear colour, four named samples carry four fixture colours, quadrant means stand in
+a fixed order, and `drawBasemap = false` leaves the frame untouched. Golden baselines were deferred to
+Cycle J with all other pixel verification.
+
+Two decisions came out of drawing the ground rather than out of planning it. **ADR 0025** supersedes ADR
+0024's depth rule: with strict `GL_GREATER`, every altitude-0 map-anchored thing vanished the instant a
+ground existed at altitude 0 — the draw call issued, the pixels never written — so the comparison becomes
+`GL_GEQUAL` and the map regime's draw order becomes a contract (ground, then geometries, then map-anchored
+stickers, later declaration winning an exact tie). **ADR 0026** invents the single directional
+world-anchored light models will be shaded by, before the cycle that needs it, so the constant is argued in
+the open rather than appearing unexplained in a shader.
+
+When golden baselines do arrive they need a finer key than the platform. A hosted macOS runner renders
+through a software renderer while a developer's machine renders through Metal, so the reported renderer
+string — not the target — keys a baseline, or the first run on new hardware fails on a difference that is
+not a regression. And attribution has to be split: Rentile draws the basemap's content through Skia and
+RenG only composites it, so a whole-frame baseline cannot tell a RenG regression from a Skia bump.
 
 **E-terrain.** Draws the terrain Cycle C acquires, plus Cycle C's deferred terrain-acquisition task. Cycle
 C takes Rentile's terrain descriptor and DEM tiles, decodes them, and validates their declared encoding,
@@ -218,7 +252,7 @@ which Rentile evaluates from the style and hands over as a literal, belongs with
 are ready. Both halves belong to one letter and one subject — things a `FramePlan` draws — described
 together here.
 
-**F-1 — stickers, geometries, and the renderer factory (the MVP).** `createRenderer`, the first API making
+**F-1 — stickers, geometries, and the renderer factory (the MVP), released in `0.2.0`.** `createRenderer`, the first API making
 RenG operable; stickers drawn in both draw regimes; geometries painted by consumer shader pairs with
 consumer-supplied uniforms and textures. This cycle owns the decision CLAUDE.md flagged as ADR-worthy: how
 the two draw regimes order against each other within one frame, given screen-anchored things composite by

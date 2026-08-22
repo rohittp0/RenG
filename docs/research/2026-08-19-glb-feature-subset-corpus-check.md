@@ -69,3 +69,28 @@ One incidental note carried forward from the run that produced these counts: the
 separately (`SKIN` now precedes `ATTRIBUTE_SEMANTIC`) so a skinned model is diagnosed by the feature a
 consumer must actually remove; re-running this same corpus after that fix would move these 9 files from
 `ATTRIBUTE_SEMANTIC` to `SKIN`, not from reject to accept, so it does not change the conclusion above.
+
+## Erratum (2026-08-22): the corpus is 119 files, and a re-run puts the accepted count at 53
+
+The numbers above are left exactly as measured — they are the record of what the 2026-08-19 run saw, and
+rewriting them would destroy the only evidence of what the subset accepted at that date. Two facts have
+moved since.
+
+**`KhronosGroup/glTF-Sample-Assets` now carries 119 `.glb` files under `Models/*/glTF-Binary`, not 118.**
+The corpus grew upstream; nothing about RenG's pipeline changed to see a file it previously missed.
+
+**A re-run over all 119 files reports 53 supported.** That is one more accepted document than the 52 above,
+consistent with the corpus growing by one accepted file rather than with any row moving. The re-run was
+performed twice — before and after the accessor-constraint tightening on branch `feat/f2-glb-validation`,
+commit `24f36f0`, which adds fifteen guards to `PARSE_GLB` and `VALIDATE_GLB_FEATURES` — and **zero files
+changed verdict between the two**, so 53 is the count both for the pipeline as it stands on the released
+`0.2.0` line and for the tightened pipeline. That is the result the tightening needed: closing holes that
+become out-of-bounds reads once accessor decoding exists, without narrowing what the corpus can draw.
+
+The conclusion above is unaffected. No row moved from reject to accept in either run, so ADR 0021's subset
+still stands unrevised by measurement.
+
+Two things to know before citing this erratum. `feat/f2-glb-validation` is **not merged** into the basemap
+cycle branch or into `main`, so the tightened pipeline is not what a checkout of `main` runs today; and that
+branch numbers its own ADR `0025-constrain-glb-accessors-per-role.md`, which collides with the `0025` the
+basemap cycle already merged. One of the two must be renumbered at merge.

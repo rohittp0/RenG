@@ -314,6 +314,23 @@ decoded samples must be bit-exact, with no premultiplication, scaling, or colour
 those silently change elevations.
 _Avoid_: Height map, DEM image, hillshade, terrain texture
 
+**Scene Light**:
+The single fixed light RenG shades **Models** by. It is world-anchored — its direction is fixed relative
+to the map, not to the camera — at azimuth 335 degrees and elevation 45 degrees, with an ambient term so a
+surface facing away from it stays readable rather than going black against a bright ground. The azimuth is
+the cartographic relief-shading convention, chosen because light from the north-west avoids the inversion
+illusion that makes hills read as valleys; taking it means **Model** shading and terrain hillshading already
+agree when the ground gains relief.
+
+It is **RenG's own constant, not a consumer-visible feature**. No **Frame Plan** field configures it, and
+none of the 34 map styles RenG is verified against declares a style-spec `light` object at all, so there is
+nothing to derive it from and nothing to disagree with. World-anchoring is the load-bearing half: a
+camera-anchored light makes a **Model**'s shading swim as the camera orbits, so the object reads as lit by
+the viewer rather than by the world, which is wrong for something pinned to a coordinate. **Stickers**,
+**Geometries** and the ground are unlit and unaffected — a **Geometry** is painted by its own shader pair,
+and lighting it would contradict that.
+_Avoid_: Sun, headlight, illumination, lighting model, shading mode
+
 ### Resources
 
 **Frame Identity**:

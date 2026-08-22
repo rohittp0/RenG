@@ -45,6 +45,20 @@ Also observed, all benign: every model is single-buffer; no primitive declares a
 extensions present (`KHR_materials_specular`, `KHR_materials_ior`) appear in `extensionsUsed` and
 never in `extensionsRequired`, so RenG's required-extension check correctly ignores them.
 
+## Scope decided from these numbers
+
+Owner decisions, taken against this corpus rather than against glTF's breadth:
+
+- **Ignore extra UV and colour sets.** 10 models are rejected for nothing else, and the data is never
+  read. First, because it is the largest win per unit of work in the whole cycle.
+- **Support skinning, with joint matrices in a uniform buffer.** 7 models, joints to 112.
+- **Morph targets stay unsupported.** Zero in the corpus.
+- **JPEG stays unsupported.** One model carries a JPEG texture, and a decoder RenG does not have is not
+  worth building for a single asset. That model remains rejected, loudly and by a named code, and the
+  cheaper fix is upstream — re-export it as PNG.
+
+Reaching **40 of 41**. The one exception is the JPEG model, by decision rather than oversight.
+
 ## Vestigial rigs — a check that is already right
 
 18 models carry a `skins` array that **no node references**: exporter leftovers. RenG rejects on

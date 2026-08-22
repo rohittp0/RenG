@@ -121,3 +121,49 @@ to glyph URL composition, atlas packing, or `LabelCandidate` itself — all of w
 RenG can, for a given prepared style and tile batch, obtain a list that provably contains every glyph
 URL the following `acquireLabelCandidates` call will request — without that list costing a fetch, and
 without RenG relaxing the firewall's exact-match rule for any resource class.
+
+---
+
+# Second request, found while the first was being written: four missing expression operators
+
+**Status:** defect report, not a design question.
+**Urgency:** this becomes a total outage for most of the corpus the moment label rendering ships.
+
+## The ask
+
+Implement `!=`, `<`, `>` and `slice` in `compileNode`, and reconsider whether `failRetained` should
+throw.
+
+## Why it is urgent rather than merely owed
+
+Measured across the 34 map styles Rentile is verified against: **20 of them carry one of these
+operators — `>` in all 20 — and every occurrence is inside a `symbol` layer.**
+
+They work today for exactly one reason: **Rentile 0.2.0 does not compile symbol layers at all.** The
+expressions are never evaluated, so the gap is invisible. Label rendering is the feature that starts
+compiling them.
+
+So the sequencing is unfortunate in a specific way: the release that makes labels possible is the same
+release that makes 20 of 34 styles stop preparing, unless the operators land with it. Worth doing in
+the same change as the glyph closure above, since both are label work.
+
+## Why it is a total outage rather than a degradation
+
+`failRetained` **throws**, so an unsupported operator does not drop a layer — it kills the whole style,
+and with it the basemap. Probes confirm the boundary precisely:
+
+- legacy filter syntax `["!=", "class", "residential"]` → draws;
+- expression syntax `["!=", ["get", "class"], "residential"]` in a **fill** layer → the style dies;
+- the same expression in a **symbol** layer → harmless today, because symbol layers are not compiled.
+
+A consumer cannot route around it: the operators are in styles they do not author.
+
+## What we are not asking for
+
+Not asking RenG to work around it. RenG could not honestly do so — evaluating style expressions is
+Rentile's, behind the firewall, and a renderer that quietly reimplemented a slice of its engine's style
+semantics would be exactly the boundary violation ADR 0016 exists to prevent. This belongs upstream.
+
+Whether an unsupported operator should kill the style or drop the layer that uses it is Rentile's call.
+Dropping the layer would turn a total outage into a visible gap, which is the friendlier failure — but
+it is a semantics change with its own consequences, so it is raised rather than requested.

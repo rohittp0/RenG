@@ -262,17 +262,35 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * The [PreparedStyle] this host is currently holding for [styleKey], or `null` if it holds none.
-     * Performs no engine call, no cache call and no consumer exchange whatsoever.
+     * The [PreparedStyle] this host is currently holding for [styleKey] **and for [contentDigest]**, or
+     * `null` if it holds none matching both. Performs no engine call, no cache call and no consumer
+     * exchange whatsoever.
      *
      * This exists because the pure core emits no `CompileBasemapStyle` at all on a `RESIDENT`-provenance
      * frame (`requiresStyleCompilation(RESIDENT)` is false) — correctly, since resident bytes were
      * compiled when they were installed. The renderer therefore cannot take the frame's style from the
      * compile action, and reads back the host's own retained compilation instead. Retained across
      * invocations on purpose: the compilation belongs to the engine's lifetime, not to one preparation.
+     *
+     * **Why the digest is a parameter rather than a fact this host looks up.** "Resident bytes were
+     * compiled when they were installed" is the premise, and it can be false: [preparedStyle] runs before
+     * `InstallBasemapStyleVisibility`, so a frame whose compilation succeeded and whose *install* never
+     * ran — the style's own Store write failing is enough — leaves a compilation retained here for bytes
+     * that are not resident and may never be. A later `RESIDENT`-provenance frame would then be handed
+     * that compilation while `RenGRenderer.renderBasemapTiles` derives its routes from the older bytes
+     * that *are* resident, and the frame fails closed on every tile at once, exactly as a mismatched
+     * compile does. Matching on the key alone cannot see that; matching on the content the caller says is
+     * resident can, and declining is honest: this host holds no compilation of those bytes.
+     *
+     * The caller supplies the digest because the caller is already reading the resident generation for
+     * the manifest, and because this method's "no cache call" property is worth keeping — the point is
+     * that both halves of the frame are then keyed off *one* observation of what is resident, rather than
+     * two that can disagree. A `null` [contentDigest] (nothing resident under this key) matches nothing.
      */
-    fun currentPreparedStyle(styleKey: ResourceKey): PreparedStyle? =
-        compiledStyle?.takeIf { it.styleKey == styleKey }?.prepared
+    fun currentPreparedStyle(styleKey: ResourceKey, contentDigest: String?): PreparedStyle? =
+        compiledStyle
+            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+            ?.prepared
 
     /**
      * The [BasemapStyleManifest] for [styleKey] -- the routes the engine will ask for while compiling the
@@ -550,9 +568,12 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * One compilation, the exact content digest it was compiled from, and the lease keeping that content
-     * resident. [contentDigest] rather than the [Lease]'s own generation is what decides reuse — see
-     * [preparedStyle].
+     * One compilation, the exact content digest it was compiled from, and a lease held for as long as the
+     * binding is. [contentDigest] rather than the [Lease]'s own generation is what decides reuse — see
+     * [preparedStyle], which is also why the lease and the digest can describe *different* documents for
+     * one frame: on the frame a style is edited the lease is on the generation still resident, while the
+     * digest is the one being committed. The lease is residency bookkeeping, not a record of what was
+     * compiled.
      */
     private class CompiledStyleBinding(
         val styleKey: ResourceKey,

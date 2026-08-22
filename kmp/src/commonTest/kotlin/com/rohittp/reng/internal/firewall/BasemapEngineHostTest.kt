@@ -243,7 +243,7 @@ class BasemapEngineHostTest {
 
                 assertSame(first, second, "a fresh generation of identical bytes reuses the compilation")
                 assertSame(
-                    host.currentPreparedStyle(hostStyleKey),
+                    host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest),
                     second,
                     "the host retains exactly what it last compiled",
                 )
@@ -254,12 +254,15 @@ class BasemapEngineHostTest {
     }
 
     /**
-     * The resident generation is authoritative, so "the content changed" means a generation carrying
-     * different bytes was installed — exactly what the driver's own visibility install does after a
-     * transport re-fetch. That, and only that, recompiles.
+     * The ordinary shape of an edit as the driver performs it end to end: a transport re-fetch, the
+     * visibility install, and a compile of the same new bytes. What recompiles is the **content the
+     * caller commits** — the install beside it here is the driver's, reproduced so this reads as a whole
+     * frame rather than as an isolated call, and is deliberately *not* what the recompilation keys off.
+     * The test twenty lines above compiles edited bytes with nothing installed at all, and recompiles
+     * just the same; see [BasemapEngineHost.preparedStyle] for why the two cannot be swapped.
      */
     @Test
-    fun recompilesWhenTheInstalledStyleContentItselfChanges() = runTest {
+    fun recompilesWhenTheCommittedStyleContentItselfChanges() = runTest {
         val cache = ResidentCache()
         val host = basemapEngineHost(cache = cache)
         try {
@@ -316,8 +319,12 @@ class BasemapEngineHostTest {
                 )
                 assertSame(
                     second,
-                    host.currentPreparedStyle(hostStyleKey),
+                    host.currentPreparedStyle(hostStyleKey, edited.contentDigest),
                     "the host retains the compilation of the bytes being committed",
+                )
+                assertNull(
+                    host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest),
+                    "and does not offer it for the document that is merely still resident",
                 )
             }
         } finally {
@@ -329,13 +336,17 @@ class BasemapEngineHostTest {
     fun holdsNoPreparedStyleUntilOneIsCompiled() = runTest {
         val host = basemapEngineHost()
         try {
-            assertNull(host.currentPreparedStyle(hostStyleKey))
+            assertNull(host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest))
             host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
                 host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
             }
             // Retained across invocations on purpose: a RESIDENT-provenance frame emits no compile
             // action at all, so this readback is the renderer's only way to hold the frame's style.
-            assertNotNull(host.currentPreparedStyle(hostStyleKey))
+            assertNotNull(host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest))
+            assertNull(
+                host.currentPreparedStyle(hostStyleKey, contentDigest = null),
+                "nothing resident under the key matches no compilation",
+            )
         } finally {
             host.close()
         }

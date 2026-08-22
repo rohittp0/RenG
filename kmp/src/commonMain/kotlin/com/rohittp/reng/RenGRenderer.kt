@@ -557,10 +557,18 @@ internal class RenGRenderer(
                 // from. The host retains the compilation across invocations, so this is the one place
                 // the frame's style is obtainable on every frame alike. A frame that drew no basemap
                 // clears it, so this always describes the frame just prepared.
+                // Asked for by content, not by key alone: a compilation whose visibility install never
+                // ran -- the style's own Store write failing is enough -- would otherwise be handed back
+                // here for bytes that are not resident, and paired with routes renderBasemapTiles derives
+                // from the bytes that are. The host declines that, so both halves of the frame are keyed
+                // off this one observation of what is resident.
                 val style = if (styleReference == null) {
                     null
                 } else {
-                    basemapEngineHost.currentPreparedStyle(styleReference.resourceKey)
+                    basemapEngineHost.currentPreparedStyle(
+                        styleKey = styleReference.resourceKey,
+                        contentDigest = residentCache.current(styleReference.resourceKey)?.stored?.contentDigest,
+                    )
                 }
                 preparedBasemapStyle = style
                 if (styleReference != null && style != null && canonicalTiles.isNotEmpty()) {

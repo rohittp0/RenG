@@ -17,13 +17,13 @@ inherits the current decisions rather than revisiting them without new evidence.
 **Reordered 2026-08-19 so an MVP can ship for waiting consumers.** Existing cycle letters stay bound to
 their existing content so no prior reference breaks: Cycle F splits into **F-1** (stickers, geometries, and
 the renderer factory) and **F-2** (models with textures and animation), and Cycle E splits across its
-basemap and terrain halves. Six Cycle C tasks travel to Cycle E in this reorder — see "C — Resource layer"
+basemap, label and terrain thirds. Six Cycle C tasks travel to Cycle E in this reorder — see "C — Resource layer"
 below for exactly which.
 
 ```
 A skeleton ──► B core ──┬──► C resources ──┐
                         └──► D gl foundation┘──► F-1 (MVP) ──► release ──► E-basemap ──► release
-                                                            ──► F-2 models + labels ──► release ──► E-terrain
+                                                            ──► F-2 models ──► release ──► E-labels ──► E-terrain
                                                             ──► G globe ──► H platforms ──► I harness ──► J corpus
 ```
 
@@ -39,7 +39,8 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | F-1 | Stickers, geometries, and the renderer factory — the MVP | Call-log draw-path assertions; ADR 0024's draw-regime order honoured |
 | *(internal MVP release)* | All six targets published; only macOS and Linux verified | — |
 | E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; golden baseline per reported renderer |
-| F-2 | Models with textures and animation, and map labels | Per-platform golden baselines |
+| F-2 | Models with textures and animation | Per-platform golden baselines |
+| E-labels | Map text drawn as screen-space primitives from Rentile label candidates | Labels legible and collision-free over a moving camera |
 | E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
 | G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |
@@ -159,12 +160,24 @@ macOS remains untested on any machine with a real GPU. Cycle D awaits integratio
 and not released, so its exact merged-commit CI and publication have not been observed, and `VERSION_NAME`
 remains `0.1.0`.
 
-## E — Basemap and terrain
+## E — Basemap, labels and terrain
 
-**Split across two execution slots by the 2026-08-19 reorder** so an MVP can ship first: the basemap half
-runs immediately after F-1's MVP release, and the terrain half runs after F-2, moved behind models because
-terrain was already deferred once for having no consumer while models have consumers waiting. Both halves
-still belong to one letter and one subject — the ground — described together here.
+**Split across three execution slots.** The 2026-08-19 reorder split basemap from terrain so an MVP could
+ship first: the basemap slot runs immediately after F-1's MVP release, and terrain runs last, moved behind
+models because terrain was already deferred once for having no consumer while models have consumers
+waiting. Labels were split out on 2026-08-22, after research showed they share almost nothing with the
+model work they were briefly bundled into — a signed-distance-field shader, viewport-wide collision and
+priority, and a Rentile-side change that has not shipped — and that letting an external dependency sit
+inside the model cycle would hold a shippable release hostage. All three slots belong to one letter and
+one subject — what the map itself draws — and are described together here.
+
+**E-labels.** Map text drawn by RenG as screen-space primitives from Rentile's `LabelCandidate`s, which
+already carry laid-out glyph quads, so text shaping and line breaking are Rentile's. Blocked on a Rentile
+API that reports the glyph closure before fetching it — ADR 0016's firewall preregisters exact URLs, and
+glyph-range URLs are the one resource class RenG cannot derive in advance, because the range set comes
+from text inside decoded vector tiles. The request is at
+`docs/research/2026-08-22-rentile-glyph-closure-request.md`. Placed before terrain on consumer value: a
+map without text serves fewer consumers than a flat one does.
 
 **E-basemap.** Rentile PNG tiles decoded, uploaded, and drawn as the mercator ground under a camera, with
 texture residency and eviction driven by the prepared frames that are alive. This is the first cycle that

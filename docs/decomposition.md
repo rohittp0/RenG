@@ -39,13 +39,29 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | F-1 | Stickers, geometries, and the renderer factory — the MVP | Call-log draw-path assertions; ADR 0024's draw-regime order honoured |
 | *(internal MVP release)* | All six targets published; only macOS and Linux verified | — |
 | E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; golden baseline per reported renderer |
-| F-2 | Models with textures and animation | Per-platform golden baselines |
+| F-2 | Models with textures and animation | Analytical readback over a real GL context |
 | E-labels | Map text drawn as screen-space primitives from Rentile label candidates | Labels legible and collision-free over a moving camera |
 | E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
 | G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |
-| I | macOS harness: plans in, MP4 out | A rendered sequence encodes and plays |
+| I | macOS harness: plans in, video out | A rendered sequence encodes and plays |
 | J | Golden-image corpus gate | Corpus job wired into `ci.yml` and `publish.yml` |
+
+**Pixel verification is deferred to Cycle J** by owner decision, recorded at
+`docs/superpowers/specs/2026-08-19-cycle-f1-stickers-and-geometries-design.md:204-205`. The gate rows for
+E-basemap and F-2 therefore read "analytical readback", not golden baselines: relationships asserted over
+a real GL context, with no stored images. Analytical readback catches the failures that are quiet and
+plausible — a transposed tile index, a v-flipped texture, a silently empty ground, a model that renders
+black because its mipmap filter has no mipmaps — and it cannot tell anyone whether the result *looks*
+right. That remains Cycle J's job, and these cycles should not imply otherwise.
+
+**A visual harness runs earlier than Cycle I.** Pulled forward on the reasoning that RenG has drawn a
+basemap no human has looked at: analytical assertions prove relationships, not resemblance. It lives in
+`consumer-smoke` under a `macosArm64`-only source set rather than in its own directory, because
+`tools/check_repository_policy.py` permits Kotlin source in exactly two places — `kmp/src` and
+`consumer-smoke` — and because the six-target resolution proof is what protects every release and should
+not share a source set with rendering machinery. It writes a frame sequence and leaves assembly to
+`ffmpeg`; a self-contained encoder through AVFoundation cinterop stays with Cycle I.
 
 The MVP release is **internal**: breaking the public interface in a later cycle is accepted. Publication
 itself stays immutable regardless — a later breaking change means a new version, never overwriting a

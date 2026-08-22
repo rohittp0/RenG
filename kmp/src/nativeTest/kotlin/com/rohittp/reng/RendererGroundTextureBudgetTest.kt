@@ -124,6 +124,82 @@ class RendererGroundTextureBudgetTest {
     }
 
     /**
+     * Task E-J: a tile a draw **reuses** is as protected from that draw's own eviction as a tile the
+     * draw uploads. Reuse is not a weaker kind of use.
+     *
+     * The pressure is real and is applied through the public surface only. The budget holds two of the
+     * four tiles this camera needs, so the first draw evicts two of its own tiles on the way out and
+     * leaves two resident. The second draw over identical ground therefore reuses those two and uploads
+     * the other two — four tiles registered against a two-tile ceiling, which must cost two evictions.
+     * The question this test asks is *which* two.
+     *
+     * With the reuse branch leasing what it reuses, the answer is: not the reused ones. They are
+     * structurally unreachable to eviction for the whole draw, because `evictOverBudget` iterates only
+     * unleased keys. With the reuse branch merely touching them — the shape this test was written
+     * against — the two reused tiles sit unleased in the eviction order for the whole draw, are the
+     * oldest candidates in it, and are exactly what the first release deletes: a draw evicting the very
+     * textures it just sampled, kept safe only by the accident that the release sweep runs after the
+     * last `drawArrays`.
+     *
+     * Every name here is derived from what the run actually did rather than assumed, so the test states
+     * one belief about the fixture and no more: that two 512x512 tiles fit this budget and four do not.
+     */
+    @Test
+    fun aReusedGroundTextureSurvivesThePressureThatEvictsTheTilesAroundIt() = runTest {
+        val binding = styleGlBinding()
+        val renderer = groundRenderer(
+            binding,
+            limits = ResourceLimits(maximumResidentGpuTextureBytes = 2 * ONE_TILE_BYTES),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L))
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L))
+
+        binding.log.clear()
+        binding.deletedNames.clear()
+        renderer.draw(first, target)
+        val firstDrawUploads = uploadedTextureNames(binding.log)
+        assertEquals(GROUND_TILES_PER_FRAME, firstDrawUploads.size, "the first draw uploads every tile")
+        val reusable = firstDrawUploads.filterNot { it in binding.deletedNames }
+        assertEquals(
+            2,
+            reusable.size,
+            "the fixture belief: a two-tile budget leaves exactly two of the four tiles resident",
+        )
+
+        binding.log.clear()
+        binding.deletedNames.clear()
+        renderer.draw(second, target)
+
+        val boundTextures = binding.log.mapNotNull(::boundTextureName).toSet()
+        assertTrue(
+            reusable.all { it in boundTextures },
+            "the second draw must actually reuse both resident tiles, or there is no reuse to protect",
+        )
+        val secondDrawUploads = uploadedTextureNames(binding.log)
+        assertEquals(
+            GROUND_TILES_PER_FRAME - reusable.size,
+            secondDrawUploads.size,
+            "and must upload only the tiles the first draw's eviction took",
+        )
+        assertTrue(
+            binding.deletedNames.isNotEmpty(),
+            "four tiles against a two-tile budget must evict something, or this test applies no pressure",
+        )
+        assertEquals(
+            emptyList(),
+            reusable.filter { it in binding.deletedNames },
+            "a tile this draw reused is a tile this draw is using: it must not be what this draw evicts",
+        )
+        assertEquals(
+            secondDrawUploads.toSet(),
+            binding.deletedNames.toSet(),
+            "the eviction falls on this draw's own uploads instead, which is the whole of the difference",
+        )
+    }
+
+    /**
      * The one way a rendered tile's decode can legitimately fail: a consumer whose
      * [ResourceLimits.maximumDecodedImageBytes] is below one tile has configured a renderer that
      * cannot draw a basemap at all. It must say so as a typed failure naming the tile, at the stage the
@@ -159,8 +235,27 @@ class RendererGroundTextureBudgetTest {
         RenderContextProbe { RenderContextIdentity(1L) },
     )
 
+    /**
+     * The GL name every `genTextures(1)` in [log] produced, in call order, read back from the
+     * `bindTexture` the uploader issues immediately afterwards — [RecordingGlBinding] hands out names
+     * through an `IntArray` the log line cannot carry, and the bind is where the name it just took
+     * becomes visible.
+     */
+    private fun uploadedTextureNames(log: List<String>): List<Int> =
+        log.indices.filter { log[it] == "genTextures(1)" }.map { index ->
+            val bind = log[index + 1]
+            requireNotNull(boundTextureName(bind)) { "an upload binds the name it just generated, not \"$bind\"" }
+        }
+
+    /** The texture name in a `bindTexture(<target>,<name>)` log line, or null for any other line. */
+    private fun boundTextureName(line: String): Int? =
+        if (line.startsWith("bindTexture(")) line.substringAfterLast(',').removeSuffix(")").toIntOrNull() else null
+
     private companion object {
         /** `x in {1, 2}, y in {10, 11}` at LOD 4 — see `styleCamera`'s own KDoc for why that camera. */
         const val GROUND_TILES_PER_FRAME: Int = 4
+
+        /** One canonical 512x512 RGBA8 basemap tile on the GPU. */
+        const val ONE_TILE_BYTES: Long = 512L * 512L * 4L
     }
 }

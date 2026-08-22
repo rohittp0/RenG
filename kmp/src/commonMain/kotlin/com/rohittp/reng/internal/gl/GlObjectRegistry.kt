@@ -18,11 +18,16 @@ internal enum class GlObjectType {
 internal data class GlObjectHandle(val type: GlObjectType, val name: Int)
 
 /**
- * A single-use claim that keeps a [GlObjectRegistry.registerTexture] entry exempt from
- * byte-budgeted eviction, mirroring [com.rohittp.reng.internal.cache.Lease]'s shape at the GPU
- * layer: Cycle B's lease answers what MUST stay resident, this one answers the same question for
- * the GL texture behind it. Consumed by exactly one matching [GlObjectRegistry.releaseLease] call;
- * releasing it again is a caller error rather than a silent no-op.
+ * A single-use claim that keeps a [GlObjectRegistry.registerTexture] entry exempt from every deletion
+ * path in [GlObjectRegistry] -- byte-budgeted eviction and [GlObjectRegistry.defer] alike -- mirroring
+ * [com.rohittp.reng.internal.cache.Lease]'s shape at the GPU layer: Cycle B's lease answers what MUST
+ * stay resident, this one answers the same question for the GL texture behind it. Consumed by exactly
+ * one matching [GlObjectRegistry.releaseLease] call; releasing it again is a caller error rather than a
+ * silent no-op.
+ *
+ * The one deletion a lease cannot delay is renderer close, which deletes every handle
+ * [GlObjectRegistry.liveKeys] still reports (ADR 0015): a lease postpones a deletion, it never outlives
+ * the renderer that issued it.
  */
 internal class TextureLease internal constructor(internal val key: ResourceKey) {
     private var released: Boolean = false
@@ -61,6 +66,12 @@ internal class GlObjectRegistry(
     private val textureLeaseCounts: MutableMap<ResourceKey, Int> = mutableMapOf()
     private val unleasedOrder: LinkedHashMap<ResourceKey, Unit> = LinkedHashMap()
 
+    // Keys a [defer] call asked to delete while a lease was still open: kept whole in `live` (so
+    // `liveKeys()`/`handles()` -- and therefore renderer close -- still see them) and deleted by the
+    // release of their last lease. Every member is leased by construction, so no member is ever in
+    // `unleasedOrder`, and eviction cannot reach one either.
+    private val retiredPendingLastLease: MutableSet<ResourceKey> = mutableSetOf()
+
     internal fun register(key: ResourceKey, handles: List<GlObjectHandle>) {
         live.getOrPut(key) { mutableListOf() }.addAll(handles)
     }
@@ -72,6 +83,11 @@ internal class GlObjectRegistry(
      */
     internal fun registerTexture(key: ResourceKey, handle: GlObjectHandle, byteSize: Long): TextureLease {
         require(byteSize >= 0L) { "byteSize must be non-negative" }
+        // Re-registering a key whose deletion is pending revives it, exactly as `ResidentCache.install`
+        // clears `KeyEntry.freed`: the caller has just uploaded a fresh texture under this key, and
+        // deleting it on the release of a lease taken before the free would be the same
+        // use-after-delete this marker exists to prevent, only one generation later.
+        retiredPendingLastLease.remove(key)
         live.getOrPut(key) { mutableListOf() }.add(handle)
         textureByteSizes[key] = byteSize
         textureLeaseCounts[key] = (textureLeaseCounts[key] ?: 0) + 1
@@ -80,10 +96,12 @@ internal class GlObjectRegistry(
     }
 
     /**
-     * Releases [lease]. If this was the key's last outstanding lease, the entry becomes evictable
-     * and moves to the most-recently-used end of the LRU order, then [evictOverBudget] runs.
+     * Releases [lease]. If this was the key's last outstanding lease, one of two things happens: a key
+     * [defer] retired while it was leased is deleted here and now, since the lease that was delaying its
+     * deletion is gone; any other key simply becomes evictable and moves to the most-recently-used end of
+     * the LRU order. [evictOverBudget] then runs either way.
      *
-     * Eviction deletes GL textures, and ADR 0015 requires the renderer's exact GL context to be
+     * Both of those delete GL textures, and ADR 0015 requires the renderer's exact GL context to be
      * current for any GL delete call -- [binding] is threaded through for exactly that call, so
      * this method must only ever be invoked from an operation that has already confirmed the exact
      * context is current, the same discipline [deleteGlObjects] itself already assumes throughout
@@ -96,8 +114,14 @@ internal class GlObjectRegistry(
         check(remaining >= 0) { "cannot release a texture lease with no outstanding lease" }
         textureLeaseCounts[key] = remaining
         if (remaining > 0) return
-        unleasedOrder.remove(key)
-        unleasedOrder[key] = Unit
+        if (retiredPendingLastLease.remove(key)) {
+            textureByteSizes.remove(key)
+            textureLeaseCounts.remove(key)
+            deleteGlObjects(binding, live.remove(key).orEmpty())
+        } else {
+            unleasedOrder.remove(key)
+            unleasedOrder[key] = Unit
+        }
         evictOverBudget(binding)
     }
 
@@ -118,7 +142,39 @@ internal class GlObjectRegistry(
 
     internal fun hasLiveGpuObjects(): Boolean = live.values.any { it.isNotEmpty() }
 
+    /**
+     * Queues [key]'s GL handles for deferred deletion under [id], or -- when the key still has an
+     * outstanding [TextureLease] -- retires it instead and returns `null`, leaving every handle live
+     * until the release of its last lease deletes them.
+     *
+     * A lease means "this texture is in use and must not go away". [evictOverBudget] honours that
+     * structurally, by iterating only [unleasedOrder]; before this guard existed, this method did not
+     * honour it at all, so the two deletion paths in this class disagreed about what a lease is worth.
+     * That disagreement was never reachable: no production code calls this method (the deferred-deletion
+     * ledger is designed but unwired -- `GpuLedger.deferredDeletions` is constructed empty in
+     * `RendererFactory` and nothing ever appends to it), the only leases taken anywhere are
+     * `RenGRenderer.performDraw`'s ground leases, which are taken and released inside one synchronous
+     * `Draw` permitted operation, and every GL-bound operation must hold the renderer's exact context on
+     * the calling thread (ADR 0015), so no free can interleave with a draw that holds a lease. **No
+     * reaching sequence was constructible when this guard was written**; it is here so the two paths
+     * agree before someone wires `freeResources()` onto budget-tracked tiles and makes it reachable.
+     *
+     * Retiring rather than refusing is what the contract asks for: "freeing is never an error for the
+     * caller to recover from", and `ResidentCache.free` already retires a still-leased generation and
+     * reports it in `ResourceFreeResult.deferredKeys` instead of rejecting the free. This is the same
+     * rule one layer down.
+     *
+     * A retired key stays in [live], so `liveKeys()`/`handles()` still report it and renderer close still
+     * deletes it -- a lease can delay a deletion but can never outlive the renderer. It deliberately does
+     * NOT enter [queued]: nothing drains that map on close, so queueing here would trade a
+     * use-after-delete for a leak. The last release therefore deletes directly, under the same
+     * exact-context precondition [releaseLease] already documents for eviction.
+     */
     internal fun defer(key: ResourceKey, id: DeletionId): DeferredDeletion? {
+        if ((textureLeaseCounts[key] ?: 0) > 0) {
+            retiredPendingLastLease += key
+            return null
+        }
         val handles = live.remove(key) ?: return null
         queued[id] = ArrayList(handles)
         textureByteSizes.remove(key)
@@ -144,6 +200,12 @@ internal class GlObjectRegistry(
         textureByteSizes.clear()
         textureLeaseCounts.clear()
         unleasedOrder.clear()
+        // Hygiene, deliberately not load-bearing and deliberately not covered by a test: no assertion can
+        // observe this line, because [registerTexture] is the only way to obtain a lease and it clears the
+        // key's marker first, so a marker that outlived a context loss could never reach [releaseLease].
+        // It stays because "forget everything" that leaves one map populated is a claim this class would
+        // then be making falsely.
+        retiredPendingLastLease.clear()
     }
 
     /**
@@ -153,7 +215,8 @@ internal class GlObjectRegistry(
      * from it by [registerTexture]'s re-lease guard), so it is structurally unreachable here
      * regardless of how far its bytes push the total over budget -- exceeding the budget because a
      * live Prepared Frame still needs a tile is the correct outcome; breaking a drawable frame to
-     * honour a cache limit is not.
+     * honour a cache limit is not. A key [defer] retired while leased is leased by definition and is
+     * therefore unreachable here for the same reason; [releaseLease] deletes it instead.
      */
     private fun evictOverBudget(binding: GlBinding) {
         var total = textureByteSizes.values.sum()

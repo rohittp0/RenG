@@ -9,13 +9,16 @@ Maven coordinate: com.rohittp.reng:kmp
 Public Maven repository: https://maven.rohittp.com
 Public release status: available; read Maven metadata for the current version
 
-Published Kotlin Multiplatform targets:
-- android
-- iosArm64
-- iosSimulatorArm64
-- macosArm64
-- linuxX64
-- linuxArm64
+Published Kotlin Multiplatform targets (all six ship in every release):
+- android — host tests run on the JVM; no GL is executed
+- iosArm64 — compilation only
+- iosSimulatorArm64 — compilation only
+- macosArm64 — test suite runs, including GL conformance against a real context
+- linuxX64 — test suite runs, including GL conformance against a real context on Mesa llvmpipe
+- linuxArm64 — compilation only
+
+Publication and execution are separate claims. Android and iOS bring-up on real devices is a planned
+cycle that has not happened yet.
 
 License: Apache-2.0
 
@@ -26,8 +29,22 @@ release's strict record at com/rohittp/reng/kmp/<version>/reng-release-completio
 availability are not completion proof. The workflow conditionally creates the record only after anonymous
 artifact/metadata verification and credential-free six-target resolution, then verifies it anonymously.
 
-The first public completion record verified anonymously from its exact CI-passing source commit. ADR 0013
-and the Cycle A design spec and implementation plan remain historical decision records. Public version
-display remains metadata-driven.
+Every public completion record so far verified anonymously from its exact CI-passing source commit. ADR
+0013 and the Cycle A design spec and implementation plan remain historical decision records. Public
+version display remains metadata-driven; do not quote a RenG version from this file.
 
-RenG remains pre-runtime after Cycle A. It exposes no runtime API and renders nothing.
+What the published release does
+
+RenG draws. createRenderer is public API. It adopts the OpenGL context the caller has already made
+current, takes a FramePlan describing the complete on-screen state, and draws that frame into a
+caller-supplied framebuffer. Frame preparation and drawing are separate operations. The release draws
+PNG stickers anchored to the map or to the screen, and lat/lon-bounded quads painted by consumer-supplied
+GLSL ES 3.00 shader pairs with consumer-supplied uniforms and textures.
+
+What it does not do
+
+The published release draws no basemap tiles, no GLB models, no terrain, and no map labels, and it
+rejects the GLOBE projection mode. A plan that requests the basemap does not fail; it draws none, and
+warns when no basemap style is configured. RenG owns no window, render loop, capture path, or encoder. It performs no network I/O and keeps
+no persistent cache: transport and store are adapters the consumer injects, and RenG only follows the
+supplied plan. This file describes the current release, not unreleased work.

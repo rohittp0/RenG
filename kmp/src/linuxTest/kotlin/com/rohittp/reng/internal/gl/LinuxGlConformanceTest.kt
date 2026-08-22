@@ -1,5 +1,7 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BASEMAP_READBACK_PIXELS
+import com.rohittp.reng.runBasemapReadbackSuite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -25,6 +27,32 @@ class LinuxGlConformanceTest {
         val desktopRenderer = runOn(ShaderDialect.DESKTOP) { it }
         assertEquals(esRenderer.rendererName, desktopRenderer.rendererName)
         assertTrue(esRenderer.dialect != desktopRenderer.dialect)
+    }
+
+    /**
+     * Cycle E's gate, on a real ES context: the ground genuinely reaches the framebuffer, in the
+     * arrangement the fixture camera implies. See `runBasemapReadbackSuite` for exactly what this
+     * catches and what it does not.
+     *
+     * Run on the GLES context only. The desktop dialect's half of the same suite runs on macOS
+     * (`MacosGlConformanceTest`), so both shading-language dialects are covered once each; running
+     * both here would double a Skia rasterization the suite already performs and prove nothing the
+     * pair does not.
+     */
+    @Test fun theBasemapReadbackSuitePassesOnARealEsContext() {
+        val fixture = SurfacelessEglContext.create(ShaderDialect.GLES)
+        try {
+            val binding = when (val result = openPlatformGlBinding()) {
+                is GlBindingResult.Bound -> result.binding
+                is GlBindingResult.Unsupported ->
+                    throw AssertionError("every roster entry point must resolve on this driver")
+            }
+            binding.viewport(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
+            binding.scissor(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
+            runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
     }
 
     private fun <T> runOn(dialect: ShaderDialect, assertions: (GlConformanceReport) -> T): T {

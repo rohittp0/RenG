@@ -5,8 +5,12 @@ import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 
 /**
@@ -148,6 +152,193 @@ class RendererBasemapTileTest {
         )
     }
 
+    /**
+     * The whole tile phase, twice, over a style the consumer's transport never declares fresh — which is
+     * the condition under which a per-frame style *manifest* is reachable at all, and the one
+     * `BasemapEngineHost`'s digest-bound manifest cache has to survive. Frame two resolves the document
+     * from the transport again and the driver installs a fresh generation carrying identical bytes, so a
+     * cache bound to that generation would silently reparse the entire style on every frame forever.
+     *
+     * That reuse is pure, so no consumer adapter can see it and no assertion here can: the reuse itself
+     * is asserted at its own level, by
+     * `internal.firewall.BasemapEngineHostTest.keepsTheManifestAcrossAFreshGenerationOfIdenticalBytes`.
+     * What this test does own is the end of the same path a consumer actually observes — that frame two's
+     * ground is still composed from a manifest describing *this* style, rather than from a stale or empty
+     * one, which would reach the consumer as `AMBIGUOUS_RESOURCE_ROUTE` on every tile at once.
+     *
+     * The transport declares **no** `freshUntilEpochMillis`, checked here as an assertion rather than
+     * assumed: a fresh style would make frame two `RESIDENT`-provenance, install no new generation, and
+     * leave this test passing whether the cache worked or not.
+     */
+    @Test
+    fun rendersTheSameGroundOnEveryFrameThatReResolvesTheSameStyleDocument() = runTest {
+        val transport = TileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+        val urlsAfterFirstFrame = transport.requestedUrls()
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+
+        assertEquals(
+            2,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "the fixture must genuinely re-resolve the style on frame two, or it proves nothing",
+        )
+        assertEquals(
+            first.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            second.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            "a re-resolved style of identical bytes renders exactly the same identified ground",
+        )
+        assertEquals(
+            urlsAfterFirstFrame.filter { it.startsWith("https://tiles.example/") }.sorted(),
+            transport.requestedUrls()
+                .filter { it.startsWith("https://tiles.example/") }
+                .distinct()
+                .sorted(),
+            "and asks for it through exactly the urls the first frame's manifest composed",
+        )
+    }
+
+    /**
+     * The frame on which the consumer's own style document **changes** — the thing a downstream
+     * integrator does constantly while iterating on a style, and the one case where the compilation and
+     * the route derivation can disagree about which document the frame is on.
+     *
+     * `CompileBasemapStyle` runs strictly before `InstallBasemapStyleVisibility`, so at compile time the
+     * resident generation still carries the *previous* frame's bytes; the tile-time manifest is derived
+     * after that install, from this frame's. A compilation taken from the resident generation therefore
+     * makes the engine ask for the superseded style's tile urls while the firewall holds only the edited
+     * style's, and every tile at once fails closed as `AMBIGUOUS_RESOURCE_ROUTE` — surfacing to the
+     * caller as `BASEMAP_RENDER_FAILED` on frame two.
+     *
+     * **It has to be frame two.** The defect self-heals: by frame three the edited bytes are resident, so
+     * a test that prepares two frames and only asks whether it recovers passes without the fix. What is
+     * asserted here is that the *second* frame — the one that fails today — succeeds and renders from the
+     * edited document.
+     *
+     * The transport declares **no** `freshUntilEpochMillis`, asserted rather than assumed: a fresh style
+     * would make frame two `RESIDENT`-provenance, re-resolve nothing, and never deliver the edit at all.
+     */
+    @Test
+    fun rendersTheEditedStyleOnTheVeryFrameItsBytesChange() = runTest {
+        val transport = EditedStyleTileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        renderer.prepare(basemapPlan(frameIndex = 0L))
+        val firstDigest = assertNotNull(renderer.preparedBasemapStyle, "frame one holds its style").digest
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        val secondDigest = assertNotNull(renderer.preparedBasemapStyle, "frame two holds its style").digest
+
+        assertEquals(
+            2,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "the fixture declares no freshness, so frame two must genuinely re-resolve the style",
+        )
+        assertNotEquals(
+            firstDigest,
+            secondDigest,
+            "frame two compiled the document it is committing, not the one resident before it",
+        )
+        assertEquals(4, second.basemapTiles.size, "and rendered the ground that document describes")
+        assertEquals(
+            listOf(
+                "https://tiles.example/edited/4/1/10.png",
+                "https://tiles.example/edited/4/1/11.png",
+                "https://tiles.example/edited/4/2/10.png",
+                "https://tiles.example/edited/4/2/11.png",
+            ),
+            transport.requestedUrls()
+                .filter { it.startsWith("https://tiles.example/edited/") }
+                .distinct()
+                .sorted(),
+            "through the exact urls the edited style's own tile source composes",
+        )
+        second.basemapTiles.forEach { rendered ->
+            assertEquals(
+                basemapTileKey(secondDigest, rendered.tile, TILE_OUTPUT_SIZE),
+                rendered.key,
+                "and every rendered tile is identified by the edited style's digest",
+            )
+        }
+        assertEquals(
+            4,
+            transport.requestedUrls().count { it.startsWith("https://tiles.example/r/") },
+            "the superseded style's ground is asked for on its own frame only",
+        )
+    }
+
+    /**
+     * The residual left by the compile-side fix, closed at the readback.
+     *
+     * `CompileBasemapStyle` runs before `InstallBasemapStyleVisibility`, and the steps between them can
+     * fail — the style's own Store write is enough, and is what this drives. The compilation of the
+     * edited document then succeeds and is retained by the host, while the *previous* document stays
+     * resident because nothing installed. A later `RESIDENT`-provenance frame emits no compile action at
+     * all, so the renderer reads the retained compilation back; matching on the style key alone hands it
+     * the edited style's program while `renderBasemapTiles` derives routes from the resident older bytes,
+     * and every tile fails closed at once — the same mismatch this task fixed, arriving by a different
+     * door.
+     *
+     * `RESIDENT` provenance is reached here through `CACHE_ONLY`, which `residentObserved` treats as
+     * resident unconditionally whenever anything is resident, and which is a public per-frame argument to
+     * `prepare`. The frame is asserted to *prepare* rather than to render ground: the host honestly holds
+     * no compilation of the bytes that are resident, and says so. It heals on the next frame that
+     * compiles.
+     */
+    @Test
+    fun neverPairsARetainedCompilationWithRoutesFromDifferentResidentBytes() = runTest {
+        val transport = EditedStyleTileTransport()
+        val store = FailingStyleWriteStore()
+        val renderer = styleRenderer(transport, store) as RenGRenderer
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+        assertEquals(4, first.basemapTiles.size, "the first document renders its ground")
+
+        // The edited document compiles, and then its commit fails before anything installs.
+        store.failStyleWrites = true
+        val writeFailure = assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 1L)) }
+        assertEquals(RenGErrorCode.STORE_WRITE_FAILED, writeFailure.code)
+        assertEquals(PipelineStage.STORE_WRITE, writeFailure.stage)
+        store.failStyleWrites = false
+
+        val resident = renderer.prepare(
+            basemapPlan(frameIndex = 2L),
+            ResourceAccessMode.CACHE_ONLY,
+        ) as RenGPreparedFrame
+
+        assertEquals(
+            2,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "a CACHE_ONLY frame must genuinely resolve the style from residency, or it proves nothing",
+        )
+        assertEquals(
+            emptyList(),
+            resident.basemapTiles,
+            "a compilation of bytes that are not resident is declined rather than drawn",
+        )
+        assertEquals(
+            emptyList(),
+            transport.requestedUrls().filter { it.startsWith("https://tiles.example/edited/") },
+            "so the frame never asks for the uninstalled document's ground",
+        )
+
+        val healed = renderer.prepare(basemapPlan(frameIndex = 3L)) as RenGPreparedFrame
+        assertEquals(4, healed.basemapTiles.size, "and the next compiling frame renders normally again")
+        assertEquals(
+            listOf(
+                "https://tiles.example/edited/4/1/10.png",
+                "https://tiles.example/edited/4/1/11.png",
+                "https://tiles.example/edited/4/2/10.png",
+                "https://tiles.example/edited/4/2/11.png",
+            ),
+            transport.requestedUrls()
+                .filter { it.startsWith("https://tiles.example/edited/") }
+                .distinct()
+                .sorted(),
+            "from the edited document, through its own exact urls",
+        )
+    }
+
     @Test
     fun aFrameThatDrawsNoBasemapRendersNoGroundAtAll() = runTest {
         val transport = TileTransport()
@@ -220,5 +411,84 @@ internal class TileTransport(
                 metadata = TransportResponseMetadata(contentType = "image/png"),
             )
         }
+    }
+}
+
+/** [STYLE_TILE_TEMPLATE] edited, so the same style url serves a genuinely different ground source. */
+internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/edited/{z}/{x}/{y}.png"
+
+/**
+ * [STYLE_WITH_SPRITE_JSON] with its raster source repointed. Only the tile template moves, which is
+ * enough to change both the compiled style's digest and every tile url the engine composes.
+ */
+internal val EDITED_STYLE_WITH_SPRITE_JSON: String =
+    STYLE_WITH_SPRITE_JSON.replace(STYLE_TILE_TEMPLATE, EDITED_STYLE_TILE_TEMPLATE)
+
+/**
+ * A [TileTransport] whose style document is **edited between frames**: the first request for
+ * [STYLE_URL] answers [STYLE_WITH_SPRITE_JSON] and every later one answers
+ * [EDITED_STYLE_WITH_SPRITE_JSON], modelling a consumer saving a change to their own style.
+ *
+ * Which body to serve is decided from the recorder's own snapshot, taken under the same lock the append
+ * took, so the decision is ordered with respect to every other recorded call rather than read off an
+ * unguarded counter.
+ *
+ * Declares no `freshUntilEpochMillis` at all: a fresh style would be resolved from residency on frame
+ * two and the edit would never be delivered.
+ */
+internal class EditedStyleTileTransport : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = if (recorded.snapshot().count { it == STYLE_URL } <= 1) {
+                    STYLE_WITH_SPRITE_JSON.encodeToByteArray()
+                } else {
+                    EDITED_STYLE_WITH_SPRITE_JSON.encodeToByteArray()
+                },
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
+    }
+}
+
+/**
+ * Persists every write and answers reads from them, so a `CACHE_ONLY` frame is genuinely served rather
+ * than failing for want of content — without which a test cannot tell a route mismatch from an empty
+ * store. [failStyleWrites] fails the style's own Store write only, which is the smallest deterministic
+ * way to make a frame compile its style and then abandon the commit before anything installs.
+ *
+ * A [Mutex] rather than a plain map because the engine writes its sprite pair and its ground tiles from
+ * concurrent coroutines on `Dispatchers.Default`, exactly as [ConcurrentRecorder] documents.
+ */
+internal class FailingStyleWriteStore : Store {
+    private val mutex = Mutex()
+    private val entries = mutableMapOf<RawResourceKey, StoredRawResource>()
+
+    var failStyleWrites: Boolean = false
+
+    override suspend fun read(key: RawResourceKey): StoredRawResource? = mutex.withLock { entries[key] }
+
+    override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
+        if (failStyleWrites && key.resourceClass == ResourceClass.BASEMAP_STYLE) {
+            throw IllegalStateException("consumer store is out of space")
+        }
+        mutex.withLock { entries[key] = resource }
     }
 }

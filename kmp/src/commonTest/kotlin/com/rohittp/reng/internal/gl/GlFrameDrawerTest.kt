@@ -1,11 +1,17 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.Camera
 import com.rohittp.reng.FramebufferName
+import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.planning.SpatialOutcome
+import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -14,6 +20,25 @@ import kotlin.test.assertTrue
 
 /** A sentinel distinct from both the offscreen surface's own framebuffer and target (9). */
 private const val ORIGINAL_DRAW_FRAMEBUFFER: Int = 777
+
+/** What the fake answers every `GL_TEXTURE_BINDING_2D` query with, i.e. what a restore must write back. */
+private const val INHERITED_TEXTURE_NAME: Int = 4242
+
+/** Consumer texture names, chosen so none of them can be mistaken for [INHERITED_TEXTURE_NAME]. */
+private const val CONSUMER_TEXTURE_BASE_NAME: Int = 500
+
+private fun frameShaderPair(): ShaderPair = ShaderPair(
+    vertexSource = "#version 300 es\nvoid main() {\n    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n",
+    fragmentSource = "#version 300 es\nprecision highp float;\nout vec4 rengOut;\nvoid main() {\n    rengOut = vec4(1.0);\n}\n",
+)
+
+private fun frameGeometry(): Geometry = Geometry(
+    topLeft = Vector3(1.0, -1.0, 10.0),
+    bottomRight = Vector3(-1.0, 1.0, 0.0),
+    shaderPair = frameShaderPair(),
+)
+
+private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
 
 class GlFrameDrawerTest {
     /**
@@ -48,11 +73,91 @@ class GlFrameDrawerTest {
         )
     }
 
-    @Test fun reverseZClearsDepthToZeroAndTestsGreater() {
+    /**
+     * ADR 0025: the depth comparison is `GL_GEQUAL`, not `GL_GREATER`. A fragment at exactly the
+     * ground's depth -- an altitude-0 `Geometry` or map-anchored sticker over the basemap -- must
+     * pass and paint, with draw order deciding the tie. `GL_GREATER` discards it silently.
+     */
+    @Test fun reverseZClearsDepthToZeroAndTestsGreaterOrEqual() {
         val world = drawWorld()
         world.draw { }
         assertTrue(world.binding.log.any { it == "clearDepthf(0.0)" })
-        assertTrue(world.binding.log.any { it == "depthFunc(0x204)" })
+        assertTrue(
+            world.binding.log.any { it == "depthFunc(0x206)" },
+            "ADR 0025 requires GL_GEQUAL so coplanar map content is not silently deleted",
+        )
+        assertTrue(
+            world.binding.log.none { it == "depthFunc(0x204)" },
+            "GL_GREATER must not be set anywhere in a frame",
+        )
+    }
+
+    /**
+     * ADR 0023's Restore Set names "the bindings on the units RenG uses", and [drawGeometry] uses
+     * up to [MAXIMUM_CONSUMER_TEXTURES] of them. Capturing only the composite pass's single unit
+     * left units 1..14 clobbered and never restored -- a shipped violation of the very ADR the
+     * restore machinery exists to satisfy, invisible to every test because the real-context round
+     * trip drives [drawFrame] with a clear-only lambda that binds nothing.
+     *
+     * The fake answers every `GL_TEXTURE_BINDING_2D` query with [INHERITED_TEXTURE_NAME], so this
+     * asserts the restore genuinely rebinds that value on every unit the frame could have touched,
+     * with the geometry's own texture names deliberately distinct from it.
+     */
+    @Test fun everyTextureUnitAGeometryCanBindIsCapturedAndRestored() {
+        val world = drawWorld()
+        val geometryPipeline = (
+            createGeometryPipeline(world.binding, ShaderDialect.GLES, GlProgramCache(), frameShaderPair())
+                as GeometryPipelineResult.Created
+            ).pipeline
+        val consumerTextures = (0 until MAXIMUM_CONSUMER_TEXTURES)
+            .associate { index -> "uTexture$index" to CONSUMER_TEXTURE_BASE_NAME + index }
+        val scene = Scene(
+            outputPixelSize = OutputPixelSize(width = 64, height = 64),
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(
+                    geometry = frameGeometry(),
+                    pipeline = geometryPipeline,
+                    consumerUniforms = emptyMap(),
+                    consumerTextures = consumerTextures,
+                ),
+            ),
+        )
+        val camera = (
+            resolveMercatorCamera(
+                camera = Camera(latitude = 0.0, unwrappedLongitude = 0.0, zoom = 10.0, bearing = 0.0, pitch = 0.0),
+                outputPixelSize = OutputPixelSize(width = 64, height = 64),
+            ) as SpatialOutcome.Success
+            ).value
+        val stickerPipeline = (
+            createStickerPipeline(world.binding, ShaderDialect.GLES, GlProgramCache())
+                as StickerPipelineResult.Created
+            ).pipeline
+        val groundPipeline = (
+            createGroundPipeline(world.binding, ShaderDialect.GLES, GlProgramCache())
+                as GroundPipelineResult.Created
+            ).pipeline
+        world.binding.log.clear()
+
+        val failure = drawFrame(
+            world.binding,
+            world.profile,
+            world.surface,
+            world.pipeline,
+            world.target,
+            SceneContent(camera, scene, stickerPipeline, groundPipeline),
+        )
+
+        assertNull(failure)
+        for (unitIndex in 0 until MAXIMUM_CONSUMER_TEXTURES) {
+            val activate = world.binding.log.indexOfLast { it == "activeTexture(${hex(GL_TEXTURE0 + unitIndex)})" }
+            assertTrue(activate >= 0, "unit $unitIndex must be made active to be captured and restored")
+            assertEquals(
+                "bindTexture(${hex(GL_TEXTURE_2D)},$INHERITED_TEXTURE_NAME)",
+                world.binding.log[activate + 1],
+                "unit $unitIndex must be restored to the binding the caller left on it",
+            )
+        }
     }
 
     @Test fun srgbIsSetExplicitlyAndRestoredRatherThanInherited() {
@@ -145,8 +250,9 @@ class GlFrameDrawerTest {
         srgbSupported: Boolean = false,
         srgbInitiallyEnabled: Boolean = false,
     ): DrawWorld {
-        val binding = RecordingGlBinding()
+        val binding = RecordingGlBinding().withNoDeclaredNames()
         binding.integers[GL_DRAW_FRAMEBUFFER_BINDING] = intArrayOf(ORIGINAL_DRAW_FRAMEBUFFER)
+        binding.integers[GL_TEXTURE_BINDING_2D] = intArrayOf(INHERITED_TEXTURE_NAME)
         binding.enabled[GL_FRAMEBUFFER_SRGB] = srgbInitiallyEnabled
 
         val profile = RenderContextProfile(

@@ -18,6 +18,9 @@ import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.ConcurrentRecorder
+import com.rohittp.reng.internal.basemap.BasemapStyleManifest
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.BasemapStyleReject
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
@@ -30,6 +33,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
 import kotlin.test.assertNotNull
@@ -239,7 +243,7 @@ class BasemapEngineHostTest {
 
                 assertSame(first, second, "a fresh generation of identical bytes reuses the compilation")
                 assertSame(
-                    host.currentPreparedStyle(hostStyleKey),
+                    host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest),
                     second,
                     "the host retains exactly what it last compiled",
                 )
@@ -250,12 +254,15 @@ class BasemapEngineHostTest {
     }
 
     /**
-     * The resident generation is authoritative, so "the content changed" means a generation carrying
-     * different bytes was installed — exactly what the driver's own visibility install does after a
-     * transport re-fetch. That, and only that, recompiles.
+     * The ordinary shape of an edit as the driver performs it end to end: a transport re-fetch, the
+     * visibility install, and a compile of the same new bytes. What recompiles is the **content the
+     * caller commits** — the install beside it here is the driver's, reproduced so this reads as a whole
+     * frame rather than as an isolated call, and is deliberately *not* what the recompilation keys off.
+     * The test twenty lines above compiles edited bytes with nothing installed at all, and recompiles
+     * just the same; see [BasemapEngineHost.preparedStyle] for why the two cannot be swapped.
      */
     @Test
-    fun recompilesWhenTheInstalledStyleContentItselfChanges() = runTest {
+    fun recompilesWhenTheCommittedStyleContentItselfChanges() = runTest {
         val cache = ResidentCache()
         val host = basemapEngineHost(cache = cache)
         try {
@@ -271,21 +278,295 @@ class BasemapEngineHostTest {
         }
     }
 
+    /**
+     * The compilation is of **the content the caller is committing**, not of whatever generation happens
+     * to be resident when the call arrives — the two are the same document on most frames and are
+     * genuinely different on exactly the frame a consumer edits their style.
+     *
+     * The ordering that makes them differ is the pure core's, and it is deliberate: `CompileBasemapStyle`
+     * is emitted before `InstallBasemapStyleVisibility`, because a style that fails to compile must not
+     * become visible. So at this point the resident generation still carries the *previous* document —
+     * reproduced literally below, by leaving the first document installed and calling with the second.
+     * Compiling the resident bytes there compiles a document the frame is not committing, while the
+     * tile-time manifest (derived after the install) describes the one it is; the engine then asks for
+     * the superseded style's urls and the firewall refuses every one of them.
+     *
+     * Keying on the caller's digest while still compiling the resident bytes would be worse than either:
+     * see [BasemapEngineHost.preparedStyle]. The key and the compiled bytes move together.
+     */
+    @Test
+    fun compilesTheContentTheCallerIsCommittingRatherThanTheGenerationResidentBeforeIt() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        val edited = hostStyleRecord(HOST_STYLE_JSON.replace(HOST_RASTER_TILE_TEMPLATE, HOST_EDITED_TILE_TEMPLATE))
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                val first = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                assertEquals(
+                    hostStyleRecord().contentDigest,
+                    cache.current(hostStyleKey)?.stored?.contentDigest,
+                    "the fixture must leave the first document resident, or it proves nothing",
+                )
+                assertNotEquals(hostStyleRecord().contentDigest, edited.contentDigest)
+
+                val second = host.preparedStyle(hostStyleKey, edited, HOST_STYLE_BASE_URI)
+
+                assertNotSame(first, second, "edited bytes are a different style")
+                assertNotEquals(
+                    first.digest,
+                    second.digest,
+                    "and what was compiled is the edited document, not the one still resident",
+                )
+                assertSame(
+                    second,
+                    host.currentPreparedStyle(hostStyleKey, edited.contentDigest),
+                    "the host retains the compilation of the bytes being committed",
+                )
+                assertNull(
+                    host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest),
+                    "and does not offer it for the document that is merely still resident",
+                )
+            }
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun holdsNoPreparedStyleUntilOneIsCompiled() = runTest {
         val host = basemapEngineHost()
         try {
-            assertNull(host.currentPreparedStyle(hostStyleKey))
+            assertNull(host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest))
             host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
                 host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
             }
             // Retained across invocations on purpose: a RESIDENT-provenance frame emits no compile
             // action at all, so this readback is the renderer's only way to hold the frame's style.
-            assertNotNull(host.currentPreparedStyle(hostStyleKey))
+            assertNotNull(host.currentPreparedStyle(hostStyleKey, hostStyleRecord().contentDigest))
+            assertNull(
+                host.currentPreparedStyle(hostStyleKey, contentDigest = null),
+                "nothing resident under the key matches no compilation",
+            )
         } finally {
             host.close()
         }
     }
+
+
+    // ---- style manifest --------------------------------------------------------------------------
+
+    /**
+     * The other half of the per-frame style parse. `RenGRenderer.renderBasemapTiles` needs the very
+     * manifest the driver's own `ValidateBasemapStyle` already derived from the very same bytes, and
+     * re-deriving it re-runs `parseJson` over the *whole* document -- so a basemap frame parsed its style
+     * twice (`internal.basemap.BasemapRouteDerivationCostTest` measures both halves). Bound to content
+     * exactly as the compilation beside it is, so a second call over byte-identical content reads the
+     * document once.
+     */
+    @Test
+    fun derivesTheStyleManifestOnceAndReusesItWhileResident() = runTest {
+        val host = basemapEngineHost()
+        try {
+            val first = hostManifest(host)
+            val second = hostManifest(host)
+
+            assertSame(first, second, "a resident style document is read exactly once")
+            assertEquals(
+                listOf(HOST_RASTER_TILE_TEMPLATE),
+                first.sources.single().tileTemplates,
+                "and the manifest is the one this style actually declares",
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * The defect a single-frame test cannot see, at its smallest reproducible size -- and the exact shape
+     * the compilation's own binding exists to close, since the two caches face the same hazard.
+     *
+     * A style the consumer's transport does not declare fresh is re-resolved on every frame, and the
+     * driver's own visibility install retires the current generation and installs a fresh one carrying
+     * identical bytes. A manifest bound to the resident *generation object* therefore misses on every
+     * frame after the first and reparses the whole document forever, invisibly. Bound to content, it
+     * survives the replacement.
+     */
+    @Test
+    fun keepsTheManifestAcrossAFreshGenerationOfIdenticalBytes() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            val first = hostManifest(host)
+            val observed = cache.current(hostStyleKey)
+
+            // Exactly what ResourceActionExecutor.installVisibility does with a re-resolved style.
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(), decoded = null)
+            assertNotSame(
+                observed,
+                cache.current(hostStyleKey),
+                "the fixture must genuinely replace the generation the first derivation observed",
+            )
+
+            val second = hostManifest(host)
+
+            assertSame(first, second, "a fresh generation of identical bytes reuses the manifest")
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * The resident generation is authoritative, so "the content changed" means a generation carrying
+     * different bytes was installed. That, and only that, re-derives -- a manifest served for bytes it
+     * was not derived from composes tile urls the engine never asks for, which the firewall reports as
+     * `AMBIGUOUS_RESOURCE_ROUTE` on every tile at once rather than as a stale answer.
+     */
+    @Test
+    fun rederivesTheManifestWhenTheInstalledStyleContentItselfChanges() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            val first = hostManifest(host)
+            val edited = HOST_STYLE_JSON.replace(HOST_RASTER_TILE_TEMPLATE, HOST_EDITED_TILE_TEMPLATE)
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(edited), decoded = null)
+
+            val second = hostManifest(host, hostStyleRecord(edited))
+
+            assertNotSame(first, second, "different bytes are a different manifest")
+            assertEquals(listOf(HOST_RASTER_TILE_TEMPLATE), first.sources.single().tileTemplates)
+            assertEquals(
+                listOf(HOST_EDITED_TILE_TEMPLATE),
+                second.sources.single().tileTemplates,
+                "the manifest describes the bytes that are resident now",
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * One slot bound to a content digest, so two genuinely different style documents never share an
+     * answer -- neither when they arrive under the same key (the configured style edited between frames)
+     * nor when they arrive under different ones.
+     */
+    @Test
+    fun neverServesOneStylesManifestForAnother() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            val raster = hostManifest(host)
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(PHASE_STYLE_JSON), decoded = null)
+            val phase = hostManifest(host, hostStyleRecord(PHASE_STYLE_JSON))
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(), decoded = null)
+            val rasterAgain = hostManifest(host)
+
+            assertEquals(listOf("s"), raster.sources.map { it.sourceId })
+            assertEquals(listOf("g", "r", "v", "d"), phase.sources.map { it.sourceId })
+            assertEquals(PHASE_SPRITE_BASE_URL, phase.spriteBase, "the phase style is the one that has a sprite")
+            assertNull(raster.spriteBase)
+            assertEquals(
+                listOf("s"),
+                rasterAgain.sources.map { it.sourceId },
+                "returning to the first document answers with the first document's manifest",
+            )
+
+            // The same holds across keys: this cache holds one style, and the other key's document is
+            // read from that key's own resident bytes rather than served from the slot beside it.
+            val phaseUnderItsOwnKey = hostManifest(
+                host = host,
+                stored = hostStyleRecord(PHASE_STYLE_JSON),
+                styleKey = phaseStyleKey,
+                baseUri = PHASE_STYLE_BASE_URI,
+            )
+            assertEquals(listOf("g", "r", "v", "d"), phaseUnderItsOwnKey.sources.map { it.sourceId })
+            assertNotSame(rasterAgain, phaseUnderItsOwnKey)
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * A style RenG cannot read is not an answer worth remembering. The rejection is reported as it
+     * stands and nothing is bound, so the cached success of *other* bytes is dropped rather than served
+     * for a document it did not come from, and the next call reads the document again rather than
+     * replaying a remembered refusal as though it had derived something.
+     */
+    @Test
+    fun neverCachesARejectedStyleAsThoughItHadDerived() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        try {
+            hostManifest(host)
+
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(HOST_UNSUPPORTED_STYLE_JSON), decoded = null)
+            val rejected = hostStyleManifestOutcome(host, hostStyleRecord(HOST_UNSUPPORTED_STYLE_JSON))
+            val rejectedAgain = hostStyleManifestOutcome(host, hostStyleRecord(HOST_UNSUPPORTED_STYLE_JSON))
+
+            assertEquals(
+                BasemapStyleReject.STYLE_VERSION_UNSUPPORTED,
+                assertIs<BasemapStyleManifestOutcome.Rejected>(rejected).reason,
+                "the rejection of the resident bytes, not the manifest of the bytes before them",
+            )
+            assertEquals(
+                BasemapStyleReject.STYLE_VERSION_UNSUPPORTED,
+                assertIs<BasemapStyleManifestOutcome.Rejected>(rejectedAgain).reason,
+            )
+            assertNotSame(rejected, rejectedAgain, "a rejection is derived again, never served from the cache")
+
+            cache.installAndTakeLease(hostStyleKey, hostStyleRecord(), decoded = null)
+            assertEquals(
+                listOf(HOST_RASTER_TILE_TEMPLATE),
+                hostManifest(host).sources.single().tileTemplates,
+                "and a style that derives again after one that did not is derived normally",
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * The manifest belongs to the host's own lifetime, exactly as the compilation beside it does: it
+     * outlives every individual preparation invocation, and [BasemapEngineHost.close] releases the lease
+     * keeping its bytes resident before closing the engine. Nothing GL-scoped is involved either way.
+     */
+    @Test
+    fun retainsTheManifestAcrossInvocationsAndReleasesItsLeaseOnClose() = runTest {
+        val cache = ResidentCache()
+        val host = basemapEngineHost(cache = cache)
+        // install() rather than installAndTakeLease(), so the only lease this key ever has is the host's.
+        cache.install(hostStyleKey, hostStyleRecord(), decoded = null)
+
+        val first = host.withOperation(ResourceAccessMode.NORMAL) { hostManifest(host) }
+        val second = host.withOperation(ResourceAccessMode.NORMAL) { hostManifest(host) }
+        assertSame(first, second, "one manifest spans preparation invocations")
+        assertEquals(1, hostLeaseCount(cache, hostStyleKey), "which it does by keeping its content resident")
+
+        host.close()
+
+        assertEquals(0, hostLeaseCount(cache, hostStyleKey), "closing the host gives that lease back")
+        assertFailsWith<RenGException> {
+            host.styleManifest(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+        }
+    }
+
+    private fun hostManifest(
+        host: BasemapEngineHost,
+        stored: StoredRawResource = hostStyleRecord(),
+        styleKey: ResourceKey = hostStyleKey,
+        baseUri: String = HOST_STYLE_BASE_URI,
+    ): BasemapStyleManifest = assertIs<BasemapStyleManifestOutcome.Derived>(
+        host.styleManifest(styleKey, stored, baseUri),
+    ).manifest
+
+    private fun hostStyleManifestOutcome(
+        host: BasemapEngineHost,
+        stored: StoredRawResource = hostStyleRecord(),
+        styleKey: ResourceKey = hostStyleKey,
+        baseUri: String = HOST_STYLE_BASE_URI,
+    ): BasemapStyleManifestOutcome = host.styleManifest(styleKey, stored, baseUri)
+
+    private fun hostLeaseCount(cache: ResidentCache, key: ResourceKey): Int =
+        cache.report(ResourceSelector.ByKey(key)).entries.single().leaseCount
 
     // ---- incremental route registration ----------------------------------------------------------
 
@@ -679,6 +960,12 @@ private val HOST_TILE_OUTPUT_SIZE = OutputPixelSize(512, 512)
 
 /** `TileId(z = 1, x = 0, y = 0)` in RenG's own vocabulary. */
 internal val HOST_RASTER_TILE: CanonicalBasemapTile = CanonicalBasemapTile(lod = 1, tileY = 0, canonicalX = 0)
+
+/** [HOST_RASTER_TILE_TEMPLATE] edited, so a style carrying it derives a visibly different manifest. */
+internal const val HOST_EDITED_TILE_TEMPLATE: String = "https://tiles.example/edited/{z}/{x}/{y}.png"
+
+/** Reads cleanly and declares a style version outside RenG's subset: a document-level rejection. */
+internal val HOST_UNSUPPORTED_STYLE_JSON: String = """{"version":7,"sources":{},"layers":[]}"""
 
 internal val HOST_STYLE_JSON: String =
     """{"version":8,"name":"reng-basemap-host-test",""" +

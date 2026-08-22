@@ -93,9 +93,9 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
-        assertEquals(93, allowedFailureCases.size)
+        assertEquals(97, allowedFailureCases.size)
         assertEquals(28, allowedFailureCases.count { !it.hasDiagnostic })
-        assertEquals(65, allowedFailureCases.count { it.hasDiagnostic })
+        assertEquals(69, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
         allowedFailureCases.forEach(::assertFailureTableOutcome)
@@ -466,6 +466,7 @@ class DiagnosticsAndFailuresTest {
             ),
             PipelineStage.SHADER_COMPILATION to setOf(DiagnosticField.SHADER_PAIR),
             PipelineStage.RENDER_TARGET to setOf(DiagnosticField.RENDER_TARGET),
+            PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE),
         )
 
         private val allowedFailureCases: List<FailureCase> = buildList {
@@ -577,6 +578,20 @@ class DiagnosticsAndFailuresTest {
             add(failureContext(RenGErrorCode.STORE_WRITE_FAILED, PipelineStage.STORE_WRITE, identity = IdentityShape.EXTERNAL))
             add(failureContext(RenGErrorCode.STORE_INTEGRITY_FAILED, PipelineStage.STORE_VALIDATION, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
             add(failureContext(RenGErrorCode.RESOURCE_DECODE_FAILED, PipelineStage.RESOURCE_DECODING, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            // A rendered basemap tile is decoded at DRAW and is not an external resource: its
+            // identity is a BASEMAP_TILE key with no resource class, so the RESOURCE_DECODING pair's
+            // REQUIRED_EXTERNAL rule cannot express it. The DRAW pair still requires *an* identity,
+            // so a decode failure that names no tile stays rejected.
+            IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
+                add(
+                    failureContext(
+                        RenGErrorCode.RESOURCE_DECODE_FAILED,
+                        PipelineStage.DRAW,
+                        DiagnosticField.RESOURCE,
+                        identity,
+                    ),
+                )
+            }
             listOf(DiagnosticField.RESOURCE, DiagnosticField.ANIMATION_SELECTOR).forEach { field ->
                 add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field))
                 add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field, IdentityShape.EXTERNAL))

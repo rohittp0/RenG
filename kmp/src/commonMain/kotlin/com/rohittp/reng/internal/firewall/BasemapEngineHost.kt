@@ -9,6 +9,9 @@ import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.basemap.BasemapStyleManifest
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -97,6 +100,8 @@ internal class BasemapEngineHost(
 
     private var compiledStyle: CompiledStyleBinding? = null
 
+    private var derivedManifest: StyleManifestBinding? = null
+
     private var closed: Boolean = false
 
     val isClosed: Boolean get() = closed
@@ -169,27 +174,48 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * The compiled [PreparedStyle] for [styleKey], compiled lazily on first use and **bound to the
-     * content it was compiled from**, so a later call over byte-identical content reuses it.
+     * The compiled [PreparedStyle] for [styleKey], compiled lazily on first use from **[stored] — the
+     * content the caller is committing on this frame** — and bound to that content's digest, so a later
+     * call over byte-identical content reuses it.
+     *
+     * **Why the caller's content and not the resident generation's.** This runs strictly *before* the
+     * style's own visibility install: the pure core emits `CompileBasemapStyle` and only afterwards
+     * `InstallBasemapStyleVisibility`, deliberately, because a style that fails to compile must never
+     * become visible. At this point, therefore, the resident generation still carries the *previous*
+     * frame's bytes — so on the one frame where a consumer's style document changes, reading either the
+     * bytes or the digest from the lease compiles a document the frame is not committing, while route
+     * derivation (which runs after the install) describes the one it is. The two halves of the frame then
+     * disagree about which style they are on, and the frame does not merely look stale: it fails closed,
+     * because the engine asks for the superseded style's urls and the firewall refuses every one of them.
+     *
+     * **The key and the compiled bytes move together**, and both come from [stored]. Keying on [stored]'s
+     * digest while still compiling `lease.generation.stored.bytes` would be strictly worse than either
+     * option: it records a compilation of the old document under the *new* document's identity, which is
+     * then served for the new bytes on every later frame rather than correcting itself.
      *
      * **Why content, not generation identity.** Binding the compilation to the resident *generation
-     * object* looks equivalent and is not, because compilation happens strictly before the style's own
-     * visibility install, and [ResidentCache.installAndTakeLease] always retires the current generation
-     * and installs a fresh one. Compilation would install `G1`, the driver's install action would
-     * replace it with `G2`, and every later lookup would miss — recompiling the style, and with it
-     * re-running the engine's entire sprite/TileJSON/GeoJSON acquisition through the consumer's own
-     * adapters, once per frame forever. Nothing about "accessing a freed resource reloads it" requires
-     * recompiling identical bytes; that rule is about residency, and residency is restored below
-     * whether or not the compilation is reused.
+     * object* looks equivalent and is not, for the same ordering reason plus one more:
+     * [ResidentCache.installAndTakeLease] always retires the current generation and installs a fresh one,
+     * so the driver's install action replaces whatever generation this call observed, and every later
+     * lookup would miss — recompiling the style, and with it re-running the engine's entire
+     * sprite/TileJSON/GeoJSON acquisition through the consumer's own adapters, once per frame forever.
+     * Nothing about "accessing a freed resource reloads it" requires recompiling identical bytes; that
+     * rule is about residency, and residency is restored below whether or not the compilation is reused.
      *
-     * The digest compared is the **leased generation's**, never the caller's copy, for the same reason
-     * the compilation reads the leased generation's bytes: the resident generation is authoritative.
-     *
-     * The lease is taken atomically with the observation or the install ([ResidentCache.observeAndTakeLease]
-     * / [ResidentCache.installAndTakeLease]), never as a separate `current()`-then-`takeLease()` pair: a
+     * **The lease is residency, not the source of truth for what to compile.** It is taken atomically
+     * with the observation or the install ([ResidentCache.observeAndTakeLease] /
+     * [ResidentCache.installAndTakeLease]), never as a separate `current()`-then-`takeLease()` pair: a
      * freshly installed generation sits at `leaseCount == 0` in the gap between those two calls, where a
-     * racing `free()` can drop it out of the cache's bookkeeping entirely. On a reuse the retained lease
-     * moves onto whichever generation is current now, so this host never pins a retired one.
+     * racing `free()` can drop it out of the cache's bookkeeping entirely. Exactly one lease is held at a
+     * time, and each call moves it onto whichever generation is current when the call arrives.
+     *
+     * A binding can therefore outlive, or briefly precede, the residency of the bytes it names: on the
+     * frame the document changes, the compilation is bound to [stored]'s digest while the generation
+     * leased here still holds the previous bytes, and if anything downstream fails before
+     * `InstallBasemapStyleVisibility` runs those bytes never become resident at all. That is harmless,
+     * and harmless *because* the key is the content digest: the binding is reused only when a later call
+     * commits that same content again, which is exactly when reusing it is correct. Residency is the
+     * cache's business, not the compilation's.
      *
      * The bytes are handed to the engine as [StyleInput.Prefetched], never [StyleInput.Remote]: RenG has
      * already acquired them through its own driver under its own key, and a `Remote` style would make the
@@ -201,9 +227,9 @@ internal class BasemapEngineHost(
         baseUri: String?,
     ): PreparedStyle {
         requireOpen()
+        val contentDigest = stored.contentDigest
         val lease = cache.observeAndTakeLease(styleKey)
             ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
-        val contentDigest = lease.generation.stored.contentDigest
 
         val existing = compiledStyle
         if (existing != null && existing.styleKey == styleKey && existing.contentDigest == contentDigest) {
@@ -213,15 +239,15 @@ internal class BasemapEngineHost(
         }
 
         releaseCompiledStyle()
-        // The lease is taken before compilation because compilation reads the leased generation's own
-        // bytes -- the resident generation is authoritative, not the caller's copy -- and is released again
-        // if compilation fails, so a style that will not compile does not pin a generation for the
-        // renderer's whole life.
+        // The lease is taken before compilation, and released again if compilation fails, so a style that
+        // will not compile does not pin a generation for the renderer's whole life. It is a residency
+        // claim on the style key, not the source of the bytes below: those are the caller's, which is the
+        // whole point -- see this method's KDoc.
         val prepared = try {
             engineCall {
                 engine.prepare(
                     StyleInput.Prefetched(
-                        bytes = lease.generation.stored.bytes,
+                        bytes = stored.bytes,
                         canonicalIdentity = styleKey.stableId,
                         baseUri = baseUri,
                     ),
@@ -236,17 +262,114 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * The [PreparedStyle] this host is currently holding for [styleKey], or `null` if it holds none.
-     * Performs no engine call, no cache call and no consumer exchange whatsoever.
+     * The [PreparedStyle] this host is currently holding for [styleKey] **and for [contentDigest]**, or
+     * `null` if it holds none matching both. Performs no engine call, no cache call and no consumer
+     * exchange whatsoever.
      *
      * This exists because the pure core emits no `CompileBasemapStyle` at all on a `RESIDENT`-provenance
      * frame (`requiresStyleCompilation(RESIDENT)` is false) — correctly, since resident bytes were
      * compiled when they were installed. The renderer therefore cannot take the frame's style from the
      * compile action, and reads back the host's own retained compilation instead. Retained across
      * invocations on purpose: the compilation belongs to the engine's lifetime, not to one preparation.
+     *
+     * **Why the digest is a parameter rather than a fact this host looks up.** "Resident bytes were
+     * compiled when they were installed" is the premise, and it can be false: [preparedStyle] runs before
+     * `InstallBasemapStyleVisibility`, so a frame whose compilation succeeded and whose *install* never
+     * ran — the style's own Store write failing is enough — leaves a compilation retained here for bytes
+     * that are not resident and may never be. A later `RESIDENT`-provenance frame would then be handed
+     * that compilation while `RenGRenderer.renderBasemapTiles` derives its routes from the older bytes
+     * that *are* resident, and the frame fails closed on every tile at once, exactly as a mismatched
+     * compile does. Matching on the key alone cannot see that; matching on the content the caller says is
+     * resident can, and declining is honest: this host holds no compilation of those bytes.
+     *
+     * The caller supplies the digest because the caller is already reading the resident generation for
+     * the manifest, and because this method's "no cache call" property is worth keeping — the point is
+     * that both halves of the frame are then keyed off *one* observation of what is resident, rather than
+     * two that can disagree. A `null` [contentDigest] (nothing resident under this key) matches nothing.
      */
-    fun currentPreparedStyle(styleKey: ResourceKey): PreparedStyle? =
-        compiledStyle?.takeIf { it.styleKey == styleKey }?.prepared
+    fun currentPreparedStyle(styleKey: ResourceKey, contentDigest: String?): PreparedStyle? =
+        compiledStyle
+            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+            ?.prepared
+
+    /**
+     * The [BasemapStyleManifest] for [styleKey] -- the routes the engine will ask for while compiling the
+     * style and while preparing tiles from it -- **bound to the content it was derived from**, so a later
+     * call over byte-identical content reuses it rather than reading the document again.
+     *
+     * **Why this cache exists.** `deriveBasemapStyleManifest` runs `parseJson` over the *whole* style
+     * document, and a basemap frame needs the manifest twice: once in the driver's own
+     * `ValidateBasemapStyle`, to declare the style-time routes, and once again in
+     * `RenGRenderer.renderBasemapTiles`, to declare the tile-time ones. Those two are the same pure
+     * function of the same two inputs, so the second was pure duplication -- measured at 1.9 ms per parse
+     * for a 248 KB production-shaped style on the JVM and 25.8 ms on an unoptimized native test binary
+     * (`internal.basemap.BasemapRouteDerivationCostTest`), on every basemap frame. The alternative was to
+     * widen the pure core's protocol so `ValidateBasemapStyle` carried its manifest out; this is the
+     * ownership decision that was taken instead, and it sits here rather than in the renderer because the
+     * host is the thing whose lifetime already spans frames.
+     *
+     * **Why content, not generation identity** -- and why the lease is taken first, atomically, and moved
+     * onto the current generation on reuse: identically to [preparedStyle], whose KDoc states the whole
+     * argument. The short form is that a style the consumer's transport does not declare fresh is
+     * re-resolved every frame and installed as a *fresh generation of identical bytes*, so a binding to
+     * the generation object would miss on every frame after the first and reparse the document forever,
+     * invisibly.
+     *
+     * **Here, and only here, the resident generation is genuinely authoritative for the bytes.** That is
+     * a fact about this method's one caller rather than a rule the codebase holds:
+     * `RenGRenderer.renderBasemapTiles` runs *after* the driver's `InstallBasemapStyleVisibility` and
+     * takes [stored] straight out of [ResidentCache.current], so the leased generation and the caller's
+     * copy are the same document and reading either is the same read. [preparedStyle] runs *before* that
+     * install, where the same claim is false by construction — it is exactly the defect that made it
+     * compile the caller's content instead. The two methods reach the same conclusion for different
+     * reasons; neither justifies the other.
+     *
+     * A [BasemapStyleManifestOutcome.Rejected] outcome is returned exactly as derived and **not** bound:
+     * a document RenG cannot read is not a result to remember, and binding one would either serve a
+     * refusal as though it were an answer or leave the previous document's manifest standing for bytes it
+     * did not come from. The derivation itself is pure and never throws for any input, so unlike
+     * [preparedStyle] there is no failure path here to release the lease on -- only the rejection one.
+     *
+     * Not `suspend`, unlike [preparedStyle]: this reaches no engine and no consumer adapter, and every
+     * [ResidentCache] call it makes is ordinary non-suspending code (that class linearizes on
+     * [kotlinx.coroutines.sync.Mutex.tryLock] rather than by suspending). It does read and parse a whole
+     * style document on a miss, which is real CPU on the caller's own dispatcher -- but that is exactly
+     * as true of the driver's `ValidateBasemapStyle`, and `suspend` would not change it.
+     */
+    fun styleManifest(
+        styleKey: ResourceKey,
+        stored: StoredRawResource,
+        baseUri: String,
+    ): BasemapStyleManifestOutcome {
+        requireOpen()
+        val lease = cache.observeAndTakeLease(styleKey)
+            ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
+        val contentDigest = lease.generation.stored.contentDigest
+
+        val existing = derivedManifest
+        if (existing != null &&
+            existing.styleKey == styleKey &&
+            existing.baseUri == baseUri &&
+            existing.contentDigest == contentDigest
+        ) {
+            cache.releaseLease(existing.lease)
+            derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, existing.manifest)
+            return BasemapStyleManifestOutcome.Derived(existing.manifest)
+        }
+
+        releaseStyleManifest()
+        // The leased generation's own bytes rather than the caller's copy, which here are the same
+        // document: this method's one caller reads `stored` from ResidentCache.current() after the
+        // driver's visibility install. See the KDoc -- the compilation beside this one runs before that
+        // install and so must read the caller's content.
+        val outcome = deriveBasemapStyleManifest(lease.generation.stored.bytes, baseUri)
+        if (outcome !is BasemapStyleManifestOutcome.Derived) {
+            cache.releaseLease(lease)
+            return outcome
+        }
+        derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, outcome.manifest)
+        return outcome
+    }
 
     /**
      * Acquires everything [tiles] need — through the firewall, so through this invocation's preregistered
@@ -294,6 +417,16 @@ internal class BasemapEngineHost(
         basemapTileKey(style.digest, tile, tileOutputSize, sha256)
 
     /**
+     * The same identity for one unwrapped draw [instance], which the world-copy-projecting overload of
+     * [basemapTileKey] reduces to its canonical tile. Asked of the host rather than derived by the
+     * caller so that [tileOutputSize] -- an engine render option, not a renderer configuration value --
+     * stays owned in exactly one place; a caller that guessed it would derive a key naming a tile the
+     * engine never rendered.
+     */
+    fun renderedTileKey(styleDigest: String, instance: BasemapTileInstance): ResourceKey =
+        basemapTileKey(styleDigest, instance, tileOutputSize, sha256)
+
+    /**
      * Idempotent. Releases the compiled style's lease, then closes the engine — whose own `close()` is
      * documented idempotent, non-blocking, and non-throwing, and needs no GL context of any kind.
      */
@@ -301,6 +434,7 @@ internal class BasemapEngineHost(
         if (closed) return
         closed = true
         releaseCompiledStyle()
+        releaseStyleManifest()
         activeOperation = null
         engine.close()
     }
@@ -310,6 +444,11 @@ internal class BasemapEngineHost(
     private fun releaseCompiledStyle() {
         compiledStyle?.let { binding -> cache.releaseLease(binding.lease) }
         compiledStyle = null
+    }
+
+    private fun releaseStyleManifest() {
+        derivedManifest?.let { binding -> cache.releaseLease(binding.lease) }
+        derivedManifest = null
     }
 
     private fun requireOpen() {
@@ -439,15 +578,31 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * One compilation, the exact content digest it was compiled from, and the lease keeping that content
-     * resident. [contentDigest] rather than the [Lease]'s own generation is what decides reuse — see
-     * [preparedStyle].
+     * One compilation, the exact content digest it was compiled from, and a lease held for as long as the
+     * binding is. [contentDigest] rather than the [Lease]'s own generation is what decides reuse — see
+     * [preparedStyle], which is also why the lease and the digest can describe *different* documents for
+     * one frame: on the frame a style is edited the lease is on the generation still resident, while the
+     * digest is the one being committed. The lease is residency bookkeeping, not a record of what was
+     * compiled.
      */
     private class CompiledStyleBinding(
         val styleKey: ResourceKey,
         val contentDigest: String,
         val lease: Lease,
         val prepared: PreparedStyle,
+    )
+
+    /**
+     * One derived manifest, the exact content digest and base URI it was derived from, and the lease
+     * keeping that content resident. The base URI takes part because every relative reference in the
+     * document resolves against it, so the same bytes under a different locator are a different manifest.
+     */
+    private class StyleManifestBinding(
+        val styleKey: ResourceKey,
+        val baseUri: String,
+        val contentDigest: String,
+        val lease: Lease,
+        val manifest: BasemapStyleManifest,
     )
 }
 

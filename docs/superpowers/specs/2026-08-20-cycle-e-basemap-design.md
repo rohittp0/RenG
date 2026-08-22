@@ -42,7 +42,7 @@ text, which is the failure this rule exists to prevent.
 
 - That same passage ends "and neither exists yet", referring to engine-side label primitives and RenG-side
   screen placement. The engine half **now exists** — Rentile 0.3.0 ships `acquireLabelCandidates` with
-  `LabelPrimitive` and `LabelGlyphAtlas`, which RenG itself requested.
+  `LabelCandidate` and `LabelGlyphAtlas`, which RenG itself requested.
 - ADR 0016 and the Cycle C design spec both say "eight basemap classes". Rentile 0.3.0 made it **nine**:
   `GLYPH_RANGE`, reachable only through `acquireLabelCandidates`, carrying `accept = application/x-protobuf`,
   writing before decode validation, and recovering from corruption by remove-then-refetch rather than being

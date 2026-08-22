@@ -23,7 +23,7 @@ below for exactly which.
 ```
 A skeleton ──► B core ──┬──► C resources ──┐
                         └──► D gl foundation┘──► F-1 (MVP) ──► release ──► E-basemap ──► release
-                                                            ──► F-2 models ──► release ──► E-terrain
+                                                            ──► F-2 models + labels ──► release ──► E-terrain
                                                             ──► G globe ──► H platforms ──► I harness ──► J corpus
 ```
 
@@ -39,7 +39,7 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | F-1 | Stickers, geometries, and the renderer factory — the MVP | Call-log draw-path assertions; ADR 0024's draw-regime order honoured |
 | *(internal MVP release)* | All six targets published; only macOS and Linux verified | — |
 | E-basemap | Basemap drawn from Rentile tiles, plus deferred Cycle C tasks 14/16/17/18/19 | First frame with pixels; golden baseline per reported renderer |
-| F-2 | Models with textures and animation | Per-platform golden baselines |
+| F-2 | Models with textures and animation, and map labels | Per-platform golden baselines |
 | E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
 | G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |

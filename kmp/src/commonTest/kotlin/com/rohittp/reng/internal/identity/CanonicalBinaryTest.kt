@@ -110,6 +110,7 @@ class CanonicalBinaryTest {
             CanonicalRootKind.GEOMETRY_PROGRAM to "524e47430103",
             CanonicalRootKind.INTERNAL_PIPELINE to "524e47430104",
             CanonicalRootKind.OFFSCREEN_SURFACE to "524e47430105",
+            CanonicalRootKind.BASEMAP_TILE to "524e47430106",
         )
 
         expected.forEach { (kind, hex) ->

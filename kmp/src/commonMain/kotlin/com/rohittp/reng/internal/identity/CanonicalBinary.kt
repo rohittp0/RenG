@@ -9,6 +9,7 @@ internal enum class CanonicalRootKind(internal val wireByte: Int) {
     GEOMETRY_PROGRAM(3),
     INTERNAL_PIPELINE(4),
     OFFSCREEN_SURFACE(5),
+    BASEMAP_TILE(6),
 }
 
 internal class CanonicalFieldWriter internal constructor() {

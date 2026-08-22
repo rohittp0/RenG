@@ -523,7 +523,7 @@ class CycleBPureCoreContractTest {
         val parent = occurrence(
             id = 1L,
             ownerId = 1L,
-            registration = registration("parent", ResourceClass.BASEMAP_TILE_JSON, ResourceAccessMode.RELOAD),
+            registration = registration("parent", ResourceClass.MODEL_TEXTURE, ResourceAccessMode.RELOAD),
             discoveryRequired = true,
         )
         val sharedStatic = occurrence(
@@ -551,7 +551,7 @@ class CycleBPureCoreContractTest {
         driver.driveToPendingContent(0L, ContentProvenance.TRANSPORT_200)
         driver.event(AdvancePendingClassGates(0L))
         val gate = assertIs<ValidateResourceClass>(driver.actions.single())
-        assertEquals(ResourceClassGate.PARSE_TILEJSON, gate.gate)
+        assertEquals(ResourceClassGate.DECODE_PNG, gate.gate)
         driver.event(ResourceClassValidationCompleted(gate.actionId, SuppliedValidationOutcome.Valid))
         val write = assertIs<WriteStore>(driver.actions.single())
         assertEquals(parent.registration.rawKey, write.rawKey)
@@ -896,19 +896,16 @@ class CycleBPureCoreContractTest {
             ownerId = OWNER_TWO,
             registration = registration("owner-two", ResourceClass.STICKER_IMAGE, ResourceAccessMode.RELOAD),
         )
-        val styleChild = DiscoveredResourceChild(
-            traversal = ResourceChildTraversal.BasemapSource(
-                "alpha",
-                BasemapSourceMember.Metadata,
-            ),
-            occurrence = occurrence(
-                id = 6L,
-                ownerId = OWNER_ONE,
-                registration = registration(
-                    "style-child",
-                    ResourceClass.BASEMAP_TILE_JSON,
-                    ResourceAccessMode.RELOAD,
-                ),
+        // A second resource of the style's own owner, traversed after the style. It used to be a
+        // discovered child of the style; a validated style now announces a route manifest instead, and
+        // its siblings are ordinary static resources ordered against it by the owner barrier.
+        val ownerOneSibling = occurrence(
+            id = 6L,
+            ownerId = OWNER_ONE,
+            registration = registration(
+                "owner-one-sibling",
+                ResourceClass.MODEL_TEXTURE,
+                ResourceAccessMode.RELOAD,
             ),
         )
         val driver = ResourceDriver(
@@ -919,6 +916,7 @@ class CycleBPureCoreContractTest {
                     spriteImage,
                     styleOwnerOne,
                     styleOwnerTwo,
+                    ownerOneSibling,
                     ownerTwoSticker,
                 ),
             ),
@@ -969,38 +967,30 @@ class CycleBPureCoreContractTest {
             "both bound style occurrences reference the one style route",
         )
         assertEquals(
-            listOf(ResourceOwnerId(OWNER_ONE)),
+            emptyList(),
             driver.style(STYLE_GROUP).ownersWithCompletedNonStyleWork,
-            "only the sprite owner has installed all of its non-style work",
+            "the sprite owner still has its own sibling resource outstanding",
         )
 
         driver.event(
             BasemapStyleValidationCompleted(
                 styleValidation.actionId,
-                BasemapStyleValidationOutcome.Valid(listOf(styleChild)),
+                BasemapStyleValidationOutcome.Valid(emptyList()),
             ),
         )
 
-        assertEquals(
-            listOf(ParkedRoute(2L, ParkedRouteBarrier.StyleChildren(STYLE_GROUP))),
-            driver.parked,
-            "the style parks on its children barrier",
-        )
+        // A route manifest leaves no child to wait for, so the children barrier is satisfied in the
+        // very transition it is entered and the style keeps its slot straight through to compilation.
+        val compilation = assertIs<CompileBasemapStyle>(driver.actions.single())
+        assertTrue(driver.parked.isEmpty())
         assertEquals(ResourceRouteStatus.RUNNING, driver.record(2L).status)
-        assertEquals(2L, driver.state.nextRetirementOrdinal, "the parked style never retires")
-        assertEquals(listOf(3L), driver.state.activeRouteOrdinals, "capacity goes to the child route")
+        assertEquals(2L, driver.state.nextRetirementOrdinal, "the compiling style never retires")
+        assertEquals(listOf(2L), driver.state.activeRouteOrdinals, "the style keeps the single slot")
+        assertEquals(ResourceRouteStatus.ELIGIBLE, driver.record(3L).status)
         assertEquals(
             listOf(ResourceOwnerId(OWNER_ONE), ResourceOwnerId(OWNER_TWO)),
             driver.style(STYLE_GROUP).referencingOwnerIds,
         )
-        assertTrue(driver.emitted.filterIsInstance<CompileBasemapStyle>().isEmpty())
-
-        driver.driveOrdinaryRoute(3L, ContentProvenance.TRANSPORT_200)
-
-        val compilation = assertIs<CompileBasemapStyle>(driver.actions.single())
-        assertEquals(listOf(2L), driver.state.activeRouteOrdinals)
-        assertTrue(driver.parked.isEmpty())
-        assertEquals(2L, driver.state.nextRetirementOrdinal)
 
         driver.event(
             BasemapStyleCompilationCompleted(compilation.actionId, BasemapStyleCompilationOutcome.Succeeded),
@@ -1009,15 +999,26 @@ class CycleBPureCoreContractTest {
         assertEquals(
             listOf(ParkedRoute(2L, ParkedRouteBarrier.StyleOwners(STYLE_GROUP))),
             driver.parked,
-            "the style parks again on its owner barrier",
+            "the style parks on its owner barrier",
+        )
+        assertEquals(
+            emptyList(),
+            driver.style(STYLE_GROUP).ownersWithCompletedNonStyleWork,
+            "neither owner has installed all of its non-style work yet",
+        )
+        assertEquals(listOf(3L), driver.state.activeRouteOrdinals, "capacity goes to the owner route")
+        assertTrue(driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty())
+        assertEquals(2L, driver.state.nextRetirementOrdinal)
+
+        driver.driveOrdinaryRoute(3L, ContentProvenance.TRANSPORT_200)
+        assertTrue(
+            driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty(),
+            "one owner's work is not the whole barrier",
         )
         assertEquals(
             listOf(ResourceOwnerId(OWNER_ONE)),
             driver.style(STYLE_GROUP).ownersWithCompletedNonStyleWork,
         )
-        assertEquals(listOf(4L), driver.state.activeRouteOrdinals, "capacity goes to the owner route")
-        assertTrue(driver.emitted.filterIsInstance<WriteBasemapStyle>().isEmpty())
-        assertEquals(2L, driver.state.nextRetirementOrdinal)
 
         driver.driveOrdinaryRoute(4L, ContentProvenance.TRANSPORT_200)
 

@@ -188,6 +188,14 @@ _Avoid_: Transform, matrix, pose
 
 **Anchoring Mode**:
 Whether one placement property is resolved against the map (`MAP`) or against the screen (`SCREEN`).
+
+A `SCREEN` **Placement** position on a **Model** is not implemented, and preparation fails on it before
+acquisition or drawing rather than degrading — the same rule **Projection Mode** follows for a mode a
+renderer does not yet support, and for the same reason: RenG never substitutes a different mode. The
+screen regime composites an ordered stack with no depth test, and its projection carries no depth at all,
+so a volumetric mesh drawn there would show its own back faces through its front ones. That is a silently
+wrong picture rather than a missing one, which is the worse failure. Every other combination is supported,
+including a `SCREEN` rotation or scale on a **Model** whose position is `MAP` — the billboard case.
 _Avoid_: Coordinate space, reference frame, projection mode
 
 **Rotation**:
@@ -221,7 +229,14 @@ ellipsoidal altitude metres)`. `MERCATOR` preparation applies the **Camera** lat
 to every map position and **Geometry** corner; out-of-domain values fail rather than clamp or wrap. Altitude
 accepts any finite value, but planning rejects values that cannot remain finite through camera-relative Double
 and GPU-bound Float conversion. Those failures report `mapPosition.altitude` or `geometry.altitude`; latitude
-and world-copy failures retain their corresponding latitude or unwrapped-longitude field.
+and world-copy failures retain their corresponding latitude or unwrapped-longitude field. Map-anchored
+drawing is depth-tested and writes no depth, so map-regime content is occluded by anything that did write
+nearer depth and occludes nothing itself; visibility among map-regime content is decided entirely by draw
+order, which is the **Basemap Tile** ground first, then **Geometry**s in list order, then map-anchored drawn
+things in list order, with later entries on top (ADRs 0025 and 0027). Depth comparison is greater-or-equal,
+so a drawn thing at exactly the depth already drawn there is visible rather than discarded; altitude-0
+content over the ground is the ordinary case of that, and needs no tie-break of its own now that nothing on
+the map plane writes depth to tie with.
 _Avoid_: World mode, 3D mode, geo mode
 
 **Draw Regime**:
@@ -313,6 +328,23 @@ terrain where it is acquired and displaces the ground with it where the ground i
 decoded samples must be bit-exact, with no premultiplication, scaling, or colour transform, because any of
 those silently change elevations.
 _Avoid_: Height map, DEM image, hillshade, terrain texture
+
+**Scene Light**:
+The single fixed light RenG shades **Models** by. It is world-anchored — its direction is fixed relative
+to the map, not to the camera — at azimuth 335 degrees and elevation 45 degrees, with an ambient term so a
+surface facing away from it stays readable rather than going black against a bright ground. The azimuth is
+the cartographic relief-shading convention, chosen because light from the north-west avoids the inversion
+illusion that makes hills read as valleys; taking it means **Model** shading and terrain hillshading already
+agree when the ground gains relief.
+
+It is **RenG's own constant, not a consumer-visible feature**. No **Frame Plan** field configures it, and
+none of the 34 map styles RenG is verified against declares a style-spec `light` object at all, so there is
+nothing to derive it from and nothing to disagree with. World-anchoring is the load-bearing half: a
+camera-anchored light makes a **Model**'s shading swim as the camera orbits, so the object reads as lit by
+the viewer rather than by the world, which is wrong for something pinned to a coordinate. **Stickers**,
+**Geometries** and the ground are unlit and unaffected — a **Geometry** is painted by its own shader pair,
+and lighting it would contradict that.
+_Avoid_: Sun, headlight, illumination, lighting model, shading mode
 
 ### Resources
 

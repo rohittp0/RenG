@@ -37,7 +37,15 @@ kotlin {
     }
     iosArm64()
     iosSimulatorArm64()
-    macosArm64()
+    // The visual harness is a macOS-only executable living beside the six-target resolution proof,
+    // never inside it. The target factory keeps its parenthesised call form because
+    // `tools/check_repository_policy.py` counts exactly that shape; `binaries` and `executable` are
+    // not target factories and add no target.
+    macosArm64().binaries {
+        executable("harness") {
+            entryPoint = "com.rohittp.reng.smoke.harness.main"
+        }
+    }
     linuxX64()
     linuxArm64()
 
@@ -46,4 +54,41 @@ kotlin {
             implementation("com.rohittp.reng:kmp:$rengVersion")
         }
     }
+}
+
+/**
+ * Runs the visual harness against a real map style.
+ *
+ * The style url carries the owner's api key, so it is never checked in: pass it as
+ * `-PstyleUrl=<url>` or in the `RENG_HARNESS_STYLE_URL` environment variable.
+ */
+val runHarness by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Renders a frame sequence with RenG and writes PPM files for ffmpeg."
+    val link = tasks.named("linkHarnessDebugExecutableMacosArm64")
+    dependsOn(link)
+    val binary = layout.buildDirectory.file("bin/macosArm64/harnessDebugExecutable/harness.kexe")
+    val frames = layout.buildDirectory.dir("harness-frames")
+    val styleUrl = providers.gradleProperty("styleUrl")
+        .orElse(providers.environmentVariable("RENG_HARNESS_STYLE_URL"))
+    val frameCount = providers.gradleProperty("frameCount")
+    // `-PnoBasemap` renders the same camera path with `drawBasemap = false` on every frame, so the
+    // stickers and the geometry can be watched even when the ground itself will not draw.
+    val groundless = providers.gradleProperty("noBasemap").isPresent
+    val verbose = providers.gradleProperty("verbose").isPresent
+    doFirst {
+        frames.get().asFile.mkdirs()
+    }
+    commandLine(
+        buildList {
+            add(binary.get().asFile.absolutePath)
+            add("--style")
+            add(styleUrl.getOrElse(""))
+            add("--out")
+            add(frames.get().asFile.absolutePath)
+            frameCount.orNull?.let { add("--frames"); add(it) }
+            if (groundless) add("--no-basemap")
+            if (verbose) add("--verbose")
+        },
+    )
 }

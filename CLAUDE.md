@@ -4,73 +4,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Cycle A is complete as an implemented and publicly released cycle.** Exact source commit
-`af92901b2ef045078b855a6b47533bc95aca6886` passed both CI jobs and the publication workflow; its first
-public `0.1.0` completion record verified anonymously. The root build includes only the single `:kmp`
-library module; Android Studio's placeholder `:app` has been deleted. `:kmp` is a publishable six-target
-skeleton with no public runtime API and no rendering behavior yet. `consumer-smoke`, the dependency-free
-static site, publication tooling, repository-policy tooling, and `VERSION_NAME=0.1.0` exist.
+**RenG draws, and two releases are public.** `VERSION_NAME` is `0.2.0`. Anything in this file or in an
+older document that says RenG "renders nothing", "exposes no public runtime API", or that the KLIB ABI
+dump "contains no renderer factory" is obsolete: `createRenderer` is published API and the basemap branch
+draws a ground.
 
-**Cycle B is complete and merged to `main` locally, unpushed.** Its
-owner-approved design is `docs/superpowers/specs/2026-08-17-cycle-b-public-api-pure-core-design.md` and its
-reviewed plan is `docs/superpowers/plans/2026-08-17-cycle-b-public-api-pure-core.md`; every plan task
-including the cross-engine contract proof is complete, and each was independently reviewed with its findings
-fixed. The specification and plan are approved, so do not re-run grilling or write another plan unless
-repository-owner review reopens a contract.
+**Cycle A — released as `0.1.0`, historical.** Exact source commit
+`af92901b2ef045078b855a6b47533bc95aca6886` passed both CI jobs and the publication workflow, and its
+completion record verified anonymously. It established the single publishable `:kmp` module (Android
+Studio's placeholder `:app` is deleted), `consumer-smoke`, the dependency-free static site, and the
+publication and repository-policy tooling.
 
-Cycle B is pure core only: public immutable values, protocols and sanitized failures, canonical identities,
-spatial and diff planning, and pure lifecycle, resource, and preparation reducers driven entirely by supplied
-values. There is still no renderer factory, consumer adapter call, Rentile acquisition, decoder, parser,
-production cache, GL call, shader compilation, or pixel, and no public runtime API — the KLIB ABI dump
-contains no Rentile type, platform binding, or renderer factory. Cycle B has been merged to `main` locally,
-as stated above, but `main` itself is unpushed, so Cycle B has **not** been released and its exact
-merged-commit CI and publication have not been observed. `VERSION_NAME` remains `0.1.0` and the public
-`0.1.0` record remains Cycle A's.
+**Cycles B, C, D and F-1 — merged to `main` and released together as `0.2.0`.** Exact source commit
+`a2cbe6a965247f221f7e279a962b40306baac21b`: CI run `32314778617` and publication run `32314778594` both
+succeeded, and `com/rohittp/reng/kmp/0.2.0/reng-release-completion-v1.json` verifies anonymously, naming
+that commit and manifest digest `e93bdfde7870056552961791d2d29fea43b6030e6b5e4493ff425049d0dcb1d4`. The
+first attempt, at `3a6eec5`, failed closed before any R2 write — a scheduler-benchmark wall-clock ceiling
+calibrated on developer hardware, replaced by a machine-independent scaling-ratio assertion in `c67349a` —
+so nothing was published and the retry reused the same version, exactly as ADR 0013 intends. `main` and
+`origin/main` are the same commit.
 
-**Cycle C is implemented on branch `feat/cycle-c-resource-layer` and awaits integration review.** Its
-owner-approved design is `docs/superpowers/specs/2026-08-18-cycle-c-resource-layer-design.md` and its
-reviewed plan is `docs/superpowers/plans/2026-08-18-cycle-c-resource-layer.md`, but the plan's original
-scope is now wider than what shipped: the owner reordered the cycles so an MVP can ship for waiting
-consumers, and six of its twenty-one tasks travel with the basemap cycle instead. **Shipped in Cycle C**
-(tasks 1–13 and 15): the coroutines dependency; the five public declarations Task 2 adds; the inflate and
-CRC-32 seam; PNG container parsing and unfiltering to canonical RGBA8, hardened by five adversarial review
-passes into a 300,000-input property fuzz test that asserts `decodePng` never throws; strict UTF-8 and a
-hand-written JSON reader (no serialization library is compile-visible outside native targets); GLB
-container scanning, glTF document parsing, and the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates; the resident
-cache (generations, leases, reload markers); the resource driver running RenG's own class gates and
-performing Store writes and visibility installs; and cancellation propagated unwrapped through the driver.
-**Deferred to the basemap cycle, not implemented:** sprite-pair and basemap-style commits, the production
-Rentile private-key resolver, the firewall transport/store adapters, engine failure classification, the
-basemap rasterizer host and rendered-tile identity, and terrain acquisition. Consequently Cycle C calls no
-Rentile adapter, decodes no basemap tile, and draws no map text or pixel of any kind; six
-Rentile-firewall-validated gate/class combinations (`PARSE_TILEJSON`, `DECODE_VECTOR_TILE`,
-`PARSE_GEOJSON`, and `DECODE_PNG` over the basemap raster/DEM classes) throw loudly rather than fake
-`Valid`, and are unreached until the deferred firewall lands. See `HANDOFF.md` for the scheduler-cost
-measurement, the PNG hardening detail, and an owed erratum against ADR 0016's basemap-class count. Cycle C
-has **not** been merged to `main`, has not been released, and its exact merged-commit CI and publication
-have not been observed. `VERSION_NAME` remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+What `0.2.0` contains, by cycle. **B**: the public value types, protocols and sanitized failures, canonical
+identities, spatial and diff planning, and the pure lifecycle, resource and preparation reducers, which
+still call no adapter and touch no GL. **C**: the inflate and CRC-32 seam; PNG container parsing and
+unfiltering to canonical RGBA8, hardened by five adversarial review passes into a 300,000-input property
+fuzz test asserting `decodePng` never throws; strict UTF-8 and a hand-written JSON reader (no
+serialization library is compile-visible outside native targets); GLB container scanning, glTF document
+parsing and the `PARSE_GLB`/`VALIDATE_GLB_FEATURES` gates; the resident cache; the resource driver; and
+cancellation propagated unwrapped. **D**: the internal GL seam and its four platform implementations,
+runtime shading-language dialect detection, the offscreen colour-and-depth surface and composite pass, the
+corrected restore set (ADR 0023), shader compilation with version-directive substitution and program
+caching, the lifecycle driver, and the conformance suite against real llvmpipe and real Apple silicon.
+**F-1**: `createRenderer` — the first API that makes RenG operable — stickers drawn in both draw regimes,
+and geometries painted by consumer shader pairs with consumer-supplied uniforms and textures. Six Cycle C
+tasks were reordered onto the basemap cycle so this could ship; the MVP release is internal, and a later
+breaking interface change is accepted (never an overwritten coordinate).
 
-**Cycle D is implemented on branch `feat/cycle-d-gl-foundation` and awaits integration review.** Its
-authority is `docs/superpowers/specs/2026-08-18-cycle-d-gl-foundation-design.md` and
-`docs/superpowers/plans/2026-08-18-cycle-d-gl-foundation.md`; every plan task including the real-context
-conformance suite is complete, and each was independently reviewed with its findings fixed. It adds the
-internal GL seam and its four platform implementations, runtime shading-language dialect detection, the
-offscreen colour-and-depth surface and its composite pass, the corrected GL restore set (ADR 0023), shader
-compilation with version-directive substitution and program caching, the lifecycle driver that supplies
-real GL facts to Cycle B's unmodified pure reducer, and the GL conformance suite that runs against real
-contexts on both llvmpipe and Apple silicon. Cycle D still adds no public ABI, no renderer factory, no
-resource acquisition, no Rentile call, no decoder or parser, and no frame content — the KLIB ABI dump
-contains no Rentile type, platform binding, or renderer factory. Cycle D has **not** been merged to `main`,
-has not been released, and its exact merged-commit CI and publication have not been observed. `VERSION_NAME`
-remains `0.1.0` and the public `0.1.0` record remains Cycle A's.
+**The basemap cycle is complete and gathered on `feat/cycle-e-basemap`, and is neither merged to `main`
+nor released.** Its authority is `docs/superpowers/specs/2026-08-20-cycle-e-basemap-design.md` and
+`docs/superpowers/plans/2026-08-20-cycle-e-basemap.md`; the per-task ledger, including every review verdict
+and the four spikes taken mid-cycle, is `.superpowers/sdd/2026-08-20-cycle-e-basemap/progress.md`. It
+ships the Rentile firewall and its production key resolver (`internal/firewall/`: `FirewallTransport`,
+`FirewallStore`, `OperationRegistry`, `RentileKeyDerivation`, `EngineFailureClassification`,
+`BasemapEngineHost`), sprite-pair and style commits, route derivation from a real style, style compilation
+against the bytes the frame actually commits, tile rendering through the engine, sources that declare
+their tiles by reference through TileJSON, bounded GPU texture residency, and the drawn ground
+(`internal/gl/GroundPipeline.kt`) gated by analytical readback rather than by any stored image. Test
+counts last measured in this checkout: **903 Android host / 936 `macosArm64`, no failures, none skipped**.
+
+**Exactly one public field is added by the basemap cycle**: `ResourceLimits.maximumResidentGpuTextureBytes`,
+plus its mechanical constructor/`copy`/`component11` fallout. It was inert for most of the cycle —
+`RendererFactory` constructed `GlObjectRegistry()` with the class default, so the knob had no effect at
+all — until the ground-draw task threaded it from the caller's configuration at `RendererFactory.kt:115`.
+A public field with no wiring is the failure mode worth remembering here.
+
+**Basemap rendering is verified on `macosArm64Test` and `linuxX64Test` only, and that is a measured limit,
+not a scheduling one.** Those are the only two test tasks that can hold a GL context. Android's host tests
+are doubly excluded: no GL, and they cannot execute Rentile's Skia rasterization at all, which was measured
+with error codes rather than assumed. All six targets still publish at every release; which of them anyone
+has actually executed belongs in release notes rather than being discovered by an Android consumer.
+
+**Out of scope in the basemap cycle, and not implemented:** terrain (Cycle C's task 20 travels to
+E-terrain), map labels, models with textures and animation, the globe projection, and golden images. Map
+labels were split into their own cycle, **E-labels**, on 2026-08-22, and **Android and iOS bring-up (H) now
+precedes the globe (G)**. **Pixel verification is deferred to Cycle J by owner decision**
+(`docs/superpowers/specs/2026-08-19-cycle-f1-stickers-and-geometries-design.md:204-205`), so E-basemap and
+F-2 gate on analytical readback — relationships asserted over a real context, no stored baselines.
+
+**There are no longer any gate/class combinations that throw.** An older version of this file claimed six
+Rentile-firewall-validated combinations "throw loudly rather than fake `Valid`". It was wrong twice: the
+count was five, not six, and it is now zero. `ResourceClassGate` has exactly three constants —
+`DECODE_PNG`, `PARSE_GLB`, `VALIDATE_GLB_FEATURES`
+(`kmp/src/commonMain/kotlin/com/rohittp/reng/internal/resource/ResourceOperationProtocol.kt:614-618`) — and
+`ordinaryResourceClassGates` returns `null` for all eight classes RenG's driver does not gate: the seven the
+Rentile engine acquires and validates itself through the firewall, plus `BASEMAP_STYLE`, which commits
+through its own verbs (same file, `:640-657`). `RenGClassGateRunner`'s `when` is therefore total over three
+gates with no `error(...)` branch, and the former `VALIDATE_DEM_TERRAIN_ENCODING` gate is gone — the DEM
+check survives as `validatesDemTerrainEncoding` in
+`internal/driver/ClassGateRunner.kt`, called from the firewall's write path where ADR 0016 puts the
+obligation. RenG's own `ResourceClass` still has eleven constants.
+
+**The erratum this file used to say was owed against ADR 0016's basemap-class count has been written.** It
+is appended to `docs/adr/0016-contain-rentile-behind-an-operation-scoped-adapter-firewall.md` and to the
+Cycle C design spec: Rentile `0.3.0` added a ninth class, `GLYPH_RANGE`, reachable only through
+`acquireLabelCandidates`, which RenG does not call.
+
+**Rentile is pinned in `gradle/libs.versions.toml`, at `0.2.0` as of the basemap cycle** — earlier text
+here named `0.1.5`, which is two releases behind. Do not quote a Rentile version from prose; read the
+catalog. A version lives in three coupled places that must move in one commit or
+`check_repository_policy.py` fails closed — `HANDOFF.md` names them, and the measured case for moving to
+`0.4.0` is recorded there too.
 
 Design decisions live in `CONTEXT.md` (vocabulary) and `docs/adr/` (ADRs 0001–0012 establish the
 original graphics contract, ADR 0013 governs fail-closed publication, ADRs 0014–0015 supersede
 preparation ordering and GL-deletion context behavior, ADRs 0016–0017 govern the Rentile firewall and
 terminal renderer ownership, ADR 0018 governs canonical identities, ADR 0019 takes kotlinx-coroutines as a
 first-party dependency, ADRs 0020–0021 fix PNG decode ownership and the supported GLB subset, ADR 0022
-supersedes ADR 0009's source-set visibility claim, and ADR 0023 supersedes ADR 0006's GL restore set and
-declares the GL error-queue exception). Read both before proposing anything that touches
+supersedes ADR 0009's source-set visibility claim, ADR 0023 supersedes ADR 0006's GL restore set and
+declares the GL error-queue exception, ADR 0024 draws the map regime first and composites the screen
+regime on top as one stack, ADR 0025 supersedes ADR 0024's depth rule — `GL_GEQUAL` instead of
+`GL_GREATER`, plus a fixed map-regime draw order of ground, then geometries, then map-anchored stickers,
+with the later-declared thing winning an exact depth tie — and ADR 0026 invents the one directional,
+world-anchored light every model is shaded by, at azimuth 335° and elevation 45° with an ambient term,
+leaving stickers, geometries and the ground unlit). Read both before proposing anything that touches
 the public API — where this file and an ADR disagree, the newer ADR wins.
 
 ## What RenG is
@@ -153,11 +189,11 @@ Non-obvious semantics:
 
 ## Implemented structure (mirroring rentile)
 
-Rentile remains the structural template. The implemented Cycle A surface is:
+Rentile remains the structural template. The implemented surface is:
 
 | Path | Purpose |
 |---|---|
-| `kmp/` | The one published module. Cycle A contains only an internal Rentile linkage anchor and its common test; later API, scene graph, resource layer, and platform renderers remain deep package boundaries inside it — **not** separate Gradle subprojects (rentile ADR 0002: KMP publication does not fold unpublished project dependencies into the aggregate artifact, so extra modules would break the single-coordinate guarantee). |
+| `kmp/` | The one published module. The public API sits at `com.rohittp.reng`; everything else is a deep package boundary under `com.rohittp.reng.internal` — `basemap`, `cache`, `diff`, `driver`, `failure`, `firewall`, `gl`, `glb`, `identity`, `image`, `json`, `lifecycle`, `math`, `planning`, `preparation`, `projection`, `resource`, `shader` — and **not** separate Gradle subprojects (rentile ADR 0002: KMP publication does not fold unpublished project dependencies into the aggregate artifact, so extra modules would break the single-coordinate guarantee). |
 | `docs/adr/` | One short ADR per decision, `NNNN-imperative-title.md`, a few paragraphs of prose — no template headings. |
 | `docs/` | Dependency-free static site published to GitHub Pages at `https://rohittp.com/reng/`. |
 | `CONTEXT.md` | Domain vocabulary: each term with its definition and an explicit `_Avoid_:` list of rejected synonyms. Read it before naming anything. |
@@ -200,11 +236,12 @@ the JVM is deliberately out of the published surface and absent from the ported 
 host tests still run on the JVM — that is a test source set, not a published target. If the macOS
 harness or a future consumer needs it, adding `jvm` means touching both workflows and `consumer-smoke`.
 
-**Rentile publishes every target RenG needs, as of `0.1.5`.** `kmp-android`, `kmp-iosarm64`,
-`kmp-iossimulatorarm64`, `kmp-macosarm64`, `kmp-linuxx64`, and `kmp-linuxarm64` all resolve from
-`https://maven.rohittp.com`, so RenG depends on `com.rohittp.rentile:kmp:0.1.5` with no `mavenLocal()`
-and no temporary repository entry. (Earlier guidance here described `macosArm64` as unpublished at
-`0.1.4`; that was true then and is not now.)
+**Rentile publishes every target RenG needs.** `kmp-android`, `kmp-iosarm64`, `kmp-iossimulatorarm64`,
+`kmp-macosarm64`, `kmp-linuxx64`, and `kmp-linuxarm64` all resolve from `https://maven.rohittp.com`, so
+RenG depends on `com.rohittp.rentile:kmp` with no `mavenLocal()` and no temporary repository entry. The
+pinned version is in `gradle/libs.versions.toml` and is **`0.2.0`** as of the basemap cycle — do not quote
+a Rentile version from prose, including from this file, since it moves. Bumping it moves three coupled
+places at once (`HANDOFF.md` names them) or the repository policy fails closed.
 
 ## CI/CD
 
@@ -262,9 +299,11 @@ The standard-library Python tools are:
 Publishing needs repository **vars** `R2_ENDPOINT`, `R2_BUCKET`, `R2_PUBLIC_URL` and **secrets**
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. A dedicated step fails fast if any is missing. Do not run AWS,
 upload, push, dispatch, or otherwise infer that outward gates passed without explicit approval and an
-observed workflow result. The first public release completed from
+observed workflow result. Two releases have completed this way. `0.1.0` from
 `af92901b2ef045078b855a6b47533bc95aca6886`: CI run `31968682132` and publication run `31968682290`
-succeeded, and the immutable `0.1.0` completion record verified anonymously. ADR 0013 and the Cycle A
+succeeded, and the immutable completion record verified anonymously. `0.2.0` from
+`a2cbe6a965247f221f7e279a962b40306baac21b`: CI run `32314778617` and publication run `32314778594`
+succeeded, and its completion record likewise verifies anonymously. ADR 0013 and the Cycle A
 design spec and implementation plan remain historical decision records. Keep public version display
 metadata-driven and do not check a RenG semantic version literal into README or served docs.
 

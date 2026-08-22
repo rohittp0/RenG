@@ -130,8 +130,10 @@ internal fun deleteStickerPipeline(
  * One sticker instance ready to draw: its already-resolved per-instance model-view-projection matrix
  * (column-major, matching [GlBinding.uniformMatrix4fv]) and its already-uploaded GL texture name.
  *
- * [screenCompositeZ] is meaningless for a map-anchored sticker — the GPU depth buffer, not draw order,
- * decides visibility there — and is read only by [drawStickers] while sorting [StickerWorld.screenAnchored].
+ * [screenCompositeZ] is meaningless for a map-anchored sticker — since ADR 0027 the map regime
+ * writes no depth, so declaration order decides visibility among map-anchored things and the depth
+ * buffer only ever occludes them against content that wrote nearer depth — and is read only by
+ * [drawStickers] while sorting [StickerWorld.screenAnchored].
  */
 internal class ResolvedSticker(
     val modelViewProjection: FloatArray,
@@ -142,11 +144,21 @@ internal class ResolvedSticker(
 /**
  * The two draw regimes ADR 0024 fixes for one frame's stickers.
  *
- * [mapAnchored] draws depth-tested, in any order — the GPU depth buffer decides visibility between
- * map-anchored things, not draw order. [screenAnchored] then composites on top as a single ordered
- * stack: `CONTEXT.md` says greater `position.z` composites on top and equal values keep stable plan
- * order, so [drawStickers] sorts it by [ResolvedSticker.screenCompositeZ] with a stable ascending sort
- * and draws it after disabling depth testing.
+ * [mapAnchored] draws depth-tested but **depth-write-free**, **in declaration order** — a contract
+ * since ADR 0025 and, since ADR 0027, the whole of the rule rather than only its tie-break. This
+ * KDoc once said the opposite ("in any order — the GPU depth buffer decides visibility between
+ * map-anchored things, not draw order"); ADR 0025 replaced that with a tie-break, and ADR 0027
+ * replaced the tie-break with an unconditional painter's order among map-regime content, because a
+ * tie-break only ever resolved *exact* ties and the two defects that shipped were both near-ties.
+ * The map regime still tests depth, so anything that genuinely wrote nearer depth still occludes
+ * it; it just no longer writes depth itself. [drawStickers] therefore preserves the order it is
+ * given, and `SceneContent` builds that order from `FramePlan.stickers` with the ground already
+ * drawn beneath.
+ *
+ * [screenAnchored] then composites on top as a single ordered stack: `CONTEXT.md` says greater
+ * `position.z` composites on top and equal values keep stable plan order, so [drawStickers] sorts it
+ * by [ResolvedSticker.screenCompositeZ] with a stable ascending sort and draws it after disabling
+ * depth testing.
  */
 internal class StickerWorld(
     val mapAnchored: List<ResolvedSticker> = emptyList(),
@@ -155,7 +167,17 @@ internal class StickerWorld(
 
 /**
  * Draws both regimes of [world] through [pipeline], in ADR 0024's order: the map regime first,
- * depth-tested, then the screen regime composited on top with depth testing off.
+ * depth-tested, then the screen regime composited on top with depth testing off. Within the map
+ * regime the given order is preserved exactly, because ADR 0027 makes it decide visibility outright.
+ *
+ * **Why the map regime writes no depth (ADR 0027).** A map-anchored, screen-rotated sticker is a
+ * billboard: its quad is screen-parallel, so every fragment carries the anchor's single depth while
+ * the ground plane it stands on has depth varying down the screen. Under a pitched camera the half
+ * of the quad below the anchor row is geometrically *under* the map plane and the depth test
+ * deleted it — a cyan pin sliced exactly in half along a horizontal line through its own anchor,
+ * visible at every pitch but zero. No constant or slope-scaled offset closes that, because the
+ * deficit grows with the quad's own screen height. Removing the writes from every map-regime
+ * surface removes the occluder instead, which is the only thing that makes the billboard whole.
  *
  * Blend state is set explicitly to the premultiplied `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` function that
  * Task 4's premultiplied image upload requires, rather than inherited from whatever the caller left
@@ -176,6 +198,7 @@ internal fun drawStickers(binding: GlBinding, pipeline: StickerPipeline, world: 
     }
 
     binding.enable(GL_DEPTH_TEST)
+    binding.depthMask(false)
     world.mapAnchored.forEach { drawOneSticker(binding, pipeline, it) }
     binding.disable(GL_DEPTH_TEST)
 

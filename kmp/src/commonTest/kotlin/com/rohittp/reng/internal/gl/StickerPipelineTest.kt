@@ -94,6 +94,27 @@ class StickerPipelineTest {
         )
     }
 
+    /**
+     * ADR 0027. The map regime is depth-tested and writes nothing, so a map-anchored billboard —
+     * a screen-parallel quad carrying its anchor's single depth — cannot be sliced in half by the
+     * varying depth of the map plane it stands on, and cannot slice a later one either.
+     */
+    @Test fun theMapRegimeTurnsDepthWritesOffBeforeItDraws() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        binding.log.clear()
+        drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker(texture = 11))))
+
+        val maskedOff = binding.log.indexOfFirst { it == "depthMask(false)" }
+        val firstDraw = binding.log.indexOfFirst { it.startsWith("drawArrays") }
+        assertTrue(firstDraw >= 0, "the map-anchored sticker must actually draw")
+        assertTrue(
+            maskedOff in 0 until firstDraw,
+            "the map regime must turn depth writes off before it draws (ADR 0027)",
+        )
+        assertFalse(binding.log.any { it == "depthMask(true)" }, "nothing here re-enables depth writes")
+    }
+
     @Test fun equalZIndexCompositesInStablePlanOrder() {
         val binding = newBinding()
         val pipeline = createdPipeline(binding)

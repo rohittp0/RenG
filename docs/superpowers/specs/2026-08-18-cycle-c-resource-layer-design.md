@@ -514,4 +514,29 @@ Required gates:
 - repository policy, amended for the one coroutines coordinate, plus local publication and the fresh
   six-target consumer smoke before merge.
 
+## Erratum (2026-08-20, Cycle E basemap preflight)
+
+"Measured basemap-engine behaviour" above counts "all eight classes exercised," and "Adapter translation"
+maps "Rentile's eight `ResourceClass` values... onto RenG's eight `BASEMAP_`-prefixed classes." Rentile
+`0.3.0` added a ninth, `GLYPH_RANGE`, measured in
+`docs/research/2026-08-19-rentile-030-counting-stub-respike.md`. Both "eight"s above accurately counted the
+`0.1.5` artifact this spec's own spike drove; only Rentile's later surface growth made the count stale.
+
+`GLYPH_RANGE` carries `accept = application/x-protobuf`. Like `BASEMAP_DEM_TILE` — and unlike
+`BASEMAP_SPRITE_JSON`/`BASEMAP_SPRITE_IMAGE` — it reaches Rentile's raw-store write before its own decode
+validation runs. And unlike the sprite pair's terminal poisoning, a digest mismatch on a stored `GLYPH_RANGE`
+record recovers by remove-then-refetch, the same non-terminal shape "Class gate execution"'s own observed-
+sequence table already describes for TileJSON, vector, raster, DEM, and GeoJSON.
+
+It is reachable only through a new entry point, `acquireLabelCandidates(style, tiles, resourceAccess)`, never
+through `prepare`, `prepareBatch`, or `render` — the three methods "The Rentile firewall, made real" builds
+against. Cycle C's firewall does not call `acquireLabelCandidates`, so `GLYPH_RANGE` stays deliberately
+outside it: enumerating the class without adopting the entry point that reaches it would be exactly the
+failure the respike was run to rule out. The firewall's existing posture — failing closed on an unrecognised
+URL or resource class rather than special-casing one it cannot handle — is what makes that omission safe
+rather than a silent gap, and this erratum changes nothing about it.
+
+This is appended rather than corrected in place because "eight" was an accurate count of what the `0.1.5`
+spike measured and this design reasoned from; only Rentile's later surface growth made the number stale.
+
 Cycle C produces no pixels, no GL call, no factory, and no public renderer construction.

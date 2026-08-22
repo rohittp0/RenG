@@ -14,9 +14,23 @@ internal val EmptyGlFrameContent: GlFrameContent = GlFrameContent { }
 /**
  * Cycle B's projection maps the near plane to `+1` and infinity to `-1` in clip space, so window
  * depth runs from `1` at the near plane down to `0` at infinity. RenG therefore clears depth to `0`
- * and tests with `GL_GREATER`.
+ * and tests with [GL_GEQUAL] (ADR 0025 -- it used to be `GL_GREATER`; see [drawFrame]).
  */
 internal const val REVERSE_Z_FAR_DEPTH: Float = 0.0f
+
+/**
+ * How many texture units one frame captures and restores.
+ *
+ * ADR 0023's Restore Set covers "the bindings on the units RenG uses", and the widest user is
+ * [drawGeometry], which binds one unit per consumer texture up to [MAXIMUM_CONSUMER_TEXTURES].
+ * Capturing only [COMPOSITE_TEXTURE_UNIT_COUNT] left units 1..14 clobbered and never restored --
+ * a shipped ADR 0006/0023 violation. This is deliberately a fixed maximum rather than a per-frame
+ * count threaded down from the caller: a count derived from the frame's own content is one more
+ * thing a future pass can forget to widen, and the whole defect this replaces was exactly that
+ * kind of omission. Both GL 3.3 core and GLES 3.0 mandate at least sixteen per-stage texture image
+ * units, so `GL_TEXTURE0 + 14` is always a valid unit on every context RenG adopts.
+ */
+internal val FRAME_TEXTURE_UNIT_COUNT: Int = maxOf(COMPOSITE_TEXTURE_UNIT_COUNT, MAXIMUM_CONSUMER_TEXTURES)
 
 /**
  * Draws one frame: clears and renders [content] into RenG's own offscreen surface, then composites
@@ -27,6 +41,19 @@ internal const val REVERSE_Z_FAR_DEPTH: Float = 0.0f
  * The entire body runs inside [withCapturedGlState], so the caller's GL state is captured before
  * either pass and restored afterward unconditionally — including when [content] leaves state dirty
  * or a driver error is detected at the end.
+ *
+ * **Depth comparison (ADR 0025) and depth writes (ADR 0027).** The test is [GL_GEQUAL], not
+ * `GL_GREATER`. Under strict `GL_GREATER` a fragment at exactly the depth already in the buffer is
+ * discarded, which silently deletes every altitude-0 map-anchored thing the moment the basemap
+ * ground exists beneath it -- the most ordinary frame a consumer writes. `GL_GEQUAL` keeps real
+ * occlusion wherever depths differ and resolves exact ties by draw order.
+ *
+ * This function still enables depth testing and still leaves [depthMask] **on** for the clear, which
+ * is what makes the per-frame depth clear take effect. What changed under ADR 0027 is that every
+ * map-regime draw inside [content] turns depth writes off for itself, because an exact-tie rule
+ * never covered the near-ties a moving camera produces. See
+ * [com.rohittp.reng.internal.gl.SceneContent] for the order that decides the map regime, and
+ * [drawGround] / [drawStickers] for the per-pass depth state.
  *
  * `GL_FRAMEBUFFER_SRGB` arrives **enabled** on Mesa's ES context and **disabled** on its desktop
  * core context — a pixel-affecting difference between two contexts on the same machine — so RenG
@@ -45,7 +72,7 @@ internal fun drawFrame(
 ): FailureDescriptor? {
     GlErrorQueue.drainOnEntry(binding)
 
-    return withCapturedGlState(binding, profile, COMPOSITE_TEXTURE_UNIT_COUNT) {
+    return withCapturedGlState(binding, profile, FRAME_TEXTURE_UNIT_COUNT) {
         binding.pixelStorei(GL_UNPACK_ALIGNMENT, GL_UNPACK_ALIGNMENT_DEFAULT)
         binding.pixelStorei(GL_UNPACK_ROW_LENGTH, 0)
         binding.pixelStorei(GL_UNPACK_SKIP_ROWS, 0)
@@ -61,7 +88,7 @@ internal fun drawFrame(
         binding.clearDepthf(REVERSE_Z_FAR_DEPTH)
         binding.clear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
         binding.enable(GL_DEPTH_TEST)
-        binding.depthFunc(GL_GREATER)
+        binding.depthFunc(GL_GEQUAL)
         binding.frontFace(GL_CCW)
         binding.cullFace(GL_BACK)
         profile.setFramebufferSrgb(binding, enabled = false)

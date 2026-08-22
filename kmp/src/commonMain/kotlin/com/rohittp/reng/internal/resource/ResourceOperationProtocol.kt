@@ -601,32 +601,55 @@ internal data class PendingChildDiscovery(
     }
 }
 
+/**
+ * The checks RenG itself performs over content its **own** driver acquired. No member exists for a check
+ * the Rentile engine owns: the engine acquires all seven engine-keyed basemap classes through RenG's
+ * firewall, so no TileJSON, vector tile, GeoJSON or DEM ever reaches a class gate (ADR 0003's split,
+ * ADR 0016's firewall).
+ *
+ * Not every check RenG owns is a member here. DEM terrain-encoding validation is RenG's under ADR 0016,
+ * but it belongs to the firewall's write path rather than to a driver class gate, because the driver
+ * never holds a DEM tile's bytes. "One member per check RenG owns" would be the wrong summary.
+ */
 internal enum class ResourceClassGate {
-    PARSE_TILEJSON,
-    DECODE_VECTOR_TILE,
     DECODE_PNG,
-    VALIDATE_DEM_TERRAIN_ENCODING,
-    PARSE_GEOJSON,
     PARSE_GLB,
     VALIDATE_GLB_FEATURES,
 }
 
+/**
+ * The ordered class gates RenG runs over a resolved route's content, or `null` for a class whose routes
+ * this function does not gate at all.
+ *
+ * `null` is the answer for two different reasons, and both are structural rather than unfinished:
+ *
+ * - **The engine acquires it.** `BASEMAP_TILE_JSON`, `BASEMAP_VECTOR_TILE`, `BASEMAP_RASTER_TILE`,
+ *   `BASEMAP_DEM_TILE`, `BASEMAP_GEO_JSON`, `BASEMAP_SPRITE_JSON` and `BASEMAP_SPRITE_IMAGE` are keyed to
+ *   the Rentile engine, which fetches and validates them itself through RenG's firewall
+ *   ([com.rohittp.reng.internal.firewall.OperationRegistry]); RenG's driver only preregisters their
+ *   routes. They cannot become driver routes either: only
+ *   [com.rohittp.reng.internal.planning.StaticResourceReference.External] becomes a
+ *   [ResourceOccurrence], and its own `init` requires a static-direct class, which none of the seven is.
+ *   Re-gating them here would also fetch and validate one logical resource twice under two different
+ *   stable ids, one per key space (ADR 0016).
+ * - **Its commit path is not the ordinary one.** `BASEMAP_STYLE` commits through the style-commit path
+ *   rather than through [AdvancePendingClassGates].
+ *
+ * That leaves the three classes RenG genuinely decodes and parses for itself.
+ */
 internal fun ordinaryResourceClassGates(resourceClass: ResourceClass): List<ResourceClassGate>? =
     when (resourceClass) {
-        ResourceClass.BASEMAP_TILE_JSON -> listOf(ResourceClassGate.PARSE_TILEJSON)
-        ResourceClass.BASEMAP_VECTOR_TILE -> listOf(ResourceClassGate.DECODE_VECTOR_TILE)
-        ResourceClass.BASEMAP_RASTER_TILE -> listOf(ResourceClassGate.DECODE_PNG)
-        ResourceClass.BASEMAP_DEM_TILE -> listOf(
-            ResourceClassGate.DECODE_PNG,
-            ResourceClassGate.VALIDATE_DEM_TERRAIN_ENCODING,
-        )
-        ResourceClass.BASEMAP_GEO_JSON -> listOf(ResourceClassGate.PARSE_GEOJSON)
         ResourceClass.STICKER_IMAGE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_TEXTURE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_GLB -> listOf(
             ResourceClassGate.PARSE_GLB,
             ResourceClassGate.VALIDATE_GLB_FEATURES,
         )
+        ResourceClass.BASEMAP_TILE_JSON,
+        ResourceClass.BASEMAP_VECTOR_TILE,
+        ResourceClass.BASEMAP_RASTER_TILE,
+        ResourceClass.BASEMAP_DEM_TILE,
+        ResourceClass.BASEMAP_GEO_JSON,
         ResourceClass.BASEMAP_STYLE,
         ResourceClass.BASEMAP_SPRITE_JSON,
         ResourceClass.BASEMAP_SPRITE_IMAGE,
@@ -929,10 +952,18 @@ internal class StyleCommitState(
     ownersWithCompletedNonStyleWork: List<ResourceOwnerId>,
     val writeAcknowledged: Boolean,
     val visible: Boolean,
+    /**
+     * The routes this style's compilation will make the engine ask for, carried from validation to
+     * compilation. Empty until [BasemapStyleValidationOutcome.Valid] supplies them — a style that has
+     * not been validated yet has no manifest, and a validated style that declares no sprite and no
+     * GeoJSON source honestly has an empty one.
+     */
+    styleTimeRoutes: List<ResourceRouteKey> = emptyList(),
 ) {
     private val referencingOwnerIdSnapshot: List<ResourceOwnerId> = freshListCopy(referencingOwnerIds)
     private val completedOwnerIdSnapshot: List<ResourceOwnerId> =
         freshListCopy(ownersWithCompletedNonStyleWork)
+    private val styleTimeRouteSnapshot: List<ResourceRouteKey> = freshListCopy(styleTimeRoutes)
 
     init {
         require(ordinal >= 0L) { "route ordinal must be non-negative" }
@@ -975,6 +1006,9 @@ internal class StyleCommitState(
     val ownersWithCompletedNonStyleWork: List<ResourceOwnerId>
         get() = freshListCopy(completedOwnerIdSnapshot)
 
+    val styleTimeRoutes: List<ResourceRouteKey>
+        get() = freshListCopy(styleTimeRouteSnapshot)
+
     internal val compilationRequired: Boolean
         get() = requiresStyleCompilation(stagedContent.provenance)
 
@@ -990,6 +1024,9 @@ internal class StyleCommitState(
 
     internal fun withCompilationStatus(status: StyleCompilationStatus): StyleCommitState =
         copyStyle(compilationStatus = status)
+
+    internal fun withStyleTimeRoutes(routes: List<ResourceRouteKey>): StyleCommitState =
+        copyStyle(styleTimeRoutes = routes)
 
     internal fun withOwners(
         referencingOwnerIds: List<ResourceOwnerId>,
@@ -1009,6 +1046,7 @@ internal class StyleCommitState(
         ownersWithCompletedNonStyleWork: List<ResourceOwnerId> = this.completedOwnerIdSnapshot,
         writeAcknowledged: Boolean = this.writeAcknowledged,
         visible: Boolean = this.visible,
+        styleTimeRoutes: List<ResourceRouteKey> = this.styleTimeRouteSnapshot,
     ): StyleCommitState = StyleCommitState(
         groupId = groupId,
         ordinal = ordinal,
@@ -1018,6 +1056,7 @@ internal class StyleCommitState(
         ownersWithCompletedNonStyleWork = ownersWithCompletedNonStyleWork,
         writeAcknowledged = writeAcknowledged,
         visible = visible,
+        styleTimeRoutes = styleTimeRoutes,
     )
 
     override fun equals(other: Any?): Boolean =
@@ -1029,7 +1068,8 @@ internal class StyleCommitState(
             referencingOwnerIdSnapshot == other.referencingOwnerIdSnapshot &&
             completedOwnerIdSnapshot == other.completedOwnerIdSnapshot &&
             writeAcknowledged == other.writeAcknowledged &&
-            visible == other.visible
+            visible == other.visible &&
+            styleTimeRouteSnapshot == other.styleTimeRouteSnapshot
 
     override fun hashCode(): Int {
         var result = groupId.hashCode()
@@ -1040,6 +1080,7 @@ internal class StyleCommitState(
         result = 31 * result + completedOwnerIdSnapshot.hashCode()
         result = 31 * result + writeAcknowledged.hashCode()
         result = 31 * result + visible.hashCode()
+        result = 31 * result + styleTimeRouteSnapshot.hashCode()
         return result
     }
 
@@ -1051,7 +1092,8 @@ internal class StyleCommitState(
             "referencingOwnerCount=${referencingOwnerIdSnapshot.size}, " +
             "completedOwnerCount=${completedOwnerIdSnapshot.size}, " +
             "writeAcknowledged=$writeAcknowledged, " +
-            "visible=$visible)"
+            "visible=$visible, " +
+            "styleTimeRouteCount=${styleTimeRouteSnapshot.size})"
 }
 
 internal data class AwaitingStyleValidation(
@@ -1358,28 +1400,43 @@ internal data class AdvancePendingStyleCommit(
 }
 
 internal sealed interface BasemapStyleValidationOutcome {
+    /**
+     * The style reads, and here is the **route manifest** its compilation will make the Rentile engine
+     * ask for: the sprite pair and every GeoJSON document, derived purely from the style document by
+     * `deriveBasemapStyleManifest`/`styleTimeRoutes`.
+     *
+     * These are a *preregistration* manifest, not resources RenG fetches. RenG keys only its own four
+     * classes (ADR 0016); the seven engine-keyed ones are acquired by the engine itself and are admitted
+     * only because the firewall recognises the exact url. Modelling them as occurrences instead would
+     * have to exempt them from six independent invariants that assume every occurrence becomes a
+     * fetched, visibility-installed route — most decisively the one that makes operation success
+     * impossible unless every occurrence's route carries `visibilityInstalled` — and would buy nothing,
+     * since [com.rohittp.reng.internal.firewall.OperationRegistry.preregister] already performs the
+     * private-key collision detection an occurrence would add.
+     *
+     * A route list is not a set of children, so this outcome no longer produces a
+     * [DiscoveredResourceChild]. Nothing in production does; see [DiscoverChildren].
+     */
     class Valid(
-        children: List<DiscoveredResourceChild>,
+        routes: List<ResourceRouteKey>,
     ) : BasemapStyleValidationOutcome {
-        private val childSnapshot: List<DiscoveredResourceChild> =
-            freshListCopy(children).sortedWith(resourceChildComparator)
+        private val routeSnapshot: List<ResourceRouteKey> = freshListCopy(routes)
 
         init {
-            for (index in 1 until childSnapshot.size) {
-                require(
-                    resourceChildComparator.compare(childSnapshot[index - 1], childSnapshot[index]) != 0,
-                ) { "discovered child traversal descriptors must be distinguishable" }
+            require(routeSnapshot.toSet().size == routeSnapshot.size) {
+                "a style route manifest must not repeat a route"
             }
         }
 
-        val children: List<DiscoveredResourceChild>
-            get() = freshListCopy(childSnapshot)
+        val routes: List<ResourceRouteKey>
+            get() = freshListCopy(routeSnapshot)
 
-        override fun equals(other: Any?): Boolean = other is Valid && childSnapshot == other.childSnapshot
+        override fun equals(other: Any?): Boolean = other is Valid && routeSnapshot == other.routeSnapshot
 
-        override fun hashCode(): Int = childSnapshot.hashCode()
+        override fun hashCode(): Int = routeSnapshot.hashCode()
 
-        override fun toString(): String = "Valid(childCount=${childSnapshot.size})"
+        /** Redacted: a route carries a locator, and a locator can carry a credential. */
+        override fun toString(): String = "Valid(routeCount=${routeSnapshot.size})"
     }
 
     data class Failed(
@@ -1402,6 +1459,20 @@ internal sealed interface BasemapStyleCompilationOutcome {
 
     data class Failed(
         val kind: StyleFailureKind,
+    ) : BasemapStyleCompilationOutcome
+
+    /**
+     * Compilation failed for a reason that is **not** a property of the style document: the firewall
+     * refused a url RenG did not preregister, a consumer adapter the engine reached through it failed,
+     * a byte ceiling was exceeded. [failure] is the descriptor
+     * [com.rohittp.reng.internal.firewall.BasemapEngineHost] already sanitized and already translated
+     * into RenG's own identity namespace, and it is forwarded verbatim — the same asymmetry
+     * [SuppliedInstallOutcome.Failed] carries, and for the same reason: collapsing it into a
+     * [StyleFailureKind] would report a firewall or transport fault as `RESOURCE_PARSE_FAILED`, which
+     * is a lie about a document that parses perfectly well.
+     */
+    data class EngineFailed(
+        val failure: FailureDescriptor,
     ) : BasemapStyleCompilationOutcome
 
     data class Cancelled(
@@ -1641,19 +1712,60 @@ internal data class ValidateBasemapStyle(
     }
 }
 
-internal data class CompileBasemapStyle(
+/**
+ * Compile [content] through the Rentile engine, having first preregistered [routes] — the manifest
+ * [BasemapStyleValidationOutcome.Valid] derived from this exact document — on the invocation's firewall.
+ * The two travel together because the engine's own sprite and GeoJSON acquisition happens *inside* the
+ * compilation: a route preregistered afterwards is preregistered too late, and one never preregistered
+ * makes the compilation fail closed as `AMBIGUOUS_RESOURCE_ROUTE`.
+ */
+internal class CompileBasemapStyle(
     val actionId: ResourceActionId,
     val ordinal: Long,
     val groupId: StyleGroupId,
     val content: ResolvedResourceContent,
+    routes: List<ResourceRouteKey> = emptyList(),
 ) : ResourceOperationAction {
+    private val routeSnapshot: List<ResourceRouteKey> = freshListCopy(routes)
+
     init {
         require(ordinal >= 0L) { "route ordinal must be non-negative" }
         requireBasemapStyleContent(content)
         require(requiresStyleCompilation(content.provenance)) {
             "only uncompiled style content is compiled"
         }
+        require(routeSnapshot.toSet().size == routeSnapshot.size) {
+            "a style route manifest must not repeat a route"
+        }
     }
+
+    val routes: List<ResourceRouteKey>
+        get() = freshListCopy(routeSnapshot)
+
+    override fun equals(other: Any?): Boolean =
+        other is CompileBasemapStyle &&
+            actionId == other.actionId &&
+            ordinal == other.ordinal &&
+            groupId == other.groupId &&
+            content == other.content &&
+            routeSnapshot == other.routeSnapshot
+
+    override fun hashCode(): Int {
+        var result = actionId.hashCode()
+        result = 31 * result + ordinal.hashCode()
+        result = 31 * result + groupId.hashCode()
+        result = 31 * result + content.hashCode()
+        result = 31 * result + routeSnapshot.hashCode()
+        return result
+    }
+
+    /** Redacted: a route carries a locator, and a locator can carry a credential. */
+    override fun toString(): String =
+        "CompileBasemapStyle(" +
+            "actionId=$actionId, " +
+            "ordinal=$ordinal, " +
+            "groupId=$groupId, " +
+            "routeCount=${routeSnapshot.size})"
 }
 
 internal data class WriteBasemapStyle(
@@ -1723,6 +1835,24 @@ internal data class StartRoute(
     }
 }
 
+/**
+ * **Unreachable in production, deliberately — not an unfinished feature.**
+ *
+ * Generic route-driven child discovery. It is emitted only from [RouteReadyForDiscovery], and the one
+ * resource class that ever declared `discoveryRequired` — the basemap style — cannot emit that event:
+ * a style route retires through its own visibility install instead. Since
+ * [BasemapStyleValidationOutcome.Valid] now yields a *route manifest* rather than
+ * [DiscoveredResourceChild]ren, nothing in RenG produces a child occurrence at all, and nothing is
+ * planned to: the seven engine-keyed classes are acquired by the Rentile engine through the firewall,
+ * never by RenG's own driver (ADR 0016).
+ *
+ * This mechanism, [ChildrenDiscovered], [RouteReadyForDiscovery], [DiscoveredResourceChild],
+ * [ResourceChildTraversal], [BasemapSourceMember] and [DiscoveryFrontier]'s child half are retained
+ * because the pure core's own test suite exercises them as a complete, correct abstraction, and
+ * deleting them is a separate change with a large blast radius. `ResourceOccurrence.discoveryRequired`
+ * is **not** part of that set: it is still load-bearing, because it is what pushes the style's frontier
+ * and so what keeps the style's route ahead of its siblings in traversal order.
+ */
 internal data class DiscoverChildren(
     val ordinal: Long,
     val parentOccurrenceId: ResourceOccurrenceId,

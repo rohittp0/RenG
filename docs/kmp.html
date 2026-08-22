@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KMP setup — RenG</title>
-  <meta name="description" content="Review the public RenG KMP installation and its six publication targets." />
+  <meta name="description" content="Install the public RenG KMP coordinate, draw a frame plan into your own GL context, and read which of the six targets are execution-verified." />
   <meta name="theme-color" content="#0b3026" />
   <link rel="canonical"
     href="https://rohittp.com/reng/kmp.html" />
@@ -13,7 +13,7 @@
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="RenG" />
   <meta property="og:title" content="KMP setup — RenG" />
-  <meta property="og:description" content="Review the public RenG KMP repository, dependency, and six-target setup." />
+  <meta property="og:description" content="Install the public RenG KMP coordinate, draw a frame, and read the six-target publication and verification surface." />
   <meta property="og:url" content="https://rohittp.com/reng/kmp.html" />
   <script src="versions.js" defer></script>
 </head>
@@ -36,6 +36,7 @@
       <a href="#overview">Current scope</a>
       <a href="#install">Repositories</a>
       <a href="#dependency">Dependency</a>
+      <a href="#draw">Draw a frame</a>
       <a href="#targets">Targets</a>
     </aside>
 
@@ -44,19 +45,21 @@
         <p class="eyebrow">com.rohittp.reng:kmp</p>
         <h1>KMP setup</h1>
         <p class="docs-lead">
-          RenG publishes one public KMP coordinate. Its exact-source CI jobs and first immutable completion
-          record verified anonymously, so the setup below is available now.
+          RenG publishes one public KMP coordinate. Add the repository, declare the dependency, and hand
+          the renderer a GL context you have already made current.
         </p>
         <div class="tag-row">
           <span class="tag">Kotlin Multiplatform</span>
-          <span class="tag">Six configured targets</span>
+          <span class="tag">Six published targets</span>
           <span class="tag">Apache-2.0</span>
           <span class="tag">Release <span data-maven-version="kmp">available</span></span>
         </div>
         <div class="status-callout">
-          <p><strong>The first public release is complete.</strong>
-          Exact-source CI, credential-free six-target resolution, and anonymous completion-record
-          verification passed. Cycle A still exposes no runtime API and renders nothing.</p>
+          <p><strong>The published release draws.</strong>
+          <code>createRenderer</code> is public API: it takes a <code>FramePlan</code> and draws stickers
+          consumer-shaded geometry, and a basemap rendered from a map style you supply, into a GL context
+          the caller has already made current. It does not draw models, terrain, or map labels, and it
+          rejects the globe projection.</p>
           <p>Version display remains metadata-driven. ADR 0013 and the Cycle A design spec and implementation
           plan remain historical decision records.</p>
         </div>
@@ -115,25 +118,77 @@ kotlin {
         </div>
       </section>
 
+      <section class="doc-section" id="draw">
+        <p class="doc-label">Step 3</p>
+        <h2>Draw a frame.</h2>
+        <p>
+          <code>createRenderer</code> adopts the GL context that is already current on the calling thread —
+          RenG never creates one, and never owns your render loop. A <code>FramePlan</code> is a complete
+          definition of on-screen state, so you rebuild it each frame rather than mutating the scene; reusing
+          decoded images, uploaded textures, and compiled programs between frames is RenG's own concern.
+        </p>
+        <div class="code-card doc-code">
+          <div class="code-head"><span>Kotlin</span><span>commonMain</span></div>
+          <pre><code>// Transport and Store are yours: RenG performs no network I/O and keeps no cache.
+val renderer = createRenderer(
+    RendererConfiguration(
+        outputPixelSize = OutputPixelSize(1920, 1080),
+        transport = myTransport,
+        store = myStore,
+    ),
+)
+
+val pin = Placement(
+    positionMode = AnchoringMode.MAP, position = Vector3(48.8584, 2.2945, 0.0),
+    rotationMode = AnchoringMode.SCREEN, rotation = Vector3(0.0, 0.0, 0.0),
+    scaleMode = AnchoringMode.SCREEN, scale = 1.0,
+)
+
+val plan = FramePlan(
+    frameIndex = 0,
+    camera = Camera(48.8584, 2.2945, zoom = 16.0, bearing = 0.0, pitch = 0.0),
+    drawBasemap = true, // needs a basemap style on the renderer; without one this warns and draws none
+    stickers = listOf(Sticker(pin, ResourceLocator(<span class="str">"https://example.com/pin.png"</span>))),
+)
+
+// prepare() suspends; draw() is synchronous and needs the same context current.
+renderer.prepare(plan).use { frame -&gt;
+    renderer.draw(frame, renderer.mintRenderTarget(FramebufferName(myFramebuffer)))
+}</code></pre>
+        </div>
+        <div class="callout">
+          Acquisition and drawing are separate operations. <code>prepare</code> fetches, decodes, and uploads;
+          <code>draw</code> only issues GL calls. <code>queryResources</code> and <code>freeResources</code>
+          report and release what the renderer holds, and <code>close</code> frees everything.
+        </div>
+      </section>
+
       <section class="doc-section" id="targets">
         <p class="doc-label">Publication surface</p>
         <h2>Six published targets.</h2>
         <p>
           These targets are the complete publication surface. Apple support is Apple Silicon only; RenG
-deliberately does not publish <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
+          deliberately does not publish <code>iosX64</code>, <code>macosX64</code>, or <code>jvm</code>.
+        </p>
+        <p>
+          Publication and execution are separate claims, and this table keeps them apart. All six targets
+          ship together in every release, but only <code>macosArm64</code> and <code>linuxX64</code>
+          execute RenG's GL code against a real context in continuous integration. Android's host tests
+          run on the JVM with no GL at all, and the rest are compiled rather than executed. Android and
+          iOS bring-up on real devices is a planned cycle that has not happened yet.
         </p>
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Platform</th><th>KMP target</th><th>Publication</th></tr>
+              <tr><th>Platform</th><th>KMP target</th><th>Publication</th><th>Verified by</th></tr>
             </thead>
             <tbody>
-              <tr><td>Android</td><td><code>android</code></td><td>Available</td></tr>
-              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Available</td></tr>
-              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Available</td></tr>
-              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Available</td></tr>
-              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Available</td></tr>
-              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Available</td></tr>
+              <tr><td>Android</td><td><code>android</code></td><td>Available</td><td>Host tests on the JVM and an archive gate. No GL is executed.</td></tr>
+              <tr><td>iPhone and iPad</td><td><code>iosArm64</code></td><td>Available</td><td>Compilation only.</td></tr>
+              <tr><td>Apple Silicon Simulator</td><td><code>iosSimulatorArm64</code></td><td>Available</td><td>Compilation only.</td></tr>
+              <tr><td>Apple Silicon Mac</td><td><code>macosArm64</code></td><td>Available</td><td>Test suite runs, including GL conformance against a real context.</td></tr>
+              <tr><td>Linux x64</td><td><code>linuxX64</code></td><td>Available</td><td>Test suite runs, including GL conformance against a real context on Mesa llvmpipe.</td></tr>
+              <tr><td>Linux arm64</td><td><code>linuxArm64</code></td><td>Available</td><td>Compilation only.</td></tr>
             </tbody>
           </table>
         </div>

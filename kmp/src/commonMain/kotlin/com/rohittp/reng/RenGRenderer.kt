@@ -1,12 +1,18 @@
 package com.rohittp.reng
 
 import com.rohittp.reng.internal.DiagnosticField
+import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
+import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.driver.PreparationDriver
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.firewall.BasemapEngineHost
+import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
+import com.rohittp.reng.internal.firewall.RenderedBasemapTile
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.CompositePipelineResult
 import com.rohittp.reng.internal.gl.GeometryPipeline
@@ -17,23 +23,29 @@ import com.rohittp.reng.internal.gl.GlObjectHandle
 import com.rohittp.reng.internal.gl.GlObjectRegistry
 import com.rohittp.reng.internal.gl.GlObjectType
 import com.rohittp.reng.internal.gl.GlProgramCache
+import com.rohittp.reng.internal.gl.GroundPipeline
+import com.rohittp.reng.internal.gl.GroundPipelineResult
 import com.rohittp.reng.internal.gl.OffscreenSurface
 import com.rohittp.reng.internal.gl.OffscreenSurfaceResult
 import com.rohittp.reng.internal.gl.RenderContextProfile
 import com.rohittp.reng.internal.gl.Scene
 import com.rohittp.reng.internal.gl.SceneContent
 import com.rohittp.reng.internal.gl.SceneGeometry
+import com.rohittp.reng.internal.gl.SceneGroundTile
 import com.rohittp.reng.internal.gl.SceneSticker
 import com.rohittp.reng.internal.gl.StickerPipeline
 import com.rohittp.reng.internal.gl.StickerPipelineResult
 import com.rohittp.reng.internal.gl.TextureContent
+import com.rohittp.reng.internal.gl.TextureLease
 import com.rohittp.reng.internal.gl.createCompositePipeline
 import com.rohittp.reng.internal.gl.createGeometryPipeline
+import com.rohittp.reng.internal.gl.createGroundPipeline
 import com.rohittp.reng.internal.gl.createOffscreenSurface
 import com.rohittp.reng.internal.gl.createStickerPipeline
 import com.rohittp.reng.internal.gl.deleteCompositePipeline
 import com.rohittp.reng.internal.gl.deleteGeometryPipeline
 import com.rohittp.reng.internal.gl.deleteGlObjects
+import com.rohittp.reng.internal.gl.deleteGroundPipeline
 import com.rohittp.reng.internal.gl.deleteOffscreenSurface
 import com.rohittp.reng.internal.gl.deleteStickerPipeline
 import com.rohittp.reng.internal.gl.drawFrame
@@ -43,6 +55,7 @@ import com.rohittp.reng.internal.gl.uploadTexture
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
+import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.PngDecodeResult
@@ -55,25 +68,19 @@ import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
 import com.rohittp.reng.internal.lifecycle.RendererOwnerState
 import com.rohittp.reng.internal.lifecycle.RenderTargetFact
 import com.rohittp.reng.internal.maximumBytesFor
+import com.rohittp.reng.internal.planning.BasemapTileInstance
+import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import com.rohittp.reng.internal.planning.FramePlanningCore
 import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.preparation.buildResourceOperationDefinition
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.renGFailure
-import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
-import com.rohittp.reng.internal.resource.RentilePrivateKey
-import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
-import com.rohittp.reng.internal.resource.ResourceCommitBinding
-import com.rohittp.reng.internal.resource.ResourceOccurrence
-import com.rohittp.reng.internal.resource.ResourceOccurrenceId
-import com.rohittp.reng.internal.resource.ResourceOperationDefinition
 import com.rohittp.reng.internal.resource.ResourceOperationOutcome
-import com.rohittp.reng.internal.resource.ResourceOwnerId
-import com.rohittp.reng.internal.resource.ResourceRouteKey
-import com.rohittp.reng.internal.resource.ResourceRouteRegistration
+import com.rohittp.rentile.PreparedStyle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 
@@ -81,23 +88,6 @@ import kotlinx.coroutines.sync.Mutex
 // Renderer, PreparedFrame, and RenderTarget are all `sealed`, and Kotlin requires a sealed type's
 // direct implementers to share its package (not merely its module). Every declaration below stays
 // `internal` visibility regardless -- none of it appears in the ABI dump.
-
-/**
- * A private-key derivation with no real Rentile integration to draw on yet — no cycle has wired one
- * (`CLAUDE.md`'s repository state: "There is still no ... Rentile acquisition"). Deterministic per
- * `(locator, resourceClass)` so the same external resource always derives the same key within one
- * process, which is all [FramePlanningCore]'s bookkeeping needs today. Every resource class this
- * cycle actually fetches (`STICKER_IMAGE`) goes straight through RenG's own configured [Transport]
- * and [Store], never through Rentile's shared cache, so no real cross-tenant firewall exists for it
- * to protect yet. Replacing this with a genuine derivation is the acquisition cycle's job, not this
- * one's.
- */
-internal object DeterministicRentilePrivateKeyResolver : RentilePrivateKeyResolver {
-    override fun resolve(
-        locator: ResourceLocator,
-        resourceClass: ResourceClass,
-    ): RentilePrivateKey = RentilePrivateKey("${resourceClass.name}:${locator.value}")
-}
 
 /**
  * One [Sticker]'s [Placement] paired with its decoded, not-yet-uploaded image and the [ResourceKey]
@@ -136,6 +126,24 @@ internal class PreparedGeometry(
 )
 
 /**
+ * One unwrapped basemap tile draw instance, already paired at `prepare()` time with the
+ * [ResourceKey] naming the rendered tile it draws.
+ *
+ * The pairing is derived here, once per frame, rather than at draw time, for the same reason
+ * [PreparedSticker] carries its own key: identity derivation (ADR 0018) is `prepare()`'s job, it
+ * costs a SHA-256 per **canonical** tile rather than per instance when memoized as it is below, and
+ * doing it here lets one `check` prove every instance names a tile this frame actually rendered
+ * instead of leaving a lookup miss to be discovered inside a GL draw call.
+ *
+ * N world copies of one canonical tile produce N entries sharing one [resourceKey] -- that is
+ * exactly what `basemapTileKey`'s instance overload is for.
+ */
+internal class PreparedGroundInstance(
+    internal val instance: BasemapTileInstance,
+    internal val resourceKey: ResourceKey,
+)
+
+/**
  * The concrete [PreparedFrame] this cycle's factory produces. Deliberately thin: it retains exactly
  * what [RenGRenderer.draw] needs to assemble a [Scene] — the raw [Camera] value, each sticker's
  * already-decoded image, and each geometry's already-snapshotted uniforms/textures — and nothing
@@ -157,12 +165,35 @@ internal class RenGPreparedFrame(
     internal val drawBasemap: Boolean,
     stickers: List<PreparedSticker>,
     geometries: List<PreparedGeometry>,
+    /**
+     * This frame's ground, already rendered by the Rentile engine and already named by RenG's own
+     * canonical identity (ADR 0018) — one entry per **canonical** tile, so N Mercator world copies of one
+     * tile share one entry, one engine render and one later texture upload. Empty whenever the frame
+     * draws no basemap, no style is configured, or the frame selected no tile.
+     *
+     * The bytes are encoded PNG, exactly as `BasemapRasterizer.render` produced them. They are decoded
+     * and uploaded in [RenGRenderer.performDraw] rather than here, because a tile whose GL texture is
+     * still resident from an earlier frame must cost neither: `prepare()` has no render context, and
+     * decoding every tile of every frame unconditionally is precisely the per-frame cliff the resident
+     * texture budget exists to avoid.
+     */
+    basemapTiles: List<RenderedBasemapTile>,
+    /**
+     * Where this frame's ground goes — one entry per **unwrapped** draw instance, so N Mercator world
+     * copies of one canonical tile are N placements sharing one entry in [basemapTiles]. Empty exactly
+     * when [basemapTiles] is empty.
+     */
+    groundInstances: List<PreparedGroundInstance> = emptyList(),
 ) : PreparedFrame {
     private val stickerSnapshot: List<PreparedSticker> = ArrayList(stickers)
     private val geometrySnapshot: List<PreparedGeometry> = ArrayList(geometries)
+    private val basemapTileSnapshot: List<RenderedBasemapTile> = ArrayList(basemapTiles)
+    private val groundInstanceSnapshot: List<PreparedGroundInstance> = ArrayList(groundInstances)
 
     internal val stickers: List<PreparedSticker> get() = ArrayList(stickerSnapshot)
     internal val geometries: List<PreparedGeometry> get() = ArrayList(geometrySnapshot)
+    internal val basemapTiles: List<RenderedBasemapTile> get() = ArrayList(basemapTileSnapshot)
+    internal val groundInstances: List<PreparedGroundInstance> get() = ArrayList(groundInstanceSnapshot)
 
     internal var closed: Boolean = false
         private set
@@ -176,6 +207,24 @@ internal class RenGPreparedFrame(
     }
 }
 
+/**
+ * Everything one `prepare()` acquired through the consumer's adapters: the decoded images the frame's
+ * stickers and geometry textures need, and the ground the engine rendered for it. Two results rather
+ * than one because they are two different kinds of thing — a `Map` keyed for lookup by the caller, and
+ * an ordered list carried whole onto the prepared frame.
+ */
+private class FrameAcquisition(
+    val decodedImagesByKey: Map<ResourceKey, DecodedImage>,
+    val basemapTiles: List<RenderedBasemapTile>,
+    /**
+     * The compiled style [basemapTiles] were rendered from, or `null` when this frame rendered none.
+     * Carried out of acquisition rather than read back off the renderer, because `basemapTileKey` is a
+     * function of it and `preparedBasemapStyle` describes the *most recently* prepared frame — which,
+     * for a frame prepared earlier and drawn later, is a different style entirely.
+     */
+    val basemapStyleDigest: String?,
+)
+
 /** The concrete [RenderTarget] [RenGRenderer.mintRenderTarget] produces. */
 internal class RenGRenderTarget(
     internal val owner: RenGRenderer,
@@ -188,6 +237,7 @@ internal class InternalGlState(
     val offscreenSurface: OffscreenSurface,
     val compositePipeline: CompositePipeline,
     val stickerPipeline: StickerPipeline,
+    val groundPipeline: GroundPipeline,
 )
 
 internal sealed interface InternalGlStateResult {
@@ -218,22 +268,26 @@ internal fun createInternalGlState(
     val surfaceResult = createOffscreenSurface(binding, profile, surfaceKey, surfaceDescriptor)
     val compositeResult = createCompositePipeline(binding, profile.dialect, programs, deriver)
     val stickerResult = createStickerPipeline(binding, profile.dialect, programs, deriver)
+    val groundResult = createGroundPipeline(binding, profile.dialect, programs, deriver)
 
     val surface = (surfaceResult as? OffscreenSurfaceResult.Created)?.surface
     val composite = (compositeResult as? CompositePipelineResult.Created)?.pipeline
     val sticker = (stickerResult as? StickerPipelineResult.Created)?.pipeline
+    val ground = (groundResult as? GroundPipelineResult.Created)?.pipeline
 
-    if (surface != null && composite != null && sticker != null) {
-        return InternalGlStateResult.Created(InternalGlState(surface, composite, sticker))
+    if (surface != null && composite != null && sticker != null && ground != null) {
+        return InternalGlStateResult.Created(InternalGlState(surface, composite, sticker, ground))
     }
 
     surface?.let { deleteOffscreenSurface(binding, it) }
     composite?.let { deleteCompositePipeline(binding, programs, it) }
     sticker?.let { deleteStickerPipeline(binding, programs, it) }
+    ground?.let { deleteGroundPipeline(binding, programs, it) }
 
     val failure = (surfaceResult as? OffscreenSurfaceResult.Failed)?.failure
         ?: (compositeResult as? CompositePipelineResult.Failed)?.failure
         ?: (stickerResult as? StickerPipelineResult.Failed)?.failure
+        ?: (groundResult as? GroundPipelineResult.Failed)?.failure
         ?: error("createInternalGlState: no result failed despite an incomplete allocation set")
     return InternalGlStateResult.Failed(failure)
 }
@@ -282,6 +336,7 @@ internal class RenGRenderer(
     private val driver: GlLifecycleDriver,
     private val preparationDriver: PreparationDriver,
     private val residentCache: ResidentCache,
+    private val basemapEngineHost: BasemapEngineHost,
     private val programs: GlProgramCache,
     private val glObjectRegistry: GlObjectRegistry,
     initialGlState: InternalGlState,
@@ -291,9 +346,18 @@ internal class RenGRenderer(
     private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver()
     private val geometryPipelines: MutableMap<ResourceKey, GeometryPipeline> = mutableMapOf()
 
+    /**
+     * Reproduces Rentile's actual `sha256Hex(withRedactedAuthenticationQuery(url))` key for the seven
+     * classes Rentile itself fetches and keys, and RenG's own canonical identity for the four it does
+     * not (basemap task 16). This is a pure, stateless function of `(locator, resourceClass)`, so one
+     * shared instance is correct for every call this renderer makes across every frame preparation.
+     */
+    private val rentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256)
+
     private var offscreenSurface: OffscreenSurface? = initialGlState.offscreenSurface
     private var compositePipeline: CompositePipeline? = initialGlState.compositePipeline
     private var stickerPipeline: StickerPipeline? = initialGlState.stickerPipeline
+    private var groundPipeline: GroundPipeline? = initialGlState.groundPipeline
 
     private var identityRegistry: CanonicalIdentityRegistry = CanonicalIdentityRegistry()
     private var framePlanningCore: FramePlanningCore = newFramePlanningCore(identityRegistry)
@@ -303,11 +367,24 @@ internal class RenGRenderer(
     /** Once per renderer, never per frame — see the design spec's `drawBasemap` decision. */
     private var basemapWarningEmitted: Boolean = false
 
+    /**
+     * The compiled basemap style of the **most recently prepared frame**, or `null` when that frame drew
+     * no basemap (or when no preparation has succeeded yet). Cleared rather than left standing on a
+     * `drawBasemap = false` frame, so that a reader never has to cross-check the plan to know whether
+     * this belongs to the frame in front of it — "the last style compiled" is a subtly different claim
+     * and would be a trap for Cycle E-C3, which consumes this. Nothing draws with it yet.
+     *
+     * Read back from [basemapEngineHost] rather than taken from the driver's compile action, because a
+     * `RESIDENT`-provenance frame emits no compile action at all.
+     */
+    internal var preparedBasemapStyle: PreparedStyle? = null
+        private set
+
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
         frameEncoder = FramePlanCanonicalEncoder(),
         frameIdentityRegistry = registry,
         resourceKeyDeriver = ResourceKeyDeriver(),
-        rentilePrivateKeyResolver = DeterministicRentilePrivateKeyResolver,
+        rentilePrivateKeyResolver = rentilePrivateKeyResolver,
     )
 
     // ---- Preparation --------------------------------------------------------------------------
@@ -360,10 +437,23 @@ internal class RenGRenderer(
                     }
                 }
 
-            val decodedByKey = acquireExternalImages(
-                stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second },
-                accessMode,
-            )
+            // The style is the one traversal entry that is neither a sticker nor a texture: it is
+            // acquired, validated, compiled through the engine, written and installed by the resource
+            // driver's own basemap-style commit verbs, and never decoded as an image.
+            val styleReference = planned.staticResourceTraversal
+                .filterIsInstance<StaticResourceReference.External>()
+                .singleOrNull { it.resourceClass == ResourceClass.BASEMAP_STYLE }
+
+            val imageReferences =
+                stickerImageReferences + geometryTextureReferencesByGeometry.flatten().map { it.second }
+            // Post-world-copy-dedup by construction: `canonicalResources` is what BasemapTileSelector
+            // emits separately from `instances` precisely so N visible copies of one tile are one
+            // acquisition, one engine render and one identity. It is non-null exactly when the plan draws
+            // a basemap and a style is configured (planMercatorSpatial), which is also exactly when
+            // `styleReference` is non-null.
+            val canonicalTiles = planned.spatialPlan.tileSelection?.canonicalResources.orEmpty()
+            val acquired = acquireFrameResources(styleReference, imageReferences, canonicalTiles, accessMode)
+            val decodedByKey = acquired.decodedImagesByKey
 
             val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
                 PreparedSticker(
@@ -406,9 +496,55 @@ internal class RenGRenderer(
                 drawBasemap = plan.drawBasemap,
                 stickers = stickers,
                 geometries = geometries,
+                basemapTiles = acquired.basemapTiles,
+                groundInstances = groundInstances(
+                    instances = planned.spatialPlan.tileSelection?.instances.orEmpty(),
+                    renderedTiles = acquired.basemapTiles,
+                    styleDigest = acquired.basemapStyleDigest,
+                ),
             )
         } finally {
             preparationMutex.unlock()
+        }
+    }
+
+    /**
+     * Pairs every unwrapped draw [instances] entry with the rendered tile it draws, by deriving RenG's
+     * own [BasemapEngineHost.renderedTileKey] for it (ADR 0018) rather than by matching its
+     * `(lod, tileY, canonicalX)` triple against [renderedTiles] structurally. The two agree by
+     * construction, and that is the point: deriving the key here means the draw path resolves a tile
+     * through the same identity the acquisition path named it with, so a divergence between them fails
+     * this `check` loudly instead of drawing the wrong ground.
+     *
+     * The derivation is memoized per **canonical** tile, not performed per instance: the instance
+     * overload projects the world copy away, so every copy of one tile derives the identical key, and a
+     * frame at the 512-instance budget would otherwise pay 512 SHA-256 hashes for at most a few dozen
+     * distinct answers.
+     *
+     * Returns empty whenever no tile was rendered, which is also exactly when [styleDigest] is `null`:
+     * a frame that drew no basemap, had no style configured, or selected no tile.
+     */
+    private fun groundInstances(
+        instances: List<BasemapTileInstance>,
+        renderedTiles: List<RenderedBasemapTile>,
+        styleDigest: String?,
+    ): List<PreparedGroundInstance> {
+        if (renderedTiles.isEmpty() || styleDigest == null) return emptyList()
+        val renderedKeys = renderedTiles.mapTo(HashSet()) { it.key }
+        val keyByCanonicalTile = HashMap<CanonicalBasemapTile, ResourceKey>(renderedTiles.size)
+        return instances.map { instance ->
+            val canonical = CanonicalBasemapTile(
+                lod = instance.lod,
+                tileY = instance.tileY,
+                canonicalX = instance.canonicalX,
+            )
+            val key = keyByCanonicalTile.getOrPut(canonical) {
+                basemapEngineHost.renderedTileKey(styleDigest, instance)
+            }
+            check(key in renderedKeys) {
+                "every selected tile instance must name a tile this frame rendered"
+            }
+            PreparedGroundInstance(instance = instance, resourceKey = key)
         }
     }
 
@@ -429,7 +565,7 @@ internal class RenGRenderer(
             maximumResponseBytes = configuration.resourceLimits.maximumBytesFor(ResourceClass.MODEL_TEXTURE),
             resourceKey = derived.key,
             rawKey = requireNotNull(derived.rawKey),
-            privateRentileKey = DeterministicRentilePrivateKeyResolver.resolve(locator, ResourceClass.MODEL_TEXTURE),
+            privateRentileKey = rentilePrivateKeyResolver.resolve(locator, ResourceClass.MODEL_TEXTURE),
             canonicalIdentity = derived.identity,
         )
     }
@@ -453,67 +589,97 @@ internal class RenGRenderer(
     }
 
     /**
-     * Fetches every traversed external image — a sticker's, or (Task 9b) a geometry consumer
-     * texture's — through [preparationDriver], one [ResourceOccurrence] per [references] entry, each
-     * its own owner so a merged route (two entries sharing one locator) still resolves independently
-     * — then decodes each resulting resident generation's bytes through Cycle C's PNG decoder.
-     * Returns nothing and performs no adapter call at all when [references] is empty, which is what
-     * keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no configured
-     * basemap honestly free of consumer exchange too.
+     * Acquires everything one frame plan asked for that is not already in hand: the configured basemap
+     * style ([styleReference], when the plan draws one), every traversed external image
+     * ([imageReferences] — a sticker's, or a geometry consumer texture's), and the ground itself
+     * ([canonicalTiles]). Returns the decoded images by key plus the rendered ground; the style is not
+     * among the images, because a style is not an image.
+     *
+     * Returns nothing and performs no adapter call at all when there is nothing to acquire, which is
+     * what keeps `prepare()` on a plan with no stickers, no geometry consumer textures, and no
+     * configured basemap honestly free of consumer exchange.
+     *
+     * **One owner for the whole frame.** The occurrence set comes from [buildResourceOperationDefinition],
+     * which assigns one [ResourceOwnerId] per preparation item rather than one per reference. That is
+     * not a detail: it is the entire content of ADR 0016's style-owner barrier, which orders the style's
+     * Store write behind the completion of every other resource the same items referenced. An owner per
+     * reference gives the style an owner with no other work, and the barrier becomes vacuously true.
+     *
+     * **The firewall invocation spans the whole driver run**, because the engine's own sprite, TileJSON
+     * and GeoJSON acquisition happens inside the style's compilation, which happens inside the driver.
+     * Opening it afterwards would leave every one of those exchanges with no registry to be recognised
+     * by, and each would fail closed as `AMBIGUOUS_RESOURCE_ROUTE`.
+     *
+     * **It also spans the tile phase**, for the reason ADR 0016 gives rather than for mechanical
+     * necessity: one operation registry belongs to one preparation invocation. The style's routes are
+     * knowable only once the document has been read (inside the driver) and the tiles' only once it has
+     * been compiled, so both phases register incrementally into the one registry this invocation owns.
      *
      * A [ResourceOperationOutcome.Cancelled] outcome — reached when one route's adapter call observes
-     * its own cancellation while a sibling route is still active, exactly the multi-route scenario
-     * Task 1 fixed in [com.rohittp.reng.internal.driver.ResourceActionExecutor] — is rethrown as a
-     * genuine [CancellationException] rather than a [RenGException], consistent with keeping
-     * cancellation unwrapped throughout this codebase. This function, called from [prepare], is what
-     * makes that fixed `CancelRoute` path reachable through the public API for the first time: before
-     * this factory existed, [preparationDriver]'s multi-route machinery had no caller at all.
+     * its own cancellation while a sibling route is still active — is rethrown as a genuine
+     * [CancellationException] rather than a [RenGException], consistent with keeping cancellation
+     * unwrapped throughout this codebase.
      */
-    private suspend fun acquireExternalImages(
-        references: List<StaticResourceReference.External>,
+    private suspend fun acquireFrameResources(
+        styleReference: StaticResourceReference.External?,
+        imageReferences: List<StaticResourceReference.External>,
+        canonicalTiles: List<CanonicalBasemapTile>,
         accessMode: ResourceAccessMode,
-    ): Map<ResourceKey, DecodedImage> {
-        if (references.isEmpty()) return emptyMap()
-
-        val occurrences = references.mapIndexed { index, reference ->
-            // ResourceOccurrenceId and ResourceOwnerId both require a strictly positive value, so
-            // this is 1-based rather than the list's own 0-based index.
-            val ordinal = (index + 1).toLong()
-            ResourceOccurrence(
-                id = ResourceOccurrenceId(ordinal),
-                ownerId = ResourceOwnerId(ordinal),
-                registration = ResourceRouteRegistration(
-                    route = ResourceRouteKey(
-                        accessMode = accessMode,
-                        locator = reference.locator,
-                        resourceClass = reference.resourceClass,
-                        maximumResponseBytes = reference.maximumResponseBytes,
-                    ),
-                    resourceKey = reference.resourceKey,
-                    rawKey = reference.rawKey,
-                    privateRentileKey = reference.privateRentileKey,
-                    canonicalBytes = reference.canonicalIdentity.canonicalBytes,
-                ),
-                discoveryRequired = false,
-                commitBinding = ResourceCommitBinding.Single,
-            )
+    ): FrameAcquisition {
+        val references = listOfNotNull(styleReference) + imageReferences
+        if (references.isEmpty()) {
+            preparedBasemapStyle = null
+            return FrameAcquisition(emptyMap(), emptyList(), basemapStyleDigest = null)
         }
-        val definition = ResourceOperationDefinition(
-            maximumConcurrentRoutes = minOf(configuration.maximumConcurrentResourceOperations, occurrences.size),
-            staticOccurrences = occurrences,
-            resourceIdentities = occurrences.map {
-                CanonicalIdentityRecord(it.registration.resourceKey, it.registration.canonicalBytes)
-            },
+
+        val definition = buildResourceOperationDefinition(
+            traversalsByItem = listOf(references),
+            accessMode = accessMode,
+            maximumConcurrentRoutes = minOf(
+                configuration.maximumConcurrentResourceOperations,
+                references.size,
+            ),
         )
 
-        when (val outcome = preparationDriver.run(definition)) {
+        var basemapTiles: List<RenderedBasemapTile> = emptyList()
+        var basemapStyleDigest: String? = null
+        val outcome = basemapEngineHost.withOperation(accessMode) {
+            val driven = preparationDriver.run(definition)
+            if (driven is ResourceOperationOutcome.Success) {
+                // Read back rather than taken from the compile action: on a RESIDENT-provenance frame
+                // the pure core emits no CompileBasemapStyle at all, so there is no action to take it
+                // from. The host retains the compilation across invocations, so this is the one place
+                // the frame's style is obtainable on every frame alike. A frame that drew no basemap
+                // clears it, so this always describes the frame just prepared.
+                // Asked for by content, not by key alone: a compilation whose visibility install never
+                // ran -- the style's own Store write failing is enough -- would otherwise be handed back
+                // here for bytes that are not resident, and paired with routes renderBasemapTiles derives
+                // from the bytes that are. The host declines that, so both halves of the frame are keyed
+                // off this one observation of what is resident.
+                val style = if (styleReference == null) {
+                    null
+                } else {
+                    basemapEngineHost.currentPreparedStyle(
+                        styleKey = styleReference.resourceKey,
+                        contentDigest = residentCache.current(styleReference.resourceKey)?.stored?.contentDigest,
+                    )
+                }
+                preparedBasemapStyle = style
+                if (styleReference != null && style != null && canonicalTiles.isNotEmpty()) {
+                    basemapTiles = renderBasemapTiles(styleReference, style, canonicalTiles, accessMode)
+                    basemapStyleDigest = style.digest
+                }
+            }
+            driven
+        }
+        when (outcome) {
             is ResourceOperationOutcome.Success -> Unit
             is ResourceOperationOutcome.Failure -> throw outcome.failure.toException()
             is ResourceOperationOutcome.Cancelled ->
                 throw CancellationException("resource preparation observed a route cancellation")
         }
 
-        return references.associate { reference ->
+        val decodedByKey = imageReferences.associate { reference ->
             val stored = residentCache.current(reference.resourceKey)?.stored
                 ?: error("a successful resource operation must leave its content resident")
             val image = when (
@@ -534,6 +700,84 @@ internal class RenGRenderer(
                 )
             }
             reference.resourceKey to image
+        }
+        return FrameAcquisition(decodedByKey, basemapTiles, basemapStyleDigest)
+    }
+
+    /**
+     * Declares the tile routes this frame's style will make the engine ask for, then acquires and draws
+     * the ground through it. Called from **inside** the invocation that compiled the style, so both
+     * phases share one operation registry (ADR 0016).
+     *
+     * The manifest is asked of the engine host rather than carried out of the driver. It is the same pure
+     * function of the same two inputs the driver's own `ValidateBasemapStyle` ran — the style bytes and
+     * the style's own locator, which is exactly what Rentile receives as `StyleInput.Prefetched.baseUri`
+     * — so the two derivations cannot disagree. The bytes are read from the resident generation here,
+     * which is sound *because this runs after* the driver's `InstallBasemapStyleVisibility`: what is
+     * resident by now is this frame's own document. The compilation runs before that install, where the
+     * resident generation is still the previous frame's, and so compiles the content the driver hands it
+     * instead — see `BasemapEngineHost.preparedStyle`.
+     *
+     * **A basemap frame used to parse its style document twice** — once in `ValidateBasemapStyle` and
+     * once again here — which was pure duplication measured at 1.9 ms per parse for a 248 KB
+     * production-shaped style on the JVM (`internal.basemap.BasemapRouteDerivationCostTest`), on every
+     * frame. [BasemapEngineHost.styleManifest] now binds the derivation to the style's content digest
+     * beside the compilation it already binds that way, so a frame over byte-identical content reads the
+     * document once. Preregistration itself stays uncached, and deliberately: it is immaterial (a
+     * realistic 40-tile frame names 150 routes for a few ms of CPU, less than one of the 150 tile fetches
+     * it then performs), and it is the one part of this that genuinely varies per frame.
+     *
+     * A rejected manifest is unreachable: the driver validated these exact bytes on this exact frame and
+     * would have failed the operation otherwise, so reaching it means RenG's own derivation is not a
+     * function — a defect, not a consumer condition.
+     *
+     * **The manifest is then completed with the TileJSON documents the compilation observed.** A
+     * `url`-form source — 96 of the 98 tile sources across the verified style corpus — names a TileJSON
+     * document rather than a template, and that document is fetched during `engine.prepare`, strictly
+     * before this point. `completeBasemapStyleManifest` folds it back in so the source composes its tile
+     * urls exactly as an inline one does; a source whose document never arrived stays degraded and
+     * contributes nothing at all, rather than guessing a template that would fail closed anyway.
+     */
+    private suspend fun renderBasemapTiles(
+        styleReference: StaticResourceReference.External,
+        style: PreparedStyle,
+        canonicalTiles: List<CanonicalBasemapTile>,
+        accessMode: ResourceAccessMode,
+    ): List<RenderedBasemapTile> {
+        val stored = residentCache.current(styleReference.resourceKey)?.stored
+            ?: error("a successful style commit must leave the style document resident")
+        val manifest = when (
+            val derived = basemapEngineHost.styleManifest(
+                styleKey = styleReference.resourceKey,
+                stored = stored,
+                baseUri = styleReference.locator.value,
+            )
+        ) {
+            is BasemapStyleManifestOutcome.Derived -> derived.manifest
+            is BasemapStyleManifestOutcome.Rejected ->
+                error("the resource driver already validated this exact style document")
+        }
+        // The manifest the driver derived names each `url`-form source's TileJSON *document*, not its
+        // tiles. Completing it here folds in the documents the firewall observed while the engine
+        // compiled this exact content -- the same content digest both halves are keyed off -- so a
+        // `url`-form source composes its tile urls exactly as an inline one does. A source whose document
+        // never arrived stays degraded and contributes nothing, rather than guessing a template.
+        val completed = completeBasemapStyleManifest(
+            manifest,
+            basemapEngineHost.tileJsonDocuments(styleReference.resourceKey, stored.contentDigest),
+        )
+        basemapEngineHost.registerRoutes(
+            tileTimeRoutes(
+                manifest = completed,
+                tiles = canonicalTiles,
+                accessMode = accessMode,
+                limits = configuration.resourceLimits,
+            ),
+        )
+        // The batch owns engine-side resources and is closed as soon as the pixels are in hand: nothing
+        // downstream of here reads it, because rendering is where a PreparedBatch's whole purpose ends.
+        return basemapEngineHost.prepareTiles(style, canonicalTiles).use { prepared ->
+            basemapEngineHost.renderTiles(prepared)
         }
     }
 
@@ -604,6 +848,7 @@ internal class RenGRenderer(
         offscreenSurface = null
         compositePipeline = null
         stickerPipeline = null
+        groundPipeline = null
         geometryPipelines.clear()
     }
 
@@ -622,6 +867,7 @@ internal class RenGRenderer(
                         offscreenSurface = recreated.state.offscreenSurface
                         compositePipeline = recreated.state.compositePipeline
                         stickerPipeline = recreated.state.stickerPipeline
+                        groundPipeline = recreated.state.groundPipeline
                     }
 
                     is InternalGlStateResult.Failed -> {
@@ -683,9 +929,55 @@ internal class RenGRenderer(
         val surface = requireNotNull(offscreenSurface) { "drawing requires an offscreen surface" }
         val composite = requireNotNull(compositePipeline) { "drawing requires the composite pipeline" }
         val sticker = requireNotNull(stickerPipeline) { "drawing requires the sticker pipeline" }
+        val ground = requireNotNull(groundPipeline) { "drawing requires the ground pipeline" }
 
         val resolvedCamera = resolveFrameCamera(frame.camera)
 
+        // Every ground texture lease this draw takes is released in the `finally` below -- on the
+        // failure returns inside, and on a throw out of drawFrame. An unreleased lease is permanently
+        // exempt from eviction (`GlObjectRegistry.evictOverBudget` iterates only unleased keys), so a
+        // leaked one is a texture the byte budget can never reclaim for the renderer's whole life.
+        val groundLeases = ArrayList<TextureLease>(frame.basemapTiles.size)
+        try {
+            val sceneGroundTiles = when (val resolved = resolveGroundTiles(frame, groundLeases)) {
+                is GroundTilesResult.Resolved -> resolved.tiles
+                is GroundTilesResult.Failed -> return resolved.failure
+            }
+            return drawResolvedFrame(
+                frame = frame,
+                framebufferName = framebufferName,
+                profile = profile,
+                surface = surface,
+                composite = composite,
+                sticker = sticker,
+                ground = ground,
+                resolvedCamera = resolvedCamera,
+                sceneGroundTiles = sceneGroundTiles,
+            )
+        } finally {
+            groundLeases.forEach { glObjectRegistry.releaseLease(it, binding) }
+        }
+    }
+
+    /**
+     * The rest of one draw, once its ground textures are in hand: upload each sticker's image, compile
+     * or reuse each distinct geometry program, and hand the assembled [Scene] to [drawFrame].
+     *
+     * Split out of [performDraw] only so that the ground leases [performDraw] holds are released by one
+     * `finally` covering every exit from this body, including its own failure returns.
+     */
+    @Suppress("LongParameterList")
+    private fun drawResolvedFrame(
+        frame: RenGPreparedFrame,
+        framebufferName: FramebufferName,
+        profile: RenderContextProfile,
+        surface: OffscreenSurface,
+        composite: CompositePipeline,
+        sticker: StickerPipeline,
+        ground: GroundPipeline,
+        resolvedCamera: ResolvedMercatorCamera,
+        sceneGroundTiles: List<SceneGroundTile>,
+    ): FailureDescriptor? {
         val sceneStickers = frame.stickers.map { preparedSticker ->
             val texture = cachedTexture(preparedSticker.resourceKey) {
                 uploadTexture(binding, preparedSticker.image, TextureContent.IMAGE)
@@ -724,8 +1016,9 @@ internal class RenGRenderer(
             frameIndex = frame.frameIndex,
             stickers = sceneStickers,
             geometries = sceneGeometries,
+            groundTiles = sceneGroundTiles,
         )
-        val content = SceneContent(resolvedCamera, scene, sticker)
+        val content = SceneContent(resolvedCamera, scene, sticker, ground)
 
         return drawFrame(
             binding = binding,
@@ -735,6 +1028,87 @@ internal class RenGRenderer(
             targetFramebuffer = framebufferName,
             content = content,
         )
+    }
+
+    private sealed interface GroundTilesResult {
+        class Resolved(val tiles: List<SceneGroundTile>) : GroundTilesResult
+
+        class Failed(val failure: FailureDescriptor) : GroundTilesResult
+    }
+
+    /**
+     * Turns this frame's ground instances into drawable tiles, decoding and uploading only what is not
+     * already on the GPU.
+     *
+     * **Residency, not a per-frame upload.** A tile whose GL texture is still registered is neither
+     * decoded nor uploaded again -- [GlObjectRegistry.leaseResident] hands back the texture already on
+     * the GPU. That is the whole point of the byte budget: panning back over ground already seen must
+     * cost nothing, and a 512x512 tile costs a megabyte of decode plus a megabyte of upload every time
+     * it is missed.
+     *
+     * **Leases, and why they are draw-scoped.** Both branches leave this loop holding a lease, and they
+     * have to: a lease is what "an in-flight draw holds for its own duration" means, and a tile this
+     * draw reuses is as much in use as one it just uploaded. A texture with an open lease is
+     * structurally unreachable to eviction ([GlObjectRegistry] iterates only its unleased keys), so
+     * nothing this frame needs can be evicted by a sibling tile part-way through the same draw --
+     * "exceeding the budget because a live frame still needs a tile is the correct outcome; breaking a
+     * drawable frame to honour a cache limit is not". Releasing the lease is also what marks the tile
+     * most-recently-used, so the reuse branch needs no separate touch. The lease is released by
+     * [performDraw]'s `finally` rather than held for the prepared frame's lifetime, because eviction
+     * issues GL deletes and ADR 0015 requires the exact context to be current for those -- which is
+     * guaranteed inside a `Draw` operation and guaranteed by nothing at `PreparedFrame.close()`. Between
+     * draws the tile stays resident, unleased, up to the budget.
+     *
+     * A tile is uploaded as [TextureContent.IMAGE]: a basemap tile is an image, its alpha is a coverage
+     * value, and it is filtered under every pitched camera, which is exactly what premultiplication
+     * exists to make correct.
+     */
+    private fun resolveGroundTiles(
+        frame: RenGPreparedFrame,
+        groundLeases: MutableList<TextureLease>,
+    ): GroundTilesResult {
+        val groundInstances = frame.groundInstances
+        if (groundInstances.isEmpty()) return GroundTilesResult.Resolved(emptyList())
+
+        val renderedByKey = frame.basemapTiles.associateBy { it.key }
+        val texturesByKey = HashMap<ResourceKey, Int>(renderedByKey.size)
+        val tiles = ArrayList<SceneGroundTile>(groundInstances.size)
+        for (groundInstance in groundInstances) {
+            val key = groundInstance.resourceKey
+            val cached = texturesByKey[key]
+            if (cached != null) {
+                tiles += SceneGroundTile(instance = groundInstance.instance, texture = cached)
+                continue
+            }
+            val reused = glObjectRegistry.leaseResident(key)
+            val texture = if (reused != null) {
+                groundLeases += reused.lease
+                reused.handle.name
+            } else {
+                val rendered = requireNotNull(renderedByKey[key]) {
+                    "prepare() already proved every ground instance names a rendered tile"
+                }
+                val image = when (
+                    val decoded = decodePng(
+                        rendered.pngBytes,
+                        configuration.resourceLimits.maximumDecodedImageBytes,
+                    )
+                ) {
+                    is PngDecodeResult.Success -> decoded.image
+                    else -> return GroundTilesResult.Failed(basemapTileDecodeFailure(key))
+                }
+                val name = uploadTexture(binding, image, TextureContent.IMAGE)
+                groundLeases += glObjectRegistry.registerTexture(
+                    key = key,
+                    handle = GlObjectHandle(GlObjectType.TEXTURE, name),
+                    byteSize = image.width.toLong() * image.height.toLong() * RGBA_BYTES_PER_PIXEL,
+                )
+                name
+            }
+            texturesByKey[key] = texture
+            tiles += SceneGroundTile(instance = groundInstance.instance, texture = texture)
+        }
+        return GroundTilesResult.Resolved(tiles)
     }
 
     /**
@@ -795,6 +1169,7 @@ internal class RenGRenderer(
                 offscreenSurface?.let { deleteOffscreenSurface(binding, it) }
                 compositePipeline?.let { deleteCompositePipeline(binding, programs, it) }
                 stickerPipeline?.let { deleteStickerPipeline(binding, programs, it) }
+                groundPipeline?.let { deleteGroundPipeline(binding, programs, it) }
                 geometryPipelines.values.forEach { deleteGeometryPipeline(binding, programs, it) }
                 geometryPipelines.clear()
                 // Task 9b item 1: every sticker/geometry-consumer texture cachedTexture() has ever
@@ -807,7 +1182,12 @@ internal class RenGRenderer(
                 offscreenSurface = null
                 compositePipeline = null
                 stickerPipeline = null
+                groundPipeline = null
                 residentCache.closeAll()
+                // The renderer owns exactly one Rentile engine (ADR 0016), so closing the renderer closes
+                // it. Its close() is idempotent and, unlike everything above it here, not GL-scoped -- so
+                // it neither needs nor consults the exact current context (ADRs 0007/0015).
+                basemapEngineHost.close()
                 null
             } else {
                 unexpectedOperation(operation)
@@ -816,6 +1196,27 @@ internal class RenGRenderer(
         if (outcome is RendererLifecycleOutcome.Failed) throw outcome.failure.toException()
     }
 }
+
+/** RGBA8, the one decoded form Cycle C produces and the one GL upload format RenG uses. */
+private const val RGBA_BYTES_PER_PIXEL: Long = 4L
+
+/**
+ * A rendered basemap tile that will not decode, named by the tile it is about.
+ *
+ * Reported at [PipelineStage.DRAW] rather than at `RESOURCE_DECODING` because that is genuinely where
+ * it happens -- see [RenGRenderer.resolveGroundTiles] for why the decode is deferred to the draw -- and
+ * with `RESOURCE_DECODE_FAILED` rather than `GPU_OPERATION_FAILED` because the fault is in the bytes or
+ * in `ResourceLimits.maximumDecodedImageBytes`, not in the caller's GL state.
+ */
+private fun basemapTileDecodeFailure(key: ResourceKey): FailureDescriptor = FailureDescriptor(
+    code = RenGErrorCode.RESOURCE_DECODE_FAILED,
+    stage = PipelineStage.DRAW,
+    diagnostic = failureContextDiagnostic(
+        stage = PipelineStage.DRAW,
+        fieldName = DiagnosticField.RESOURCE,
+        resourceKey = key,
+    ),
+)
 
 private fun emptyResourceReport(): ResourceReport = ResourceReport(
     entries = emptyList(),

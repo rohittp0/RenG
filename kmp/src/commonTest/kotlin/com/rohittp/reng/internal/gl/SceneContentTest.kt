@@ -13,6 +13,8 @@ import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.math.DoubleVector3
+import com.rohittp.reng.internal.planning.BasemapTileInstance
+import com.rohittp.reng.internal.planning.resolveBasemapTileQuad
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolveGeometry
 import com.rohittp.reng.internal.planning.resolvePlacement
@@ -22,6 +24,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SceneContentTest {
@@ -31,7 +34,12 @@ class SceneContentTest {
     @Test
     fun anEmptySceneIssuesNoGlCallsAtAll() {
         val binding = RecordingGlBinding()
-        SceneContent(topDownCamera(), Scene(outputPixelSize = OUTPUT_SIZE, frameIndex = 0L), newStickerPipeline())
+        SceneContent(
+            topDownCamera(),
+            Scene(outputPixelSize = OUTPUT_SIZE, frameIndex = 0L),
+            newStickerPipeline(),
+            newGroundPipeline(),
+        )
             .draw(binding)
         assertContentEquals(emptyList(), binding.log)
     }
@@ -58,7 +66,7 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(camera, scene, stickerPipeline).draw(binding)
+        SceneContent(camera, scene, stickerPipeline, newGroundPipeline()).draw(binding)
 
         val geometryDraw = binding.log.indexOfFirst { it.startsWith("drawArrays") }
         val depthDisabled = binding.log.indexOfFirst { it == "disable(${hex(GL_DEPTH_TEST)})" }
@@ -70,6 +78,180 @@ class SceneContentTest {
         assertTrue(mapStickerBind in geometryDraw until depthDisabled, "the map-anchored sticker draws depth-tested too")
         assertTrue(depthDisabled < screenStickerBind, "the screen-anchored sticker composites after depth testing is off")
         assertTrue(depthDisabled in 0 until screenDraw, "every depth-tested thing draws before the screen regime composites")
+    }
+
+    // --- ADR 0027: nothing a scene draws writes depth --------------------------------------------
+
+    /**
+     * ADR 0027 as an invariant over the whole scene rather than as three separate per-pipeline
+     * assertions, because the defect it closes was a *pass* that forgot.
+     *
+     * `drawFrame` hands [SceneContent] a context with `glDepthMask(GL_TRUE)` — it has to, or the
+     * per-frame depth clear would not take — so every pass owes its own `depthMask(false)`. A future
+     * fourth map-regime pass (models are next) that inherits the enable but forgets the mask
+     * reintroduces exactly the two defects ADR 0027 removes, and would pass
+     * `theGroundDrawsDepthTestedAndWritesNoDepth` and `theMapRegimeTurnsDepthWritesOffBeforeItDraws`
+     * untouched. This walks the call log with the mask's real starting value and fails on the first
+     * draw issued while depth writes are on, whichever pass issued it.
+     *
+     * A model pipeline that genuinely needs to write depth is a deliberate change to ADR 0027, and
+     * has to come here and say so.
+     */
+    @Test
+    fun noDrawInAWholeSceneRunsWithDepthWritesOn() {
+        val binding = RecordingGlBinding()
+        val camera = topDownCamera()
+        val geometryPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val groundPipeline = newGroundPipeline(binding)
+
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(mapPlacement(), texture = 101),
+                SceneSticker(screenPlacement(z = 5.0), texture = 202),
+            ),
+            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap())),
+            groundTiles = listOf(groundTile(canonicalX = 0, tileY = 0, texture = 303)),
+        )
+        binding.log.clear()
+
+        SceneContent(camera, scene, stickerPipeline, groundPipeline).draw(binding)
+
+        // `drawFrame` leaves the mask on for its depth clear, so that is the state a scene inherits.
+        var depthWrites = true
+        var draws = 0
+        binding.log.forEachIndexed { index, call ->
+            when {
+                call == "depthMask(true)" -> depthWrites = true
+                call == "depthMask(false)" -> depthWrites = false
+                call.startsWith("drawArrays") -> {
+                    draws += 1
+                    assertFalse(
+                        depthWrites,
+                        "call $index ($call) draws with depth writes still on; ADR 0027 requires " +
+                            "every map-regime pass to turn them off for itself",
+                    )
+                }
+            }
+        }
+        assertEquals(4, draws, "the scene must issue one ground, one geometry and two sticker draws")
+    }
+
+    // --- ADR 0025: the ground is first, and map-regime draw order is a contract ------------------
+
+    /**
+     * The ground is the backdrop consumer content paints onto, so it draws before every other
+     * map-regime thing. Under ADR 0025's `GL_GEQUAL` this is no longer cosmetic: a `Geometry` or a
+     * map-anchored sticker at altitude 0 ties with the ground on depth, and the tie is broken by
+     * draw order, so drawing the ground second would erase them.
+     */
+    @Test
+    fun theGroundDrawsBeforeEveryOtherMapRegimeThing() {
+        val binding = RecordingGlBinding()
+        val camera = topDownCamera()
+        val geometryPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val groundPipeline = newGroundPipeline(binding)
+        val groundTexture = 303
+        val mapTexture = 101
+        val screenTexture = 202
+
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(mapPlacement(), texture = mapTexture),
+                SceneSticker(screenPlacement(z = 5.0), texture = screenTexture),
+            ),
+            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap())),
+            groundTiles = listOf(groundTile(canonicalX = 8, tileY = 8, texture = groundTexture)),
+        )
+        binding.log.clear()
+
+        SceneContent(camera, scene, stickerPipeline, groundPipeline).draw(binding)
+
+        val groundBind = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$groundTexture)" }
+        val geometryDraw = binding.log.indexOfFirst { it.startsWith("drawArrays") }
+        val mapStickerBind = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$mapTexture)" }
+        val depthDisabled = binding.log.indexOfFirst { it == "disable(${hex(GL_DEPTH_TEST)})" }
+        val screenStickerBind = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$screenTexture)" }
+
+        assertTrue(groundBind >= 0, "the ground must actually draw")
+        assertTrue(groundBind < geometryDraw, "the ground draws before every geometry")
+        assertTrue(groundBind < mapStickerBind, "the ground draws before every map-anchored sticker")
+        assertTrue(geometryDraw < mapStickerBind, "geometries keep drawing before map-anchored stickers")
+        assertTrue(mapStickerBind < depthDisabled, "the whole map regime is depth-tested")
+        assertTrue(depthDisabled < screenStickerBind, "the screen regime still composites last")
+    }
+
+    /**
+     * ADR 0025's contract, at the only level a call log can state it: within the map regime, later
+     * declaration draws later, so under `GL_GEQUAL` the later-declared of two coplanar things wins.
+     * `StickerPipeline`'s KDoc used to say map-anchored things draw "in any order"; that sentence is
+     * false from ADR 0025 onward, and this test is what stops it becoming true again.
+     */
+    @Test
+    fun coplanarMapAnchoredThingsDrawInDeclarationOrderSoTheLaterOneWins() {
+        val binding = RecordingGlBinding()
+        val stickerPipeline = newStickerPipeline(binding)
+        val firstTexture = 401
+        val secondTexture = 402
+        val firstGroundTexture = 501
+        val secondGroundTexture = 502
+
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(mapPlacement(), texture = firstTexture),
+                SceneSticker(mapPlacement(), texture = secondTexture),
+            ),
+            groundTiles = listOf(
+                groundTile(canonicalX = 8, tileY = 8, texture = firstGroundTexture),
+                groundTile(canonicalX = 9, tileY = 8, texture = secondGroundTexture),
+            ),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, stickerPipeline, newGroundPipeline(binding)).draw(binding)
+
+        val firstGround = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$firstGroundTexture)" }
+        val secondGround = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$secondGroundTexture)" }
+        val first = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$firstTexture)" }
+        val second = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},$secondTexture)" }
+        assertTrue(firstGround in 0 until secondGround, "ground tiles draw in the order the frame lists them")
+        assertTrue(first in 0 until second, "the later-declared map-anchored sticker draws last, so it wins a tie")
+    }
+
+    /**
+     * The ground's own placement, end to end through [SceneContent]: the uniform it uploads must be
+     * exactly the camera's view-projection composed with the tile's own quad, so a placement bug
+     * cannot hide behind a matrix this layer recomputes differently.
+     */
+    @Test
+    fun theGroundUniformIsTheCameraViewProjectionComposedWithTheTilesOwnQuad() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME to 3,
+            GROUND_TEXTURE_UNIFORM_NAME to 7,
+        )
+        val camera = topDownCamera()
+        val pipeline = (
+            createGroundPipeline(binding, ShaderDialect.GLES, GlProgramCache()) as GroundPipelineResult.Created
+            ).pipeline
+        val tile = groundTile(canonicalX = 9, tileY = 7, texture = 55)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            groundTiles = listOf(tile),
+        )
+        binding.log.clear()
+
+        SceneContent(camera, scene, newStickerPipeline(binding), pipeline).draw(binding)
+
+        val expected = composeGroundModelViewProjection(camera, resolveBasemapTileQuad(tile.instance, camera))
+        assertContentEquals(expected, requireNotNull(binding.uniformMatrix4fvValues[3]))
     }
 
     // --- the precision path: SceneContent must not be the layer that discards it ---------------
@@ -107,7 +289,7 @@ class SceneContentTest {
             geometries = listOf(SceneGeometry(geometry, pipeline, consumerUniforms = emptyMap())),
         )
 
-        SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+        SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding()), newGroundPipeline()).draw(binding)
 
         val uploaded = decodeLittleEndianFloats(requireNotNull(binding.bufferDataPayloads[GL_ARRAY_BUFFER]))
         // Layout is bottom-left, bottom-right, top-left, top-right; stride 5 floats (xyz + uv).
@@ -134,7 +316,7 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+        SceneContent(camera, scene, newStickerPipeline(RecordingGlBinding()), newGroundPipeline()).draw(binding)
 
         assertContentEquals(expected, binding.uniformMatrix4fvValues.getValue(2))
     }
@@ -166,7 +348,8 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding()), newGroundPipeline())
+            .draw(binding)
 
         assertTrue(
             binding.log.contains("uniform1f(20,0.5)"),
@@ -202,7 +385,8 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding()), newGroundPipeline())
+            .draw(binding)
 
         assertTrue(
             binding.log.contains("uniform1i(21,0)"),
@@ -241,7 +425,8 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding())).draw(binding)
+        SceneContent(topDownCamera(), scene, newStickerPipeline(RecordingGlBinding()), newGroundPipeline())
+            .draw(binding)
 
         assertTrue(binding.log.contains("uniform1f(20,0.9)"), "the explicit snapshot must be drawn: ${binding.log}")
         assertTrue(!binding.log.contains("uniform1f(20,0.5)"), "the Geometry's own live map must not be read: ${binding.log}")
@@ -329,7 +514,7 @@ class SceneContentTest {
         )
         binding.log.clear()
 
-        SceneContent(topDownCamera(), scene, stickerPipeline).draw(binding)
+        SceneContent(topDownCamera(), scene, stickerPipeline, newGroundPipeline()).draw(binding)
 
         val resolved = (resolvePlacement(placement, topDownCamera()) as SpatialOutcome.Success).value
         val expected = composeScreenModelViewProjection(OUTPUT_SIZE, resolved, DoubleVector3(4.0, 2.0, 1.0))
@@ -407,6 +592,20 @@ class SceneContentTest {
 
     private fun newStickerPipeline(binding: RecordingGlBinding = RecordingGlBinding().withNoDeclaredNames()): StickerPipeline =
         (createStickerPipeline(binding, ShaderDialect.GLES, GlProgramCache()) as StickerPipelineResult.Created).pipeline
+
+    private fun newGroundPipeline(binding: RecordingGlBinding = RecordingGlBinding().withNoDeclaredNames()): GroundPipeline =
+        (createGroundPipeline(binding, ShaderDialect.GLES, GlProgramCache()) as GroundPipelineResult.Created).pipeline
+
+    private fun groundTile(canonicalX: Int, tileY: Int, texture: Int): SceneGroundTile = SceneGroundTile(
+        instance = BasemapTileInstance(
+            lod = 4,
+            tileY = tileY,
+            unwrappedX = canonicalX.toLong(),
+            instanceCopy = 0,
+            canonicalX = canonicalX,
+        ),
+        texture = texture,
+    )
 
     private fun expectedProjectionTimesView(camera: ResolvedMercatorCamera): FloatArray {
         val result = FloatArray(16)

@@ -17,6 +17,7 @@ import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
 import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.internal.cache.ResidentCache
+import com.rohittp.reng.internal.firewall.basemapEngineHost
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
 import com.rohittp.reng.internal.resource.ContentProvenance
@@ -142,6 +143,8 @@ class PreparationDriverTest {
             store = ThrowingStore(CancellationException("boom")),
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
+            resourceLimits = ResourceLimits(),
+            basemapEngineHost = basemapEngineHost(),
             clock = FixedClock,
         )
         assertFailsWith<CancellationException> {
@@ -175,6 +178,8 @@ class PreparationDriverTest {
             store = CountingStore(),
             cache = ResidentCache(),
             classGateRunner = RenGClassGateRunner(ResourceLimits()),
+            resourceLimits = ResourceLimits(),
+            basemapEngineHost = basemapEngineHost(),
             clock = FixedClock,
         )
         val registration = registration("vanished")
@@ -205,14 +210,20 @@ private fun driver(
     store: Store,
     maximumConcurrentOperations: Int = 8,
     clock: () -> Long = FixedClock,
-): PreparationDriver = PreparationDriver(
-    transport = transport,
-    store = store,
-    cache = ResidentCache(),
-    classGateRunner = RenGClassGateRunner(ResourceLimits()),
-    maximumConcurrentOperations = maximumConcurrentOperations,
-    clock = clock,
-)
+): PreparationDriver {
+    val cache = ResidentCache()
+    return PreparationDriver(
+        transport = transport,
+        store = store,
+        cache = cache,
+        classGateRunner = RenGClassGateRunner(ResourceLimits()),
+        resourceLimits = ResourceLimits(),
+        // The engine host shares this driver's own resident cache, exactly as RendererFactory wires them.
+        basemapEngineHost = basemapEngineHost(cache = cache),
+        maximumConcurrentOperations = maximumConcurrentOperations,
+        clock = clock,
+    )
+}
 
 private object FixedClock : () -> Long {
     override fun invoke(): Long = 1_700_000_000_000L

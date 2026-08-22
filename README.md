@@ -4,9 +4,15 @@
 
 ## Current status
 
-RenG is a pre-runtime Kotlin Multiplatform publication skeleton. Cycle A established its public coordinate,
-six-target surface, and immutable release gates; its first public completion record has verified anonymously
-from the exact CI-passing source commit. It exposes no runtime API and renders nothing.
+RenG is a Kotlin Multiplatform renderer that draws a caller-supplied frame onto a caller-supplied GL
+context. The published release exposes a renderer factory, a frame plan, and screen- and map-anchored
+stickers and geometry, and it draws them. Every release is gated on exact-source CI, credential-free
+six-target resolution, and an anonymously verified immutable completion record.
+
+All six targets publish. Only `macosArm64` and `linuxX64` execute GL against a real context in CI, so
+they are the two the drawing is verified on; the rest are compiled, not exercised. The published release
+draws a basemap from a caller-supplied map style, and it draws no terrain, no models and no map text —
+`Model` is present in the public API as a type, without a draw path behind it.
 
 ## Coordinate and repository
 

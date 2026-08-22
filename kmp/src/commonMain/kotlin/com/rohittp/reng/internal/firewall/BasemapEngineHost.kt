@@ -49,6 +49,7 @@ import com.rohittp.rentile.TileSubstitutionPolicy
 import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 
 /**
  * The one place in RenG that constructs and drives a real Rentile engine (ADR 0016, ADR 0017).
@@ -130,6 +131,25 @@ internal class BasemapEngineHost(
      * [accessMode] binds the invocation's mode explicitly rather than reconstructing it from a Rentile
      * key, which Rentile's callbacks do not carry at all (ADR 0016). Every route must already agree with
      * it, since one registry is never shared across modes.
+     *
+     * **[block] runs inside a [coroutineScope], which is what gives the invocation a [Job] of its own.**
+     * That is not tidiness: Rentile's `DefaultBasemapRasterizer.operation` reads
+     * `currentCoroutineContext().job` on **every** rasterizer entry point, so a caller whose context
+     * carries no `Job` makes each of them throw `IllegalStateException("Current context doesn't contain
+     * Job in it")` — which reaches [classifyEngineFailure] as a non-`RentileException` and becomes the
+     * opaque `BASEMAP_RENDER_FAILED`. A `suspend` function may legally be resumed from any context,
+     * including `EmptyCoroutineContext`, so RenG's own public `prepare` must not depend on the consumer
+     * happening to have launched it from a scope. Style compilation never showed this because it runs
+     * inside [com.rohittp.reng.internal.driver.PreparationDriver.run], which already opens its own
+     * `coroutineScope`; tile preparation and rendering run in this block and did not.
+     *
+     * The second thing the `Job` buys is containment, and it is the more important of the two. Rentile's
+     * `operation` starts its work as `scope.async` in the engine's own long-lived scope *before* it reads
+     * the caller's job, and links the two with `invokeOnCompletion`. With no job to link, the failure
+     * escapes while that worker keeps running unowned and uncancellable — still calling back into
+     * whichever [OperationRegistry] is active by the time it gets there, which is a *later* invocation's.
+     * That is how a Job-less caller turned one failure into a stream of `AMBIGUOUS_RESOURCE_ROUTE`
+     * refusals attributed to registries that had done nothing wrong.
      */
     suspend fun <T> withOperation(
         accessMode: RenGResourceAccessMode,
@@ -146,7 +166,7 @@ internal class BasemapEngineHost(
         activeOperation = FirewallOperation(accessMode, registry)
         return try {
             registerRoutes(routes)
-            block()
+            coroutineScope { block() }
         } finally {
             activeOperation = null
         }
@@ -166,13 +186,13 @@ internal class BasemapEngineHost(
      * level later — an exchange RenG never planned — so it fails the same way, rather than silently
      * accruing routes into a registry that does not exist.
      */
-    fun registerRoutes(routes: List<ResourceRouteKey>) {
+    suspend fun registerRoutes(routes: List<ResourceRouteKey>) {
         requireOpen()
         val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
         require(routes.all { it.accessMode == operation.accessMode }) {
             "an operation-scoped registry is never shared across access modes"
         }
-        routes.forEach(operation.registry::preregister)
+        operation.registry.preregister(routes)
     }
 
     /**

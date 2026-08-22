@@ -573,7 +573,7 @@ class FirewallTest {
             transport = spritePairTransport(VALID_SPRITE_JSON),
             store = store,
             privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
-        ).also { it.preregister(spriteImageRoute) }
+        ).also { it.preregister(listOf(spriteImageRoute)) }
         FirewallTransport(registry).execute(engineRequestFor(spriteImageRoute))
         FirewallStore(registry).write(engineKeyFor(spriteImageRoute), engineStoredResourceOf(SPRITE_ATLAS_PNG))
         assertEquals(0, store.writeCalls)
@@ -667,7 +667,7 @@ class FirewallTest {
             store = recordingStore,
             privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
         )
-        routes.forEach(registry::preregister)
+        registry.preregister(routes)
         val firewallTransport = FirewallTransport(registry)
         val firewallStore = FirewallStore(registry)
 
@@ -701,7 +701,111 @@ class FirewallTest {
         // reaching here at all is the assertion: every one of the routeCount digests survived.
         assertEquals(routeCount, writtenKeys.size)
     }
+
+    /**
+     * The containment property, under the one condition every other test in this file cannot create:
+     * **a route this registry already declared is looked up while it is declaring more.**
+     *
+     * Why that condition is the real one, and why no `runTest` test can produce it. Preregistration is
+     * incremental by design -- [com.rohittp.reng.internal.firewall.BasemapEngineHost.registerRoutes]
+     * exists so a style commit can declare the routes it only discovered mid-invocation -- and Rentile's
+     * `DefaultBasemapRasterizer.operation` runs each engine call as `scope.async` in the *engine's own*
+     * long-lived `Dispatchers.Default` scope, not as a child of the caller's coroutine. So an engine
+     * worker really can be reading these indices while a driver is writing them, and it can even outlive
+     * the call that started it and read them during the *next* invocation's registration. `runTest`'s
+     * scheduler is single-threaded, so on it a plain `mutableMapOf` is perfectly visible and perfectly
+     * consistent: every existing test in this file passed against the unsynchronized version.
+     *
+     * What the assertion is. `anchor` is declared once, before any reader coroutine is launched, so
+     * every reader is ordered after that registration by `launch` itself -- resolving it is not a
+     * question of timing, it is a fact about the index. The readers then look it up on all three
+     * answer-path indices (transport, store, and the engine-digest index
+     * [com.rohittp.reng.internal.firewall.OperationRegistry.renGResourceKeyForEngineDigest] reads) in a
+     * tight loop while a writer declares thousands of *other* routes into the same registry. Not one of
+     * those lookups may fail. Against a bare `mutableMapOf` they do: a hash map being structurally
+     * resized on one thread hands a concurrent reader a table in which a present key reads as absent,
+     * and this file turns "absent" into `AMBIGUOUS_RESOURCE_ROUTE` -- the whole basemap refused by its
+     * own firewall, which is exactly the outage this test exists to keep fixed.
+     *
+     * Measured rather than assumed, on this machine (Apple M3 Max, 14 cores). Against a variant of
+     * `OperationRegistry` reverted to five plain unsynchronized `mutableMapOf`s -- the pre-fix shape,
+     * with this same batch API so only the synchronization differs -- it failed **12 of 12**
+     * `testAndroidHostTest` runs, refusing 8 to 33 lookups of a route that was declared before any
+     * reader existed, and **1 of 6** `macosArm64Test` runs. (Kotlin/Native reproduces far less often
+     * than the JVM here and raising the route count to 50,000 did not move that rate, so the JVM run is
+     * the sensitive half of this gate; the Native run is the one that proves the fix compiles and holds
+     * on the runtime the harness actually uses.) With the volatile snapshot restored it passed **15 of
+     * 15** JVM runs and **10 of 10** Native runs. Like the test above this is not a deterministic proof
+     * for every schedule on every machine -- data races never are -- but it is a real, measured,
+     * currently-passing exercise of exactly the access pattern that broke.
+     */
+    @Test
+    fun neverRefusesAnAlreadyDeclaredRouteWhileMoreAreDeclaredConcurrently() = runBlocking {
+        val anchor = rasterRoute
+        val laterRouteCount = LATER_ROUTE_COUNT
+        val laterRoutes = (0 until laterRouteCount).map { index ->
+            ResourceRouteKey(
+                accessMode = ResourceAccessMode.NORMAL,
+                locator = ResourceLocator("https://tiles.example/incremental/$index.pbf"),
+                resourceClass = ResourceClass.BASEMAP_VECTOR_TILE,
+                maximumResponseBytes = 32L * 1024L * 1024L,
+            )
+        }
+
+        val registry = OperationRegistry(
+            transport = CountingTransport(body = VALID_STICKER_PNG),
+            store = CountingStore(response = validRasterRecord()),
+            privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
+        )
+        // The one registration every reader below is ordered after.
+        registry.preregister(listOf(anchor))
+        val firewallTransport = FirewallTransport(registry)
+        val firewallStore = FirewallStore(registry)
+        val anchorDigest = sha256Hex(redactAuthenticationQuery(anchor.locator.value))
+
+        val refusals = MutableStateFlow(0)
+        coroutineScope {
+            val declaring = launch(Dispatchers.Default) {
+                laterRoutes.chunked(DECLARATION_BATCH).forEach { batch -> registry.preregister(batch) }
+            }
+            repeat(CONCURRENT_READERS) {
+                launch(Dispatchers.Default) {
+                    while (declaring.isActive) {
+                        try {
+                            firewallTransport.execute(engineRequestFor(anchor))
+                        } catch (refused: RenGException) {
+                            refusals.update { it + 1 }
+                        }
+                        try {
+                            firewallStore.read(engineKeyFor(anchor))
+                        } catch (refused: RenGException) {
+                            refusals.update { it + 1 }
+                        }
+                        if (registry.renGResourceKeyForEngineDigest(anchor.resourceClass, anchorDigest) == null) {
+                            refusals.update { it + 1 }
+                        }
+                    }
+                }
+            }
+        }
+
+        assertEquals(
+            0,
+            refusals.value,
+            "a declared route must stay resolvable while other routes are declared concurrently",
+        )
+    }
 }
+
+/**
+ * Enough concurrent structural insertions for a reader to actually catch one, measured rather than
+ * guessed -- see [FirewallTest.neverRefusesAnAlreadyDeclaredRouteWhileMoreAreDeclaredConcurrently].
+ */
+private const val LATER_ROUTE_COUNT = 20_000
+
+/** Batch size, matching production's shape: routes arrive as whole manifests, not one at a time. */
+private const val DECLARATION_BATCH = 50
+private const val CONCURRENT_READERS = 8
 
 // ---- firewall + fixture wiring ------------------------------------------------------------------
 
@@ -753,22 +857,25 @@ private class Firewall(
         transport = consumerTransport,
         store = consumerStore,
         privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
-    ).also { registry ->
-        registry.preregister(rasterRoute)
-        registry.preregister(spriteJsonRoute)
-        registry.preregister(spriteImageRoute)
-        registry.preregister(demRoute)
-        registry.preregister(tileJsonRoute)
+    )
+
+    /**
+     * Separate from construction because `preregister` is `suspend` -- it serializes writers against
+     * each other on the registry's own mutex -- and a constructor cannot suspend. Every fixture route
+     * is declared in one batch, which is also the shape production uses.
+     */
+    suspend fun declareFixtureRoutes(): Firewall = apply {
+        registry.preregister(listOf(rasterRoute, spriteJsonRoute, spriteImageRoute, demRoute, tileJsonRoute))
     }
 
     val transport: EngineResourceTransport = FirewallTransport(registry)
     val store: EngineRawResourceStore = FirewallStore(registry)
 }
 
-private fun firewall(
+private suspend fun firewall(
     transport: Transport = CountingTransport(),
     store: Store = CountingStore(),
-): Firewall = Firewall(transport, store)
+): Firewall = Firewall(transport, store).declareFixtureRoutes()
 
 private fun engineClassFor(resourceClass: ResourceClass): EngineResourceClass = when (resourceClass) {
     ResourceClass.BASEMAP_RASTER_TILE -> EngineResourceClass.RASTER_TILE

@@ -43,8 +43,8 @@ GLSL ES 3.00 shader pairs with consumer-supplied uniforms and textures.
 
 What it does not do
 
-The published release draws no basemap tiles, no GLB models, no terrain, and no map labels, and it
-rejects the GLOBE projection mode. A plan that requests the basemap does not fail; it draws none, and
-warns when no basemap style is configured. RenG owns no window, render loop, capture path, or encoder. It performs no network I/O and keeps
+The published release draws no GLB models, no terrain, and no map labels, and it rejects the GLOBE
+projection mode. A plan that requests the basemap without a configured style does not fail; it draws
+none, and warns. Basemap drawing is execution-verified on macosArm64 and linuxX64 only. RenG owns no window, render loop, capture path, or encoder. It performs no network I/O and keeps
 no persistent cache: transport and store are adapters the consumer injects, and RenG only follows the
 supplied plan. This file describes the current release, not unreleased work.

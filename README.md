@@ -11,8 +11,8 @@ six-target resolution, and an anonymously verified immutable completion record.
 
 All six targets publish. Only `macosArm64` and `linuxX64` execute GL against a real context in CI, so
 they are the two the drawing is verified on; the rest are compiled, not exercised. The published release
-draws no basemap, no terrain and no models — `Model` is present in the public API as a type, without a
-draw path behind it.
+draws a basemap from a caller-supplied map style, and it draws no terrain, no models and no map text —
+`Model` is present in the public API as a type, without a draw path behind it.
 
 ## Coordinate and repository
 

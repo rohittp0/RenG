@@ -57,8 +57,9 @@
         <div class="status-callout">
           <p><strong>The published release draws.</strong>
           <code>createRenderer</code> is public API: it takes a <code>FramePlan</code> and draws stickers
-          and consumer-shaded geometry into a GL context the caller has already made current. It does not
-          draw a basemap, models, terrain, or map labels, and it rejects the globe projection.</p>
+          consumer-shaded geometry, and a basemap rendered from a map style you supply, into a GL context
+          the caller has already made current. It does not draw models, terrain, or map labels, and it
+          rejects the globe projection.</p>
           <p>Version display remains metadata-driven. ADR 0013 and the Cycle A design spec and implementation
           plan remain historical decision records.</p>
         </div>
@@ -146,7 +147,7 @@ val pin = Placement(
 val plan = FramePlan(
     frameIndex = 0,
     camera = Camera(48.8584, 2.2945, zoom = 16.0, bearing = 0.0, pitch = 0.0),
-    drawBasemap = false, // this release draws no basemap; true only warns and degrades
+    drawBasemap = true, // needs a basemap style on the renderer; without one this warns and draws none
     stickers = listOf(Sticker(pin, ResourceLocator(<span class="str">"https://example.com/pin.png"</span>))),
 )
 

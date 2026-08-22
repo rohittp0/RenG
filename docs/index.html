@@ -56,8 +56,9 @@
         <p class="hero-lead">
           RenG is a Kotlin Multiplatform renderer for an OpenGL context you have already made current.
           You hand it a <code>FramePlan</code> — a complete definition of on-screen state — and it draws
-          that frame into your framebuffer. The published release draws stickers and geometry painted by
-          your own shader pairs. It does not draw a basemap, models, or terrain yet.
+          that frame into your framebuffer. The published release draws a basemap from your own map
+          style, plus stickers and geometry painted by your own shader pairs. It does not draw models,
+          terrain, or map labels yet.
         </p>
         <div class="hero-actions">
           <a class="button primary" href="kmp.html">Read the KMP setup</a>
@@ -118,10 +119,10 @@
         </article>
         <article class="scope-card">
           <p class="card-label">It does not provide</p>
-          <h3>A basemap or models</h3>
-          <p>The release draws no map tiles, no GLB models, no terrain, and no map labels, and it rejects
-          the globe projection. Asking for a basemap does not fail — it simply draws none, and warns when
-          no style is configured.</p>
+          <h3>Models, terrain, or labels</h3>
+          <p>The release draws no GLB models, no terrain, and no map text, and it rejects the globe
+          projection. Asking for a basemap without configuring a style does not fail — it draws none and
+          warns. Basemap drawing is verified on macOS and Linux only.</p>
         </article>
       </div>
     </section>

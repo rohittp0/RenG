@@ -16,3 +16,9 @@ __pycache__/
 # Subagent-driven-development scratch: ledgers, briefs, reports, review packages.
 # Per-plan working state, never part of the published record.
 .superpowers/
+
+# Gradle project state, created under consumer-smoke by running the harness there.
+.gradle/
+
+# macOS Finder metadata.
+.DS_Store

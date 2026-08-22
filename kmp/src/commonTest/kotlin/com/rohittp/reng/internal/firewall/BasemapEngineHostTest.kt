@@ -21,6 +21,8 @@ import com.rohittp.reng.ConcurrentRecorder
 import com.rohittp.reng.internal.basemap.BasemapStyleManifest
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.BasemapStyleReject
+import com.rohittp.reng.internal.basemap.BasemapSourceUnderivableReason
+import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
@@ -665,9 +667,11 @@ class BasemapEngineHostTest {
                         ResourceClass.BASEMAP_SPRITE_JSON,
                         ResourceClass.BASEMAP_SPRITE_IMAGE,
                         ResourceClass.BASEMAP_GEO_JSON,
+                        ResourceClass.BASEMAP_TILE_JSON,
                     ),
                     whileCompiling,
-                    "compiling a style fetches the sprite pair and every GeoJSON source, and no tile",
+                    "compiling a style fetches the sprite pair, every GeoJSON source, every TileJSON " +
+                        "document -- and no tile",
                 )
 
                 assertFailsWith<RenGException> { host.prepareTiles(style, listOf(PHASE_TILE)) }
@@ -685,13 +689,98 @@ class BasemapEngineHostTest {
         } finally {
             host.close()
         }
-        // The seventh engine-keyed class. RenG rejects the TileJSON reference form of a source at manifest
-        // derivation (BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED), so it composes no
-        // BASEMAP_TILE_JSON route and the engine is never given a style that would make it fetch one.
-        assertTrue(
-            transport.requestedClasses().none { it == ResourceClass.BASEMAP_TILE_JSON },
-            "the TileJSON reference form is outside RenG's supported subset, so nothing fetches one",
+        // The TileJSON document is a style-time class, and that is the whole premise of the `url` form:
+        // the document RenG needs in order to name a tile is fetched strictly before any tile is named,
+        // so there is a phase in which to read it. A Rentile that moved it into `prepareBatch` would
+        // break the reference form outright rather than merely reorder two fetches.
+        assertEquals(
+            1,
+            transport.requestedUrls().count { it == PHASE_TILE_JSON_URL },
+            "the TileJSON document is fetched exactly once, while compiling",
         )
+    }
+
+    // ---- the TileJSON documents a compilation leaves behind ---------------------------------------
+
+    /**
+     * The documents a compilation fetched are retained **beside the compilation**, not beside the
+     * invocation that saw them go past, and the reuse path carries them forward untouched.
+     *
+     * That is what a `RESIDENT`-provenance frame depends on: it emits no `CompileBasemapStyle`, so its
+     * invocation calls `resolveTileJson` never and observes nothing. Retaining these with the compiled
+     * style -- which still holds the templates Rentile derived from them -- is the only thing that keeps
+     * such a frame able to name a tile at all.
+     */
+    @Test
+    fun retainsTheParsedTileJsonDocumentsBesideTheCompilationTheyWereFetchedFor() = runTest {
+        val transport = PhaseRecordingHostTransport()
+        val host = basemapEngineHost(transport = transport)
+        try {
+            val stored = hostStyleRecord(PHASE_STYLE_JSON)
+            host.withOperation(ResourceAccessMode.NORMAL, phaseStyleTimeRoutes) {
+                host.preparedStyle(phaseStyleKey, stored, PHASE_STYLE_BASE_URI)
+            }
+            val parsed = assertIs<BasemapTileJsonOutcome.Parsed>(
+                host.tileJsonDocuments(phaseStyleKey, stored.contentDigest)[PHASE_TILE_JSON_URL],
+            )
+            assertEquals(
+                listOf("https://tiles.example/p/t/{z}/{x}/{y}.pbf?key=k"),
+                parsed.document.tileTemplates,
+            )
+
+            // A second invocation over byte-identical content reuses the compilation and performs no
+            // acquisition at all, so the documents must survive that path rather than be re-observed.
+            host.withOperation(ResourceAccessMode.NORMAL, phaseStyleTimeRoutes) {
+                host.preparedStyle(phaseStyleKey, stored, PHASE_STYLE_BASE_URI)
+            }
+            assertEquals(
+                1,
+                transport.requestedUrls().count { it == PHASE_TILE_JSON_URL },
+                "the second invocation re-fetched nothing, so it observed nothing",
+            )
+            assertIs<BasemapTileJsonOutcome.Parsed>(
+                host.tileJsonDocuments(phaseStyleKey, stored.contentDigest)[PHASE_TILE_JSON_URL],
+                "and the retained document survives the reuse",
+            )
+        } finally {
+            host.close()
+        }
+        assertEquals(
+            emptyMap(),
+            host.tileJsonDocuments(phaseStyleKey, "some-other-digest"),
+            "and is declined for content this host holds no compilation of",
+        )
+    }
+
+    /**
+     * A TileJSON document only **RenG's** stricter reader refuses degrades the one source that named it
+     * and leaves the compilation standing.
+     *
+     * Rejecting the style here would be wrong twice over. The engine compiled it, so the style genuinely
+     * works; and RenG's reader diverges from kotlinx in four documented ways -- duplicate member names,
+     * as here, plus invalid UTF-8, number spelling, and nesting depth -- none of which says anything
+     * about whether the document is usable. What RenG loses is the ability to name that source's tiles,
+     * which the firewall then reports precisely and attributably at the moment one is asked for.
+     */
+    @Test
+    fun keepsTheCompilationWhenOnlyRenGsStricterReaderRefusesATileJsonDocument() = runTest {
+        val host = basemapEngineHost(transport = StrictTileJsonHostTransport())
+        try {
+            val stored = hostStyleRecord(STRICT_TILE_JSON_STYLE_JSON)
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(strictTileJsonRoute)) {
+                // Does not throw: Rentile's kotlinx reader keeps the last duplicate and compiles happily.
+                host.preparedStyle(hostStyleKey, stored, HOST_STYLE_BASE_URI)
+            }
+            assertEquals(
+                BasemapTileJsonOutcome.Rejected(
+                    BasemapSourceUnderivableReason.TILE_JSON_DUPLICATE_MEMBER_NAME,
+                ),
+                host.tileJsonDocuments(hostStyleKey, stored.contentDigest)[STRICT_TILE_JSON_URL],
+                "the reason is carried, not discarded, so a later diagnostic can name it",
+            )
+        } finally {
+            host.close()
+        }
     }
 
     /**
@@ -1025,9 +1114,18 @@ internal const val PHASE_SPRITE_BASE_URL: String = "https://sprites.example/phas
 internal const val PHASE_SPRITE_JSON_URL: String = "https://sprites.example/phase.json"
 internal const val PHASE_SPRITE_IMAGE_URL: String = "https://sprites.example/phase.png"
 internal const val PHASE_GEO_JSON_URL: String = "https://data.example/points.geojson"
+internal const val PHASE_TILE_JSON_URL: String = "https://tiles.example/p/t/tiles.json?key=k"
 internal const val PHASE_RASTER_TILE_URL: String = "https://tiles.example/p/r/3/5/2.png"
 internal const val PHASE_VECTOR_TILE_URL: String = "https://tiles.example/p/v/3/5/2.pbf"
 internal const val PHASE_DEM_TILE_URL: String = "https://tiles.example/p/d/3/5/2.png"
+
+/** The tile the TileJSON document below declares, composed for [PHASE_TILE]. */
+internal const val PHASE_TILE_JSON_TILE_URL: String = "https://tiles.example/p/t/3/5/2.pbf?key=k"
+
+/** Shaped like the 16 documents the verified corpus names: absolute template, explicit zoom range. */
+internal val PHASE_TILE_JSON_BODY: String =
+    """{"tilejson":"2.0.0","tiles":["https://tiles.example/p/t/{z}/{x}/{y}.pbf?key=k"],""" +
+        """"minzoom":0,"maxzoom":14}"""
 
 /** `TileId(z = 3, x = 5, y = 2)`, asymmetric for the same reason [HOST_ASYMMETRIC_TILE] is. */
 internal val PHASE_TILE: CanonicalBasemapTile = CanonicalBasemapTile(lod = 3, tileY = 2, canonicalX = 5)
@@ -1044,13 +1142,15 @@ internal val PHASE_STYLE_JSON: String =
         """"g":{"type":"geojson","data":"$PHASE_GEO_JSON_URL"},""" +
         """"r":{"type":"raster","tiles":["https://tiles.example/p/r/{z}/{x}/{y}.png"],"tileSize":256},""" +
         """"v":{"type":"vector","tiles":["https://tiles.example/p/v/{z}/{x}/{y}.pbf"]},""" +
-        """"d":{"type":"raster-dem","tiles":["https://tiles.example/p/d/{z}/{x}/{y}.png"],"tileSize":256}""" +
+        """"d":{"type":"raster-dem","tiles":["https://tiles.example/p/d/{z}/{x}/{y}.png"],"tileSize":256},""" +
+        """"t":{"type":"vector","url":"$PHASE_TILE_JSON_URL"}""" +
         """},"layers":[""" +
         """{"id":"bg","type":"background","paint":{"background-pattern":"dot"}},""" +
         """{"id":"raster","type":"raster","source":"r"},""" +
         """{"id":"vector","type":"fill","source":"v","source-layer":"water"},""" +
         """{"id":"hillshade","type":"hillshade","source":"d"},""" +
-        """{"id":"geo","type":"fill","source":"g"}""" +
+        """{"id":"geo","type":"fill","source":"g"},""" +
+        """{"id":"tilejson","type":"fill","source":"t","source-layer":"water"}""" +
         """]}"""
 
 internal val phaseStyleKey: ResourceKey = ResourceKeyDeriver(PureKotlinSha256)
@@ -1068,6 +1168,7 @@ internal val phaseStyleTimeRoutes: List<ResourceRouteKey> = listOf(
     phaseRoute(PHASE_SPRITE_JSON_URL, ResourceClass.BASEMAP_SPRITE_JSON),
     phaseRoute(PHASE_SPRITE_IMAGE_URL, ResourceClass.BASEMAP_SPRITE_IMAGE),
     phaseRoute(PHASE_GEO_JSON_URL, ResourceClass.BASEMAP_GEO_JSON),
+    phaseRoute(PHASE_TILE_JSON_URL, ResourceClass.BASEMAP_TILE_JSON),
 )
 
 /**
@@ -1079,6 +1180,7 @@ internal val phaseTileTimeRoutes: List<ResourceRouteKey> =
     listOf(
         phaseRoute(PHASE_RASTER_TILE_URL, ResourceClass.BASEMAP_RASTER_TILE),
         phaseRoute(PHASE_VECTOR_TILE_URL, ResourceClass.BASEMAP_VECTOR_TILE),
+        phaseRoute(PHASE_TILE_JSON_TILE_URL, ResourceClass.BASEMAP_VECTOR_TILE),
     ) +
         (1..3).flatMap { y ->
             (4..6).map { x ->
@@ -1117,6 +1219,11 @@ internal class PhaseRecordingHostTransport : Transport {
                 statusCode = 200,
                 body = """{"type":"FeatureCollection","features":[]}""".encodeToByteArray(),
                 metadata = TransportResponseMetadata(contentType = "application/geo+json"),
+            )
+            PHASE_TILE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = PHASE_TILE_JSON_BODY.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             else -> TransportResponse(statusCode = 404, body = ByteArray(0))
         }
@@ -1197,3 +1304,43 @@ internal class CountingHostStore(
 internal val VALID_TILE_PNG: ByteArray = Base64.decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR42mPgEpHTMLJhcAuISsmrAAAPGAMNubnoZAAAAABJRU5ErkJggg==",
 )
+
+// ---- a TileJSON only RenG's stricter reader refuses -----------------------------------------------
+
+internal const val STRICT_TILE_JSON_URL: String = "https://tiles.example/strict/tiles.json"
+
+/**
+ * A duplicate `tilejson` member. kotlinx keeps the last occurrence and Rentile compiles the style; RenG's
+ * own reader rejects the document under its own code. The divergence runs in the safe direction -- RenG
+ * refuses a document Rentile read -- so it can only cost a route, never compose a wrong url.
+ */
+internal const val STRICT_TILE_JSON_BODY: String =
+    """{"tilejson":"2.0.0","tilejson":"2.0.0",""" +
+        """"tiles":["https://tiles.example/strict/{z}/{x}/{y}.png"],"minzoom":0,"maxzoom":14}"""
+
+internal val STRICT_TILE_JSON_STYLE_JSON: String =
+    """{"version":8,"name":"reng-strict-tilejson-test",""" +
+        """"sources":{"s":{"type":"raster","url":"$STRICT_TILE_JSON_URL","tileSize":256}},""" +
+        """"layers":[{"id":"bg","type":"background","paint":{"background-color":"#ffffff"}},""" +
+        """{"id":"r","type":"raster","source":"s"}]}"""
+
+internal val strictTileJsonRoute: ResourceRouteKey = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator(STRICT_TILE_JSON_URL),
+    resourceClass = ResourceClass.BASEMAP_TILE_JSON,
+    maximumResponseBytes = 4L * 1024L * 1024L,
+)
+
+/** Answers [STRICT_TILE_JSON_BODY] for the document and a 404 for anything else. */
+internal class StrictTileJsonHostTransport : Transport {
+    override suspend fun execute(request: TransportRequest): TransportResponse =
+        if (request.locator.value == STRICT_TILE_JSON_URL) {
+            TransportResponse(
+                statusCode = 200,
+                body = STRICT_TILE_JSON_BODY.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+        } else {
+            TransportResponse(statusCode = 404, body = ByteArray(0))
+        }
+}

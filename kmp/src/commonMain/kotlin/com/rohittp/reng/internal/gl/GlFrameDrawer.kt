@@ -42,13 +42,18 @@ internal val FRAME_TEXTURE_UNIT_COUNT: Int = maxOf(COMPOSITE_TEXTURE_UNIT_COUNT,
  * either pass and restored afterward unconditionally — including when [content] leaves state dirty
  * or a driver error is detected at the end.
  *
- * **Depth comparison (ADR 0025).** The test is [GL_GEQUAL], not `GL_GREATER`. Under strict
- * `GL_GREATER` a fragment at exactly the depth already in the buffer is discarded, which silently
- * deletes every altitude-0 map-anchored thing the moment the basemap ground exists beneath it --
- * the most ordinary frame a consumer writes. `GL_GEQUAL` keeps real occlusion wherever depths
- * differ and resolves exact ties by draw order, which is why the map regime's draw order is a
- * contract from ADR 0025 onward rather than the arbitrary detail it used to be. See
- * [com.rohittp.reng.internal.gl.SceneContent] for that order.
+ * **Depth comparison (ADR 0025) and depth writes (ADR 0027).** The test is [GL_GEQUAL], not
+ * `GL_GREATER`. Under strict `GL_GREATER` a fragment at exactly the depth already in the buffer is
+ * discarded, which silently deletes every altitude-0 map-anchored thing the moment the basemap
+ * ground exists beneath it -- the most ordinary frame a consumer writes. `GL_GEQUAL` keeps real
+ * occlusion wherever depths differ and resolves exact ties by draw order.
+ *
+ * This function still enables depth testing and still leaves [depthMask] **on** for the clear, which
+ * is what makes the per-frame depth clear take effect. What changed under ADR 0027 is that every
+ * map-regime draw inside [content] turns depth writes off for itself, because an exact-tie rule
+ * never covered the near-ties a moving camera produces. See
+ * [com.rohittp.reng.internal.gl.SceneContent] for the order that decides the map regime, and
+ * [drawGround] / [drawStickers] for the per-pass depth state.
  *
  * `GL_FRAMEBUFFER_SRGB` arrives **enabled** on Mesa's ES context and **disabled** on its desktop
  * core context — a pixel-affecting difference between two contexts on the same machine — so RenG

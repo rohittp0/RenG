@@ -1,5 +1,14 @@
 # Pass coplanar map content and fix the map regime draw order
 
+> **Amended by [ADR 0027](0027-let-the-map-regime-test-depth-without-writing-it.md).** The depth
+> comparison and the draw order below both stand. The ruling that the ground keeps writing depth does
+> **not**: a tie-break resolves exact ties only, and the near-ties a moving camera produces tore a
+> coplanar `Geometry` apart frame to frame and bisected every map-anchored billboard at nonzero pitch.
+> No draw in the map regime writes depth from ADR 0027 onward. The paragraph below beginning
+> "Three alternatives were considered and rejected" is kept as the record of what was weighed at the
+> time and is superseded on its third alternative; the closing paragraph about a pitched camera
+> ("which is correct") is the sentence ADR 0027 overturns.
+
 ADR 0024 settled the order *between* the two draw regimes and left the order *within* the map regime
 stated as arbitrary, on the reasoning that the depth buffer decides visibility among map-anchored things.
 That reasoning was correct only while the map regime had no ground in it. The depth comparison RenG has

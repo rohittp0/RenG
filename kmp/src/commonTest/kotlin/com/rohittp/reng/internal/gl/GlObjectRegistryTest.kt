@@ -135,6 +135,95 @@ class GlObjectRegistryTest {
         assertFalse(100 in binding.deletedNames, "the leased tile's GL name must never be deleted")
     }
 
+    // ---- Task E-H: defer() must honour a lease the same way eviction does ----------------------
+
+    @Test fun deferringALeasedTextureRetiresItInsteadOfQueuingItForDeletion() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4 * ONE_TILE_BYTES)
+        val key = tileKey(0)
+        val lease = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+
+        // The sequence a consumer-triggered free would take against a tile an in-flight draw is
+        // sampling. Nothing wires it today (see GlObjectRegistry.defer's KDoc), but the lease must
+        // outrank this deletion path exactly as it outranks eviction.
+        assertNull(
+            registry.defer(key, DeletionId(1L)),
+            "a leased texture must not produce a ledger entry the lifecycle machine would delete",
+        )
+
+        assertEquals(
+            GlObjectHandle(GlObjectType.TEXTURE, 100),
+            registry.resident(key),
+            "the draw still sampling this texture must still find it",
+        )
+        assertTrue(
+            registry.takeQueued(DeletionId(1L)).isEmpty(),
+            "no handle of a leased texture may be queued for deferred deletion",
+        )
+        assertTrue(binding.deletedNames.isEmpty(), "nothing may be deleted while the lease is open")
+
+        // The draw ends, the lease goes, and only now does the retired texture die.
+        registry.releaseLease(lease, binding)
+
+        assertEquals(listOf(100), binding.deletedNames, "the last release deletes the retired texture")
+        assertNull(registry.resident(key))
+        assertTrue(registry.liveKeys().isEmpty())
+    }
+
+    @Test fun aRetiredTextureSurvivesEveryLeaseButTheLast() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4 * ONE_TILE_BYTES)
+        val key = tileKey(0)
+        val first = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        val second = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
+
+        registry.defer(key, DeletionId(1L))
+        registry.releaseLease(first, binding)
+
+        assertTrue(binding.deletedNames.isEmpty(), "one released lease of two is not the last one")
+        assertNotNull(registry.resident(key))
+
+        registry.releaseLease(second, binding)
+        assertEquals(
+            listOf(100, 101),
+            binding.deletedNames,
+            "the last release deletes every handle the retired key still holds",
+        )
+    }
+
+    @Test fun renderCloseDeletesATextureWhoseDeletionALeaseIsStillDelaying() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4 * ONE_TILE_BYTES)
+        val key = tileKey(0)
+        registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.defer(key, DeletionId(1L))
+
+        // Exactly RenGRenderer.close()'s own sweep: every key liveKeys() still reports, deleted once.
+        registry.liveKeys().forEach { live -> deleteGlObjects(binding, registry.handles(live)) }
+
+        assertEquals(
+            listOf(100),
+            binding.deletedNames,
+            "a lease may delay a deletion, never survive the renderer that issued it",
+        )
+    }
+
+    @Test fun reRegisteringARetiredKeyRevivesIt() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4 * ONE_TILE_BYTES)
+        val key = tileKey(0)
+        val stale = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.defer(key, DeletionId(1L))
+
+        // The reload half of "accessing a freed resource reloads it": a fresh upload under the same key.
+        val reloaded = registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
+        registry.releaseLease(stale, binding)
+        registry.releaseLease(reloaded, binding)
+
+        assertTrue(binding.deletedNames.isEmpty(), "the reload cancels the pending deletion")
+        assertNotNull(registry.resident(key))
+    }
+
     @Test fun contextLossForgetsTexturesWhileTheDecodedImageStaysLeased() {
         val registry = GlObjectRegistry()
         val residentCache = ResidentCache()

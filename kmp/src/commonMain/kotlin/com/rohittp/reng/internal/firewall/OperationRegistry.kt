@@ -43,6 +43,7 @@ import com.rohittp.rentile.StoredRawResource as EngineStoredRawResource
 import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.TransportResponseMetadata as EngineTransportResponseMetadata
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
@@ -65,6 +66,41 @@ import kotlinx.coroutines.sync.withLock
  * ever invoked, every `(accessMode, locator, resourceClass, maximumResponseBytes)` route this
  * invocation may need. [executeTransport], [readStore], [writeStore], and [removeStore] are the
  * answer paths Rentile's own adapters call into.
+ *
+ * ## Concurrency
+ *
+ * **Every answer path here runs on a thread this object's writer does not control.** Rentile's
+ * `DefaultBasemapRasterizer.operation` runs each engine call as `scope.async { ... }` in the *engine's
+ * own* long-lived `Dispatchers.Default` scope rather than as a child of the caller's coroutine, and it
+ * fans a tile batch out at concurrency eight (ADR 0016's 256-tile batch). Two consequences follow, and
+ * both are load-bearing for everything below. Answer paths for different routes genuinely run in
+ * parallel with each other. And a worker can outlive the call that started it -- when the caller's own
+ * coroutine fails before awaiting, the `async` is already running -- so it can still be calling into a
+ * registry while a *later* invocation's driver is preregistering into one.
+ *
+ * Because of that, every piece of mutable state in this file is enumerated and given exactly one
+ * owner. Nothing here may be a bare `mutableMapOf` reachable from an answer path:
+ *
+ *  - the five route indices -- one immutable [RouteIndex] snapshot behind a `@Volatile` reference;
+ *    writers serialize on [routeIndexMutex], readers take no lock at all;
+ *  - `lastTransportDigestByRoute` -- `lastTransportDigestMutex`;
+ *  - `observedTileJsonByUrl` -- `tileJsonObservationMutex`;
+ *  - each of [transportJoin], [storeReadJoin], [storeWriteJoin] and [spritePairJoin] -- that
+ *    `SuspendJoin`'s own mutex, over its own `inFlight` map;
+ *  - [spriteRendezvous]'s slot table and each slot's fields -- that object's own mutex; a slot's
+ *    `arrived` is a `CompletableDeferred`, which is safe on its own.
+ *
+ * Everything else this class holds is immutable or stateless: `transport` and `store` are the
+ * consumer's own objects, and `resourceKeyDeriver`, `privateKeyResolver` and `sha256` are pure
+ * functions over their arguments with no fields that change.
+ *
+ * **The lock graph is a set of leaves, and stays one.** No lock in this file is ever acquired while
+ * another is held, so no cycle can exist and the order of acquisition never matters. Three facts keep
+ * that true: `SuspendJoin.run` releases its own mutex *before* running the block, so every lock taken
+ * inside a block is taken with nothing held; every critical section here is pure bookkeeping, with
+ * `complete`/`await` and every consumer call outside it; and the route indices are read with no lock
+ * whatsoever, which is what lets a lookup sit anywhere -- including inside a join block -- without
+ * ever nesting.
  */
 internal class OperationRegistry(
     private val transport: Transport,
@@ -74,25 +110,47 @@ internal class OperationRegistry(
 ) {
     private val resourceKeyDeriver = ResourceKeyDeriver(sha256)
 
-    // Every preregistered route, indexed three ways: by the private Rentile key (collision
-    // detection only -- ADR 0016's "detects static private Rentile key collisions"), by the exact
-    // (url, engine class) pair Transport requests carry, and by the (stableId, engine class) pair
-    // Store keys carry. A route absent from the relevant index fails closed rather than being
-    // forwarded -- this is the whole point of the firewall.
-    private val routeByPrivateKey = mutableMapOf<RentilePrivateKey, ResourceRouteKey>()
-    private val transportRoutes = mutableMapOf<TransportIndexKey, ResourceRouteKey>()
-    private val storeRoutes = mutableMapOf<StoreIndexKey, ResourceRouteKey>()
-
-    // The same `sha256Hex(withRedactedAuthenticationQuery(url))` digest Rentile embeds in every
+    // Every preregistered route, indexed five ways, as ONE immutable [RouteIndex] snapshot behind a
+    // volatile reference. [preregister] replaces that reference; every answer path reads it. A route
+    // absent from the relevant index fails closed rather than being forwarded -- this is the whole
+    // point of the firewall, so a reader that cannot see a route the writer already declared is a
+    // total, silent basemap outage rather than a slightly stale lookup.
+    //
+    // **Why a snapshot and not five plain maps.** The maps were plain `mutableMapOf`s, written on the
+    // coroutine that prepares and read from Rentile's own `Dispatchers.Default` workers with no
+    // synchronization and no safe-publication barrier of any kind. Preregistration is *incremental*
+    // ([BasemapEngineHost.registerRoutes] exists precisely so a style commit can declare the routes it
+    // only discovered mid-invocation), and Rentile's `DefaultBasemapRasterizer.operation` runs each
+    // engine call in the engine's *own* long-lived scope rather than as a child of the caller -- so a
+    // worker outliving the call that started it can genuinely read these maps while a later invocation
+    // is still writing them. That is a data race, and an unsynchronized `HashMap` read racing a
+    // structural insertion is entitled to answer `null` for a key that is present.
+    //
+    // **Why this shape.** Readers are the hot side -- one lookup per engine transport call and two per
+    // engine store call, over ADR 0016's 256-tile batch -- and they must stay non-suspending so that
+    // [renGResourceKeyForEngineDigest] can keep its plain (non-`suspend`) signature for
+    // [BasemapEngineHost]'s failure-translation path. A single volatile read of a fully built,
+    // never-again-mutated snapshot gives them the happens-before edge with no lock at all, which also
+    // makes the leaf-lock rule below trivially true on the read side: readers hold nothing.
+    // [routeIndexMutex] serializes writers alone, so two concurrent [preregister] batches cannot lose
+    // each other's routes the way a bare read-modify-write of a volatile would.
+    //
+    // The five indices are: by the private Rentile key (collision detection only -- ADR 0016's "detects
+    // static private Rentile key collisions"); by the exact (url, engine class) pair Transport requests
+    // carry; by the (stableId, engine class) pair Store keys carry; by the
+    // `sha256Hex(withRedactedAuthenticationQuery(url))` digest Rentile embeds in every
     // `ResourceAcquisitionException.sanitizedResourceId` and `ResourceDecodeException.sanitizedResourceId`,
-    // read in reverse: engine digest -> the RenG route it names. [BasemapEngineHost] needs this because
-    // that digest is a FOREIGN namespace -- a consumer handed one as a `ResourceSelector.ByKey` gets a
-    // silent empty selection rather than an error -- and this registry is the only place that already
-    // holds both the locator and the digest derived from it. Indexed for every class Rentile can name in
-    // a failure, which is one wider than [storeRoutes]: [ResourceClass.BASEMAP_STYLE] has no Rentile
-    // raw-store entry but `acquireRemoteStyle` still reports `sha256Hex(redacted url)` on a style
-    // transport failure.
-    private val routesByEngineDigest = mutableMapOf<EngineDigestKey, ResourceRouteKey>()
+    // read in reverse -- [BasemapEngineHost] needs that because the digest is a FOREIGN namespace (a
+    // consumer handed one as a `ResourceSelector.ByKey` gets a silent empty selection rather than an
+    // error) and this registry is the only place holding both the locator and the digest derived from
+    // it, indexed one class wider than the store index because [ResourceClass.BASEMAP_STYLE] has no
+    // Rentile raw-store entry yet `acquireRemoteStyle` still reports `sha256Hex(redacted url)` on a
+    // style transport failure; and by sprite member, so [approveSpriteMemberWrite] can name a member's
+    // sibling without guessing.
+    private val routeIndexMutex = Mutex()
+
+    @Volatile
+    private var routeIndex: RouteIndex = RouteIndex.EMPTY
 
     // The digest of the most recent successfully latched Transport response for a route, so a
     // subsequent Store write can be checked against what the engine actually fetched (ADR 0016: "a
@@ -152,13 +210,6 @@ internal class OperationRegistry(
     private val storeReadJoin = SuspendJoin<ResourceRouteKey, EngineStoredRawResource?>()
     private val storeWriteJoin = SuspendJoin<ResourceRouteKey, Unit>()
 
-    // The sprite pair's two members, indexed by the base url Rentile's own `appendSpriteExtension`
-    // derived both of them from, so [approveSpriteMemberWrite] can name a member's sibling without
-    // guessing. Written only from [preregister] -- which [BasemapEngineHost.withOperation] runs to
-    // completion before the engine can call any answer path -- exactly like the three route indices
-    // above, which is why it needs no guard while [spriteRendezvous] does.
-    private val spriteMemberRoutes = mutableMapOf<SpriteMemberKey, ResourceRouteKey>()
-
     // ADR 0016: "RenG jointly prevalidates the complete sprite JSON-and-PNG pair before writing either
     // fetched member." Per-member validation cannot see the one check that actually matters here --
     // whether each atlas entry's rect lies inside the atlas image -- and Rentile writes each member
@@ -170,48 +221,86 @@ internal class OperationRegistry(
     private val spritePairJoin = SuspendJoin<SpriteGroupKey, Boolean>()
 
     /**
-     * Declares one static prelookup route this invocation may need. Idempotent for an identical
+     * Declares the static prelookup routes this invocation may need. Idempotent for an identical
      * repeat registration (two occurrences joining the same route); throws if a second, genuinely
-     * different route would collide with an already-registered one on any of the three indices --
+     * different route would collide with an already-registered one on any of the five indices --
      * every such collision is exactly the "two different resources answered by one engine call"
      * failure mode ADR 0016 exists to rule out, so it is caught here rather than at answer time.
+     *
+     * **A batch, not one route at a time**, and that is a cost decision rather than a convenience.
+     * Publishing an immutable snapshot means each call copies the whole index, so registering a
+     * 512-instance tile plan one route at a time would be quadratic in the plan size for no benefit;
+     * every caller already holds a list ([BasemapEngineHost.registerRoutes] and
+     * [BasemapEngineHost.withOperation] both take one).
+     *
+     * **All-or-nothing.** A collision throws before anything is published, so a batch that fails
+     * leaves the index exactly as it was rather than half-applied. That is strictly safer than the
+     * partial application it replaces: a half-applied batch would let an engine call this registry has
+     * already decided to refuse be answered for whichever routes happened to land first.
+     *
+     * `suspend` because the write must serialize against other writers, and [routeIndexMutex] is the
+     * only lock in this file's discipline that can do that. Every caller is already suspending.
      */
-    fun preregister(route: ResourceRouteKey) {
-        val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
-        requireNoCollision(routeByPrivateKey[privateKey], route)
-        routeByPrivateKey[privateKey] = route
+    suspend fun preregister(routes: List<ResourceRouteKey>) {
+        if (routes.isEmpty()) return
+        routeIndexMutex.withLock {
+            val current = routeIndex
+            val byPrivateKey = current.byPrivateKey.toMutableMap()
+            val transportRoutes = current.transportRoutes.toMutableMap()
+            val storeRoutes = current.storeRoutes.toMutableMap()
+            val byEngineDigest = current.byEngineDigest.toMutableMap()
+            val spriteMemberRoutes = current.spriteMemberRoutes.toMutableMap()
 
-        val transportClass = engineTransportClassFor(route.resourceClass)
-        if (transportClass != null) {
-            val transportIndex = TransportIndexKey(route.locator.value, transportClass)
-            requireNoCollision(transportRoutes[transportIndex], route)
-            transportRoutes[transportIndex] = route
-        }
+            for (route in routes) {
+                val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
+                requireNoCollision(byPrivateKey[privateKey], route)
+                byPrivateKey[privateKey] = route
 
-        val storeClass = engineKeyedResourceClassOf(route.resourceClass)
-        // Computed once and shared by the two indices below, and not at all for the three classes the
-        // engine never touches (sticker, GLB, model texture) -- a pure-Kotlin SHA-256 per route adds up
-        // across a 512-instance tile plan.
-        val expectedStableId = if (storeClass != null || transportClass != null) {
-            redactedLocatorHex(route.locator.value)
-        } else {
-            null
-        }
-        if (storeClass != null) {
-            val storeIndex = StoreIndexKey(requireNotNull(expectedStableId), storeClass)
-            requireNoCollision(storeRoutes[storeIndex], route)
-            storeRoutes[storeIndex] = route
-        }
+                val transportClass = engineTransportClassFor(route.resourceClass)
+                if (transportClass != null) {
+                    val transportIndex = TransportIndexKey(route.locator.value, transportClass)
+                    requireNoCollision(transportRoutes[transportIndex], route)
+                    transportRoutes[transportIndex] = route
+                }
 
-        if (transportClass != null) {
-            val digestIndex = EngineDigestKey(requireNotNull(expectedStableId), route.resourceClass)
-            requireNoCollision(routesByEngineDigest[digestIndex], route)
-            routesByEngineDigest[digestIndex] = route
-        }
+                val storeClass = engineKeyedResourceClassOf(route.resourceClass)
+                // Computed once and shared by the two indices below, and not at all for the three
+                // classes the engine never touches (sticker, GLB, model texture) -- a pure-Kotlin
+                // SHA-256 per route adds up across a 512-instance tile plan.
+                val expectedStableId = if (storeClass != null || transportClass != null) {
+                    redactedLocatorHex(route.locator.value)
+                } else {
+                    null
+                }
+                if (storeClass != null) {
+                    val storeIndex = StoreIndexKey(requireNotNull(expectedStableId), storeClass)
+                    requireNoCollision(storeRoutes[storeIndex], route)
+                    storeRoutes[storeIndex] = route
+                }
 
-        spriteMemberKeyOf(route)?.let { member ->
-            requireNoCollision(spriteMemberRoutes[member], route)
-            spriteMemberRoutes[member] = route
+                if (transportClass != null) {
+                    val digestIndex = EngineDigestKey(requireNotNull(expectedStableId), route.resourceClass)
+                    requireNoCollision(byEngineDigest[digestIndex], route)
+                    byEngineDigest[digestIndex] = route
+                }
+
+                spriteMemberKeyOf(route)?.let { member ->
+                    requireNoCollision(spriteMemberRoutes[member], route)
+                    spriteMemberRoutes[member] = route
+                }
+            }
+
+            // The one publication. Every map above was built from a private copy and is handed over
+            // here without another reference to it surviving, so the snapshot a reader observes is
+            // complete and never mutated again -- which is exactly what makes the volatile read on the
+            // answer paths sufficient.
+            routeIndex = RouteIndex(
+                byPrivateKey = byPrivateKey,
+                transportRoutes = transportRoutes,
+                storeRoutes = storeRoutes,
+                byEngineDigest = byEngineDigest,
+                spriteMemberRoutes = spriteMemberRoutes,
+            )
         }
     }
 
@@ -222,7 +311,7 @@ internal class OperationRegistry(
      * belongs to a resource this invocation never routed.
      */
     fun renGResourceKeyForEngineDigest(resourceClass: ResourceClass, engineDigest: String): ResourceKey? {
-        val route = routesByEngineDigest[EngineDigestKey(engineDigest, resourceClass)] ?: return null
+        val route = routeIndex.byEngineDigest[EngineDigestKey(engineDigest, resourceClass)] ?: return null
         return renGResourceKeyFor(route)
     }
 
@@ -233,7 +322,7 @@ internal class OperationRegistry(
     // ---- Transport ------------------------------------------------------------------------------
 
     suspend fun executeTransport(request: EngineTransportRequest): EngineTransportResponse {
-        val route = transportRoutes[TransportIndexKey(request.url, request.resourceClass)]
+        val route = routeIndex.transportRoutes[TransportIndexKey(request.url, request.resourceClass)]
             ?: throw ambiguousRouteFailure()
         val latchKey = TransportLatchKey(
             route = route,
@@ -280,7 +369,7 @@ internal class OperationRegistry(
     // ---- Store ----------------------------------------------------------------------------------
 
     suspend fun readStore(key: EngineRawResourceKey): EngineStoredRawResource? {
-        val route = storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)] ?: throw ambiguousRouteFailure()
+        val route = routeIndex.storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)] ?: throw ambiguousRouteFailure()
         return storeReadJoin.run(route) {
             try {
                 val stored = store.read(RenGRawResourceKey(stableId = key.stableId, resourceClass = route.resourceClass))
@@ -320,7 +409,7 @@ internal class OperationRegistry(
     }
 
     suspend fun writeStore(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
-        val route = storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)] ?: throw ambiguousRouteFailure()
+        val route = routeIndex.storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)] ?: throw ambiguousRouteFailure()
         // Digest self-consistency and the byte ceiling are NOT checked here: `copyValidStoredResource`
         // below enforces both, and throws the identical failure. Checking them twice cost a second
         // pure-Kotlin SHA-256 over the same bytes on every engine store write.
@@ -345,11 +434,34 @@ internal class OperationRegistry(
         val renGMetadata = resource.metadata.toRenGMetadata()
         if (!isValidMetadata(renGMetadata)) return
 
+        val bytes = resource.bytes
+        // An empty body is a CONTENT verdict too, and it is the one `copyValidStoredResource` below
+        // cannot be allowed to answer, because it answers every rejection identically and this one is
+        // provably not the engine's fault: the latched-digest check immediately above already proved
+        // these are exactly the bytes RenG's own transport returned for this route.
+        //
+        // Empty bodies are ordinary in production basemaps. A tile server answers `204 No Content` for
+        // every tile of a source that has no data there -- MapTiler's `ocean` source does it for every
+        // inland tile, and the same holds for contour, hillshade and terrain sources at their edges --
+        // and an empty vector tile is a well-formed empty protobuf message that Rentile renders as an
+        // empty tile. Refusing the write instead threw `STORE_WRITE_FAILED` out of Rentile's own
+        // acquirer, which cancelled the whole batch scope, so a single 204 anywhere in a frame's tile
+        // cover failed the entire basemap for that frame.
+        //
+        // Declining is the same legal answer the metadata and class-specific gates already give: the
+        // engine's `write` returns `Unit`, its result is never read, and the engine proceeds with the
+        // bytes it already holds. Nothing is cached, which costs nothing -- `copyValidStoredResource`
+        // is the read path's validator too, so an empty record would be answered as a miss anyway.
+        if (bytes.isEmpty()) {
+            storeWriteJoin.run(route) { markSpriteMemberWithoutContent(route) }
+            return
+        }
+
         // What remains IS integrity: `copyValidStoredResource` re-derives SHA-256 over the bytes, so a
         // rejection here means the engine kept the latched digest and presented different bytes.
         val validated = copyValidStoredResource(
             StoredRawResource(
-                bytes = resource.bytes,
+                bytes = bytes,
                 contentDigest = resource.contentDigest,
                 metadata = renGMetadata,
             ),
@@ -468,7 +580,7 @@ internal class OperationRegistry(
     private suspend fun approveSpriteMemberWrite(route: ResourceRouteKey, validated: StoredRawResource): Boolean {
         val member = spriteMemberKeyOf(route) ?: return true
         val sibling = SpriteMemberKey(member.group, siblingSpriteClassOf(member.resourceClass))
-        if (spriteMemberRoutes[sibling] == null) return false
+        if (routeIndex.spriteMemberRoutes[sibling] == null) return false
 
         val mine = SpriteMemberContent(validated.contentDigest, validated.bytes)
         // A second, different content for one member inside one invocation means the consumer Store and
@@ -627,6 +739,28 @@ internal class OperationRegistry(
             resourceKey = renGResourceKeyFor(route),
         ),
     )
+}
+
+/**
+ * One complete, immutable view of everything [OperationRegistry.preregister] has declared so far,
+ * indexed the five ways the answer paths ask for it. Built entirely inside
+ * [OperationRegistry.preregister]'s critical section and published by a single volatile write, so a
+ * reader either sees a whole batch or none of it and never observes a half-built map.
+ *
+ * The maps are typed `Map`, are never handed out, and are never written after construction. That is
+ * the property the volatile publication rests on: a snapshot's contents cannot change under a reader,
+ * so the one happens-before edge the volatile read establishes covers all of it.
+ */
+private class RouteIndex(
+    val byPrivateKey: Map<RentilePrivateKey, ResourceRouteKey>,
+    val transportRoutes: Map<TransportIndexKey, ResourceRouteKey>,
+    val storeRoutes: Map<StoreIndexKey, ResourceRouteKey>,
+    val byEngineDigest: Map<EngineDigestKey, ResourceRouteKey>,
+    val spriteMemberRoutes: Map<SpriteMemberKey, ResourceRouteKey>,
+) {
+    companion object {
+        val EMPTY = RouteIndex(emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap())
+    }
 }
 
 /** The exact `(url, engine resource class)` pair Rentile's own [EngineTransportRequest] carries. */

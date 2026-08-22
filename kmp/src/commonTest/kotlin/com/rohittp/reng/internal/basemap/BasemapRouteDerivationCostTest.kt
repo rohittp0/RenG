@@ -26,6 +26,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.time.TimeSource
+import kotlinx.coroutines.runBlocking
 
 /**
  * What one frame's tile-route phase actually costs, measured rather than assumed.
@@ -111,8 +112,11 @@ import kotlin.time.TimeSource
  */
 class BasemapRouteDerivationCostTest {
 
+    // `runBlocking` rather than `runTest`: `preregister` is `suspend` (it serializes writers on the
+    // registry's own mutex), and this test measures wall-clock cost, so it runs on a real dispatcher
+    // rather than a virtual-time scheduler.
     @Test
-    fun derivesAndPreregistersAWholeFramesTileRoutesAndReportsTheCost() {
+    fun derivesAndPreregistersAWholeFramesTileRoutesAndReportsTheCost() = runBlocking {
         val manifest = threeSourceManifest()
 
         val realistic = measure(manifest, tileCount = REALISTIC_VIEWPORT_TILES)
@@ -270,7 +274,7 @@ class BasemapRouteDerivationCostTest {
         return THREE_SOURCE_STYLE.removeSuffix(""""layers":[]}""") + """"layers":[$layers]}"""
     }
 
-    private fun measure(manifest: BasemapStyleManifest, tileCount: Int): Measurement {
+    private suspend fun measure(manifest: BasemapStyleManifest, tileCount: Int): Measurement {
         val tiles = viewportTiles(tileCount)
         // One untimed pass first. This phase runs on every frame, so its steady-state cost is what
         // matters; a first-call measurement on a cold JIT (androidHostTest) or a cold code page
@@ -285,7 +289,7 @@ class BasemapRouteDerivationCostTest {
         val started = TimeSource.Monotonic.markNow()
         val routes = tileTimeRoutes(manifest, tiles, ResourceAccessMode.NORMAL, LIMITS)
         val derived = started.elapsedNow()
-        routes.forEach(registry::preregister)
+        registry.preregister(routes)
         val total = started.elapsedNow()
         return Measurement(
             routeCount = routes.size,
@@ -294,14 +298,14 @@ class BasemapRouteDerivationCostTest {
         )
     }
 
-    private fun warmUp(manifest: BasemapStyleManifest, tiles: List<CanonicalBasemapTile>) {
+    private suspend fun warmUp(manifest: BasemapStyleManifest, tiles: List<CanonicalBasemapTile>) {
         val registry = OperationRegistry(
             transport = NoTransport,
             store = NoStore,
             privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
             sha256 = PureKotlinSha256,
         )
-        tileTimeRoutes(manifest, tiles, ResourceAccessMode.NORMAL, LIMITS).forEach(registry::preregister)
+        registry.preregister(tileTimeRoutes(manifest, tiles, ResourceAccessMode.NORMAL, LIMITS))
     }
 
     private class Measurement(val routeCount: Int, val deriveMicros: Long, val totalMicros: Long)

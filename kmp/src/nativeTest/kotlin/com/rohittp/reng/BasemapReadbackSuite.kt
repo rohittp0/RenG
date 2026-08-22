@@ -43,16 +43,27 @@ import kotlinx.coroutines.runBlocking
  * - a dead `drawBasemap = false` (the negative case, which is also what stops the other three
  *   passing vacuously);
  * - ADR 0025's depth ruling in pixels: two coplanar altitude-0 map-anchored stickers over the ground,
- *   where the later-declared one must win.
+ *   where the later-declared one must win;
+ * - ADR 0027's depth ruling in pixels, under **pitched** cameras: a coplanar altitude-0 `Geometry`
+ *   must keep every pixel the ground covers, at every camera in a sweep, and a map-anchored
+ *   billboard must be the same size at pitch as it is at pitch 0.
  *
  * **What it does NOT catch, stated so nobody reads more into a green run than is there:**
  * sub-pixel tile placement; filtering quality; blend correctness at tile edges, which is exactly
- * where it deliberately does not sample; the antimeridian seam and world-copy dedup (this camera
- * straddles neither); a pitched camera's near-ground coverage; anything about geometries or models
- * composited over the ground; and **any regression that preserves the four quadrant means and the
- * four sample colours** — which is why the fixture is asymmetric in both axes, and why "add a fifth
- * sample point" is the cheapest next increment. It stores no baseline and compares no image, so it
- * says nothing at all about how the frame *looks*; golden images remain Cycle J's.
+ * where it deliberately does not sample; the antimeridian seam and world-copy dedup (the fixture
+ * camera straddles neither); models; and **any regression that preserves the four quadrant means
+ * and the four sample colours** — which is why the fixture is asymmetric in both axes, and why "add
+ * a fifth sample point" is the cheapest next increment. It stores no baseline and compares no
+ * image, so it says nothing at all about how the frame *looks*; golden images remain Cycle J's.
+ *
+ * **One camera is not a sweep.** Two defects shipped past 942 green tests and were found by watching
+ * a video: a coplanar `Geometry` losing up to 100% of its pixels between consecutive frames, and a
+ * map-anchored billboard sliced in half along its own anchor row. Both are invisible at pitch 0 —
+ * the one camera where a coplanar surface and the ground land on bit-identical window depth — and
+ * every fixture in this file used to be pitch 0. The two pitched cases below therefore sweep the
+ * camera rather than sample it, and assert a *quantity* (which pixels, how many) rather than mere
+ * presence, because "the quad appeared in this one frame" is exactly the assertion both defects
+ * would have passed.
  *
  * **No baselines, and no shared decoder between the two sides.** The expected colours are constants
  * written by hand from the fixture PNGs; the actual side is a raw `glReadPixels`. Nothing on the
@@ -81,6 +92,10 @@ internal fun runBasemapReadbackSuite(
         assertGroundCoversTheFrameInTheFixturesOwnArrangement(binding, renderer, renderTarget, target, dialect)
         assertDrawBasemapFalseLeavesTheFrameUntouched(binding, renderer, renderTarget, target)
         assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(binding, renderer, renderTarget, target)
+        assertACoplanarGeometryKeepsEveryGroundCoveredPixelAcrossACameraSweep(
+            binding, renderer, renderTarget, target,
+        )
+        assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(binding, renderer, renderTarget, target)
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target))
@@ -162,16 +177,22 @@ private fun assertDrawBasemapFalseLeavesTheFrameUntouched(
 }
 
 /**
- * ADR 0025's contract, in pixels, and the only place it is enforced.
+ * ADR 0025's ordering contract, in pixels, and the only place it is enforced.
  *
  * Both stickers are map-anchored at the camera's own ground anchor with altitude 0, under a pitch-0
- * camera — so both quads lie exactly in the ground plane, at bit-identical window depth (their
- * model-view-projection matrices differ only in terms the depth row never reads). Three distinct
- * outcomes are therefore distinguishable at one sample point:
- * - the **second** sticker's colour: `GL_GEQUAL` plus ground-first plus declaration order — correct;
- * - the **first** sticker's colour: the map regime drew in reverse, so the tie resolved backwards;
- * - the **ground's** colour: the depth function is still `GL_GREATER`, so both coplanar stickers
- *   failed the test against the ground and vanished — the silent deletion ADR 0025 exists to stop.
+ * camera — so both quads lie exactly in the ground plane. Three distinct outcomes are therefore
+ * distinguishable at one sample point:
+ * - the **second** sticker's colour: ground-first plus declaration order — correct;
+ * - the **first** sticker's colour: the map regime drew in reverse, so the order resolved backwards;
+ * - the **ground's** colour: a coplanar altitude-0 sticker lost the depth test to the ground and
+ *   vanished — the silent deletion ADR 0025 exists to stop.
+ *
+ * This case predates ADR 0027 and is deliberately kept rather than folded into the pitched sweeps
+ * below: it is the *ordering* half of the contract, which ADR 0027 leaves standing and in fact
+ * strengthens from "later-declared wins a tie" to "later-declared wins". Under ADR 0027 the third
+ * outcome can no longer be produced by the depth function alone — nothing on the map plane writes
+ * depth for a sticker to lose to — but it remains the right thing to name in the failure message,
+ * because it is still what a consumer would see if some future pass started writing depth again.
  */
 private fun assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(
     binding: GlBinding,
@@ -199,6 +220,169 @@ private fun assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(
                 ", ground here = " + NORTH_WEST_TILE.describe() + ")",
         )
     }
+}
+
+/**
+ * ADR 0027's first defect, in pixels, under cameras ADR 0025's own evidence never looked at.
+ *
+ * A `Geometry` at altitude 0 is coplanar with the basemap ground by construction — `CONTEXT.md`
+ * calls painting a region at altitude 0 the ordinary thing a consumer does. ADR 0025 made the
+ * *exact* tie pass and stopped there, having verified on a pitch-0 camera that the two surfaces land
+ * on bit-identical window depth. They do, and only there: the ground's depth comes from
+ * `projection * view * mapSpaceModel` while a geometry corner's comes from `projection * view`
+ * applied to an already-camera-relative corner, so under any other camera the two differ by a float
+ * epsilon whose **sign changes as the camera moves**. Measured on a real map style before this
+ * changed, one coplanar quad's pixel count over fifteen consecutive frames ran 3609, 7026, 9468,
+ * 1257, 25, 0, 8607, 0, 6501 — twice erased outright.
+ *
+ * **The assertion is per-pixel, not a count, and it is a three-way render.** For each camera in
+ * [DEPTH_SWEEP_CAMERAS] the same geometry is drawn three times: with no ground, over ground with no
+ * geometry, and over ground with the geometry. Every pixel that the geometry paints on its own AND
+ * that the ground covers on its own must still be the geometry's colour in the combined frame. That
+ * phrasing is deliberate:
+ * - comparing pixel *sets* rather than totals means a quad that loses one region and gains another
+ *   cannot cancel out to a passing count;
+ * - intersecting with the ground-only frame is what makes the case non-vacuous — a pixel above the
+ *   horizon has no ground beneath it and proves nothing, so it is excluded rather than allowed to
+ *   dilute the result;
+ * - and requiring a floor on both the geometry's own pixels and the covered fraction stops the whole
+ *   assertion passing on an empty intersection.
+ *
+ * The sweep varies pitch and bearing together. Pitch is what the defect needs; bearing is what stops
+ * a fix that happens to work along one screen axis reading as a fix.
+ */
+private fun assertACoplanarGeometryKeepsEveryGroundCoveredPixelAcrossACameraSweep(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+) {
+    var frameIndex = 100L
+    DEPTH_SWEEP_CAMERAS.forEach { camera ->
+        val geometryOnly = clearAndDraw(
+            binding, renderer, renderTarget, targetFramebuffer,
+            FramePlan(
+                frameIndex = frameIndex++,
+                camera = camera,
+                drawBasemap = false,
+                geometries = listOf(coplanarGeometry()),
+            ),
+        )
+        val groundOnly = clearAndDraw(
+            binding, renderer, renderTarget, targetFramebuffer,
+            FramePlan(frameIndex = frameIndex++, camera = camera, drawBasemap = true),
+        )
+        val both = clearAndDraw(
+            binding, renderer, renderTarget, targetFramebuffer,
+            FramePlan(
+                frameIndex = frameIndex++,
+                camera = camera,
+                drawBasemap = true,
+                geometries = listOf(coplanarGeometry()),
+            ),
+        )
+
+        val where = "pitch ${camera.pitch} bearing ${camera.bearing}"
+        var painted = 0
+        var covered = 0
+        var kept = 0
+        for (y in INTERIOR) {
+            for (x in INTERIOR) {
+                if (!geometryOnly.at(x, y).isCloseTo(COPLANAR_GEOMETRY)) continue
+                painted += 1
+                if (groundOnly.at(x, y).isCloseTo(ABSENT)) continue
+                covered += 1
+                if (both.at(x, y).isCloseTo(COPLANAR_GEOMETRY)) kept += 1
+            }
+        }
+
+        assertTrue(
+            painted >= MINIMUM_SWEEP_GEOMETRY_PIXELS,
+            "at $where the coplanar geometry drew only $painted pixels with no ground beneath it, " +
+                "so this camera proves nothing; the fixture must keep the quad on screen",
+        )
+        assertTrue(
+            covered * 2 >= painted,
+            "at $where only $covered of the geometry's $painted pixels have ground beneath them, " +
+                "so the ground is not actually under the quad and the case is vacuous",
+        )
+        assertEquals(
+            covered,
+            kept,
+            "at $where the ground deleted ${covered - kept} of the $covered ground-covered pixels " +
+                "of a coplanar altitude-0 geometry (ADR 0027: no map-regime draw writes depth, so " +
+                "nothing on the map plane can win or lose a near-tie against anything else on it)",
+        )
+    }
+}
+
+/**
+ * ADR 0027's second defect, in pixels: a map-anchored billboard must be the same size at pitch as at
+ * pitch 0.
+ *
+ * A map-anchored sticker with `SCREEN` rotation is `CONTEXT.md`'s billboard — a screen-parallel quad
+ * pinned to a coordinate — so every one of its fragments carries the anchor's single depth, while
+ * the map plane it stands on has depth varying down the screen. Below the anchor row the plane is
+ * nearer, so under any nonzero pitch the depth test used to delete the lower half of the quad along
+ * a hard horizontal line through the anchor. ADR 0025's tie rule rescued exactly the anchor row and
+ * no other. Measured before this changed, the visible half of one billboard shrank from a 41x40
+ * bounding box to 39x19 — the width intact, the height halved.
+ *
+ * **Why an exact-count assertion is legitimate here rather than a tolerance-heavy one.** The sticker
+ * is anchored at the camera's own ground anchor, and [resolveMercatorCamera] orbits that anchor at a
+ * fixed [ResolvedMercatorCamera.cameraDistanceLogicalPixels] whatever the pitch, so the anchor's
+ * view-space position is `(0, 0, -distance)` at every pitch in the sweep. With `SCREEN` rotation and
+ * `SCREEN` scale the quad's whole model-view-projection matrix is therefore *identical* across the
+ * sweep, and the only thing that differs between these frames is the ground behind it. A pitched
+ * count that differs from the pitch-0 count at all is the depth buffer eating the billboard; it
+ * cannot be projection drift.
+ *
+ * A small tolerance is allowed anyway, because a driver is free to rasterise the same quad over an
+ * opaque ground of a different colour with a boundary pixel resolved differently.
+ */
+private fun assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+) {
+    var frameIndex = 200L
+    val counts = BILLBOARD_PITCHES.map { pitch ->
+        val frame = clearAndDraw(
+            binding, renderer, renderTarget, targetFramebuffer,
+            FramePlan(
+                frameIndex = frameIndex++,
+                camera = sweepCamera(pitch = pitch, bearing = 0.0),
+                drawBasemap = true,
+                stickers = listOf(
+                    Sticker(
+                        placement = coplanarGroundPlacement(),
+                        image = ResourceLocator(SECOND_STICKER_URL),
+                    ),
+                ),
+            ),
+        )
+        pitch to frame.count { it.isCloseTo(SECOND_STICKER) }
+    }
+
+    val (levelPitch, levelCount) = counts.first()
+    assertEquals(0.0, levelPitch, "the sweep's first camera must be the pitch-0 reference")
+    assertTrue(
+        levelCount >= MINIMUM_BILLBOARD_PIXELS,
+        "the pitch-0 billboard drew only $levelCount pixels, so every later comparison is vacuous",
+    )
+    val tolerance = maxOf(2, levelCount / 50)
+    counts.drop(1).forEach { (pitch, count) ->
+        assertTrue(
+            abs(count - levelCount) <= tolerance,
+            "the map-anchored billboard is $count pixels at pitch $pitch against $levelCount at " +
+                "pitch 0 (tolerance $tolerance). Its model-view-projection matrix is identical at " +
+                "every pitch in this sweep, so a difference is the ground beneath it winning the " +
+                "depth test against a screen-parallel quad — the bisection ADR 0027 removes by " +
+                "taking depth writes off every map-regime draw.",
+        )
+    }
+    println("RenG billboard-at-pitch readback: " + counts.joinToString(" ") { "${it.first}=${it.second}" })
 }
 
 // ---- harness -------------------------------------------------------------------------------------
@@ -362,6 +546,29 @@ private val DECOY_GREY: IntArray = intArrayOf(128, 128, 128, 255)
 private val FIRST_STICKER: IntArray = intArrayOf(255, 0, 255, 255)
 private val SECOND_STICKER: IntArray = intArrayOf(255, 128, 0, 255)
 
+/**
+ * What [COPLANAR_GEOMETRY_FRAGMENT_SOURCE] paints, opaque.
+ *
+ * Opaque on purpose. `drawGeometry` runs a consumer's own program and establishes no blend state of
+ * its own, so a geometry-only frame inherits whatever blend function was last set while a
+ * geometry-over-ground frame inherits `drawGround`'s premultiplied one. At `alpha = 1` every one of
+ * those functions — premultiplied, straight, and blending disabled — returns the source colour
+ * unchanged, so the pixel-set comparison in the sweep is comparing depth behaviour and nothing else.
+ */
+private val COPLANAR_GEOMETRY: IntArray = intArrayOf(0, 255, 128, 255)
+
+/**
+ * Served for any tile url inside the fixture's own template that the four named tiles do not cover.
+ *
+ * A pitched camera sees ground the pitch-0 fixture never reaches, and [ReadbackTransport] used to
+ * fail closed on the first such url. This colour is deliberately not any expected sample value, so
+ * the fallback cannot rescue a wrong-url regression in
+ * [assertGroundCoversTheFrameInTheFixturesOwnArrangement]: a transposed index there now yields this
+ * purple at a named sample and the failure message names it, rather than the fallback quietly
+ * serving a colour that happens to match.
+ */
+private val HORIZON_FILLER_TILE: IntArray = intArrayOf(96, 32, 160, 255)
+
 private val FIXTURE_COLOURS: List<Pair<String, IntArray>> = listOf(
     "north-west tile" to NORTH_WEST_TILE,
     "north-east tile" to NORTH_EAST_TILE,
@@ -372,6 +579,8 @@ private val FIXTURE_COLOURS: List<Pair<String, IntArray>> = listOf(
     "decoy grey" to DECOY_GREY,
     "first sticker" to FIRST_STICKER,
     "second sticker" to SECOND_STICKER,
+    "coplanar geometry" to COPLANAR_GEOMETRY,
+    "horizon filler tile" to HORIZON_FILLER_TILE,
     "absent" to ABSENT,
 )
 
@@ -414,6 +623,87 @@ private fun coplanarGroundPlacement(): Placement = Placement(
 )
 
 /**
+ * The cameras the coplanar sweep runs. Pitch is the axis the defect lives on; bearing moves with it
+ * so a fix that only happens to work along one screen axis cannot read as a fix.
+ *
+ * Pitch stops at 55 degrees. The projection's vertical field of view is 45 degrees
+ * (`FOCAL_LENGTH_SCALE = 1 + sqrt(2)`), so at 55 degrees the top screen row still looks 77.5 degrees
+ * from nadir — below the horizon, and therefore still ground rather than sky. Past about 67 degrees
+ * the top of the frame stops hitting the ground at all and the sweep would be measuring the horizon
+ * clip instead of the depth rule.
+ */
+private val DEPTH_SWEEP_CAMERAS: List<Camera> = listOf(
+    sweepCamera(pitch = 0.0, bearing = 0.0),
+    sweepCamera(pitch = 15.0, bearing = 37.0),
+    sweepCamera(pitch = 30.0, bearing = 113.0),
+    sweepCamera(pitch = 45.0, bearing = 206.0),
+    sweepCamera(pitch = 55.0, bearing = 301.0),
+)
+
+/**
+ * [styleCamera] moved off pitch 0 and bearing 0. `Camera` is not a data class — construction
+ * canonicalizes, so there is no `copy` — and the fixture's latitude, longitude and zoom are repeated
+ * here rather than hardcoded a second time somewhere else.
+ */
+private fun sweepCamera(pitch: Double, bearing: Double): Camera {
+    val level = styleCamera()
+    return Camera(
+        latitude = level.latitude,
+        unwrappedLongitude = level.unwrappedLongitude,
+        zoom = level.zoom,
+        bearing = bearing,
+        pitch = pitch,
+    )
+}
+
+/** The pitches the billboard sweep runs, pitch 0 first because every later camera is compared to it. */
+private val BILLBOARD_PITCHES: List<Double> = listOf(0.0, 15.0, 30.0, 45.0, 55.0)
+
+/**
+ * A floor on the coplanar quad's own footprint, so a camera that has swung the fixture off screen
+ * fails loudly instead of passing on an empty comparison. The quad covers thousands of pixels of the
+ * 128x128 frame at every camera in [DEPTH_SWEEP_CAMERAS]; this is an order of magnitude below that.
+ */
+private const val MINIMUM_SWEEP_GEOMETRY_PIXELS: Int = 200
+
+/** The same floor for the billboard: its 2x2 image at scale 16 is a 32x32 output-pixel quad. */
+private const val MINIMUM_BILLBOARD_PIXELS: Int = 700
+
+/**
+ * An altitude-0 rectangle around the fixture camera's own anchor — `CONTEXT.md`'s ordinary case, a
+ * region painted flat on the ground — sized to stay well inside the frame at every camera in
+ * [DEPTH_SWEEP_CAMERAS]. Latitude runs north-to-south and longitude west-to-east, as `Geometry`
+ * requires.
+ */
+private fun coplanarGeometry(): Geometry = Geometry(
+    topLeft = Vector3(-54.4, -136.0, 0.0),
+    bottomRight = Vector3(-55.6, -134.0, 0.0),
+    shaderPair = ShaderPair(COPLANAR_GEOMETRY_VERTEX_SOURCE, COPLANAR_GEOMETRY_FRAGMENT_SOURCE),
+)
+
+/**
+ * The smallest shader pair that is still a real consumer shader: it declares `aPosition` and
+ * `uModelViewProjection` from the documented interface and nothing else, and paints one flat opaque
+ * colour so a pixel either is the geometry or is not. Anything with a gradient or an alpha ramp would
+ * make the sweep's pixel-set comparison a threshold argument instead of an identity.
+ */
+private val COPLANAR_GEOMETRY_VERTEX_SOURCE: String =
+    "#version 300 es\n" +
+        "in vec3 aPosition;\n" +
+        "uniform mat4 uModelViewProjection;\n" +
+        "void main() {\n" +
+        "    gl_Position = uModelViewProjection * vec4(aPosition, 1.0);\n" +
+        "}\n"
+
+private val COPLANAR_GEOMETRY_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengCoplanarColour;\n" +
+        "void main() {\n" +
+        "    rengCoplanarColour = vec4(0.0, 1.0, 0.501960784, 1.0);\n" +
+        "}\n"
+
+/**
  * A style with an opaque background and one raster source, so a rendered tile is exactly its source
  * image and nothing else. No sprite: this fixture is about pixels on the ground, and the sprite path
  * is already covered by `RendererBasemapStyleTest`.
@@ -424,24 +714,42 @@ private val READBACK_STYLE_JSON: String =
         """"layers":[{"id":"bg","type":"background","paint":{"background-color":"#000000"}},""" +
         """{"id":"r","type":"raster","source":"s"}]}"""
 
-/** Serves the style, one distinctly-textured PNG per fixture tile url, and the two sticker images. */
+/**
+ * Serves the style, one distinctly-textured PNG per fixture tile url, the two sticker images, and
+ * [HORIZON_FILLER_TILE_PNG] for any other tile inside the fixture's own url template.
+ *
+ * The fallback exists only because the pitched sweep sees ground the four named tiles do not cover.
+ * It is scoped to the template's own prefix, so a url RenG composed from the wrong template — a
+ * different source, a stale style — still fails closed here rather than being handed a plausible
+ * body.
+ */
 private class ReadbackTransport : Transport {
     override suspend fun execute(request: TransportRequest): TransportResponse {
         val url = request.locator.value
-        return when (url) {
-            STYLE_URL -> TransportResponse(
+        return when {
+            url == STYLE_URL -> TransportResponse(
                 statusCode = 200,
                 body = READBACK_STYLE_JSON.encodeToByteArray(),
                 metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             else -> TransportResponse(
                 statusCode = 200,
-                body = requireNotNull(READBACK_PNGS[url]) { "the readback fixture serves no body for $url" },
+                body = READBACK_PNGS[url]
+                    ?: HORIZON_FILLER_TILE_PNG.takeIf { url.startsWith(READBACK_TILE_URL_PREFIX) }
+                    ?: error("the readback fixture serves no body for $url"),
                 metadata = TransportResponseMetadata(contentType = "image/png"),
             )
         }
     }
 }
+
+/** Everything before `{z}` in [STYLE_TILE_TEMPLATE]; see [ReadbackTransport]. */
+private val READBACK_TILE_URL_PREFIX: String = STYLE_TILE_TEMPLATE.substringBefore("{z}")
+
+/** A 2x2 PNG whose four texels are all [HORIZON_FILLER_TILE]. */
+private val HORIZON_FILLER_TILE_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR42mNIUFjwH4QZYAwAR7QIfVj/5kkAAAAASUVORK5CYII=",
+)
 
 /**
  * Each tile PNG is 2x2 RGBA. Reading the four texels in `[north-west, north-east, south-west,

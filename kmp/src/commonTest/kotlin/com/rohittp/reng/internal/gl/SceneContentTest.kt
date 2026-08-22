@@ -24,6 +24,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SceneContentTest {
@@ -77,6 +78,65 @@ class SceneContentTest {
         assertTrue(mapStickerBind in geometryDraw until depthDisabled, "the map-anchored sticker draws depth-tested too")
         assertTrue(depthDisabled < screenStickerBind, "the screen-anchored sticker composites after depth testing is off")
         assertTrue(depthDisabled in 0 until screenDraw, "every depth-tested thing draws before the screen regime composites")
+    }
+
+    // --- ADR 0027: nothing a scene draws writes depth --------------------------------------------
+
+    /**
+     * ADR 0027 as an invariant over the whole scene rather than as three separate per-pipeline
+     * assertions, because the defect it closes was a *pass* that forgot.
+     *
+     * `drawFrame` hands [SceneContent] a context with `glDepthMask(GL_TRUE)` — it has to, or the
+     * per-frame depth clear would not take — so every pass owes its own `depthMask(false)`. A future
+     * fourth map-regime pass (models are next) that inherits the enable but forgets the mask
+     * reintroduces exactly the two defects ADR 0027 removes, and would pass
+     * `theGroundDrawsDepthTestedAndWritesNoDepth` and `theMapRegimeTurnsDepthWritesOffBeforeItDraws`
+     * untouched. This walks the call log with the mask's real starting value and fails on the first
+     * draw issued while depth writes are on, whichever pass issued it.
+     *
+     * A model pipeline that genuinely needs to write depth is a deliberate change to ADR 0027, and
+     * has to come here and say so.
+     */
+    @Test
+    fun noDrawInAWholeSceneRunsWithDepthWritesOn() {
+        val binding = RecordingGlBinding()
+        val camera = topDownCamera()
+        val geometryPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val groundPipeline = newGroundPipeline(binding)
+
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(mapPlacement(), texture = 101),
+                SceneSticker(screenPlacement(z = 5.0), texture = 202),
+            ),
+            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap())),
+            groundTiles = listOf(groundTile(canonicalX = 0, tileY = 0, texture = 303)),
+        )
+        binding.log.clear()
+
+        SceneContent(camera, scene, stickerPipeline, groundPipeline).draw(binding)
+
+        // `drawFrame` leaves the mask on for its depth clear, so that is the state a scene inherits.
+        var depthWrites = true
+        var draws = 0
+        binding.log.forEachIndexed { index, call ->
+            when {
+                call == "depthMask(true)" -> depthWrites = true
+                call == "depthMask(false)" -> depthWrites = false
+                call.startsWith("drawArrays") -> {
+                    draws += 1
+                    assertFalse(
+                        depthWrites,
+                        "call $index ($call) draws with depth writes still on; ADR 0027 requires " +
+                            "every map-regime pass to turn them off for itself",
+                    )
+                }
+            }
+        }
+        assertEquals(4, draws, "the scene must issue one ground, one geometry and two sticker draws")
     }
 
     // --- ADR 0025: the ground is first, and map-regime draw order is a contract ------------------

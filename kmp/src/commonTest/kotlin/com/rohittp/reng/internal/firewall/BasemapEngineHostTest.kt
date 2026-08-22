@@ -42,7 +42,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.test.runTest
 
 /**
@@ -1030,6 +1035,48 @@ class BasemapEngineHostTest {
             // A latch never evicts within one registry, so a registry that outlived its invocation would
             // replay the first failure without calling the consumer again and this count would read 1.
             assertEquals(2, transport.executeCalls, "each invocation gets its own operation-scoped registry")
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * An invocation carries a [Job] of its own even when the caller's context has none.
+     *
+     * This is not a hypothetical. Rentile's `DefaultBasemapRasterizer.operation` reads
+     * `currentCoroutineContext().job` on every rasterizer entry point, so without a job every
+     * `prepareTiles` and `renderTiles` throws `IllegalStateException("Current context doesn't contain Job
+     * in it")`, which [classifyEngineFailure] can only report as the opaque `BASEMAP_RENDER_FAILED` --
+     * a total basemap blackout with no usable diagnosis, for a consumer that did nothing wrong. A
+     * `suspend` function may be resumed from any context, `EmptyCoroutineContext` included, so RenG's
+     * public `prepare` cannot require the consumer to have launched it from a scope. (Style compilation
+     * hid this for a long time because it runs inside `PreparationDriver.run`, which opens its own
+     * `coroutineScope`; tile preparation runs in [BasemapEngineHost.withOperation]'s block and did not.)
+     *
+     * Deliberately driven by [startCoroutine] rather than `runTest` or `runBlocking`: both of those put a
+     * [Job] in the context, which is precisely the condition this test must not have.
+     */
+    @Test
+    fun givesTheInvocationItsOwnJobEvenWhenTheCallerContextHasNone() {
+        val host = basemapEngineHost()
+        var observedJob: Job? = null
+        var failure: Throwable? = null
+        var finished = false
+        try {
+            val invocation: suspend () -> Unit = {
+                host.withOperation(ResourceAccessMode.NORMAL) {
+                    observedJob = currentCoroutineContext()[Job]
+                }
+            }
+            invocation.startCoroutine(
+                Continuation(EmptyCoroutineContext) { result ->
+                    failure = result.exceptionOrNull()
+                    finished = true
+                },
+            )
+            assertTrue(finished, "an invocation over an empty block completes without ever dispatching")
+            assertNull(failure, "a caller without a Job is a legal caller")
+            assertNotNull(observedJob, "the invocation must supply the Job Rentile's rasterizer reads")
         } finally {
             host.close()
         }

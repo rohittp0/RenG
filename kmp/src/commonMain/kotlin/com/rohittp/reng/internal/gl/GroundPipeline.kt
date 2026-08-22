@@ -153,12 +153,16 @@ internal class ResolvedGroundTile(
 /**
  * Draws [tiles] as the frame's ground, in the order given.
  *
- * **Depth testing on, depth writes left on (ADR 0025).** The ground writes depth so that terrain,
- * when it lands, genuinely occludes what is buried in it; suppressing the write would have been the
- * cheap way to stop a coplanar altitude-0 thing being deleted, and it would have cost real occlusion
- * to buy it. `drawFrame` sets `GL_GEQUAL` instead, so a fragment at exactly the ground's depth
- * passes and the *later* draw wins — which is why [tiles] order, and the ground's position first in
- * [SceneContent.draw], are contracts rather than incidental.
+ * **Depth testing on, depth writes off (ADR 0027, superseding ADR 0025 on this point).** ADR 0025
+ * kept the ground's depth writes and bought coplanarity with `GL_GEQUAL` alone, on the reasoning
+ * that terrain would later need the ground to occlude. That resolves an *exact* tie and nothing
+ * else, and a moving camera does not produce exact ties: the ground's depth and a coplanar
+ * altitude-0 `Geometry`'s depth are computed through different matrix products, so they differ by a
+ * float epsilon whose sign changes from frame to frame and the quad tears itself apart. Measured on
+ * a real style, a coplanar quad lost up to 100% of its pixels between consecutive frames. The
+ * ground no longer writes depth at all, so there is nothing for coplanar map content to tie with,
+ * near-tie or exact. [tiles] order and the ground's position first in [SceneContent.draw] stay
+ * contracts — they are now the *whole* of the rule rather than only its tie-break.
  *
  * Blend state is established here rather than inherited, exactly as [drawStickers] does and for the
  * same reason: the premultiplied `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` function is what [uploadTexture]'s
@@ -178,6 +182,7 @@ internal fun drawGround(binding: GlBinding, pipeline: GroundPipeline, tiles: Lis
         binding.uniform1i(pipeline.textureUniformLocation, 0)
     }
     binding.enable(GL_DEPTH_TEST)
+    binding.depthMask(false)
 
     tiles.forEach { tile ->
         if (pipeline.modelViewProjectionUniformLocation >= 0) {

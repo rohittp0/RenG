@@ -57,7 +57,32 @@ Owner decisions, taken against this corpus rather than against glTF's breadth:
   worth building for a single asset. That model remains rejected, loudly and by a named code, and the
   cheaper fix is upstream — re-export it as PNG.
 
+- **Support `alphaMode: BLEND`.** 6 materials across 6 models. A per-model two-pass split — opaque with
+  depth writes, then blended sorted back-to-front with writes off. Rejecting would undo the gain this
+  cycle just bought, and drawing them opaque is the silently-wrong option this project keeps declining.
+
 Reaching **40 of 41**. The one exception is the JPEG model, by decision rather than oversight.
+
+## Material and sampler facts the plan must honour
+
+Measured across all 111 materials and 47 samplers:
+
+- **`doubleSided` is true on 109 of 111.** Culling is off for almost everything, which is what the
+  renderer already does — `drawFrame` sets a cull mode but never enables `GL_CULL_FACE`. Only 2
+  materials need it on.
+- **`baseColorTexture.texCoord` is `0` everywhere.** The second-UV question does not reach materials at
+  all, so ignoring `TEXCOORD_1` costs nothing anywhere.
+- **All 67 images are embedded via `bufferView`.** No external URI, matching what ADR 0021 requires.
+- **41 samplers omit `wrapS`/`wrapT`, which the specification defines as `REPEAT`.** `uploadTexture`
+  hardcodes `CLAMP_TO_EDGE` and `GL_REPEAT` is not present in `GlTokens.kt`, so wrap handling is new work.
+- **Every sampler asks for `LINEAR_MIPMAP_LINEAR`, and this one is a trap.** Honouring that minification
+  filter without generating mipmaps leaves the texture mipmap-incomplete, and an incomplete texture
+  **samples black**. It is the same failure a previous cycle hit on sticker textures. F-2 must either
+  generate mipmaps or deliberately clamp the filter; doing neither renders black models that read as a
+  shader bug rather than a missing feature.
+- Material members in use are almost entirely `metallicFactor`, `baseColorTexture`, `roughnessFactor`
+  and `baseColorFactor`. `normalTexture` and `metallicRoughnessTexture` appear twice each across the
+  whole corpus, so neither is load-bearing for this consumer.
 
 ## Vestigial rigs — a check that is already right
 

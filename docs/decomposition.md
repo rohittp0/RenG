@@ -24,7 +24,7 @@ below for exactly which.
 A skeleton ──► B core ──┬──► C resources ──┐
                         └──► D gl foundation┘──► F-1 (MVP) ──► release ──► E-basemap ──► release
                                                             ──► F-2 models ──► release ──► E-labels ──► E-terrain
-                                                            ──► G globe ──► H platforms ──► I harness ──► J corpus
+                                                            ──► H platforms ──► G globe ──► I harness ──► J corpus
 ```
 
 C and D are genuinely independent — one is I/O and CPU, the other is GPU — and are the natural place to
@@ -42,8 +42,8 @@ work in parallel. Everything from F-1 onward is a chain; the MVP release sits be
 | F-2 | Models with textures and animation | Analytical readback over a real GL context |
 | E-labels | Map text drawn as screen-space primitives from Rentile label candidates | Labels legible and collision-free over a moving camera |
 | E-terrain | Terrain displacing the mercator ground, plus deferred Cycle C task 20 | Golden baselines with terrain |
-| G | Globe projection | Golden baselines at both projection modes |
 | H | Android and iOS bring-up | Device/simulator runs, manual for Android GL |
+| G | Globe projection | Golden baselines at both projection modes |
 | I | macOS harness: plans in, video out | A rendered sequence encodes and plays |
 | J | Golden-image corpus gate | Corpus job wired into `ci.yml` and `publish.yml` |
 
@@ -232,17 +232,19 @@ draw-path assertions. This cycle's release is the internal MVP.
 sampling, split out so they can ship after the MVP and after the basemap without blocking either — models
 have consumers waiting, unlike terrain.
 
-## G — Globe projection
-
-The second projection mode, re-projecting mercator basemap tiles and every placement onto a globe.
-Deliberately after both halves of F and E so it re-projects a complete scene rather than being designed
-around a partial one.
-
 ## H — Android and iOS bring-up
 
 The two targets CI cannot exercise against a real context. Android's `GLES30` path and iOS's
 `platform.gles3` path get run on real devices, and whatever differs from the macOS and Linux behaviour
 gets fixed or documented.
+
+## G — Globe projection
+
+The second projection mode, re-projecting mercator basemap tiles and every placement onto a globe.
+Deliberately after F and E so it re-projects a complete scene rather than being designed around a
+partial one. Moved behind H on 2026-08-22: every cycle adds GL surface that two of the six published
+targets have never executed, and that gap compounds, so bring-up should not keep waiting behind new
+rendering work.
 
 ## I — macOS harness
 

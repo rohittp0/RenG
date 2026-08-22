@@ -92,16 +92,30 @@ class GroundPipelineTest {
         assertNull(cache.program(pipeline.key))
     }
 
-    @Test fun theGroundDrawsDepthTestedAndWritesDepth() {
+    /**
+     * ADR 0027, superseding ADR 0025 on this point. This test used to assert the exact opposite —
+     * that `depthMask(false)` never appears, "or terrain can never occlude anything" — and that
+     * reasoning shipped two visible defects. Keeping the ground's depth writes bought exactly one
+     * thing, an occluder for content below altitude 0, and cost a coplanar `Geometry` up to 100% of
+     * its pixels frame to frame plus the lower half of every map-anchored billboard at any nonzero
+     * pitch. The ground still *tests* depth, so terrain and models can occlude it once they exist
+     * and write depth of their own.
+     */
+    @Test fun theGroundDrawsDepthTestedAndWritesNoDepth() {
         val binding = newBinding()
         val pipeline = createdPipeline(binding)
         binding.log.clear()
         drawGround(binding, pipeline, listOf(resolvedTile()))
         assertTrue(binding.log.contains("enable(${hex(GL_DEPTH_TEST)})"), "the ground is depth-tested")
-        assertFalse(
-            binding.log.any { it == "depthMask(false)" },
-            "the ground must keep writing depth, or terrain can never occlude anything (ADR 0025)",
+        val maskedOff = binding.log.indexOfFirst { it == "depthMask(false)" }
+        val firstDraw = binding.log.indexOfFirst { it.startsWith("drawArrays") }
+        assertTrue(firstDraw >= 0, "the ground must actually draw")
+        assertTrue(
+            maskedOff in 0 until firstDraw,
+            "the ground must turn depth writes off before it draws (ADR 0027): " +
+                "a coplanar altitude-0 Geometry cannot near-tie with depth that was never written",
         )
+        assertFalse(binding.log.any { it == "depthMask(true)" }, "the ground never re-enables depth writes")
     }
 
     @Test fun theBlendModeIsPremultipliedNotStraightAlpha() {

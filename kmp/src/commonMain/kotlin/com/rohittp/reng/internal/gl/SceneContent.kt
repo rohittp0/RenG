@@ -116,7 +116,7 @@ internal class Scene(
  * The [GlFrameContent] Cycle D always left a seam for: its own KDoc says "Cycle D draws no frame
  * content of its own; Cycle E replaces this with the real scene draw." This is that replacement.
  *
- * **Ordering (ADRs 0024 and 0025).** The map regime draws first, depth-tested; the screen regime
+ * **Ordering (ADRs 0024, 0025 and 0027).** The map regime draws first, depth-tested; the screen regime
  * then composites on top with depth testing off. Within the map regime the order is fixed by ADR
  * 0025 as: the **ground** first, then every [Geometry] (map-anchored by definition — `CONTEXT.md`
  * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every map-anchored
@@ -126,11 +126,14 @@ internal class Scene(
  * exactly the state the ground and the geometries drew under too.
  *
  * That order used to be arbitrary and is now load-bearing. `drawFrame` tests `GL_GEQUAL`, not
- * `GL_GREATER` (ADR 0025), so a fragment at exactly the depth already in the buffer passes and
- * overwrites — which is what stops a coplanar altitude-0 `Geometry` or map-anchored sticker being
- * silently deleted by the ground beneath it, and which makes "later declared wins a tie" the rule a
- * consumer may rely on. The ground goes first because it is the backdrop everything else paints
- * onto.
+ * `GL_GREATER` (ADR 0025), and **no map-regime draw writes depth** (ADR 0027), so the order above is
+ * the whole rule: later declared wins, full stop, not merely on an exact tie. ADR 0025's tie-break
+ * closed only the bit-identical case, and the two defects that actually shipped were near-ties — a
+ * coplanar `Geometry` tearing itself apart frame to frame as the epsilon between two different
+ * matrix products changed sign, and a billboard bisected along its anchor row by a ground plane
+ * whose depth varies down the screen. The map regime still *tests* depth, so content that genuinely
+ * wrote nearer depth still occludes it. The ground goes first because it is the backdrop everything
+ * else paints onto.
  *
  * **Why resolving [Placement]/[Geometry] here does not put spatial-failure handling inside a GL
  * draw call.** Cycle F-1 Tasks 5 and 6 pushed placement and geometry resolution out of
@@ -167,6 +170,7 @@ internal class SceneContent(
 
         if (scene.groundTiles.isNotEmpty()) {
             binding.enable(GL_DEPTH_TEST)
+            binding.depthMask(false)
             drawGround(
                 binding = binding,
                 pipeline = groundPipeline,
@@ -183,7 +187,12 @@ internal class SceneContent(
         }
 
         if (scene.geometries.isNotEmpty()) {
+            // ADR 0027: the map regime tests depth and writes none. `drawGeometry` runs a
+            // consumer's own shader pair, so unlike `drawGround` and `drawStickers` it establishes
+            // no pipeline state of its own -- the depth state for the geometry pass is set here,
+            // beside the `GL_DEPTH_TEST` enable that has always lived here.
             binding.enable(GL_DEPTH_TEST)
+            binding.depthMask(false)
             val geometryViewProjection = composeGeometryViewProjection(camera)
             for (sceneGeometry in scene.geometries) {
                 val resolved = resolveGeometry(sceneGeometry.geometry, camera).requireResolvedAtDrawTime()

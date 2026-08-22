@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RenG — Kotlin Multiplatform 3D rendering contract</title>
-  <meta name="description" content="RenG is a pre-runtime Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract." />
+  <title>RenG — Kotlin Multiplatform 3D renderer</title>
+  <meta name="description" content="RenG is a Kotlin Multiplatform renderer that draws a frame plan into an OpenGL context the caller already made current." />
   <meta name="theme-color" content="#0b3026" />
   <link rel="canonical"
     href="https://rohittp.com/reng/" />
@@ -12,8 +12,8 @@
 
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="RenG" />
-  <meta property="og:title" content="RenG — A rendering contract, before a renderer" />
-  <meta property="og:description" content="A pre-runtime Kotlin Multiplatform skeleton for a caller-owned 3D rendering contract." />
+  <meta property="og:title" content="RenG — A renderer for a context you own" />
+  <meta property="og:description" content="A Kotlin Multiplatform renderer that draws a frame plan into a caller-owned OpenGL context." />
   <meta property="og:url" content="https://rohittp.com/reng/" />
 
   <script type="application/ld+json">
@@ -21,7 +21,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",
     "name": "RenG",
-    "description": "A pre-runtime Kotlin Multiplatform skeleton for a caller-owned 3D rendering contract.",
+    "description": "A Kotlin Multiplatform renderer that draws a frame plan into a caller-owned OpenGL context.",
     "codeRepository": "https://github.com/rohittp0/RenG",
     "url": "https://rohittp.com/reng/",
     "programmingLanguage": "Kotlin",
@@ -51,13 +51,13 @@
   <main id="main-content">
     <section class="hero shell" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <p class="eyebrow">Kotlin Multiplatform · Cycle A</p>
-        <h1 id="hero-title">A rendering contract,<br /><em>before a renderer.</em></h1>
+        <p class="eyebrow">Kotlin Multiplatform · Public release</p>
+        <h1 id="hero-title">You own the context.<br /><em>RenG draws the frame.</em></h1>
         <p class="hero-lead">
-          RenG is a Kotlin Multiplatform publication skeleton for a caller-owned 3D rendering contract.
-          Cycle A established its public coordinate, target surface, and release discipline. Its first
-          immutable completion record verified anonymously, while RenG still exposes no runtime API or
-          rendering behavior.
+          RenG is a Kotlin Multiplatform renderer for an OpenGL context you have already made current.
+          You hand it a <code>FramePlan</code> — a complete definition of on-screen state — and it draws
+          that frame into your framebuffer. The published release draws stickers and geometry painted by
+          your own shader pairs. It does not draw a basemap, models, or terrain yet.
         </p>
         <div class="hero-actions">
           <a class="button primary" href="kmp.html">Read the KMP setup</a>
@@ -65,16 +65,16 @@
         </div>
       </div>
 
-      <aside class="frame-card" aria-label="Cycle A publication status">
+      <aside class="frame-card" aria-label="Public release status">
         <div class="frame-grid" aria-hidden="true"></div>
         <div class="frame-content">
           <p class="frame-label">Publication frame</p>
-          <p class="frame-state">Cycle A</p>
+          <p class="frame-state">Drawing</p>
           <dl class="frame-facts">
             <div><dt>Coordinate</dt><dd><code>com.rohittp.reng:kmp</code></dd></div>
             <div><dt>Release</dt><dd><span data-maven-version="kmp">available</span></dd></div>
-            <div><dt>Runtime</dt><dd>Not exposed</dd></div>
-            <div><dt>Rendering</dt><dd>Not present</dd></div>
+            <div><dt>Entry point</dt><dd><code>createRenderer</code></dd></div>
+            <div><dt>Draws</dt><dd>Stickers, geometry</dd></div>
           </dl>
         </div>
       </aside>
@@ -94,11 +94,14 @@
     <section class="section shell" id="status">
       <div class="section-heading">
         <p class="eyebrow">Current scope</p>
-        <h2>The configured surface is intentionally narrow.</h2>
+        <h2>What the published release draws.</h2>
         <p>
-          RenG publishes one anonymous Maven coordinate and six targets. Its exact-source CI and first
-          immutable completion record verified anonymously. No callable runtime behavior, window, render
-          loop, or frame drawing exists yet.
+          RenG publishes one anonymous Maven coordinate and six targets. It draws into a GL context the
+          caller has already made current, and owns no window, render loop, capture path, or encoder. It
+          performs no network I/O and keeps no cache of its own — transport and store are adapters you
+          inject, and RenG only follows the plan you supply. All six targets are published together;
+          only <code>macosArm64</code> and <code>linuxX64</code> are execution-verified against a real GL
+          context, and the <a href="kmp.html#targets">KMP guide</a> breaks that down.
         </p>
       </div>
       <div class="scope-grid">
@@ -108,14 +111,17 @@
           <p>Resolve <code>com.rohittp.reng:kmp</code> without credentials.</p>
         </article>
         <article class="scope-card">
-          <p class="card-label">It is published for</p>
-          <h3>Six selected targets</h3>
-          <p>Android, Apple Silicon iOS and macOS, plus x64 and arm64 Linux are available together.</p>
+          <p class="card-label">It draws</p>
+          <h3>Stickers and geometry</h3>
+          <p>PNG stickers anchored to the map or to the screen, and lat/lon-bounded quads painted by your
+          own GLSL ES 3.00 shader pair with your own uniforms and textures.</p>
         </article>
         <article class="scope-card">
           <p class="card-label">It does not provide</p>
-          <h3>A runtime API</h3>
-          <p>Cycle A renders nothing. Documentation does not promise a future function, class, or signature.</p>
+          <h3>A basemap or models</h3>
+          <p>The release draws no map tiles, no GLB models, no terrain, and no map labels, and it rejects
+          the globe projection. Asking for a basemap does not fail — it simply draws none, and warns when
+          no style is configured.</p>
         </article>
       </div>
     </section>
@@ -174,7 +180,7 @@ kotlin {
       </div>
       <div class="callout">
         <p><strong>Fail closed by design.</strong> A malformed response, transport failure, validation failure, or occupied coordinate stops publication. Releases never overwrite or skip an existing version. Aggregate POM and metadata availability are not completion proof; only the valid immutable completion record is.</p>
-        <p><strong>First release complete.</strong> Both exact-source CI jobs and the public workflow passed, including credential-free six-target resolution and anonymous verification of the immutable completion record. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records. Version display remains metadata-driven.</p>
+        <p><strong>Every published release completed.</strong> Each passed both exact-source CI jobs and the public workflow, including credential-free six-target resolution and anonymous verification of its immutable completion record. ADR 0013 and the Cycle A design spec and implementation plan remain historical decision records. Version display remains metadata-driven, and this site describes only what the current release does — not what a later one will.</p>
       </div>
     </section>
 

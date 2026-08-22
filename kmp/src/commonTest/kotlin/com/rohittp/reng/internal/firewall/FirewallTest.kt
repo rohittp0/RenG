@@ -315,15 +315,18 @@ class FirewallTest {
         )
         assertEquals(0, blankStore.writeCalls, "a blank etag declines the cache write")
 
-        // Empty bytes stay INTEGRITY, not a content verdict: they are their own case: they need an empty-bodied latch to get past the digest check at
-        // all, which is exactly how they used to slip through.
+        // An empty body is a CONTENT verdict as well, and the one that matters most in production. A
+        // tile server answers `204 No Content` with a zero-byte body for every tile of a source that has
+        // no data there -- MapTiler's `ocean` source does exactly that for every inland tile -- and an
+        // empty vector tile is a well-formed empty protobuf message the engine renders as an empty tile.
+        // Its latched digest is the digest of the very body RenG's own transport returned, so refusing
+        // it says nothing about provenance; throwing instead cancelled the engine's whole batch scope and
+        // failed the entire basemap for any frame whose tile cover touched one such tile.
         val emptyStore = CountingStore()
         val emptyFirewall = firewall(transport = CountingTransport(body = ByteArray(0)), store = emptyStore)
         emptyFirewall.transport.execute(engineRequestFor(rasterRoute))
-        assertFailsWith<RenGException> {
-            emptyFirewall.store.write(engineKeyFor(rasterRoute), engineStoredResourceOf(ByteArray(0)))
-        }
-        assertEquals(0, emptyStore.writeCalls, "an empty record is not a valid RenG record")
+        emptyFirewall.store.write(engineKeyFor(rasterRoute), engineStoredResourceOf(ByteArray(0)))
+        assertEquals(0, emptyStore.writeCalls, "an empty record is still never cached")
     }
 
     @Test

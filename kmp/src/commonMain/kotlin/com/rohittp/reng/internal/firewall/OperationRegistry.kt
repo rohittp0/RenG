@@ -434,11 +434,34 @@ internal class OperationRegistry(
         val renGMetadata = resource.metadata.toRenGMetadata()
         if (!isValidMetadata(renGMetadata)) return
 
+        val bytes = resource.bytes
+        // An empty body is a CONTENT verdict too, and it is the one `copyValidStoredResource` below
+        // cannot be allowed to answer, because it answers every rejection identically and this one is
+        // provably not the engine's fault: the latched-digest check immediately above already proved
+        // these are exactly the bytes RenG's own transport returned for this route.
+        //
+        // Empty bodies are ordinary in production basemaps. A tile server answers `204 No Content` for
+        // every tile of a source that has no data there -- MapTiler's `ocean` source does it for every
+        // inland tile, and the same holds for contour, hillshade and terrain sources at their edges --
+        // and an empty vector tile is a well-formed empty protobuf message that Rentile renders as an
+        // empty tile. Refusing the write instead threw `STORE_WRITE_FAILED` out of Rentile's own
+        // acquirer, which cancelled the whole batch scope, so a single 204 anywhere in a frame's tile
+        // cover failed the entire basemap for that frame.
+        //
+        // Declining is the same legal answer the metadata and class-specific gates already give: the
+        // engine's `write` returns `Unit`, its result is never read, and the engine proceeds with the
+        // bytes it already holds. Nothing is cached, which costs nothing -- `copyValidStoredResource`
+        // is the read path's validator too, so an empty record would be answered as a miss anyway.
+        if (bytes.isEmpty()) {
+            storeWriteJoin.run(route) { markSpriteMemberWithoutContent(route) }
+            return
+        }
+
         // What remains IS integrity: `copyValidStoredResource` re-derives SHA-256 over the bytes, so a
         // rejection here means the engine kept the latched digest and presented different bytes.
         val validated = copyValidStoredResource(
             StoredRawResource(
-                bytes = resource.bytes,
+                bytes = bytes,
                 contentDigest = resource.contentDigest,
                 metadata = renGMetadata,
             ),

@@ -11,6 +11,8 @@ import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.basemap.BasemapStyleManifest
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
+import com.rohittp.reng.internal.basemap.parseBasemapTileJson
 import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
@@ -234,7 +236,15 @@ internal class BasemapEngineHost(
         val existing = compiledStyle
         if (existing != null && existing.styleKey == styleKey && existing.contentDigest == contentDigest) {
             cache.releaseLease(existing.lease)
-            compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, existing.prepared)
+            // The TileJSON documents travel with the compilation they were fetched for: no compilation,
+            // no `resolveTileJson` call, so this invocation observed nothing to replace them with.
+            compiledStyle = CompiledStyleBinding(
+                styleKey,
+                contentDigest,
+                lease,
+                existing.prepared,
+                existing.tileJsonDocuments,
+            )
             return existing.prepared
         }
 
@@ -257,9 +267,46 @@ internal class BasemapEngineHost(
             cache.releaseLease(lease)
             throw failure
         }
-        compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, prepared)
+        compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, prepared, harvestTileJsonDocuments())
         return prepared
     }
+
+    /**
+     * Parses every TileJSON document this invocation's firewall observed while the compilation above ran.
+     *
+     * Harvested here rather than read at tile time because the observation is invocation-scoped and the
+     * compilation is not: a `RESIDENT`-provenance frame emits no `CompileBasemapStyle` at all, so its
+     * invocation calls `resolveTileJson` never, observes nothing, and would derive no tile route for a
+     * `url`-form source -- failing closed on every tile of an otherwise perfectly cached style. Binding
+     * the documents to the compilation instead is what makes them last exactly as long as the templates
+     * Rentile itself derived from them, which is the compiled style's own lifetime.
+     *
+     * Parsed once, on the frame that fetched them, rather than on every frame that draws: a production
+     * TileJSON carries `vector_layers` and `tilestats` blocks far larger than the routing fields RenG
+     * keeps, and re-reading them per frame would repeat the cost the style manifest's own binding exists
+     * to avoid.
+     */
+    private suspend fun harvestTileJsonDocuments(): Map<String, BasemapTileJsonOutcome> {
+        val registry = activeOperation?.registry ?: return emptyMap()
+        val observed = registry.observedTileJsonDocuments()
+        if (observed.isEmpty()) return emptyMap()
+        return observed.mapValues { (documentUrl, bytes) -> parseBasemapTileJson(bytes, documentUrl) }
+    }
+
+    /**
+     * The TileJSON documents behind [styleKey]'s retained compilation, keyed by the exact url each was
+     * fetched from, or empty when this host holds no compilation of [contentDigest].
+     *
+     * Gated on the content digest for the same reason [currentPreparedStyle] is: the routes a frame
+     * derives and the program it draws with must describe one document, and a compilation retained for
+     * bytes that never became resident describes another. Empty is the honest answer there, and it
+     * degrades every `url`-form source rather than composing a url from a superseded document.
+     */
+    fun tileJsonDocuments(styleKey: ResourceKey, contentDigest: String?): Map<String, BasemapTileJsonOutcome> =
+        compiledStyle
+            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+            ?.tileJsonDocuments
+            .orEmpty()
 
     /**
      * The [PreparedStyle] this host is currently holding for [styleKey] **and for [contentDigest]**, or
@@ -580,6 +627,12 @@ internal class BasemapEngineHost(
         val contentDigest: String,
         val lease: Lease,
         val prepared: PreparedStyle,
+        /**
+         * Every TileJSON document the engine fetched while compiling [prepared], parsed, by url. The
+         * compiled style already holds the tile templates these yielded and will not fetch them again, so
+         * they belong to its lifetime rather than to the invocation that observed them.
+         */
+        val tileJsonDocuments: Map<String, BasemapTileJsonOutcome>,
     )
 
     /**

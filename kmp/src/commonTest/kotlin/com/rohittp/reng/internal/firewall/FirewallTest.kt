@@ -26,6 +26,7 @@ import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportRequestMetadata as EngineTransportRequestMetadata
 import kotlin.io.encoding.Base64
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -113,6 +114,74 @@ class FirewallTest {
         assertEquals(200, jsonResponse.statusCode)
         val imageResponse = fw.transport.execute(engineRequestFor(spriteImageRoute, accept = "image/png"))
         assertEquals(200, imageResponse.statusCode)
+    }
+
+    // ---- observing a TileJSON document, without becoming a way around the allowlist ---------------
+
+    /**
+     * RenG cannot ask the engine what a TileJSON document said -- `PreparedStyle` exposes no template,
+     * zoom range or scheme -- so the only way to derive a `url`-form source's tile routes is to read the
+     * document as the firewall answers the route already preregistered for it.
+     */
+    @Test
+    fun readsTheTileJsonDocumentItAnswersOnEitherPath() = runTest {
+        val transported = firewall(transport = CountingTransport(body = TILE_JSON_BODY))
+        transported.transport.execute(engineRequestFor(tileJsonRoute))
+        assertContentEquals(
+            TILE_JSON_BODY,
+            transported.registry.observedTileJsonDocuments()[tileJsonRoute.locator.value],
+        )
+
+        // The store path is not an optimisation to add later: `TileJsonResourceAcquirer.acquire` reads its
+        // raw store first and returns a parseable hit without transporting at all, so a consumer whose
+        // Store already holds the document would otherwise leave every one of its tiles unrouted.
+        val stored = firewall(store = CountingStore(response = validRasterRecord(TILE_JSON_BODY)))
+        assertNotNull(stored.store.read(engineKeyFor(tileJsonRoute)))
+        assertContentEquals(
+            TILE_JSON_BODY,
+            stored.registry.observedTileJsonDocuments()[tileJsonRoute.locator.value],
+        )
+    }
+
+    /**
+     * The containment property, stated against the observation rather than against the answer: reading
+     * bytes in transit is **not** a second way in. Both observation points sit after the allowlist lookup
+     * that throws, so a url this invocation never preregistered fails closed before `Transport.execute`
+     * and leaves nothing recorded -- there is no route to record it against.
+     */
+    @Test
+    fun recordsNothingForATileJsonUrlThisInvocationNeverRouted() = runTest {
+        val transport = CountingTransport(body = TILE_JSON_BODY)
+        val fw = firewall(transport = transport)
+        val unrouted = EngineTransportRequest(
+            url = "https://tiles.example/other/tiles.json?key=k",
+            resourceClass = EngineResourceClass.TILE_JSON,
+            maxResponseBytes = 4L * 1024L * 1024L,
+        )
+
+        val failure = assertFailsWith<RenGException> { fw.transport.execute(unrouted) }
+
+        assertEquals(RenGErrorCode.AMBIGUOUS_RESOURCE_ROUTE, failure.code)
+        assertEquals(0, transport.executeCalls, "an unplanned exchange must never reach the consumer")
+        assertEquals(emptyMap(), fw.registry.observedTileJsonDocuments())
+    }
+
+    @Test
+    fun recordsNothingForATileJsonResponseTheEngineItselfWouldRefuse() = runTest {
+        // `TileJsonResourceAcquirer.fetchParseAndStore` throws on any status outside 200..299 before it
+        // parses, so a 404 body is not the document -- recording it would derive tile urls from an error
+        // page the engine never read.
+        val fw = firewall(transport = CountingTransport(statusCode = 404, body = TILE_JSON_BODY))
+        fw.transport.execute(engineRequestFor(tileJsonRoute))
+        assertEquals(emptyMap(), fw.registry.observedTileJsonDocuments())
+    }
+
+    @Test
+    fun recordsNothingForAnyClassOtherThanTileJson() = runTest {
+        val fw = firewall()
+        fw.transport.execute(engineRequestFor(rasterRoute))
+        fw.transport.execute(engineRequestFor(spriteJsonRoute))
+        assertEquals(emptyMap(), fw.registry.observedTileJsonDocuments())
     }
 
     @Test
@@ -666,11 +735,21 @@ private val demRoute = ResourceRouteKey(
     maximumResponseBytes = 32L * 1024L * 1024L,
 )
 
+private val tileJsonRoute = ResourceRouteKey(
+    accessMode = ResourceAccessMode.NORMAL,
+    locator = ResourceLocator("https://tiles.example/tiles.json?key=k"),
+    resourceClass = ResourceClass.BASEMAP_TILE_JSON,
+    maximumResponseBytes = 4L * 1024L * 1024L,
+)
+
+private val TILE_JSON_BODY: ByteArray =
+    """{"tilejson":"2.0.0","tiles":["https://tiles.example/{z}/{x}/{y}.pbf?key=k"]}""".encodeToByteArray()
+
 private class Firewall(
     consumerTransport: Transport,
     consumerStore: Store,
 ) {
-    private val registry = OperationRegistry(
+    val registry = OperationRegistry(
         transport = consumerTransport,
         store = consumerStore,
         privateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
@@ -679,6 +758,7 @@ private class Firewall(
         registry.preregister(spriteJsonRoute)
         registry.preregister(spriteImageRoute)
         registry.preregister(demRoute)
+        registry.preregister(tileJsonRoute)
     }
 
     val transport: EngineResourceTransport = FirewallTransport(registry)
@@ -695,6 +775,7 @@ private fun engineClassFor(resourceClass: ResourceClass): EngineResourceClass = 
     ResourceClass.BASEMAP_SPRITE_JSON -> EngineResourceClass.SPRITE_JSON
     ResourceClass.BASEMAP_SPRITE_IMAGE -> EngineResourceClass.SPRITE_IMAGE
     ResourceClass.BASEMAP_DEM_TILE -> EngineResourceClass.DEM_TILE
+    ResourceClass.BASEMAP_TILE_JSON -> EngineResourceClass.TILE_JSON
     else -> error("fixture does not exercise this class")
 }
 

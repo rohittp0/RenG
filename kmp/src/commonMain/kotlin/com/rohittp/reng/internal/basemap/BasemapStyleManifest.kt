@@ -35,13 +35,25 @@ import com.rohittp.reng.internal.resource.StyleFailureKind
  * function of the style document and the style's own base URI. A future Rentile that started composing
  * a session parameter would break every preregistered route at once.
  *
- * **Supported subset: inline `tiles` only.** A source may declare its tile templates inline
- * (`"tiles": [...]`) or by reference (`"url": ".../tiles.json"`, a TileJSON document). Only the inline
- * form is supported. The `url` form's templates, scheme, zoom range and bounds live in a TileJSON
- * document RenG never fetches, so supporting it means observing TileJSON bytes at the firewall and
- * reproducing a second layer of Rentile's private semantics. A `url`-form source is therefore recorded
- * as `SOURCE_TILE_JSON_URL_UNSUPPORTED` on `BasemapStyleManifest.underivableSources` and contributes no
- * route, rather than being dropped without trace or answered with a guessed url.
+ * **Both source forms are supported, in two phases.** A source declares its tile templates either inline
+ * (`"tiles": [...]`) or by reference (`"url": ".../tiles.json"`, a TileJSON document). The reference form
+ * is not the rare case an earlier ruling in this cycle assumed: across the 34 map styles Rentile is
+ * verified for, 96 sources use it and 2 use the inline form, and **all 34 need at least one of them** --
+ * so an inline-only reader derives no ground for any of them.
+ *
+ * What makes the reference form tractable is that only half of it is unknown ahead of time. The
+ * *document* url is `source["url"]` resolved against the style's own locator, so it preregisters like any
+ * other route ([styleTimeRoutes] emits it as `BASEMAP_TILE_JSON`). Only the *tile* routes derived from
+ * that document are unknowable in advance -- and the document arrives during `prepare(style)`, because
+ * Rentile wires `TileJsonResourceAcquirer` into `StyleCompiler` (`DefaultBasemapRasterizer.kt:176-181`),
+ * strictly before any tile is named in `prepareBatch`. RenG therefore reads that document's bytes as the
+ * firewall answers the route it already preregistered for it -- `OperationRegistry` observes them *after*
+ * its allowlist lookup, never instead of one -- parses them with [parseBasemapTileJson], and folds the
+ * result back in with [completeBasemapStyleManifest] before the tile phase opens. A source completed that
+ * way becomes an ordinary [BasemapStyleSource] and every composition below applies to it unchanged.
+ *
+ * A document that never arrives, will not parse, or yields no usable template degrades **its own source**
+ * -- one more [BasemapSourceUnderivableReason] -- and never the style, for the reason given below.
  *
  * **Over-registration, deliberately.** Which layers are active at a zoom, whether the sprite is fetched
  * at all, and which sources a retained layer actually references are all decided inside Rentile's own
@@ -50,9 +62,9 @@ import com.rohittp.reng.internal.resource.StyleFailureKind
  * answered and costs one SHA-256 in `OperationRegistry.preregister`; a missing one fails closed. Source
  * `bounds` are, for the same reason, deliberately not read: they only ever *suppress* requests.
  *
- * **A source RenG cannot derive is deferred, not fatal.** Eleven per-source conditions -- a `url`-form
- * TileJSON reference first among them -- record a `BasemapSourceUnderivableReason` against that source
- * and contribute no route, instead of rejecting the whole style. Deferring costs nothing when the
+ * **A source RenG cannot derive is deferred, not fatal.** Every per-source condition -- an unusable
+ * TileJSON document among them -- records a `BasemapSourceUnderivableReason` against that source
+ * and contributes no route, instead of rejecting the whole style. Deferring costs nothing when the
  * source is unused: `StyleCompiler` has no loop over `sources` at all, and `compileVectorSource` /
  * `compileRasterSource` are reached only per referencing layer, so an unreferenced source is never
  * compiled and never fetched. When the source *is* used, the firewall refuses it at the moment it is
@@ -147,8 +159,12 @@ internal enum class BasemapStyleReject(val kind: StyleFailureKind) {
 internal enum class BasemapSourceUnderivableReason {
     SOURCE_NOT_OBJECT,
 
-    /** The TileJSON-reference form of a source. RenG supports inline `tiles` only. */
-    SOURCE_TILE_JSON_URL_UNSUPPORTED,
+    /**
+     * Both forms at once. Not a divergence: `StyleCompiler.compileVectorSource` (`:1025`) and
+     * `compileRasterSource` (`:1300`) both refuse "cannot declare both url and tiles", and both test
+     * `"tiles" in source` -- key presence, not type -- so an empty or non-array `tiles` conflicts too.
+     */
+    SOURCE_DECLARES_URL_AND_TILES,
     SOURCE_TILES_NOT_STRINGS,
     SOURCE_TILES_EMPTY,
     SOURCE_REFERENCE_UNRESOLVABLE,
@@ -158,6 +174,33 @@ internal enum class BasemapSourceUnderivableReason {
     SOURCE_TILE_SIZE_NOT_INTEGER,
     SOURCE_TILE_SIZE_UNSUPPORTED,
     GEO_JSON_DATA_NOT_STRING,
+
+    /**
+     * The source named a TileJSON document and no bytes for it reached RenG at all -- the engine never
+     * asked for it (no retained layer references the source, which is the common case for the
+     * 17 attribution-shaped and otherwise unused sources in a real style), or the exchange failed.
+     */
+    TILE_JSON_UNOBSERVED,
+
+    // The document arrived and could not be turned into templates. Each mirrors one `failDecode` in
+    // Rentile's `TileJsonResourceAcquirer.parseOrThrow`, kept distinct for the same reason the style
+    // reader keeps its own distinct: the reason is the only thing a later diagnostic can carry.
+    TILE_JSON_MALFORMED,
+    TILE_JSON_ROOT_NOT_OBJECT,
+
+    /** RenG's reader is stricter than kotlinx here, exactly as it is for the style document. */
+    TILE_JSON_DUPLICATE_MEMBER_NAME,
+    TILE_JSON_VERSION_NOT_STRING,
+    TILE_JSON_VERSION_UNSUPPORTED,
+    TILE_JSON_TILES_NOT_STRINGS,
+    TILE_JSON_TILES_EMPTY,
+    TILE_JSON_REFERENCE_UNRESOLVABLE,
+    TILE_JSON_SCHEME_NOT_STRING,
+    TILE_JSON_SCHEME_UNSUPPORTED,
+    TILE_JSON_ZOOM_NOT_INTEGER,
+    TILE_JSON_ZOOM_RANGE_INVALID,
+    TILE_JSON_TILE_SIZE_NOT_INTEGER,
+    TILE_JSON_TILE_SIZE_UNSUPPORTED,
 }
 
 /** One declared source RenG could not derive an exact url for, and why. */
@@ -201,6 +244,33 @@ internal class BasemapStyleSource(
             "maxZoom=$maxZoom, templates=${templateSnapshot.size})"
 }
 
+/**
+ * One declared source whose tile templates live in a TileJSON document rather than in the style: the
+ * `"url": ".../tiles.json"` form. It carries the resolved document url -- which [styleTimeRoutes] routes
+ * immediately -- plus every field the style itself declared, kept **unresolved and nullable** because
+ * Rentile combines each with the document's own value rather than letting either side simply win. See
+ * [completeBasemapStyleManifest] for that combination.
+ */
+internal class BasemapTileJsonSource(
+    val sourceId: String,
+    val kind: BasemapSourceKind,
+    /** Absolute, already resolved against the style's base URI. Rentile's `resolveSourceReference`. */
+    val documentUrl: String,
+    /** `source["scheme"]`; `null` when the style declares none, in which case the document's applies. */
+    val declaredScheme: BasemapTileScheme?,
+    val declaredMinZoom: Int?,
+    val declaredMaxZoom: Int?,
+    /** `source["tileSize"]`/`["tile-size"]`, already checked against the compatibility profile. */
+    val declaredTileSizePixels: Int?,
+    /** 22 for a vector source, 30 for a raster or DEM one: the ceiling Rentile applies when the style is silent. */
+    val defaultMaximumZoom: Int,
+) {
+    /** Redacted: [documentUrl] is a url and may carry a credential. */
+    override fun toString(): String =
+        "BasemapTileJsonSource(sourceId=$sourceId, kind=$kind, scheme=$declaredScheme, " +
+            "minZoom=$declaredMinZoom, maxZoom=$declaredMaxZoom)"
+}
+
 /** Everything a style document says that decides which routes the engine will ask for. */
 internal class BasemapStyleManifest(
     /** The style's own locator; every relative reference in the document resolves against it. */
@@ -212,15 +282,24 @@ internal class BasemapStyleManifest(
      */
     val spriteBase: String?,
     sources: List<BasemapStyleSource>,
+    tileJsonSources: List<BasemapTileJsonSource>,
     underivableSources: List<UnderivableBasemapSource>,
     /** `root["terrain"]["source"]`, or `null` when the style declares no terrain. */
     val terrainSourceId: String?,
 ) {
     private val sourceSnapshot: List<BasemapStyleSource> = freshListCopy(sources)
+    private val tileJsonSourceSnapshot: List<BasemapTileJsonSource> = freshListCopy(tileJsonSources)
     private val underivableSnapshot: List<UnderivableBasemapSource> = freshListCopy(underivableSources)
 
     /** In declaration order, restricted to the four [BasemapSourceKind]s RenG routes. */
     val sources: List<BasemapStyleSource> get() = freshListCopy(sourceSnapshot)
+
+    /**
+     * The declared sources still waiting on a TileJSON document, in declaration order. Each contributes a
+     * `BASEMAP_TILE_JSON` style-time route and no tile route; [completeBasemapStyleManifest] turns those
+     * whose document arrived into ordinary [sources] and leaves this list empty.
+     */
+    val tileJsonSources: List<BasemapTileJsonSource> get() = freshListCopy(tileJsonSourceSnapshot)
 
     /**
      * The declared sources RenG could not derive an exact url for, in declaration order, and why. Each
@@ -231,6 +310,7 @@ internal class BasemapStyleManifest(
     /** Redacted: [baseUri] and [spriteBase] are urls and may carry a credential. */
     override fun toString(): String =
         "BasemapStyleManifest(sources=${sourceSnapshot.size}, " +
+            "tileJson=${tileJsonSourceSnapshot.size}, " +
             "underivable=${underivableSnapshot.size}, sprite=${spriteBase != null}, " +
             "terrain=${terrainSourceId != null})"
 }
@@ -262,13 +342,15 @@ internal fun deriveBasemapStyleManifest(styleBytes: ByteArray, baseUri: String):
     }
 
 /**
- * The routes the engine fetches while *compiling* the style: the sprite JSON and image pair, and one
- * document per GeoJSON source. Rentile touches exactly these classes inside `prepare`
- * (`StyleCompiler.compile` -> `SpriteResourceAcquirer.acquire` at `:126-133`, and
- * `compileVectorSource`'s GeoJSON branch at `:1007-1010`).
+ * The routes the engine fetches while *compiling* the style: the sprite JSON and image pair, one document
+ * per GeoJSON source, and one TileJSON document per `url`-form source. Rentile touches exactly these
+ * classes inside `prepare` (`StyleCompiler.compile` -> `SpriteResourceAcquirer.acquire` at `:126-133`,
+ * `compileVectorSource`'s GeoJSON branch at `:1007-1010`, and `resolveTileJson` at `:1029` / `:1304`).
  *
- * No `BASEMAP_TILE_JSON` route is ever produced: the TileJSON reference form is outside the supported
- * subset and is rejected at [deriveBasemapStyleManifest] instead.
+ * The `BASEMAP_TILE_JSON` routes are what make the reference form work at all: they are declared here,
+ * before compilation, so the document RenG needs in order to derive that source's *tile* routes is one
+ * the firewall is already willing to answer. Nothing observes bytes for a route this function did not
+ * emit.
  */
 internal fun styleTimeRoutes(
     manifest: BasemapStyleManifest,
@@ -284,6 +366,9 @@ internal fun styleTimeRoutes(
         source.geoJsonReference?.let { reference ->
             routes += routeFor(reference, ResourceClass.BASEMAP_GEO_JSON, accessMode, limits)
         }
+    }
+    manifest.tileJsonSources.forEach { pending ->
+        routes += routeFor(pending.documentUrl, ResourceClass.BASEMAP_TILE_JSON, accessMode, limits)
     }
     return routes.distinct()
 }
@@ -319,6 +404,125 @@ internal fun tileTimeRoutes(
         }
     }
     return routes.distinct()
+}
+
+/**
+ * The four facts a TileJSON document contributes to url composition. Rentile's `ResolvedTileJson`
+ * (`metadata/TileJsonResourceAcquirer.kt:33-42`) carries two more -- `bounds` and the two digests -- and
+ * neither takes part in composing a url: `bounds` only ever *suppresses* requests, which RenG
+ * deliberately does not model, and the digests are Rentile's own cache identity.
+ */
+internal class BasemapTileJsonDocument(
+    tileTemplates: List<String>,
+    val scheme: BasemapTileScheme,
+    val minZoom: Int,
+    val maxZoom: Int,
+    /** 64, 256 or 512 when the document declares one; `null` when it does not. */
+    val tileSizePixels: Int?,
+) {
+    private val templateSnapshot: List<String> = freshListCopy(tileTemplates)
+
+    /** Absolute, already resolved against the **document's own** url, in declaration order. */
+    val tileTemplates: List<String> get() = freshListCopy(templateSnapshot)
+
+    /** Redacted: a tile template is a url and may carry a credential. */
+    override fun toString(): String =
+        "BasemapTileJsonDocument(scheme=$scheme, minZoom=$minZoom, maxZoom=$maxZoom, " +
+            "templates=${templateSnapshot.size})"
+}
+
+internal sealed interface BasemapTileJsonOutcome {
+    class Parsed(val document: BasemapTileJsonDocument) : BasemapTileJsonOutcome
+
+    data class Rejected(val reason: BasemapSourceUnderivableReason) : BasemapTileJsonOutcome
+}
+
+/**
+ * Rentile's `TileJsonResourceAcquirer.parseOrThrow` (`:161-243`), reproduced over RenG's own JSON reader
+ * and restricted to the fields that compose a url. Pure, and never throws for any input: an unusable
+ * document degrades the one source that named it.
+ *
+ * [documentUrl] is the exact url the document was fetched from, and it is the base every `tiles` entry
+ * resolves against -- **not** the style's locator. Rentile passes `baseUrl = url` into
+ * `resolveHttpReference` at `:180`, and the two bases routinely differ in host (a style on one CDN naming
+ * a TileJSON on a tile API is the ordinary shape in the verified corpus), so resolving against the style
+ * composes a well-formed url no route covers.
+ *
+ * The known divergences from kotlinx are the same four this file's header lists for the style document --
+ * duplicate member names, invalid UTF-8, number spelling, and nesting depth -- and run in the same
+ * direction: RenG refuses a document Rentile would have read, degrading the source rather than composing
+ * a wrong url. `tilejson` version, `tiles`, `minzoom`, `maxzoom`, `scheme` and `tileSize` are read exactly
+ * as Rentile reads them, defaults included; `bounds` is not read at all (see [tileTimeRoutes]).
+ */
+internal fun parseBasemapTileJson(documentBytes: ByteArray, documentUrl: String): BasemapTileJsonOutcome =
+    try {
+        BasemapTileJsonOutcome.Parsed(readTileJsonDocument(documentBytes, documentUrl))
+    } catch (signal: SourceUnderivableSignal) {
+        BasemapTileJsonOutcome.Rejected(signal.reason)
+    }
+
+/**
+ * Folds every observed TileJSON document back into [manifest], turning each `url`-form source whose
+ * document arrived and parsed into an ordinary [BasemapStyleSource] that [tileTimeRoutes] composes urls
+ * for exactly as it does for an inline one, and recording every other one as underivable.
+ *
+ * [documents] is keyed by the exact [BasemapTileJsonSource.documentUrl] the route was preregistered
+ * under. A source with no entry is [BasemapSourceUnderivableReason.TILE_JSON_UNOBSERVED] -- the ordinary
+ * outcome for a source no retained layer references, since Rentile compiles a source only per referencing
+ * layer and so never fetches an unused one.
+ *
+ * **Where the two sides of a field disagree, Rentile's own preference is reproduced, and it is not "one
+ * side wins".** From `StyleCompiler.compileVectorSource` (`:1036-1060`) and `compileRasterSource`
+ * (`:1311-1342`):
+ *  - **templates** -- the document's replace the style's outright (`resolvedTileJson?.tileTemplates ?:
+ *    inlineTemplates`), and a source declaring both forms never reaches here at all.
+ *  - **scheme** -- the *style's* wins when it declares one, else the document's, else `xyz`.
+ *  - **minzoom** -- `maxOf(style ?: 0, document)`: the tighter floor.
+ *  - **maxzoom** -- `minOf(style ?: default, document)`: the tighter ceiling. Note that the style's own
+ *    declared value is *not* additionally clamped to the kind's default here, unlike the inline form,
+ *    because Rentile's `minOf` has the document's value as its other operand rather than the default.
+ *    Note too that a document declaring no `maxzoom` defaults to **22**, so a raster source whose own
+ *    default is 30 is still capped at 22 by an otherwise silent document.
+ *  - **tileSize** -- the style's, else the document's, else 512. Both inputs were already checked against
+ *    the compatibility profile where they were read, so the combined value needs no further check.
+ *  - **bounds** -- read by Rentile from either side and deliberately not modelled here at all.
+ *
+ * Idempotent: the returned manifest has no [BasemapStyleManifest.tileJsonSources] left, so completing it
+ * again adds nothing and duplicates nothing.
+ */
+internal fun completeBasemapStyleManifest(
+    manifest: BasemapStyleManifest,
+    documents: Map<String, BasemapTileJsonOutcome>,
+): BasemapStyleManifest {
+    val pending = manifest.tileJsonSources
+    if (pending.isEmpty()) return manifest
+    val resolved = ArrayList<BasemapStyleSource>(manifest.sources)
+    val underivable = ArrayList<UnderivableBasemapSource>(manifest.underivableSources)
+    pending.forEach { source ->
+        when (val outcome = documents[source.documentUrl]) {
+            null -> underivable += UnderivableBasemapSource(
+                source.sourceId,
+                BasemapSourceUnderivableReason.TILE_JSON_UNOBSERVED,
+            )
+
+            is BasemapTileJsonOutcome.Rejected ->
+                underivable += UnderivableBasemapSource(source.sourceId, outcome.reason)
+
+            is BasemapTileJsonOutcome.Parsed -> try {
+                resolved += combineTileJsonSource(source, outcome.document)
+            } catch (signal: SourceUnderivableSignal) {
+                underivable += UnderivableBasemapSource(source.sourceId, signal.reason)
+            }
+        }
+    }
+    return BasemapStyleManifest(
+        baseUri = manifest.baseUri,
+        spriteBase = manifest.spriteBase,
+        sources = resolved,
+        tileJsonSources = emptyList(),
+        underivableSources = underivable,
+        terrainSourceId = manifest.terrainSourceId,
+    )
 }
 
 /**
@@ -458,8 +662,10 @@ private class StyleRejectSignal(val reason: BasemapStyleReject) : RuntimeExcepti
 private fun rejectStyle(reason: BasemapStyleReject): Nothing = throw StyleRejectSignal(reason)
 
 /**
- * Internal control-flow signal for a fault confined to one source, unwound by [readSources] into an
- * [UnderivableBasemapSource]. Never escapes that loop, and never reaches [deriveBasemapStyleManifest]'s
+ * Internal control-flow signal for a fault confined to one source, unwound into an
+ * [UnderivableBasemapSource] by whichever of the three loops raised it -- [readSources] while reading the
+ * style, [parseBasemapTileJson] while reading one TileJSON document, and [completeBasemapStyleManifest]
+ * while combining the two. Never escapes any of them, and never reaches [deriveBasemapStyleManifest]'s
  * own catch: unlike [StyleRejectSignal] it is not a failure at all.
  */
 private class SourceUnderivableSignal(val reason: BasemapSourceUnderivableReason) : RuntimeException()
@@ -479,6 +685,17 @@ private const val VECTOR_DEFAULT_MAXIMUM_ZOOM: Int = 22
 private const val RASTER_DEFAULT_MAXIMUM_ZOOM: Int = 30
 private const val MAXIMUM_SOURCE_ZOOM: Int = 30
 private const val DEFAULT_RASTER_TILE_SIZE: Int = 512
+
+/**
+ * A TileJSON document nests only as deep as its `vector_layers` and `tilestats` blocks do -- the deepest
+ * in the verified corpus reaches six. Bounded by the same ceiling the style document uses, and for the
+ * same reason: Rentile's kotlinx reader imposes none, so this bounds a hostile document, not a real one.
+ */
+private const val TILE_JSON_MAXIMUM_DEPTH: Int = STYLE_JSON_MAXIMUM_DEPTH
+
+/** `parseOrThrow` :192 / :195 -- the defaults a document that declares neither zoom bound falls back to. */
+private const val TILE_JSON_DEFAULT_MINIMUM_ZOOM: Int = 0
+private const val TILE_JSON_DEFAULT_MAXIMUM_ZOOM: Int = 22
 
 private fun readStyleManifest(styleBytes: ByteArray, baseUri: String): BasemapStyleManifest {
     val root = when (val parsed = parseJson(styleBytes, 0, styleBytes.size, STYLE_JSON_MAXIMUM_DEPTH)) {
@@ -503,8 +720,116 @@ private fun readStyleManifest(styleBytes: ByteArray, baseUri: String): BasemapSt
         // and an unresolvable relative reference leaves its atlas unresolved rather than composing a url.
         spriteBase = (root.members["sprite"] as? JsonValue.Text)?.value?.let { resolveHttpReference(baseUri, it) },
         sources = declaredSources.routable,
+        tileJsonSources = declaredSources.tileJsonBacked,
         underivableSources = declaredSources.underivable,
         terrainSourceId = readTerrainSourceId(root),
+    )
+}
+
+/**
+ * The body of [parseBasemapTileJson]. Throws [SourceUnderivableSignal] rather than returning, so that the
+ * shape mirrors [readSource] exactly -- the caller converts it into a reason against the one source that
+ * named this document.
+ */
+private fun readTileJsonDocument(documentBytes: ByteArray, documentUrl: String): BasemapTileJsonDocument {
+    val root = when (
+        val parsed = parseJson(documentBytes, 0, documentBytes.size, TILE_JSON_MAXIMUM_DEPTH)
+    ) {
+        is JsonParse.Failed -> skipSource(
+            if (parsed.reason == JsonReject.DUPLICATE_MEMBER_NAME) {
+                BasemapSourceUnderivableReason.TILE_JSON_DUPLICATE_MEMBER_NAME
+            } else {
+                BasemapSourceUnderivableReason.TILE_JSON_MALFORMED
+            },
+        )
+
+        is JsonParse.Parsed -> parsed.value as? JsonValue.Obj
+            ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_ROOT_NOT_OBJECT)
+    }
+
+    // `parseOrThrow` :167-174. The member is optional; when present it must be a string, and only the
+    // 2.x and 3.x families are supported.
+    root.members["tilejson"]?.let { declared ->
+        val version = (declared as? JsonValue.Text)?.value
+            ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_VERSION_NOT_STRING)
+        if (!version.startsWith("2.") && !version.startsWith("3.")) {
+            skipSource(BasemapSourceUnderivableReason.TILE_JSON_VERSION_UNSUPPORTED)
+        }
+    }
+
+    // `parseOrThrow` :175-186. Every entry resolves against the DOCUMENT's url, and an empty or absent
+    // array is a decode failure there rather than an empty template list.
+    val templates = (root.members["tiles"] as? JsonValue.Arr)?.elements.orEmpty().map { element ->
+        val reference = (element as? JsonValue.Text)?.value
+            ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_TILES_NOT_STRINGS)
+        resolveHttpReference(documentUrl, reference)
+            ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_REFERENCE_UNRESOLVABLE)
+    }
+    if (templates.isEmpty()) skipSource(BasemapSourceUnderivableReason.TILE_JSON_TILES_EMPTY)
+
+    val minZoom = root.members["minzoom"]?.let { declared ->
+        intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_ZOOM_NOT_INTEGER)
+    } ?: TILE_JSON_DEFAULT_MINIMUM_ZOOM
+    val maxZoom = root.members["maxzoom"]?.let { declared ->
+        intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_ZOOM_NOT_INTEGER)
+    } ?: TILE_JSON_DEFAULT_MAXIMUM_ZOOM
+    if (minZoom !in 0..MAXIMUM_SOURCE_ZOOM || maxZoom !in minZoom..MAXIMUM_SOURCE_ZOOM) {
+        skipSource(BasemapSourceUnderivableReason.TILE_JSON_ZOOM_RANGE_INVALID)
+    }
+
+    val scheme = when (val declaredScheme = root.members["scheme"]) {
+        null -> BasemapTileScheme.XYZ
+        else -> when ((declaredScheme as? JsonValue.Text)?.value) {
+            null -> skipSource(BasemapSourceUnderivableReason.TILE_JSON_SCHEME_NOT_STRING)
+            "xyz" -> BasemapTileScheme.XYZ
+            "tms" -> BasemapTileScheme.TMS
+            else -> skipSource(BasemapSourceUnderivableReason.TILE_JSON_SCHEME_UNSUPPORTED)
+        }
+    }
+
+    val tileSize = (root.members["tileSize"] ?: root.members["tile-size"])?.let { declared ->
+        intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.TILE_JSON_TILE_SIZE_NOT_INTEGER)
+    }
+    if (tileSize != null && tileSize !in SUPPORTED_TILE_SIZES) {
+        skipSource(BasemapSourceUnderivableReason.TILE_JSON_TILE_SIZE_UNSUPPORTED)
+    }
+
+    return BasemapTileJsonDocument(
+        tileTemplates = templates,
+        scheme = scheme,
+        minZoom = minZoom,
+        maxZoom = maxZoom,
+        tileSizePixels = tileSize,
+    )
+}
+
+/**
+ * One `url`-form source combined with the document it named, exactly as `compileVectorSource` /
+ * `compileRasterSource` combine them. See [completeBasemapStyleManifest] for the field-by-field argument;
+ * this is that paragraph in code.
+ */
+private fun combineTileJsonSource(
+    source: BasemapTileJsonSource,
+    document: BasemapTileJsonDocument,
+): BasemapStyleSource {
+    val minZoom = maxOf(source.declaredMinZoom ?: 0, document.minZoom)
+    val maxZoom = minOf(source.declaredMaxZoom ?: source.defaultMaximumZoom, document.maxZoom)
+    if (minZoom !in 0..MAXIMUM_SOURCE_ZOOM || maxZoom !in minZoom..MAXIMUM_SOURCE_ZOOM) {
+        skipSource(BasemapSourceUnderivableReason.SOURCE_ZOOM_RANGE_INVALID)
+    }
+    return BasemapStyleSource(
+        sourceId = source.sourceId,
+        kind = source.kind,
+        tileTemplates = document.tileTemplates,
+        geoJsonReference = null,
+        scheme = source.declaredScheme ?: document.scheme,
+        minZoom = minZoom,
+        maxZoom = maxZoom,
+        tileSizePixels = if (source.kind == BasemapSourceKind.VECTOR) {
+            null
+        } else {
+            source.declaredTileSizePixels ?: document.tileSizePixels ?: DEFAULT_RASTER_TILE_SIZE
+        },
     )
 }
 
@@ -530,30 +855,44 @@ private fun intPrimitiveOrNull(value: JsonValue?): Int? = when (value) {
 
 private class DeclaredSources(
     val routable: List<BasemapStyleSource>,
+    val tileJsonBacked: List<BasemapTileJsonSource>,
     val underivable: List<UnderivableBasemapSource>,
 )
 
+/** What one declared source turned out to be: routable now, routable once its document arrives, or neither. */
+private sealed interface DeclaredSource {
+    class Routable(val source: BasemapStyleSource) : DeclaredSource
+
+    class TileJsonBacked(val source: BasemapTileJsonSource) : DeclaredSource
+}
+
 /**
- * Reads every declared source, partitioning them into the ones RenG can compose exact urls for and the
- * ones it cannot. A per-source fault is caught here and recorded; only a `sources` member that is not
- * an object at all is fatal, because that leaves no source to record a reason against.
+ * Reads every declared source, partitioning them into the ones RenG can compose exact urls for now, the
+ * ones waiting on a TileJSON document, and the ones it cannot route at all. A per-source fault is caught
+ * here and recorded; only a `sources` member that is not an object at all is fatal, because that leaves
+ * no source to record a reason against.
  */
 private fun readSources(root: JsonValue.Obj, baseUri: String): DeclaredSources {
-    val declared = root.members["sources"] ?: return DeclaredSources(emptyList(), emptyList())
+    val declared = root.members["sources"] ?: return DeclaredSources(emptyList(), emptyList(), emptyList())
     val sources = declared as? JsonValue.Obj ?: rejectStyle(BasemapStyleReject.SOURCES_NOT_OBJECT)
     val routable = ArrayList<BasemapStyleSource>()
+    val tileJsonBacked = ArrayList<BasemapTileJsonSource>()
     val underivable = ArrayList<UnderivableBasemapSource>()
     sources.members.forEach { (sourceId, value) ->
         try {
-            readSource(sourceId, value, baseUri)?.let { routable += it }
+            when (val read = readSource(sourceId, value, baseUri)) {
+                null -> Unit
+                is DeclaredSource.Routable -> routable += read.source
+                is DeclaredSource.TileJsonBacked -> tileJsonBacked += read.source
+            }
         } catch (signal: SourceUnderivableSignal) {
             underivable += UnderivableBasemapSource(sourceId, signal.reason)
         }
     }
-    return DeclaredSources(routable, underivable)
+    return DeclaredSources(routable, tileJsonBacked, underivable)
 }
 
-private fun readSource(sourceId: String, value: JsonValue, baseUri: String): BasemapStyleSource? {
+private fun readSource(sourceId: String, value: JsonValue, baseUri: String): DeclaredSource? {
     val source = value as? JsonValue.Obj ?: skipSource(BasemapSourceUnderivableReason.SOURCE_NOT_OBJECT)
     return when ((source.members["type"] as? JsonValue.Text)?.value) {
         "vector" -> readTileSource(sourceId, source, baseUri, BasemapSourceKind.VECTOR, VECTOR_DEFAULT_MAXIMUM_ZOOM)
@@ -566,7 +905,7 @@ private fun readSource(sourceId: String, value: JsonValue, baseUri: String): Bas
             RASTER_DEFAULT_MAXIMUM_ZOOM,
         )
 
-        "geojson" -> readGeoJsonSource(sourceId, source, baseUri)
+        "geojson" -> DeclaredSource.Routable(readGeoJsonSource(sourceId, source, baseUri))
         else -> null
     }
 }
@@ -577,10 +916,45 @@ private fun readTileSource(
     baseUri: String,
     kind: BasemapSourceKind,
     defaultMaximumZoom: Int,
-): BasemapStyleSource {
+): DeclaredSource {
     // Rentile reads the reference as a *string* primitive, so a non-string `url` is simply absent to it
-    // (StyleCompiler.kt:1024, :1299) and must be absent here too.
-    if (source.members["url"] is JsonValue.Text) skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED)
+    // (StyleCompiler.kt:1024, :1299) and must be absent here too -- including for the conflict test below,
+    // which Rentile only reaches when the reference is a string.
+    val tileJsonReference = (source.members["url"] as? JsonValue.Text)?.value
+    if (tileJsonReference != null && source.members.containsKey("tiles")) {
+        skipSource(BasemapSourceUnderivableReason.SOURCE_DECLARES_URL_AND_TILES)
+    }
+
+    // Read in the same order for both forms, so a malformed member is reported identically whichever form
+    // the source uses. For the `url` form each stays nullable: the document supplies the other operand,
+    // and `completeBasemapStyleManifest` is where the two are combined.
+    val declaredScheme = when (val scheme = source.members["scheme"]) {
+        null -> null
+        else -> when ((scheme as? JsonValue.Text)?.value) {
+            "xyz" -> BasemapTileScheme.XYZ
+            "tms" -> BasemapTileScheme.TMS
+            else -> skipSource(BasemapSourceUnderivableReason.SOURCE_SCHEME_UNSUPPORTED)
+        }
+    }
+    val declaredMinZoom = declaredZoom(source, "minzoom")
+    val declaredMaxZoom = declaredZoom(source, "maxzoom")
+    val declaredTileSize = if (kind == BasemapSourceKind.VECTOR) null else readTileSize(source)
+
+    if (tileJsonReference != null) {
+        return DeclaredSource.TileJsonBacked(
+            BasemapTileJsonSource(
+                sourceId = sourceId,
+                kind = kind,
+                documentUrl = resolveHttpReference(baseUri, tileJsonReference)
+                    ?: skipSource(BasemapSourceUnderivableReason.SOURCE_REFERENCE_UNRESOLVABLE),
+                declaredScheme = declaredScheme,
+                declaredMinZoom = declaredMinZoom,
+                declaredMaxZoom = declaredMaxZoom,
+                declaredTileSizePixels = declaredTileSize,
+                defaultMaximumZoom = defaultMaximumZoom,
+            ),
+        )
+    }
 
     val declaredTemplates = (source.members["tiles"] as? JsonValue.Arr)?.elements.orEmpty()
     val templates = declaredTemplates.map { element ->
@@ -589,30 +963,27 @@ private fun readTileSource(
     }
     if (templates.isEmpty()) skipSource(BasemapSourceUnderivableReason.SOURCE_TILES_EMPTY)
 
-    val scheme = when (val declaredScheme = source.members["scheme"]) {
-        null -> BasemapTileScheme.XYZ
-        else -> when ((declaredScheme as? JsonValue.Text)?.value) {
-            "xyz" -> BasemapTileScheme.XYZ
-            "tms" -> BasemapTileScheme.TMS
-            else -> skipSource(BasemapSourceUnderivableReason.SOURCE_SCHEME_UNSUPPORTED)
-        }
-    }
-
-    val minZoom = maxOf(declaredZoom(source, "minzoom") ?: 0, 0)
-    val maxZoom = minOf(declaredZoom(source, "maxzoom") ?: defaultMaximumZoom, defaultMaximumZoom)
+    val minZoom = maxOf(declaredMinZoom ?: 0, 0)
+    val maxZoom = minOf(declaredMaxZoom ?: defaultMaximumZoom, defaultMaximumZoom)
     if (minZoom !in 0..MAXIMUM_SOURCE_ZOOM || maxZoom !in minZoom..MAXIMUM_SOURCE_ZOOM) {
         skipSource(BasemapSourceUnderivableReason.SOURCE_ZOOM_RANGE_INVALID)
     }
 
-    return BasemapStyleSource(
-        sourceId = sourceId,
-        kind = kind,
-        tileTemplates = templates,
-        geoJsonReference = null,
-        scheme = scheme,
-        minZoom = minZoom,
-        maxZoom = maxZoom,
-        tileSizePixels = if (kind == BasemapSourceKind.VECTOR) null else readTileSize(source),
+    return DeclaredSource.Routable(
+        BasemapStyleSource(
+            sourceId = sourceId,
+            kind = kind,
+            tileTemplates = templates,
+            geoJsonReference = null,
+            scheme = declaredScheme ?: BasemapTileScheme.XYZ,
+            minZoom = minZoom,
+            maxZoom = maxZoom,
+            tileSizePixels = if (kind == BasemapSourceKind.VECTOR) {
+                null
+            } else {
+                declaredTileSize ?: DEFAULT_RASTER_TILE_SIZE
+            },
+        ),
     )
 }
 
@@ -621,8 +992,9 @@ private fun declaredZoom(source: JsonValue.Obj, member: String): Int? {
     return intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.SOURCE_ZOOM_NOT_INTEGER)
 }
 
-private fun readTileSize(source: JsonValue.Obj): Int {
-    val declared = source.members["tileSize"] ?: source.members["tile-size"] ?: return DEFAULT_RASTER_TILE_SIZE
+/** `null` when the source declares no tile size at all; the declared value otherwise, already profiled. */
+private fun readTileSize(source: JsonValue.Obj): Int? {
+    val declared = source.members["tileSize"] ?: source.members["tile-size"] ?: return null
     val tileSize = intPrimitiveOrNull(declared) ?: skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_NOT_INTEGER)
     if (tileSize !in SUPPORTED_TILE_SIZES) skipSource(BasemapSourceUnderivableReason.SOURCE_TILE_SIZE_UNSUPPORTED)
     return tileSize

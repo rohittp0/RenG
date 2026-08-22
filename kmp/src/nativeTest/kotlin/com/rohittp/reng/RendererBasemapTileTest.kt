@@ -339,6 +339,103 @@ class RendererBasemapTileTest {
         )
     }
 
+    // ---- sources that declare their tiles by reference -------------------------------------------
+
+    /**
+     * The `url` form, end to end: the style names a TileJSON document, the engine fetches it while
+     * compiling, and the frame's ground is then requested through the exact urls **that document**
+     * declares.
+     *
+     * This is not one more source shape. Across the 34 map styles Rentile is verified for, 96 sources use
+     * this form and 2 use the inline one, and every one of the 34 needs at least one -- so before this
+     * worked, none of them drew any ground at all. The urls are pinned as exact strings for the reason
+     * the class header gives: a plausible-but-different url is refused on every tile at once.
+     */
+    @Test
+    fun rendersGroundFromASourceThatDeclaresItsTilesByReference() = runTest {
+        val transport = TileJsonTileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val frame = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+
+        assertEquals(
+            1,
+            transport.requestedUrls().count { it == REFERENCED_TILE_JSON_URL },
+            "the TileJSON document is acquired once, through a route RenG preregistered for it",
+        )
+        assertEquals(4, frame.basemapTiles.size, "and the frame's ground is rendered from it")
+        assertEquals(
+            listOf(
+                "https://tiles.example/t/4/1/10.png?key=k",
+                "https://tiles.example/t/4/1/11.png?key=k",
+                "https://tiles.example/t/4/2/10.png?key=k",
+                "https://tiles.example/t/4/2/11.png?key=k",
+            ),
+            transport.requestedUrls().filter { it.startsWith("https://tiles.example/t/") }.distinct().sorted(),
+            "through the exact urls the TileJSON's own template composes, credential query included",
+        )
+    }
+
+    /**
+     * The retention question the `url` form raises and the inline form does not.
+     *
+     * A `RESIDENT`-provenance frame emits no `CompileBasemapStyle` at all, so its preparation invocation
+     * calls Rentile's `resolveTileJson` never and observes no TileJSON bytes whatsoever. The document's
+     * facts must therefore live with the *compilation* -- which is what still holds the templates Rentile
+     * derived from them -- and not with the invocation that happened to see them go past. Without that,
+     * frame two derives no tile route for the source and every tile fails closed at once, on a style
+     * whose only sin was being cached.
+     *
+     * The style is declared fresh so frame two is genuinely resident-provenance, asserted rather than
+     * assumed.
+     */
+    @Test
+    fun rendersReferencedGroundOnAFrameThatCompilesNoStyleAndSoObservesNoTileJson() = runTest {
+        val transport = TileJsonTileTransport(styleFreshUntilEpochMillis = Long.MAX_VALUE)
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+        val urlsAfterFirstFrame = transport.requestedUrls()
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+
+        assertEquals(
+            1,
+            transport.requestedUrls().count { it == STYLE_URL },
+            "the fixture must genuinely make frame two resident-provenance, or it proves nothing",
+        )
+        assertEquals(
+            1,
+            urlsAfterFirstFrame.count { it == REFERENCED_TILE_JSON_URL },
+            "and frame one is the only frame that observes the document",
+        )
+        assertEquals(4, first.basemapTiles.size)
+        assertEquals(
+            first.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            second.basemapTiles.map { it.key }.sortedBy { it.stableId },
+            "a frame that compiles no style still renders exactly the same referenced ground",
+        )
+    }
+
+    /**
+     * A TileJSON's `maxzoom` is not advisory. Past it the requested url's z, x and y are all different --
+     * `min(z, maxZoom)` plus the child-scale division -- so a derivation that kept the style's looser
+     * range would compose four urls the engine never asks for and omit the four it does.
+     */
+    @Test
+    fun clampsToTheZoomRangeTheTileJsonDeclaresRatherThanTheStylesDefault() = runTest {
+        val transport = TileJsonTileTransport(tileJsonMaximumZoom = 2)
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val frame = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+
+        assertEquals(4, frame.basemapTiles.size, "the frame still draws its four output tiles")
+        assertEquals(
+            listOf("https://tiles.example/t/2/0/2.png?key=k"),
+            transport.requestedUrls().filter { it.startsWith("https://tiles.example/t/") }.distinct().sorted(),
+            "all four LOD 4 tiles resolve to the one z2 source tile the document's maxzoom allows",
+        )
+    }
+
     @Test
     fun aFrameThatDrawsNoBasemapRendersNoGroundAtAll() = runTest {
         val transport = TileTransport()
@@ -490,5 +587,69 @@ internal class FailingStyleWriteStore : Store {
             throw IllegalStateException("consumer store is out of space")
         }
         mutex.withLock { entries[key] = resource }
+    }
+}
+
+// ---- the `url`-form fixture ----------------------------------------------------------------------
+
+internal const val REFERENCED_TILE_JSON_URL: String = "https://tiles.example/ref/tiles.json?key=k"
+
+/**
+ * A style whose only tile source declares its tiles by reference, plus the sprite that makes the engine
+ * fetch something else while compiling -- so the TileJSON is one of several style-time acquisitions
+ * rather than the only one.
+ */
+internal val REFERENCED_TILE_STYLE: String =
+    """{"version":8,"name":"reng-tilejson-tile-test",""" +
+        """"sprite":"$SPRITE_BASE_URL",""" +
+        """"sources":{"s":{"type":"raster","url":"$REFERENCED_TILE_JSON_URL","tileSize":256}},""" +
+        """"layers":[{"id":"bg","type":"background","paint":{"background-pattern":"dot"}},""" +
+        """{"id":"r","type":"raster","source":"s"}]}"""
+
+/**
+ * Serves [REFERENCED_TILE_STYLE], the TileJSON document it names, the sprite pair, and a valid PNG for
+ * every tile. Shaped like the 16 documents the verified corpus actually names: an absolute template
+ * carrying the account key in its query, and an explicit zoom range.
+ */
+internal class TileJsonTileTransport(
+    private val styleFreshUntilEpochMillis: Long? = null,
+    private val tileJsonMaximumZoom: Int = 14,
+) : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = REFERENCED_TILE_STYLE.encodeToByteArray(),
+                metadata = TransportResponseMetadata(
+                    contentType = "application/json",
+                    freshUntilEpochMillis = styleFreshUntilEpochMillis,
+                ),
+            )
+            REFERENCED_TILE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = (
+                    """{"tilejson":"2.0.0",""" +
+                        """"tiles":["https://tiles.example/t/{z}/{x}/{y}.png?key=k"],""" +
+                        """"minzoom":0,"maxzoom":$tileJsonMaximumZoom}"""
+                    ).encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
     }
 }

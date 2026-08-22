@@ -2,6 +2,7 @@ package com.rohittp.reng
 
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
+import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
 import com.rohittp.reng.internal.cache.ResidentCache
@@ -635,6 +636,13 @@ internal class RenGRenderer(
      * A rejected manifest is unreachable: the driver validated these exact bytes on this exact frame and
      * would have failed the operation otherwise, so reaching it means RenG's own derivation is not a
      * function — a defect, not a consumer condition.
+     *
+     * **The manifest is then completed with the TileJSON documents the compilation observed.** A
+     * `url`-form source — 96 of the 98 tile sources across the verified style corpus — names a TileJSON
+     * document rather than a template, and that document is fetched during `engine.prepare`, strictly
+     * before this point. `completeBasemapStyleManifest` folds it back in so the source composes its tile
+     * urls exactly as an inline one does; a source whose document never arrived stays degraded and
+     * contributes nothing at all, rather than guessing a template that would fail closed anyway.
      */
     private suspend fun renderBasemapTiles(
         styleReference: StaticResourceReference.External,
@@ -655,9 +663,18 @@ internal class RenGRenderer(
             is BasemapStyleManifestOutcome.Rejected ->
                 error("the resource driver already validated this exact style document")
         }
+        // The manifest the driver derived names each `url`-form source's TileJSON *document*, not its
+        // tiles. Completing it here folds in the documents the firewall observed while the engine
+        // compiled this exact content -- the same content digest both halves are keyed off -- so a
+        // `url`-form source composes its tile urls exactly as an inline one does. A source whose document
+        // never arrived stays degraded and contributes nothing, rather than guessing a template.
+        val completed = completeBasemapStyleManifest(
+            manifest,
+            basemapEngineHost.tileJsonDocuments(styleReference.resourceKey, stored.contentDigest),
+        )
         basemapEngineHost.registerRoutes(
             tileTimeRoutes(
-                manifest = manifest,
+                manifest = completed,
                 tiles = canonicalTiles,
                 accessMode = accessMode,
                 limits = configuration.resourceLimits,

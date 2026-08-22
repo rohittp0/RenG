@@ -276,30 +276,28 @@ class BasemapStyleManifestTest {
     }
 
     @Test
-    fun rejectsAUrlFormSourceLoudlyForEveryTileSourceKind() {
-        // "Loudly" now means recorded and unrouted, not fatal: the style keeps deriving, and the
-        // firewall refuses the url at the moment the engine actually asks for it. Rentile never touches
-        // an unreferenced source, so failing the whole style over one would break a working flow.
+    fun routesTheTileJsonDocumentForEveryTileSourceKindThatNamesOne() {
+        // The `url` form contributes a style-time document route and no tile route until that document
+        // arrives; `BasemapTileJsonSourceTest` owns the whole of what happens once it does.
         for (type in listOf("vector", "raster", "raster-dem")) {
             val manifest = manifestOf(
                 """{"version":8,"sources":{"s":{"type":"$type","url":"https://tiles.example/s.json"}},"layers":[]}""",
             )
-            assertEquals(
-                listOf(
-                    UnderivableBasemapSource("s", BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED),
-                ),
-                manifest.underivableSources,
-            )
+            assertEquals(emptyList(), manifest.underivableSources)
             assertEquals(emptyList(), manifest.sources)
+            assertEquals(listOf("s"), manifest.tileJsonSources.map { it.sourceId })
             assertEquals(emptyList(), tileTimeRoutes(manifest, listOf(TILE_2_1_1), ResourceAccessMode.NORMAL, LIMITS))
-            assertEquals(emptyList(), styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS))
+            assertEquals(
+                listOf("https://tiles.example/s.json"),
+                styleTimeRoutes(manifest, ResourceAccessMode.NORMAL, LIMITS).map { it.locator.value },
+            )
         }
     }
 
     @Test
     fun recordsASourceThatDeclaresBothUrlAndTilesAsUnderivable() {
         assertUnderivable(
-            BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED,
+            BasemapSourceUnderivableReason.SOURCE_DECLARES_URL_AND_TILES,
             """{"version":8,"sources":{"s":{"type":"raster","url":"https://t.example/s.json",""" +
                 """"tiles":["https://t.example/{z}/{x}/{y}.png"]}},"layers":[]}""",
         )
@@ -373,12 +371,12 @@ class BasemapStyleManifestTest {
     fun keepsRoutingEverySiblingSourceWhenOneIsUnderivable() {
         val manifest = manifestOf(
             """{"version":8,"sprite":"sprites/basic","sources":{""" +
-                """"bad":{"type":"vector","url":"https://tiles.example/v.json"},""" +
+                """"bad":{"type":"vector","tiles":[7]},""" +
                 """"r":{"type":"raster","tiles":["https://tiles.example/r/{z}/{x}/{y}.png"]},""" +
                 """"g":{"type":"geojson","data":"data/points.geojson"}},"layers":[]}""",
         )
         assertEquals(
-            listOf(UnderivableBasemapSource("bad", BasemapSourceUnderivableReason.SOURCE_TILE_JSON_URL_UNSUPPORTED)),
+            listOf(UnderivableBasemapSource("bad", BasemapSourceUnderivableReason.SOURCE_TILES_NOT_STRINGS)),
             manifest.underivableSources,
         )
         assertEquals(listOf("r", "g"), manifest.sources.map { it.sourceId })

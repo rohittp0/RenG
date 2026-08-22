@@ -17,6 +17,7 @@ import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
+import com.rohittp.reng.internal.freshCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
@@ -109,6 +110,43 @@ internal class OperationRegistry(
 
     private suspend fun latchedTransportDigestFor(route: ResourceRouteKey): String? =
         lastTransportDigestMutex.withLock { lastTransportDigestByRoute[route] }
+
+    // The bytes of every BASEMAP_TILE_JSON document this invocation answered, by the exact url the route
+    // was preregistered under. RenG cannot ask the engine what a TileJSON said -- `PreparedStyle` exposes
+    // no template, zoom range or scheme -- so the only way to derive that source's tile routes is to read
+    // the document as it passes, and this is the one place both an answered Transport response and an
+    // answered Store hit are already in hand.
+    //
+    // **This is an observation, never an answer path.** Both call sites sit strictly *after* the route
+    // lookup that would otherwise have thrown `ambiguousRouteFailure()`, take the route object that
+    // lookup returned, and add no lookup, no consumer call and no fallback of their own. An unregistered
+    // url still fails closed before `Transport.execute`, and nothing is recorded for it -- there is no
+    // route to record it against.
+    //
+    // Its own guard, for the same reason `lastTransportDigestByRoute` has one: both writers run inside a
+    // `SuspendJoin` block, which releases its own Mutex before running, so concurrent routes genuinely
+    // race here (ADR 0016's 256-tile batch at concurrency eight).
+    private val tileJsonObservationMutex = Mutex()
+    private val observedTileJsonByUrl = mutableMapOf<String, ByteArray>()
+
+    /**
+     * Records the bytes just answered for [route], if and only if it is a TileJSON route.
+     *
+     * A later observation for one url replaces an earlier one, which is exactly the engine's own
+     * preference order: `TileJsonResourceAcquirer.acquire` reads its raw store first and falls through to
+     * the transport when that hit does not parse, so the transport's bytes are the ones it actually used.
+     */
+    private suspend fun observeTileJsonDocument(route: ResourceRouteKey, bytes: ByteArray) {
+        if (route.resourceClass != ResourceClass.BASEMAP_TILE_JSON) return
+        tileJsonObservationMutex.withLock { observedTileJsonByUrl[route.locator.value] = bytes.freshCopy() }
+    }
+
+    /**
+     * Every TileJSON document this invocation answered, by url. A copy, taken under the same lock the
+     * writers take, so the reader gets a happens-before edge on all of them.
+     */
+    suspend fun observedTileJsonDocuments(): Map<String, ByteArray> =
+        tileJsonObservationMutex.withLock { LinkedHashMap(observedTileJsonByUrl) }
 
     private val transportJoin = SuspendJoin<TransportLatchKey, EngineTransportResponse>()
     private val storeReadJoin = SuspendJoin<ResourceRouteKey, EngineStoredRawResource?>()
@@ -220,6 +258,12 @@ internal class OperationRegistry(
                     ),
                 )
                 recordLatchedTransportDigest(route, sha256Hex(response.bodySnapshot))
+                // Only a success body is the document: Rentile's own acquirer refuses anything outside
+                // 200..299 before it parses, so recording another status would hand the derivation bytes
+                // the engine itself never read.
+                if (response.statusCode in 200..299) {
+                    observeTileJsonDocument(route, response.bodySnapshot)
+                }
                 response.toEngineResponse()
             } catch (cancellation: CancellationException) {
                 // Deliberately NOT latched as a contentless sprite member: a cancelled route is a
@@ -257,6 +301,11 @@ internal class OperationRegistry(
                     // ignored: a conflicting contribution is a write-path concern, and this path's
                     // contract is to answer the engine's read honestly.
                     contributeSpriteMember(route, validated)
+                    // A store hit is the whole document too, and for TileJSON it is the common path once
+                    // a consumer's Store has one: Rentile's acquirer parses a valid hit and never
+                    // transports. Observing only the transport would leave a cached style deriving no
+                    // tile route at all.
+                    observeTileJsonDocument(route, validated.bytes)
                     validated.toEngineStoredRawResource()
                 }
             } catch (cancellation: CancellationException) {

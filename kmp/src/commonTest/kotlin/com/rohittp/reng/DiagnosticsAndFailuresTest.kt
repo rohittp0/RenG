@@ -45,6 +45,9 @@ class DiagnosticsAndFailuresTest {
                 "RESOURCE_DECODE_FAILED", "RESOURCE_PARSE_FAILED", "UNSUPPORTED_RESOURCE_FEATURE",
                 "SHADER_COMPILE_FAILED", "SHADER_LINK_FAILED", "GPU_OPERATION_FAILED",
                 "IDENTITY_COLLISION", "BASEMAP_RENDER_FAILED", "UNROUTABLE_LABEL_SOURCE",
+                // Appended, never inserted: this list is in declaration order, so a constant added
+                // anywhere but the end moves every ordinal after it (ADR 0056).
+                "RENDER_CONTEXT_THREAD_CHANGED",
             ),
             RenGErrorCode.entries.map { it.name },
         )
@@ -54,6 +57,8 @@ class DiagnosticsAndFailuresTest {
                 "RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT", "BASEMAP_NOT_CONFIGURED",
                 "RESIDENT_GPU_TEXTURES_OVER_BUDGET", "LABEL_CONTENT_EXCLUDED",
                 "TERRAIN_COVERAGE_INCOMPLETE", "TERRAIN_UNAVAILABLE",
+                // Appended, never inserted: declaration order is ordinal order (ADR 0057).
+                "GROUND_PRESENTED_PROVISIONALLY",
             ),
             DiagnosticCode.entries.map { it.name },
         )
@@ -69,7 +74,7 @@ class DiagnosticsAndFailuresTest {
                 "screenPosition.y", "placement.positionMode", "placement.scale", "geometry.latitude",
                 "geometry.unwrappedLongitude", "geometry.altitude", "basemapTileInstances",
                 "responseBodyBytes", "resource", "frameIdentity", "animationSelector",
-                "shaderPair", "renderTarget",
+                "shaderPair", "renderTarget", "preparedFrameCpuBytes",
             ),
             DiagnosticField.entries.map { it.wireName },
         )
@@ -103,9 +108,11 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
-        assertEquals(100, allowedFailureCases.size)
-        assertEquals(29, allowedFailureCases.count { !it.hasDiagnostic })
-        assertEquals(71, allowedFailureCases.count { it.hasDiagnostic })
+        // 104 until ADR 0071 admitted an internal-pipeline identity for the two shader codes, then
+        // the prepared-frame aggregate CPU ceiling added one FRAME_PREPARATION limit shape.
+        assertEquals(107, allowedFailureCases.size)
+        assertEquals(33, allowedFailureCases.count { !it.hasDiagnostic })
+        assertEquals(74, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
         allowedFailureCases.forEach(::assertFailureTableOutcome)
@@ -759,6 +766,7 @@ class DiagnosticsAndFailuresTest {
                 DiagnosticField.FRAME_IDENTITY,
                 DiagnosticField.SHADER_PAIR,
             ),
+            PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
             PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
             PipelineStage.STORE_VALIDATION to setOf(DiagnosticField.RESOURCE),
             PipelineStage.TRANSPORT_VALIDATION to setOf(DiagnosticField.RESPONSE_BODY_BYTES),
@@ -814,6 +822,16 @@ class DiagnosticsAndFailuresTest {
                     PipelineStage.RENDERER_CLOSE,
                 ).map { noDiagnostic(RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT, it) },
             )
+            // The same four stages, and that is the point: a thread change is the same family of
+            // failure one step earlier, since the thread only ever stands in for the context.
+            addAll(
+                listOf(
+                    PipelineStage.RENDER_TARGET,
+                    PipelineStage.DRAW,
+                    PipelineStage.RESOURCE_FREE,
+                    PipelineStage.RENDERER_CLOSE,
+                ).map { noDiagnostic(RenGErrorCode.RENDER_CONTEXT_THREAD_CHANGED, it) },
+            )
             addAll(
                 listOf(PipelineStage.CONTEXT_ADOPTION, PipelineStage.CONFIGURATION).map {
                     noDiagnostic(RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT, it)
@@ -861,6 +879,14 @@ class DiagnosticsAndFailuresTest {
                     limitShape = LimitShape.EXCEEDED,
                 ),
             )
+            add(
+                failureContext(
+                    RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    PipelineStage.FRAME_PREPARATION,
+                    DiagnosticField.PREPARED_FRAME_CPU_BYTES,
+                    limitShape = LimitShape.EXCEEDED,
+                ),
+            )
             add(failureContext(RenGErrorCode.UNSUPPORTED_PROJECTION_MODE, PipelineStage.FRAME_PLANNING, DiagnosticField.PROJECTION_MODE))
             add(failureContext(RenGErrorCode.UNSUPPORTED_ANCHORING_MODE, PipelineStage.FRAME_PLANNING, DiagnosticField.PLACEMENT_POSITION_MODE))
             add(failureContext(RenGErrorCode.PREPARATION_ORDER_VIOLATION, PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_INDEX))
@@ -902,8 +928,14 @@ class DiagnosticsAndFailuresTest {
                 add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field, IdentityShape.EXTERNAL))
             }
             add(failureContext(RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE, PipelineStage.RESOURCE_PARSING, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            // Both consumer-program kinds, and only those two: a geometry's, and -- since ADR 0071
+            // let a consumer supply the backdrop's source -- an internal pipeline's. EXTERNAL and
+            // OFFSCREEN_SURFACE stay rejected, which is what keeps this a rule rather than a
+            // waiver: those identities still cannot carry a shader-compilation failure.
             listOf(RenGErrorCode.SHADER_COMPILE_FAILED, RenGErrorCode.SHADER_LINK_FAILED).forEach { code ->
-                add(failureContext(code, PipelineStage.SHADER_COMPILATION, DiagnosticField.SHADER_PAIR, IdentityShape.GEOMETRY_PROGRAM))
+                listOf(IdentityShape.GEOMETRY_PROGRAM, IdentityShape.INTERNAL_PIPELINE).forEach { identity ->
+                    add(failureContext(code, PipelineStage.SHADER_COMPILATION, DiagnosticField.SHADER_PAIR, identity))
+                }
             }
             listOf(
                 PipelineStage.GPU_RESOURCE,

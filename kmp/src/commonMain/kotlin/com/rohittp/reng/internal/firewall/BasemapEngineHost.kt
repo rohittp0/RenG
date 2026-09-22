@@ -22,7 +22,7 @@ import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.identity.CanonicalBytes
-import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.planning.BasemapTileInstance
@@ -30,6 +30,10 @@ import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.ResourceAccessMode as RenGResourceAccessMode
+import com.rohittp.reng.RenGRenderPriority
+import com.rohittp.reng.internal.metrics.EngineMetricRecorder
+import com.rohittp.reng.internal.metrics.toEnginePriority
+import com.rohittp.rentile.RenderPriority as EngineRenderPriority
 import com.rohittp.rentile.BasemapRasterizer
 import com.rohittp.rentile.CredentialProvider
 import com.rohittp.rentile.GlyphTemplateMismatchException
@@ -37,7 +41,6 @@ import com.rohittp.rentile.GroundRadianceDescriptor
 import com.rohittp.rentile.LabelCandidateBatch
 import com.rohittp.rentile.LabelCandidatePlan
 import com.rohittp.rentile.MapSessionProvider
-import com.rohittp.rentile.MetricsSink
 import com.rohittp.rentile.PreparedBatch
 import com.rohittp.rentile.PreparedStyle
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
@@ -97,9 +100,14 @@ internal class BasemapEngineHost(
     transport: Transport,
     store: Store,
     private val cache: ResidentCache,
-    private val tileOutputSizePixels: Int = RenderOptions.DEFAULT_OUTPUT_SIZE_PX,
-    private val sha256: Sha256Function = PureKotlinSha256,
-    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
+    internal val tileOutputSizePixels: Int = RenderOptions.DEFAULT_OUTPUT_SIZE_PX,
+    private val sha256: Sha256Function = AcceleratedSha256,
+    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(AcceleratedSha256),
+    /**
+     * Where the engine's counters go (ADR 0049). Defaulted to a fresh recorder nothing reads, so
+     * every test constructing this host keeps working and no metric escapes into a shared one.
+     */
+    private val metricRecorder: EngineMetricRecorder = EngineMetricRecorder(),
 ) : AutoCloseable {
 
     private val consumerTransport: Transport = transport
@@ -113,6 +121,12 @@ internal class BasemapEngineHost(
     private var compiledStyle: CompiledStyleBinding? = null
 
     private var derivedManifest: StyleManifestBinding? = null
+
+    /**
+     * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069). A `LinkedHashMap` because
+     * the bound is spent oldest-first.
+     */
+    private val rememberedTileKeys: MutableMap<RememberedTileKeyIdentity, ResourceKey> = LinkedHashMap()
 
     private var closed: Boolean = false
 
@@ -128,7 +142,10 @@ internal class BasemapEngineHost(
             sessionProvider = MapSessionProvider.None,
             credentialProvider = CredentialProvider.None,
             clock = RentileClock.System,
-            metricsSink = MetricsSink.None,
+            // RenG's own recorder rather than MetricsSink.None: the engine's seventeen counters
+            // are the only measurement of this renderer's basemap path, and ADR 0049 gives them
+            // a RenG vocabulary to arrive in.
+            metricsSink = metricRecorder,
         ),
     )
 
@@ -165,7 +182,24 @@ internal class BasemapEngineHost(
         routes: List<ResourceRouteKey> = emptyList(),
         block: suspend () -> T,
     ): T {
-        check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
+        val open = activeOperation
+        if (open != null) {
+            // Joining a batch root that is already open (ADR 0051). Both conditions are checked
+            // rather than assumed: a plain invocation nested inside another is still the concurrency
+            // bug this check has always caught, and one registry is never shared across access modes.
+            check(open.shared) { "a basemap engine host drives one preparation invocation at a time" }
+            check(open.accessMode == accessMode) {
+                "a shared preparation invocation is never joined under a different access mode"
+            }
+            registerRoutes(routes)
+            // A scope of its own, for the reason the root's is NOT: the Job every Rentile rasterizer
+            // entry point reads is already supplied by the root this block runs inside, so that is
+            // not what this buys. What it buys is that a frame's own children are awaited before the
+            // frame returns, so one frame's stray work cannot run on into the next frame of the
+            // batch -- joined and root blocks then behave identically, which is the least surprising
+            // thing for a caller that cannot see which it got.
+            return coroutineScope { block() }
+        }
         val registry = OperationRegistry(
             transport = consumerTransport,
             store = consumerStore,
@@ -175,6 +209,39 @@ internal class BasemapEngineHost(
         activeOperation = FirewallOperation(accessMode, registry)
         return try {
             registerRoutes(routes)
+            coroutineScope { block() }
+        } finally {
+            activeOperation = null
+        }
+    }
+
+    /**
+     * Opens one invocation that every [withOperation] inside [block] joins instead of opening its own
+     * (ADR 0051), so a `prepareBatch` gets one route index and one set of single-flight latches for
+     * the whole batch rather than one per frame.
+     *
+     * The cost this removes is measured: three frames over one camera cost 14 engine resource
+     * requests where one frame costs 6, because each frame re-asked for the four tiles the frame
+     * before it had already fetched.
+     *
+     * Opening is still exclusive — this is the root, and a root may not nest inside anything.
+     */
+    suspend fun <T> withSharedOperation(
+        accessMode: RenGResourceAccessMode,
+        block: suspend () -> T,
+    ): T {
+        check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
+        activeOperation = FirewallOperation(
+            accessMode = accessMode,
+            registry = OperationRegistry(
+                transport = consumerTransport,
+                store = consumerStore,
+                privateKeyResolver = privateKeyResolver,
+                sha256 = sha256,
+            ),
+            shared = true,
+        )
+        return try {
             coroutineScope { block() }
         } finally {
             activeOperation = null
@@ -487,24 +554,80 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * Draws [prepared]'s tiles. Performs no adapter call whatsoever: everything was acquired by
-     * [prepareTiles], which is the whole point of Rentile's prepare/render split.
+     * The priority the most recent [renderTiles] forwarded to the engine, or `null` before the first.
+     *
+     * An observation rather than state this class acts on — the same shape as
+     * [OperationRegistry.observedTileJsonDocuments] and for the same reason. A priority is a hint the
+     * engine consumes internally and reports nowhere, so without this the whole thread-through from
+     * `prepare`'s parameter to the engine call is unobservable, and a dropped argument would default
+     * silently to NORMAL forever (ADR 0053).
+     *
+     * Written by [forwarding], which is the function that produces the argument, so the record and
+     * the argument cannot come apart: a render branch that dropped its `priority =` would stop
+     * calling [forwarding] at all and this would stay null. Recording it on entry instead would
+     * report a priority the engine never received.
      */
-    suspend fun renderTiles(prepared: PreparedBasemapTiles): List<RenderedBasemapTile> {
+    var lastForwardedRenderPriority: RenGRenderPriority? = null
+        private set
+
+    /**
+     * Translates [priority] for the engine and records that it was forwarded, in that order and in
+     * one place, so [lastForwardedRenderPriority] is written by the same expression that supplies
+     * the argument rather than beside it (ADR 0053).
+     */
+    private fun forwarding(priority: RenGRenderPriority): EngineRenderPriority {
+        lastForwardedRenderPriority = priority
+        return priority.toEnginePriority()
+    }
+
+    /**
+     * Draws [prepared]'s tiles. Makes no adapter call: [prepareTiles] acquired everything.
+     *
+     * [asRawPixels] picks `renderRaw` over `render`, the same drawing with the PNG encode skipped
+     * (ADR 0044). Only the caller knows how many raw bytes are outstanding, so the choice is its
+     * own. Both forms carry the engine's `contentKey`, so tile identity is unaffected.
+     */
+    suspend fun renderTiles(
+        prepared: PreparedBasemapTiles,
+        asRawPixels: Boolean,
+        priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
+    ): List<RenderedBasemapTile> {
         requireOpen()
         val styleDigest = prepared.style.digest
-        val batch = engineCall { engine.render(prepared.batch) }
         val tilesById = prepared.tiles.associateBy(::engineTileIdOf)
-        return batch.tiles.map { rendered ->
-            val tile = tilesById[rendered.id]
+
+        // One engine call either way, chosen by the caller's budget (ADR 0044) and never by
+        // anything this file knows: the firewall renders what it is asked to render.
+        fun carry(
+            id: TileId,
+            contentKey: String,
+            pixels: BasemapTilePixels,
+        ): RenderedBasemapTile {
+            val tile = tilesById[id]
                 ?: error("the engine rendered a tile this batch never asked for")
-            RenderedBasemapTile(
+            return RenderedBasemapTile(
                 key = basemapTileKey(styleDigest, tile, tileOutputSize, sha256),
                 tile = tile,
-                pngBytes = rendered.pngBytes,
-                contentKey = rendered.contentKey,
-                substitutions = prepared.batch.substitutions[rendered.id].orEmpty(),
+                pixels = pixels,
+                contentKey = contentKey,
+                substitutions = prepared.batch.substitutions[id].orEmpty(),
             )
+        }
+
+        return if (asRawPixels) {
+            val batch = engineCall { engine.renderRaw(prepared.batch, priority = forwarding(priority)) }
+            batch.tiles.map { rendered ->
+                carry(
+                    rendered.id,
+                    rendered.contentKey,
+                    BasemapTilePixels.Raw(rendered.rgbaBytes, rendered.widthPx, rendered.heightPx),
+                )
+            }
+        } else {
+            val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority)) }
+            batch.tiles.map { rendered ->
+                carry(rendered.id, rendered.contentKey, BasemapTilePixels.Encoded(rendered.pngBytes))
+            }
         }
     }
 
@@ -802,19 +925,63 @@ internal class BasemapEngineHost(
     private fun redactedLocatorHex(url: String): String =
         sha256.digest(CanonicalBytes(redactAuthenticationQuery(url).encodeToByteArray())).lowercaseHex
 
-    /** RenG's own identity for the rendered tile [tile] of [style] at this host's tile output size. */
+    /**
+     * RenG's own identity for the rendered tile [tile] of [style] at this host's tile output size.
+     *
+     * Asked of the host rather than derived by the caller so [tileOutputSize] -- an engine render
+     * option, not a renderer configuration value -- stays owned in one place; a caller that guessed
+     * it would name a tile the engine never rendered.
+     */
     fun renderedTileKey(style: PreparedStyle, tile: CanonicalBasemapTile): ResourceKey =
-        basemapTileKey(style.digest, tile, tileOutputSize, sha256)
+        rememberedTileKey(style.digest, tile)
 
     /**
-     * The same identity for one unwrapped draw [instance], which the world-copy-projecting overload of
-     * [basemapTileKey] reduces to its canonical tile. Asked of the host rather than derived by the
-     * caller so that [tileOutputSize] -- an engine render option, not a renderer configuration value --
-     * stays owned in exactly one place; a caller that guessed it would derive a key naming a tile the
-     * engine never rendered.
+     * The same identity from a style **digest**, for a caller holding one and not a compiled style —
+     * a draw resolving an ancestor tile (ADR 0057) has the frame's `basemapStyleDigest` only.
      */
+    fun renderedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey =
+        rememberedTileKey(styleDigest, tile)
+
+    /** The same identity for one unwrapped draw [instance], reduced to its canonical tile. */
     fun renderedTileKey(styleDigest: String, instance: BasemapTileInstance): ResourceKey =
-        basemapTileKey(styleDigest, instance, tileOutputSize, sha256)
+        rememberedTileKey(
+            styleDigest,
+            // The world copy is projected away before the key is derived, so every unwrapped
+            // instance of one canonical tile shares one entry and one rendered resource.
+            CanonicalBasemapTile(
+                lod = instance.lod,
+                tileY = instance.tileY,
+                canonicalX = instance.canonicalX,
+            ),
+        )
+
+    /**
+     * [basemapTileKey] for `(styleDigest, tile)`, derived once and then remembered (ADR 0069).
+     *
+     * **The derivation is not cheap and it used to run twice per visible tile per frame**, before
+     * anything had been decided: `renderBasemapTiles` asks for every canonical tile's key to test
+     * residency, `groundInstances` asks for the same keys again, and each ask built a fresh
+     * `ResourceKeyDeriver`, a canonical binary, a SHA-256 and a 64-character hex string. At the
+     * counts `CLAUDE.md` records -- 93 canonical tiles at 3840x2160 and pitch 0, 167 with a frame of
+     * LOD history -- a still camera with every tile resident paid all of it every frame.
+     *
+     * The answer is a pure function of `(styleDigest, tile)`: [tileOutputSize] and [sha256] are fixed
+     * for this host's lifetime. Bounded at [MAXIMUM_REMEMBERED_TILE_KEYS], oldest first, in the shape
+     * `ClassGateRunner.remember` already established rather than a second one.
+     */
+    private fun rememberedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey {
+        val identity = RememberedTileKeyIdentity(styleDigest, tile)
+        rememberedTileKeys[identity]?.let { return it }
+
+        val key = basemapTileKey(styleDigest, tile, tileOutputSize, sha256)
+        rememberedTileKeys[identity] = key
+        val oldest = rememberedTileKeys.iterator()
+        while (rememberedTileKeys.size > MAXIMUM_REMEMBERED_TILE_KEYS) {
+            oldest.next()
+            oldest.remove()
+        }
+        return key
+    }
 
     /**
      * Idempotent. Releases the compiled style's lease, then closes the engine — whose own `close()` is
@@ -942,6 +1109,12 @@ internal class BasemapEngineHost(
     private class FirewallOperation(
         val accessMode: RenGResourceAccessMode,
         val registry: OperationRegistry,
+        /**
+         * Whether a nested [withOperation] may join this one rather than failing (ADR 0051). False
+         * for an ordinary single-frame invocation, so a plain nesting still fails as loudly as it
+         * always has.
+         */
+        val shared: Boolean = false,
     ) {
         val transport: EngineResourceTransport = FirewallTransport(registry)
         val store: EngineRawResourceStore = FirewallStore(registry)
@@ -1078,11 +1251,31 @@ internal fun classifyGlyphRouteRefusal(
     else -> GlyphRouteRefusal.CREDENTIAL_MISMATCH
 }
 
-/** One rendered ground tile: RenG's own identity, the encoded pixels, and the engine's own provenance. */
+/**
+ * A rendered tile's pixels, in whichever form the engine was asked for (ADR 0044).
+ *
+ * The two carry the same picture and the same `contentKey`; they differ only in whether the encode
+ * was paid. The draw path matches on this exhaustively, with no `else`, so a third form would be a
+ * compile error at the upload site rather than a tile that silently draws nothing.
+ */
+internal sealed interface BasemapTilePixels {
+    /** The engine's PNG, decoded at upload. The form every release before ADR 0044 used. */
+    class Encoded(val pngBytes: ByteArray) : BasemapTilePixels
+
+    /**
+     * The engine's pixels, **already premultiplied** and uploaded without a decode.
+     *
+     * [rgba] is tightly packed RGBA8, `widthPx * heightPx * 4` bytes. It must reach
+     * `uploadPremultipliedTexture` and never `uploadTexture`, which would premultiply it twice.
+     */
+    class Raw(val rgba: ByteArray, val widthPx: Int, val heightPx: Int) : BasemapTilePixels
+}
+
+/** One rendered ground tile: RenG's own identity, its pixels, and the engine's own provenance. */
 internal class RenderedBasemapTile(
     val key: ResourceKey,
     val tile: CanonicalBasemapTile,
-    val pngBytes: ByteArray,
+    val pixels: BasemapTilePixels,
     val contentKey: String,
     val substitutions: List<ResourceSubstitution>,
 )
@@ -1097,7 +1290,7 @@ internal fun basemapTileKey(
     styleDigest: String,
     tile: CanonicalBasemapTile,
     outputSize: OutputPixelSize,
-    sha256: Sha256Function = PureKotlinSha256,
+    sha256: Sha256Function = AcceleratedSha256,
 ): ResourceKey = ResourceKeyDeriver(sha256).basemapTile(styleDigest, tile, outputSize).key
 
 /**
@@ -1111,7 +1304,7 @@ internal fun basemapTileKey(
     styleDigest: String,
     instance: BasemapTileInstance,
     outputSize: OutputPixelSize,
-    sha256: Sha256Function = PureKotlinSha256,
+    sha256: Sha256Function = AcceleratedSha256,
 ): ResourceKey = basemapTileKey(
     styleDigest = styleDigest,
     tile = CanonicalBasemapTile(
@@ -1157,6 +1350,22 @@ private fun underivableGlyphRoutesFailure(): RenGException = FailureDescriptor(
         fieldName = DiagnosticField.RESOURCE,
     ),
 ).toException()
+
+/** What a remembered rendered-tile key varies by; everything else [basemapTileKey] takes is fixed per host. */
+private data class RememberedTileKeyIdentity(
+    val styleDigest: String,
+    val tile: CanonicalBasemapTile,
+)
+
+/**
+ * How many rendered-tile keys one host remembers (ADR 0069).
+ *
+ * `RendererConfiguration.maximumBasemapTileInstances` is capped at 4096 and canonical tiles are never
+ * more numerous than the instances naming them, so this is exactly large enough that **one frame can
+ * never evict a key it is still using**. Past that the policy is uninteresting: forgetting costs one
+ * re-derivation, which is what every frame did for every tile before this cache existed.
+ */
+internal const val MAXIMUM_REMEMBERED_TILE_KEYS: Int = 4096
 
 /** The failure for work asked of an already-closed host: the ground did not draw, and nothing more. */
 private fun basemapRenderFailure(): FailureDescriptor =

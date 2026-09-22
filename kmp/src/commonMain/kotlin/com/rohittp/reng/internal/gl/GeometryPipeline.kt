@@ -88,7 +88,112 @@ internal class GeometryPipeline(
     val resolutionLocation: Int,
     val geometryBoundsLocation: Int,
     val frameIndexLocation: Int,
-)
+) {
+    /**
+     * Consumer uniform and sampler names resolved against [program], memoised on first use.
+     *
+     * The six names above are known at creation and resolved there; a consumer's arrive with each
+     * `Geometry`, so [drawGeometry] used to ask the driver for every one on every draw -- forty-six
+     * `glGetUniformLocation` calls per instance per frame for a geometry declaring forty-six
+     * uniforms. A location is a property of the linked program, and the two are deleted together in
+     * [deleteGeometryPipeline], so the memo cannot outlive what it describes.
+     *
+     * Negative locations are deliberately not cached. Consumer-authored names can vary without
+     * bound between frames, while positive locations are bounded by what the linked program
+     * actually declares.
+     */
+    private val consumerLocations: MutableMap<String, Int> = HashMap()
+
+    /** [name]'s location in [program], from the memo above or from the driver exactly once. */
+    fun consumerLocation(binding: GlBinding, name: String): Int {
+        consumerLocations[name]?.let { return it }
+        val location = binding.getUniformLocation(program, name)
+        if (location >= 0) consumerLocations[name] = location
+        return location
+    }
+
+    /**
+     * The CPU byte buffers [drawGeometry] packs this pipeline's grid into before uploading it, reused
+     * across draws and grown by doubling.
+     *
+     * Each draw used to allocate two fresh `ByteArray`s: eighty bytes on a Mercator geometry, but on
+     * the globe and drape paths, where a grid reaches [MAXIMUM_GLOBE_GROUND_CELLS_PER_TILE_SIDE]
+     * cells a side, about a megabyte per geometry per frame.
+     *
+     * Safe to reuse only because they reach [GlBinding.bufferData] with an explicit byte count,
+     * which every platform actual passes to `glBufferData` while pinning from index zero -- so an
+     * oversized scratch uploads the prefix just packed, never the stale tail. Neither is passed
+     * anywhere that would take its length from the array.
+     */
+    private var vertexScratch: ByteArray = ByteArray(0)
+    private var indexScratch: ByteArray = ByteArray(0)
+
+    /** The scratch [packVertexBytes] filled. Valid until the next call on this pipeline. */
+    val vertexBytes: ByteArray get() = vertexScratch
+
+    /** The scratch [packIndexBytes] filled. Valid until the next call on this pipeline. */
+    val indexBytes: ByteArray get() = indexScratch
+
+    /** Packs [values] little-endian into [vertexBytes] and returns how many bytes that took. */
+    fun packVertexBytes(values: FloatArray): Int {
+        val byteCount = values.size * Float.SIZE_BYTES
+        if (vertexScratch.size < byteCount) {
+            vertexScratch = ByteArray(grownScratchSize(vertexScratch.size, byteCount))
+        }
+        writeLittleEndianFloats(values, vertexScratch)
+        return byteCount
+    }
+
+    /** Packs [values] little-endian into [indexBytes] and returns how many bytes that took. */
+    fun packIndexBytes(values: ShortArray): Int {
+        val byteCount = values.size * Short.SIZE_BYTES
+        if (indexScratch.size < byteCount) {
+            indexScratch = ByteArray(grownScratchSize(indexScratch.size, byteCount))
+        }
+        writeLittleEndianShorts(values, indexScratch)
+        return byteCount
+    }
+}
+
+/**
+ * Doubling growth that always clears [required], from a zero-length start.
+ *
+ * Doubling rather than exact, matching [growIconBuffers]: exact growth reallocates on a grid that
+ * gained one cell, which is the allocation this exists to remove.
+ */
+private fun grownScratchSize(current: Int, required: Int): Int {
+    var size = if (current == 0) required else current
+    while (size < required) size *= 2
+    return size
+}
+
+/** Writes [values] little-endian into the first `values.size * 4` bytes of [out]. */
+private fun writeLittleEndianFloats(values: FloatArray, out: ByteArray) {
+    var offset = 0
+    values.forEach { value ->
+        val bits = value.toRawBits()
+        out[offset] = (bits and 0xff).toByte()
+        out[offset + 1] = ((bits ushr 8) and 0xff).toByte()
+        out[offset + 2] = ((bits ushr 16) and 0xff).toByte()
+        out[offset + 3] = ((bits ushr 24) and 0xff).toByte()
+        offset += Float.SIZE_BYTES
+    }
+}
+
+/**
+ * Writes [values] little-endian into the first `values.size * 2` bytes of [out], as
+ * `GL_UNSIGNED_SHORT` expects.
+ *
+ * A 16-bit index is what caps [MAXIMUM_GLOBE_GROUND_CELLS_PER_TILE_SIDE] at 128 for the globe ground
+ * and for a geometry grid alike: 129 x 129 is 16,641 vertices where 257 x 257 would overflow.
+ */
+private fun writeLittleEndianShorts(values: ShortArray, out: ByteArray) {
+    values.forEachIndexed { index, value ->
+        val bits = value.toInt()
+        out[index * 2] = (bits and 0xff).toByte()
+        out[index * 2 + 1] = ((bits ushr 8) and 0xff).toByte()
+    }
+}
 
 internal sealed interface GeometryPipelineResult {
     data class Created(val pipeline: GeometryPipeline) : GeometryPipelineResult
@@ -231,12 +336,15 @@ internal fun deleteGeometryPipeline(
  * [com.rohittp.reng.internal.image.DecodedImage] — the caller assembling one frame's
  * [SceneGeometry]s uploads (and caches, by `ResourceKey`, through `GlObjectRegistry`) once, so this
  * function issues no [uploadTexture] call of its own and cannot be the site of Task 9b's
- * texture-lifetime leak. Each name is looked up against [pipeline]'s program with
- * [GlBinding.getUniformLocation] **at draw time** — the same "bind only when declared" rule
- * [pipeline]'s own six locations already follow, applied here because a consumer name's location
- * cannot be cached at pipeline-creation time the way the six documented ones are: the pipeline is
- * shared and content-keyed by [ShaderPair] alone, while the set of consumer names varies by
- * `Geometry` instance. Both maps are iterated in ascending key order (plain `String` comparison,
+ * texture-lifetime leak. Each name is resolved against [pipeline]'s program through
+ * [GeometryPipeline.consumerLocation] — the same "bind only when declared" rule [pipeline]'s own six
+ * locations already follow, reached differently because a consumer name's location cannot be
+ * resolved at pipeline-creation time the way the six documented ones are: the pipeline is shared and
+ * content-keyed by [ShaderPair] alone, while the set of consumer names varies by `Geometry`
+ * instance. So it is resolved on **first** draw that names it and memoised on the pipeline
+ * thereafter, which is sound for the same reason creation-time resolution is: a location depends on
+ * nothing but the linked program and the name, and the pipeline owns that program for its whole
+ * life. Both maps are iterated in ascending key order (plain `String` comparison,
  * i.e. UTF-16 code-unit order — the same fixed, non-locale-sensitive ordering the canonical frame
  * encoding uses) purely so the same document always assigns the same texture units; the order
  * uniforms are set in has no observable effect since each lands at its own independent location.
@@ -277,12 +385,16 @@ internal fun drawGeometry(
         "a geometry may bind at most $MAXIMUM_CONSUMER_TEXTURES consumer textures"
     }
 
-    // Defensive snapshot: guards this call's own iteration against the maps being structurally
-    // mutated mid-call. The prepare()-vs-draw() gap is already closed by the time either map
-    // reaches this function -- see the KDoc above -- so this is a narrower, cheaper guarantee, not
-    // the load-bearing one.
-    val uniformsSnapshot = consumerUniforms.toMap()
-    val texturesSnapshot = consumerTextures.toMap()
+    // Iterated directly, not copied. Both maps are already private to the frame being drawn:
+    // `PreparedGeometry.uniformsSnapshot` is a `.toMap()` taken at prepare() time and never the
+    // caller's own reference, and the texture map is built fresh per frame from it. The copies that
+    // used to stand here guarded this call's iteration against a structural mutation that no
+    // production caller can perform, at the cost of two map copies per geometry per frame.
+    //
+    // That makes it the caller's obligation rather than this function's: pass maps nothing else can
+    // mutate while this call runs.
+    val uniformsSnapshot = consumerUniforms
+    val texturesSnapshot = consumerTextures
 
     // A grid the camera pruned to nothing draws nothing, and says so by touching no GL state at
     // all rather than by uploading two empty buffers and issuing a zero-count draw. A geometry
@@ -292,10 +404,12 @@ internal fun drawGeometry(
     binding.useProgram(pipeline.program)
     binding.bindVertexArray(pipeline.vertexArray)
     binding.bindBuffer(GL_ARRAY_BUFFER, pipeline.vertexBuffer)
-    val vertexBytes = littleEndianBytes(grid.interleavedVertices)
-    binding.bufferData(GL_ARRAY_BUFFER, vertexBytes.size, vertexBytes, GL_DYNAMIC_DRAW)
-    val indexBytes = littleEndianUnsignedShortBytes(grid.triangleIndices)
-    binding.bufferData(GL_ELEMENT_ARRAY_BUFFER, indexBytes.size, indexBytes, GL_DYNAMIC_DRAW)
+    // Packed into the pipeline's reused scratch and uploaded by explicit byte count, never by array
+    // length: the scratch is a high-water buffer and its tail is whatever the last, larger draw left.
+    val vertexByteCount = pipeline.packVertexBytes(grid.interleavedVertices)
+    binding.bufferData(GL_ARRAY_BUFFER, vertexByteCount, pipeline.vertexBytes, GL_DYNAMIC_DRAW)
+    val indexByteCount = pipeline.packIndexBytes(grid.triangleIndices)
+    binding.bufferData(GL_ELEMENT_ARRAY_BUFFER, indexByteCount, pipeline.indexBytes, GL_DYNAMIC_DRAW)
 
     if (pipeline.modelViewProjectionLocation >= 0) {
         binding.uniformMatrix4fv(pipeline.modelViewProjectionLocation, 1, false, modelViewProjection)
@@ -316,23 +430,48 @@ internal fun drawGeometry(
         binding.uniform1ui(pipeline.frameIndexLocation, frameIndex.toInt())
     }
 
-    uniformsSnapshot.entries.sortedBy { it.key }.forEach { (name, value) ->
-        val location = binding.getUniformLocation(pipeline.program, name)
+    bindConsumerValues(
+        binding = binding,
+        locate = { name -> pipeline.consumerLocation(binding, name) },
+        uniforms = uniformsSnapshot,
+        textures = texturesSnapshot,
+    )
+
+    binding.drawElements(GL_TRIANGLES, grid.triangleIndices.size, GL_UNSIGNED_SHORT, 0)
+}
+
+/**
+ * Binds [uniforms] and then [textures] by name, each resolved through [locate], in name order.
+ *
+ * Shared by the geometry pass and the consumer backdrop (ADR 0071) so the two cannot drift in how a
+ * name resolves, what an undeclared one does (nothing -- ADR 0008), or which unit a texture lands
+ * on. Name order rather than map order is what makes the unit assignment deterministic for a given
+ * document, and plain `String` comparison is what keeps it locale-independent.
+ *
+ * The `activeTexture`/`bindTexture` pair runs even when the sampler is undeclared: the unit is
+ * consumed either way, so skipping it would shift every later texture's unit.
+ */
+internal fun bindConsumerValues(
+    binding: GlBinding,
+    locate: (String) -> Int,
+    uniforms: Map<String, ShaderValue>,
+    textures: Map<String, Int>,
+) {
+    uniforms.entries.sortedBy { it.key }.forEach { (name, value) ->
+        val location = locate(name)
         if (location >= 0) {
             bindConsumerUniform(binding, location, value)
         }
     }
 
-    texturesSnapshot.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, texture) ->
-        val samplerLocation = binding.getUniformLocation(pipeline.program, name)
+    textures.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, texture) ->
+        val samplerLocation = locate(name)
         binding.activeTexture(GL_TEXTURE0 + unitIndex)
         binding.bindTexture(GL_TEXTURE_2D, texture)
         if (samplerLocation >= 0) {
             binding.uniform1i(samplerLocation, unitIndex)
         }
     }
-
-    binding.drawElements(GL_TRIANGLES, grid.triangleIndices.size, GL_UNSIGNED_SHORT, 0)
 }
 
 /**
@@ -351,22 +490,6 @@ private fun bindConsumerUniform(binding: GlBinding, location: Int, value: Shader
     is ShaderValue.Vec4 -> binding.uniform4f(location, value.x, value.y, value.z, value.w)
     is ShaderValue.Integer -> binding.uniform1i(location, value.value)
     is ShaderValue.Mat4 -> binding.uniformMatrix4fv(location, 1, false, value.elementsForCore())
-}
-
-/**
- * One grid vertex's index run, little-endian, as `GL_UNSIGNED_SHORT` expects.
- *
- * A 16-bit index is what caps [MAXIMUM_GLOBE_GROUND_CELLS_PER_TILE_SIDE] at 128 for the globe ground
- * and for a geometry grid alike: 129 x 129 is 16,641 vertices where 257 x 257 would overflow.
- */
-private fun littleEndianUnsignedShortBytes(values: ShortArray): ByteArray {
-    val bytes = ByteArray(values.size * Short.SIZE_BYTES)
-    values.forEachIndexed { index, value ->
-        val bits = value.toInt()
-        bytes[index * 2] = (bits and 0xff).toByte()
-        bytes[index * 2 + 1] = ((bits ushr 8) and 0xff).toByte()
-    }
-    return bytes
 }
 
 private const val GEOMETRY_POSITION_COMPONENT_COUNT: Int = 3

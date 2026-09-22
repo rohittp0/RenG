@@ -50,6 +50,8 @@ class RendererProtocolTest {
         assertEquals(8, defaults.maximumConcurrentResourceOperations)
         assertSame(DiagnosticSink.None, defaults.diagnosticSink)
         assertEquals(false, defaults.terrainShading)
+        assertEquals(64, defaults.maximumCachedConsumerPipelines)
+        assertEquals(256, defaults.maximumConsumerPipelinesPerFrame)
     }
 
     /**
@@ -145,6 +147,24 @@ class RendererProtocolTest {
                 )
             }
         }
+        listOf(0, 4097).forEach { invalidPipelineLimit ->
+            assertFailsWith<IllegalArgumentException> {
+                RendererConfiguration(
+                    outputPixelSize,
+                    transport,
+                    store,
+                    maximumCachedConsumerPipelines = invalidPipelineLimit,
+                )
+            }
+            assertFailsWith<IllegalArgumentException> {
+                RendererConfiguration(
+                    outputPixelSize,
+                    transport,
+                    store,
+                    maximumConsumerPipelinesPerFrame = invalidPipelineLimit,
+                )
+            }
+        }
     }
 
     @Test
@@ -166,10 +186,18 @@ class RendererProtocolTest {
         renderTarget: RenderTarget,
     ) {
         val prepared: PreparedFrame = renderer.prepare(plan)
+        // Both defaults still resolve with the plan alone, which is the half of ADR 0053's ABI
+        // decision that actually binds: the parameter is source-compatible even though it is not
+        // binary-compatible.
+        val preparedUrgently: PreparedFrame =
+            renderer.prepare(plan, ResourceAccessMode.NORMAL, RenGRenderPriority.URGENT)
         val preparedBatch: List<PreparedFrame> = renderer.prepareBatch(listOf(plan))
+        val preparedBatchUrgently: List<PreparedFrame> =
+            renderer.prepareBatch(listOf(plan), ResourceAccessMode.NORMAL, RenGRenderPriority.URGENT)
         val cancellation: Unit = renderer.cancelPreparations()
         val historyClear: Unit = renderer.clearFrameHistory()
         val report: ResourceReport = renderer.queryResources()
+        val metrics: MetricReport = renderer.queryMetrics()
         val freeResult: ResourceFreeResult = renderer.freeResources()
         val gpuObjectsGone: Unit = renderer.notifyGpuObjectsGone()
         val contextAdoption: Unit = renderer.adoptCurrentRenderContext()
@@ -185,9 +213,12 @@ class RendererProtocolTest {
 
         consume(
             prepared,
+            preparedUrgently,
             preparedBatch,
+            preparedBatchUrgently,
             cancellation,
             historyClear,
+            metrics,
             report,
             freeResult,
             gpuObjectsGone,

@@ -355,11 +355,24 @@ class RendererGroundTextureBudgetTest {
      * [ResourceLimits.maximumDecodedImageBytes] is below one tile has configured a renderer that
      * cannot draw a basemap at all. It must say so as a typed failure naming the tile, at the stage the
      * decode actually happens, rather than throwing something untyped out of a GL draw call.
+     *
+     * **The raw-pixel budget is pinned to 1 byte here so the frame takes the encoded path, and that
+     * is the test's subject rather than a workaround.** Since ADR 0044 a decode only happens on that
+     * path; a frame rendered raw has nothing to decode and so has no decode to fail, which is why
+     * this test would otherwise draw successfully. Holding one budget down to exercise the other is
+     * what keeps this an assertion about decode classification, instead of letting it quietly become
+     * a second assertion about which render call was chosen.
      */
     @Test
     fun aTileTooLargeToDecodeFailsAsATypedDecodeFailureNamingTheTile() = runTest {
         val binding = styleGlBinding()
-        val renderer = groundRenderer(binding, limits = ResourceLimits(maximumDecodedImageBytes = 1L))
+        val renderer = groundRenderer(
+            binding,
+            limits = ResourceLimits(
+                maximumDecodedImageBytes = 1L,
+                maximumInFlightRawBasemapTileBytes = 1L,
+            ),
+        )
         val target = renderer.mintRenderTarget(FramebufferName(0u))
         val frame = renderer.prepare(basemapPlan(frameIndex = 0L))
 
@@ -390,14 +403,21 @@ class RendererGroundTextureBudgetTest {
 
     /**
      * The GL name every `genTextures(1)` in [log] produced, in call order, read back from the
-     * `bindTexture` the uploader issues immediately afterwards — [RecordingGlBinding] hands out names
-     * through an `IntArray` the log line cannot carry, and the bind is where the name it just took
-     * becomes visible.
+     * `bindTexture` the uploader issues next — [RecordingGlBinding] hands out names through an
+     * `IntArray` the log line cannot carry, and the bind is where the name it just took becomes
+     * visible.
+     *
+     * "Next", not "immediately next": since ADR 0055 the binding saves the unit it is about to
+     * overwrite, so a `getIntegerv` for that unit's prior state sits between the two. The upload
+     * still binds the name it just generated; it is simply no longer the adjacent log line, and
+     * asserting adjacency was pinning a fixture detail rather than the behaviour.
      */
     private fun uploadedTextureNames(log: List<String>): List<Int> =
         log.indices.filter { log[it] == "genTextures(1)" }.map { index ->
-            val bind = log[index + 1]
-            requireNotNull(boundTextureName(bind)) { "an upload binds the name it just generated, not \"$bind\"" }
+            val bind = log.drop(index + 1).firstOrNull { boundTextureName(it) != null }
+            requireNotNull(bind?.let(::boundTextureName)) {
+                "an upload binds the name it just generated; none followed genTextures at $index"
+            }
         }
 
     /** The texture name in a `bindTexture(<target>,<name>)` log line, or null for any other line. */

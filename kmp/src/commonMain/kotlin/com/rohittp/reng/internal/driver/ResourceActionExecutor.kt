@@ -10,6 +10,7 @@ import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.styleTimeRoutes
+import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
@@ -48,6 +49,7 @@ import com.rohittp.reng.internal.resource.ValidateResourceClass
 import com.rohittp.reng.internal.resource.VisibilityInstallCompleted
 import com.rohittp.reng.internal.resource.WriteBasemapStyle
 import com.rohittp.reng.internal.resource.WriteStore
+import com.rohittp.reng.internal.thread.PlatformLock
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -99,7 +101,37 @@ internal class ResourceActionExecutor(
      */
     private val resourceLimits: ResourceLimits,
     private val clock: () -> Long,
+    /**
+     * Where every lease this executor takes is recorded, so the owner that requested the operation can
+     * release it once it is finished with the content -- the "owner-lease bookkeeping" [installVisibility]
+     * used to name as a future task's job. A [com.rohittp.reng.PreparedFrame] releasing its own leases on
+     * `close()` is exactly that owner, and without this the lease of every generation a preparation ever
+     * installed stayed outstanding for the renderer's whole life. Null keeps the older behaviour -- the
+     * lease is still taken, which is what keeps the generation alive, and then simply dropped -- which is
+     * what every test that drives this class directly still wants.
+     */
+    private val leaseSink: MutableList<Lease>? = null,
+    /** Invoked only after the matching lease is reachable through [leaseSink] for rollback. */
+    private val leaseObserver: ((Lease) -> Unit)? = null,
 ) {
+    init {
+        require(leaseObserver == null || leaseSink != null) {
+            "a lease observer requires a sink that owns rejected leases for rollback"
+        }
+    }
+
+    /**
+     * Serializes [leaseSink] appends. [PreparationDriver] launches one child coroutine per action and
+     * selects no dispatcher of its own, so two [InstallVisibility] actions of one operation genuinely can
+     * reach [recordLease] from two threads whenever the consumer's own `prepare()` call sits on a
+     * multi-threaded dispatcher -- and an unguarded [MutableList] can lose one of the two leases, which is
+     * exactly the leak this sink exists to close. The optional admission observer shares this tiny
+     * critical section so callbacks see leases in installation order and always after cleanup ownership
+     * is published; [PlatformLock] blocks a contender instead of busy-spinning if the holder is briefly
+     * descheduled.
+     */
+    private val leaseSinkLock = PlatformLock()
+
     suspend fun execute(action: ResourceOperationAction): ResourceOperationEvent = when (action) {
         is SampleClock -> ClockSampled(action.actionId, clock())
 
@@ -237,9 +269,11 @@ internal class ResourceActionExecutor(
      * this route freshly resolved (from the Store or Transport) and never installed anywhere, so it
      * installs a new generation.
      *
-     * The returned [com.rohittp.reng.internal.cache.Lease] is intentionally dropped: this driver has no
-     * owner-lease bookkeeping yet (a future task's job), so today's install-and-lease is real but its
-     * lease is not yet retained for a later release.
+     * The returned [Lease] is recorded in [leaseSink] whenever the owner supplied one, so that owner can
+     * release it once the content is no longer needed -- a [com.rohittp.reng.PreparedFrame] releasing its
+     * own leases on `close()` is precisely that. With no sink the lease is still taken (it is what keeps
+     * the generation alive) but not retained, which is the older behaviour every direct test of this class
+     * relies on.
      *
      * A [ContentProvenance.RESIDENT] generation can genuinely vanish between when this route first
      * observed it and when visibility is installed here — a consumer's own concurrent
@@ -251,19 +285,55 @@ internal class ResourceActionExecutor(
         when (content.provenance) {
             ContentProvenance.RESIDENT -> {
                 val lease = cache.observeAndTakeLease(content.resourceKey)
-                if (lease != null) SuppliedInstallOutcome.Succeeded else SuppliedInstallOutcome.Failed(
-                    residentGenerationVanishedFailure(content),
-                )
+                if (lease != null) {
+                    recordLease(lease)
+                    SuppliedInstallOutcome.Succeeded
+                } else {
+                    SuppliedInstallOutcome.Failed(residentGenerationVanishedFailure(content))
+                }
             }
 
             ContentProvenance.STORE,
             ContentProvenance.TRANSPORT_200,
             ContentProvenance.TRANSPORT_304_MERGED,
             -> {
-                cache.installAndTakeLease(content.resourceKey, content.stored, decoded = null)
+                // Two statements, and they cannot be collapsed into one. Writing the record as a safe call
+                // on the sink -- `leaseSink?.add(cache.installAndTakeLease(...))` -- would take the install
+                // with it: a Kotlin safe call short-circuits its whole argument list, so with no sink
+                // supplied the install never runs at all and the resource is never made resident. The cache
+                // call is therefore always evaluated into a local first, and the record is a plain call
+                // that decides for itself whether there is a sink to write to.
+                // DriverCancellationTest.contentAcquiredBeforeCancellationMayRemainResident is the test
+                // that catches the collapsed form.
+                // Freshly resolved does not mean different (ADR 0059). A resource whose server
+                // declares no freshness is re-read from the Store on every frame, and installing a
+                // byte-identical twin of the generation already here costs the budget twice, retires
+                // a generation nothing asked to retire, and throws away anything attached to it --
+                // the decoded pixels most of all. Same key and same digest is the same content, so
+                // the existing generation is re-leased instead.
+                val reused = cache.observeAndTakeLease(content.resourceKey, content.stored.contentDigest)
+                if (reused != null) {
+                    recordLease(reused)
+                    return SuppliedInstallOutcome.Succeeded
+                }
+                val lease = cache.installAndTakeLease(content.resourceKey, content.stored, decoded = null)
+                recordLease(lease)
                 SuppliedInstallOutcome.Succeeded
             }
         }
+
+    /**
+     * Records one lease this executor just took into [leaseSink], then invokes [leaseObserver]. Recording
+     * comes first so an observer that rejects admission can throw without orphaning the lease it rejected.
+     * See [leaseSinkLock] for why both operations are serialized, and [installVisibility] for why this is
+     * a plain call rather than a safe call on the sink.
+     */
+    private fun recordLease(lease: Lease) {
+        leaseSinkLock.withLock {
+            leaseSink?.add(lease)
+            leaseObserver?.invoke(lease)
+        }
+    }
 
     /**
      * The resource this route selected as [ContentProvenance.RESIDENT] is no longer resident by the

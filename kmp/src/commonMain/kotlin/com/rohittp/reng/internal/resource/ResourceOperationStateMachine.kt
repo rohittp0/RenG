@@ -14,7 +14,7 @@ import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.acceptValue
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
-import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.AcceleratedSha256
 
 internal object ResourceOperationStateMachine {
     internal fun preRegister(
@@ -442,7 +442,7 @@ internal object ResourceOperationStateMachine {
                     val validated = copyValidStoredResource(
                         supplied,
                         record.registration.route.maximumResponseBytes,
-                        PureKotlinSha256,
+                        AcceleratedSha256,
                     )
                     if (validated == null) {
                         completeLookupRoute(
@@ -1660,7 +1660,7 @@ internal object ResourceOperationStateMachine {
                 staleBaseline = progress.staleBaseline,
                 conditionalRequest = latchKey.ifNoneMatch != null || latchKey.ifModifiedSince != null,
                 response = response,
-                sha256 = PureKotlinSha256,
+                sha256 = AcceleratedSha256,
             )
             when (outcome) {
                 is ResponseRuleOutcome.Failure -> completeLookupRoute(
@@ -1689,7 +1689,12 @@ internal object ResourceOperationStateMachine {
             val selected = ResolvedResourceContent(
                 route = registration.route,
                 resourceKey = registration.resourceKey,
-                stored = copyStored(stored),
+                // Not copied again (ADR 0062). Every caller already passes a private copy -- the
+                // resident paths pass `copyStored`'s result, the store paths pass
+                // `copyValidStoredResource`'s -- so this duplicated a full array, per route, per
+                // frame, that nothing outside this machine could reach. The boundary copy where the
+                // observation enters stays; this second one defended nothing.
+                stored = stored,
                 provenance = provenance,
             )
             updateRouteRecord(

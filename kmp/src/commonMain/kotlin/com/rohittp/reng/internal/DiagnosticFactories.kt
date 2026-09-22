@@ -34,6 +34,7 @@ internal enum class DiagnosticField(internal val wireName: String) {
     ANIMATION_SELECTOR("animationSelector"),
     SHADER_PAIR("shaderPair"),
     RENDER_TARGET("renderTarget"),
+    PREPARED_FRAME_CPU_BYTES("preparedFrameCpuBytes"),
 }
 
 internal fun failureContextDiagnostic(
@@ -77,6 +78,19 @@ internal fun basemapNotConfiguredDiagnostic(): Diagnostic =
         code = DiagnosticCode.BASEMAP_NOT_CONFIGURED,
         severity = DiagnosticSeverity.WARNING,
         stage = PipelineStage.BASEMAP_RENDER,
+    )
+
+/**
+ * One per drawn frame that presented any provisional ground at all (ADR 0057) — never one per tile,
+ * for the reason [terrainCoverageIncompleteDiagnostic] gives for counting rather than listing.
+ */
+internal fun groundPresentedProvisionallyDiagnostic(tileCount: Int): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+        limit = 0L,
+        actual = tileCount.toLong(),
     )
 
 /**
@@ -267,6 +281,7 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
         DiagnosticField.FRAME_IDENTITY,
         DiagnosticField.SHADER_PAIR,
     ),
+    PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
     PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
     PipelineStage.STORE_VALIDATION to setOf(DiagnosticField.RESOURCE),
     PipelineStage.TRANSPORT_VALIDATION to setOf(DiagnosticField.RESPONSE_BODY_BYTES),
@@ -327,6 +342,18 @@ private enum class IdentityRequirement {
         override fun matches(key: ResourceKey?): Boolean =
             key?.kind == ResourceKind.GEOMETRY_PROGRAM && key.resourceClass == null
     },
+
+    /**
+     * A program compiled from source a consumer wrote: a geometry's, or -- since ADR 0071 -- a
+     * backdrop's, which is keyed as an internal pipeline because its role is RenG's even though its
+     * text is not. Both carry no resource class.
+     */
+    REQUIRED_CONSUMER_PROGRAM {
+        override fun matches(key: ResourceKey?): Boolean =
+            key != null &&
+                key.resourceClass == null &&
+                (key.kind == ResourceKind.GEOMETRY_PROGRAM || key.kind == ResourceKind.INTERNAL_PIPELINE)
+    },
     OPTIONAL_ANY {
         override fun matches(key: ResourceKey?): Boolean = true
     };
@@ -385,6 +412,11 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
         RenGErrorCode.RESOURCE_LIMIT_EXCEEDED -> when (stage) {
             PipelineStage.FRAME_PLANNING -> FailureRule.Context(
                 fields = setOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES),
+                numericLimit = PresenceRequirement.REQUIRED,
+            )
+
+            PipelineStage.FRAME_PREPARATION -> FailureRule.Context(
+                fields = setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
                 numericLimit = PresenceRequirement.REQUIRED,
             )
 
@@ -456,6 +488,18 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
         )
 
         RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT -> noDiagnosticAt(
+            stage,
+            PipelineStage.RENDER_TARGET,
+            PipelineStage.DRAW,
+            PipelineStage.RESOURCE_FREE,
+            PipelineStage.RENDERER_CLOSE,
+        )
+
+        // The same four stages as DIFFERENT_CURRENT_RENDER_CONTEXT above, and for the same reason:
+        // both say "the context you promised is not the one here", one by identity and one by the
+        // thread that identity was fixed on (ADR 0056). CONTEXT_ADOPTION is absent because adoption
+        // is where the thread is set, never where it is refused.
+        RenGErrorCode.RENDER_CONTEXT_THREAD_CHANGED -> noDiagnosticAt(
             stage,
             PipelineStage.RENDER_TARGET,
             PipelineStage.DRAW,
@@ -566,7 +610,9 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             PipelineStage.SHADER_COMPILATION,
             FailureRule.Context(
                 fields = setOf(DiagnosticField.SHADER_PAIR),
-                identity = IdentityRequirement.REQUIRED_GEOMETRY_PROGRAM,
+                // Widened from REQUIRED_GEOMETRY_PROGRAM by ADR 0071: a consumer's backdrop shader
+                // fails with these codes too, under an internal-pipeline key.
+                identity = IdentityRequirement.REQUIRED_CONSUMER_PROGRAM,
             ),
         )
 

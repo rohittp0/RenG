@@ -73,11 +73,21 @@ internal enum class FramebufferFact {
 internal sealed interface RendererLifecycleOperation {
     data object BeginPreparation : RendererLifecycleOperation
 
+    /** Internal completion boundary for the suspend invocation begun by [BeginPreparation]. */
+    data object EndPreparation : RendererLifecycleOperation
+
     data object CancelPreparations : RendererLifecycleOperation
 
     data object ClearFrameHistory : RendererLifecycleOperation
 
     data class QueryResources(val selector: ResourceSelector) : RendererLifecycleOperation
+
+    /**
+     * Reading the engine's accumulated counters (ADR 0049). Gated exactly where [QueryResources]
+     * is, and for the same reason: it takes nothing a preparation needs, and a closed renderer
+     * should answer an empty report rather than a stale one.
+     */
+    data object QueryMetrics : RendererLifecycleOperation
 
     data class FreeResources(val selector: ResourceSelector) : RendererLifecycleOperation
 

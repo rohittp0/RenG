@@ -16,6 +16,8 @@ import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Sticker
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.animationTracksForCore
+import com.rohittp.reng.Backdrop
+import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
@@ -36,6 +38,14 @@ internal enum class FramePlanSegment(internal val tag: Int) {
     MODELS(6),
     GEOMETRIES(7),
     DRAW_LABELS(8),
+
+    /**
+     * ADR 0068's backdrop, appended so no existing tag moves. Every frame encodes this segment,
+     * absent ones as `CanonicalBinary.optional(null)`, so a Frame Identity computed before this
+     * field existed and one computed after differ even for an identical plan -- which costs one
+     * full structural diff on the first frame after an upgrade and nothing after that.
+     */
+    BACKDROP(9),
 }
 
 internal class EncodedFramePlan(
@@ -56,7 +66,7 @@ internal class EncodedFramePlan(
 }
 
 internal class FramePlanCanonicalEncoder(
-    private val sha256: Sha256Function = PureKotlinSha256,
+    private val sha256: Sha256Function = AcceleratedSha256,
 ) {
     internal fun encode(plan: FramePlan): EncodedFramePlan {
         val stickers = plan.stickersForCore()
@@ -73,6 +83,7 @@ internal class FramePlanCanonicalEncoder(
             // Encoded as its own segment rather than folded into DRAW_BASEMAP's byte: the two flags
             // are orthogonal, so all four pairings must reach four distinct Frame Identities.
             CanonicalBinary.boolean(plan.drawLabels),
+            CanonicalBinary.optional(plan.backdropForCore()?.let(::encodeBackdrop)),
         )
         val root = CanonicalBinary.root(CanonicalRootKind.FRAME) {
             FramePlanSegment.entries.forEach { segment ->
@@ -114,6 +125,27 @@ internal class FramePlanCanonicalEncoder(
         // they must reach different Frame Identities or a GROUND_RELATIVE plan is served the cached
         // ABSOLUTE one.
         field(7, CanonicalBinary.u16(placement.altitudeMode.wireValue))
+    }
+
+    /**
+     * Tags 1 and 2 stay the pattern's and tags 3 upward are the shader's, rather than a
+     * discriminator field ahead of a shared body (ADR 0018 calls the table permanent, ADR 0071 adds
+     * the case). Which tags are present *is* the discriminator, and the payoff is that a plan
+     * carrying a pattern encodes to the same bytes it did before the shader case existed -- so its
+     * Frame Identity does not move and no cache is invalidated by an upgrade.
+     */
+    private fun encodeBackdrop(backdrop: Backdrop): CanonicalBytes = CanonicalBinary.fields {
+        when (backdrop) {
+            is Backdrop.Pattern -> {
+                field(1, CanonicalBinary.exactUtf8(backdrop.image.value))
+                field(2, CanonicalBinary.binary64(backdrop.tileSizeLogicalPixels))
+            }
+            is Backdrop.Shader -> {
+                field(3, encodeShaderPair(backdrop.shaderPair))
+                field(4, encodeUniforms(backdrop.uniforms))
+                field(5, encodeTextures(backdrop.textures))
+            }
+        }
     }
 
     private fun encodeSticker(sticker: Sticker): CanonicalBytes = CanonicalBinary.fields {

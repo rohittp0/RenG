@@ -58,6 +58,7 @@ class ResourcesTest {
                 ResourceClass.MODEL_GLB,
                 ResourceClass.MODEL_TEXTURE,
                 ResourceClass.BASEMAP_GLYPH_RANGE,
+                ResourceClass.BACKDROP_IMAGE,
             ),
             ResourceClass.entries,
         )
@@ -162,6 +163,9 @@ class ResourcesTest {
             // GLYPH_RANGE_ROUTE_CEILING_BYTES, sized above the engine's own 1 MiB maxGlyphRangeBytes so
             // that Rentile's refusal is the operative one. A twelfth public limit was declined.
             ResourceClass.BASEMAP_GLYPH_RANGE to Pair(4L * mib, "application/x-protobuf"),
+            // ADR 0068. A sticker image's ceiling and accept value, because it is the same kind of
+            // bytes; what it does not share is that class's positionally-paired traversal list.
+            ResourceClass.BACKDROP_IMAGE to Pair(32L * mib, "image/png"),
         )
 
         assertEquals(
@@ -238,6 +242,55 @@ class ResourcesTest {
         assertFailsWith<IllegalArgumentException> { ResourceLimits(maximumModelJsonChunkBytes = 0L) }
         assertFailsWith<IllegalArgumentException> {
             ResourceLimits(maximumModelJsonChunkBytes = Int.MAX_VALUE.toLong() + 1L)
+        }
+    }
+
+    @Test
+    fun gpuBufferBudgetHasADocumentedDefaultAndInclusiveByteRange() {
+        assertEquals(512L * 1024L * 1024L, ResourceLimits().maximumResidentGpuBufferBytes)
+        assertEquals(1L, ResourceLimits(maximumResidentGpuBufferBytes = 1L).maximumResidentGpuBufferBytes)
+        assertEquals(
+            Int.MAX_VALUE.toLong(),
+            ResourceLimits(maximumResidentGpuBufferBytes = Int.MAX_VALUE.toLong()).maximumResidentGpuBufferBytes,
+        )
+        assertFailsWith<IllegalArgumentException> { ResourceLimits(maximumResidentGpuBufferBytes = 0L) }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumResidentGpuBufferBytes = Int.MAX_VALUE.toLong() + 1L)
+        }
+    }
+
+    @Test
+    fun imageDecodeWorkingBudgetHasADocumentedDefaultAndInclusiveByteRange() {
+        assertEquals(512L * 1024L * 1024L, ResourceLimits().maximumImageDecodeWorkingBytes)
+        assertEquals(1L, ResourceLimits(maximumImageDecodeWorkingBytes = 1L).maximumImageDecodeWorkingBytes)
+        assertEquals(
+            Int.MAX_VALUE.toLong(),
+            ResourceLimits(maximumImageDecodeWorkingBytes = Int.MAX_VALUE.toLong()).maximumImageDecodeWorkingBytes,
+        )
+        assertFailsWith<IllegalArgumentException> { ResourceLimits(maximumImageDecodeWorkingBytes = 0L) }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumImageDecodeWorkingBytes = Int.MAX_VALUE.toLong() + 1L)
+        }
+    }
+
+    @Test
+    fun preparedFrameCpuBudgetHasADocumentedDefaultAndInclusiveByteRange() {
+        assertEquals(1024L * 1024L * 1024L, ResourceLimits().maximumInFlightPreparedFrameCpuBytes)
+        assertEquals(
+            1L,
+            ResourceLimits(maximumInFlightPreparedFrameCpuBytes = 1L).maximumInFlightPreparedFrameCpuBytes,
+        )
+        assertEquals(
+            Int.MAX_VALUE.toLong(),
+            ResourceLimits(
+                maximumInFlightPreparedFrameCpuBytes = Int.MAX_VALUE.toLong(),
+            ).maximumInFlightPreparedFrameCpuBytes,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumInFlightPreparedFrameCpuBytes = 0L)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ResourceLimits(maximumInFlightPreparedFrameCpuBytes = Int.MAX_VALUE.toLong() + 1L)
         }
     }
 

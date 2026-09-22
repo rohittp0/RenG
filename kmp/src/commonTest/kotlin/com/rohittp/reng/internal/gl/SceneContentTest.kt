@@ -50,6 +50,39 @@ class SceneContentTest {
 
     // --- the empty-scene case: the first thing a consumer hits while wiring an integration -----
 
+    /**
+     * ADR 0068. A backdrop draws on an otherwise empty scene, and that case is the point rather than
+     * an edge: `drawBasemap = false` with a backdrop is the first thing a consumer wiring one is
+     * likely to try, and the emptiness check below would have returned before painting it. Paired
+     * with [anEmptySceneIssuesNoGlCallsAtAll], which pins that a scene with *no* backdrop still
+     * issues nothing at all -- the two together are the whole of "null is the absence of the pass".
+     */
+    @Test
+    fun aSceneWithNothingButABackdropStillDrawsIt() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            BACKDROP_REPEAT_UNIFORM_NAME to 11,
+            BACKDROP_TEXTURE_UNIFORM_NAME to 12,
+        )
+        val pipeline = (createBackdropPipeline(binding, ShaderDialect.GLES, GlProgramCache())
+            as BackdropPipelineResult.Created).pipeline
+        binding.log.clear()
+
+        SceneContent(
+            topDownCamera(),
+            Scene(outputPixelSize = OUTPUT_SIZE, frameIndex = 0L),
+            newStickerPipeline(),
+            newGroundPipeline(),
+            backdrop = ResolvedBackdrop.Pattern(
+                pipeline = pipeline,
+                texture = 5,
+                repeat = BackdropRepeat(across = 2.0f, down = 3.0f),
+            ),
+        ).draw(binding)
+
+        assertTrue(binding.log.any { it == "bindTexture(0xDE1,5)" }, binding.log.toString())
+        assertTrue(binding.log.any { it.startsWith("drawArrays(0x5,0,4)") }, binding.log.toString())
+    }
+
     @Test
     fun anEmptySceneIssuesNoGlCallsAtAll() {
         val binding = RecordingGlBinding()

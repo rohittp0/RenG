@@ -106,6 +106,15 @@ internal class SceneGroundTile(
     val instance: BasemapTileInstance,
     val texture: Int,
     /**
+     * Which part of [texture] this tile occupies (ADR 0057).
+     *
+     * [GroundTileWindow.WHOLE] for a tile drawn from its own texture, which is every tile unless the
+     * consumer set a per-frame rasterisation budget and this one was drawn from an ancestor instead.
+     * Declared with a default so the many construction sites that draw exact tiles say nothing about
+     * it, and the one that does not says it explicitly.
+     */
+    val colourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /**
      * This tile's own padded DEM texture and the sub-rectangle of it this tile occupies, or `null`
      * when the frame declares no terrain or Rentile returned no DEM for this canonical tile.
      *
@@ -151,16 +160,15 @@ internal class SceneTerrain(
      * The same displaced surface, readable on the CPU, or `null` when nothing in this frame asked a
      * question of it.
      *
-     * **It is built per frame and only on demand**, because holding it costs one `rgbaSnapshot` per
-     * distinct source DEM and a frame that asks nothing of it would pay that for nothing. That
-     * conditional construction is the whole of what survives the design's §6 "sparse CPU decode":
-     * Rentile `0.7.0` hands over decoded texels, so there is no decode to be sparse about, only a
-     * copy to be avoided.
+     * **It is built per frame and only on demand**, because a frame that asks nothing of the surface
+     * needs no tile index. Rentile `0.7.0` hands over decoded texels and [GroundSurface] keeps their
+     * immutable [com.rohittp.reng.internal.image.DecodedImage] references directly, so constructing
+     * this surface copies no DEM raster.
      *
      * **It is built during `prepare()` and carried here, not derived at draw time**, because the
      * label placement pass rode this exact object before the frame existed -- ADR 0035 puts label
-     * collision inside `prepare()`. Two constructions would be two copies of every source DEM and
-     * two answers to which of the frame's tiles displace.
+     * collision inside `prepare()`. Two constructions would be two indexes and two answers to which
+     * of the frame's tiles displace, even though both reference the same pixels.
      */
     val surface: GroundSurface? = null,
 ) {
@@ -458,6 +466,7 @@ internal class SceneContent(
     private val labelPipeline: LabelPipeline? = null,
     private val iconPipeline: IconPipeline? = null,
     private val globeGroundPipeline: GlobeGroundPipeline? = null,
+    private val backdrop: ResolvedBackdrop? = null,
 ) : GlFrameContent {
 
     /**
@@ -494,6 +503,21 @@ internal class SceneContent(
         ?.takeIf { scene.groundTiles.isNotEmpty() && !it.isEmpty }
 
     override fun draw(binding: GlBinding) {
+        // ADR 0068, and it is deliberately the first thing here -- ahead of the emptiness check
+        // below as well as ahead of the ground. A frame carrying nothing but a backdrop is a frame
+        // that draws its backdrop; returning early on an empty *scene* would make the one case a
+        // consumer is most likely to try first, a backdrop with `drawBasemap = false`, silently
+        // paint nothing.
+        if (backdrop != null) {
+            drawBackdrop(
+                binding = binding,
+                backdrop = backdrop,
+                resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+                resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+                frameIndex = scene.frameIndex,
+            )
+        }
+
         if (scene.groundTiles.isEmpty() &&
             scene.geometries.isEmpty() &&
             scene.models.isEmpty() &&
@@ -761,6 +785,7 @@ internal class SceneContent(
                             resolveBasemapTileQuad(tile.instance, camera),
                         ),
                         texture = tile.texture,
+                        colourWindow = tile.colourWindow,
                         elevation = tile.elevation?.let { demTile ->
                             MercatorGroundTileDem(
                                 dem = groundTileDemOf(demTile, tile.instance.lod),
@@ -806,6 +831,7 @@ internal class SceneContent(
                             ResolvedGlobeGroundTile(
                                 edges = edges,
                                 texture = tile.texture,
+                                colourWindow = tile.colourWindow,
                                 elevation = tileDem,
                             ),
                         )
@@ -814,6 +840,10 @@ internal class SceneContent(
                                 ResolvedGlobeGroundTile(
                                     edges = globeGroundPolarCapEdges(edges, north = true),
                                     texture = tile.texture,
+                                    // The cap carries the same window as the tile it hangs from: its
+                                    // collapsed v lands on the window's own edge, which is the tile's
+                                    // last row inside the ancestor rather than the ancestor's.
+                                    colourWindow = tile.colourWindow,
                                     uvV = NORTH_POLAR_CAP_UV_V,
                                     elevation = tileDem?.let { polarCapDem(it, north = true) },
                                 ),
@@ -824,6 +854,7 @@ internal class SceneContent(
                                 ResolvedGlobeGroundTile(
                                     edges = globeGroundPolarCapEdges(edges, north = false),
                                     texture = tile.texture,
+                                    colourWindow = tile.colourWindow,
                                     uvV = SOUTH_POLAR_CAP_UV_V,
                                     elevation = tileDem?.let { polarCapDem(it, north = false) },
                                 ),
@@ -1185,6 +1216,23 @@ private fun Geometry.boundsWestSouthEastNorth(): FloatArray = floatArrayOf(
  */
 internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): FloatArray =
     (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+
+/**
+ * The inverse of that same product, column-major, or `null` when the camera does not invert
+ * (ADR 0072) -- what `rengBackdropInverseViewProjection` carries to a backdrop shader.
+ *
+ * Its own named function rather than three lines at the call site, for the reason
+ * `resolvedBackdropFor` is one: the factor order is the whole content, `view * projection` is a
+ * perfectly valid matrix that draws a perfectly plausible wrong grid, and no GL call log can tell
+ * the two apart. Naming it puts the order somewhere a test can reach.
+ *
+ * Takes [ResolvedFrameCamera] rather than either concrete camera because both modes build these
+ * two matrices from the same two functions. What differs is the ground, not the matrix: under
+ * Mercator it is the plane `z = 0`, under a globe that plane is only the sphere's tangent at the
+ * anchor -- see ADR 0072.
+ */
+internal fun composeBackdropInverseViewProjection(camera: ResolvedFrameCamera): FloatArray? =
+    (camera.projectionMatrix * camera.viewMatrix).inverse()?.toColumnMajorFloatArray()
 
 /**
  * The same matrix for a globe camera, and it is the same two factors in the same order.

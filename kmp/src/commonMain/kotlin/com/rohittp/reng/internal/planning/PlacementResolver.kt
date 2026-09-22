@@ -10,7 +10,6 @@ import com.rohittp.reng.internal.projection.MercatorPosition
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.WORLD_CIRCUMFERENCE_METRES
 import com.rohittp.reng.internal.projection.validateMercatorMapPosition
-import com.rohittp.reng.internal.projection.wgs84LocalFrame
 import kotlin.math.PI
 import kotlin.math.cos
 
@@ -92,8 +91,18 @@ internal fun resolvePlacement(
     )
     val directionTransform = when (placement.rotationMode) {
         AnchoringMode.SCREEN -> localRotation
+        // **A map-anchored rotation is transported flatly here, not spherically** (ADR 0063).
+        //
+        // Upstream composed `viewBasis * cameraEnu^T * anchorEnu * localRotation`, which
+        // `GlobePlacementResolver`'s KDoc calls deliberate: under Mercator it "makes a distant model
+        // tilt as though the earth were round". On a globe that is right. This camera draws a flat
+        // map, where north is straight up at every point -- so the transport between two anchors IS
+        // the identity, and a spherical one rotates by an angle the projection already flattened away.
+        //
+        // Measured at latitude 20, camera level, model stationary: 4 degrees of drift at 10 degrees
+        // of separation, 12 at 20, and 34 plus a 37% loss of drawn area at 40, the model tipping
+        // while nothing else in the frame does. `GlobePlacementResolver` keeps the spherical form.
         AnchoringMode.MAP -> {
-            val cameraGroundAnchor = camera.geographicGroundAnchor
             val viewBasis = DoubleMatrix3.fromRows(
                 listOf(
                     listOf(camera.right.x, camera.right.y, camera.right.z),
@@ -101,9 +110,7 @@ internal fun resolvePlacement(
                     listOf(camera.cameraBack.x, camera.cameraBack.y, camera.cameraBack.z),
                 ),
             )
-            val cameraWgs84Basis = wgs84LocalFrame(cameraGroundAnchor).basisEastNorthUp
-            val anchorWgs84Basis = wgs84LocalFrame(geographicAnchor).basisEastNorthUp
-            viewBasis * cameraWgs84Basis.transpose() * anchorWgs84Basis * localRotation
+            viewBasis * localRotation
         }
     }
 

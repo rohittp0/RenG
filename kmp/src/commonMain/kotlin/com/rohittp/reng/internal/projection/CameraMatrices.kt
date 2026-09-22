@@ -9,6 +9,7 @@ import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tan
 
 internal data class MercatorGroundPoint(val x: Double, val y: Double)
 
@@ -55,6 +56,15 @@ internal sealed interface GroundRayResult {
     data object HorizonOrSky : GroundRayResult
 
     data object NearClipped : GroundRayResult
+
+    /**
+     * The ray's ground hit exists and is finite, but it lies nearer the horizon than
+     * [MAXIMUM_GROUND_ANGLE_DEGREES] allows, so the footprint built from it is not worth trusting
+     * (ADR 0064). Every caller treats this exactly as it treats [HorizonOrSky] -- both mean "this
+     * row contributes no ground" -- and the two are kept apart only so a test can tell which bound
+     * rejected a row.
+     */
+    data object BeyondHorizonAngle : GroundRayResult
 
     data class Hit(
         val point: MercatorGroundPoint,
@@ -212,6 +222,16 @@ internal fun physicalPixelGroundRay(
 
     if (q <= 0.0) return GroundRayResult.HorizonOrSky
 
+    // ADR 0064, and it decides the angle without ever computing it: `tan(theta)` is
+    // `(sinePitch + v * cosinePitch) / q`, and `q` is strictly positive by the branch above, so
+    // multiplying through preserves the sense. The comparison is closed, matching the horizon and
+    // near-plane boundaries either side of it -- at a pitch of 66.75 degrees the top row's angle is
+    // the maximum to within one ULP, and admitting that row is what lets the ceiling
+    // `Camera.MAXIMUM_GROUND_FILLING_PITCH_DEGREES` publishes be reached with the frame still whole.
+    if (sinePitch + v * cosinePitch > q * TANGENT_OF_MAXIMUM_GROUND_ANGLE) {
+        return GroundRayResult.BeyondHorizonAngle
+    }
+
     val t = camera.cameraDistanceLogicalPixels * cosinePitch / q
     if (t < NEAR_DISTANCE_LOGICAL_PIXELS) return GroundRayResult.NearClipped
 
@@ -237,5 +257,33 @@ internal val FOCAL_LENGTH_SCALE: Double = 1.0 + sqrt(2.0)
  * [projectCameraRelativeLogicalPosition] rejects a position behind it. Two copies of this
  * number would be exactly the kind of silent disagreement the round trip exists to catch. */
 internal const val NEAR_DISTANCE_LOGICAL_PIXELS: Double = 1.0
+
+/**
+ * How near the horizon a ground ray is still trusted, as an angle from the downward axis, in
+ * degrees (ADR 0064).
+ *
+ * **A numerical guard, not a work bound**, which is why it sits this close to 90: a ray just below
+ * the horizon has a vanishing `q` and an arbitrarily large `t`, which used to reach tile selection
+ * as a footprint spanning thousands of world copies -- an `OverBudget` failure, or a non-finite
+ * vertex collapsing to an empty map. Bounding the *work* is `basemapLodForGroundAngle`'s job, which
+ * leaves this free to sit where the arithmetic stops being trustworthy.
+ *
+ * `89.25` is `maxMercatorHorizonAngle` from MapLibre GL JS (`src/geo/projection/mercator_utils.ts`),
+ * adopted unchanged and with attribution. Only their "must be less than 90 to prevent errors" half
+ * is this constant's problem here, so it is inherited rather than rechosen.
+ *
+ * With a 22.5-degree vertical half field of view and `theta = pitch + atan(v)` exactly, this first
+ * bites at `89.25 - 22.5 = 66.75` degrees of pitch: measured across the sweep it removes 0.00% of
+ * frame height at 66.75, 0.62% at 67.0 and 1.60% at 67.4.
+ */
+internal const val MAXIMUM_GROUND_ANGLE_DEGREES: Double = 89.25
+
+/**
+ * [MAXIMUM_GROUND_ANGLE_DEGREES] as the tangent the ray test compares against, evaluated once here
+ * rather than per pixel. A ground ray is cast for every row of every frame, so the per-row cost of
+ * this bound is one multiply and one compare.
+ */
+private val TANGENT_OF_MAXIMUM_GROUND_ANGLE: Double =
+    tan(MAXIMUM_GROUND_ANGLE_DEGREES.degreesToRadians())
 private val UP: DoubleVector3 = DoubleVector3(0.0, 0.0, 1.0)
 

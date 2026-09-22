@@ -19,7 +19,7 @@ import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.freshCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
-import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.image.PngDecodeResult
@@ -44,6 +44,8 @@ import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.TransportResponseMetadata as EngineTransportResponseMetadata
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -105,7 +107,7 @@ internal class OperationRegistry(
     private val transport: Transport,
     private val store: Store,
     private val privateKeyResolver: RentilePrivateKeyResolver,
-    private val sha256: Sha256Function = PureKotlinSha256,
+    private val sha256: Sha256Function = AcceleratedSha256,
 ) {
     private val resourceKeyDeriver = ResourceKeyDeriver(sha256)
 
@@ -747,7 +749,11 @@ internal class OperationRegistry(
     private fun passesClassSpecificReadValidation(resourceClass: ResourceClass, stored: StoredRawResource): Boolean =
         when (resourceClass) {
             ResourceClass.BASEMAP_SPRITE_IMAGE ->
-                decodePng(stored.bytes, SPRITE_IMAGE_DECODE_CEILING_BYTES) is PngDecodeResult.Success
+                decodePng(
+                    stored.bytes,
+                    SPRITE_IMAGE_DECODE_CEILING_BYTES,
+                    SPRITE_IMAGE_WORKING_CEILING_BYTES,
+                ) is PngDecodeResult.Success
             ResourceClass.BASEMAP_SPRITE_JSON ->
                 parseJson(stored.bytes, 0, stored.bytes.size, SPRITE_JSON_MAXIMUM_DEPTH) is JsonParse.Parsed
             // Deliberate, and the reason is specific rather than "nothing else needs checking". Rentile's
@@ -937,22 +943,77 @@ private class SuspendJoin<K : Any, V> {
     private val mutex = Mutex()
     private val inFlight = mutableMapOf<K, CompletableDeferred<V>>()
 
+    /**
+     * Runs [block] for [key] once, replaying its outcome to every other caller — except a
+     * cancellation, which is replayed to nobody (ADR 0050).
+     *
+     * A latch records what is true of the resource: a success, a transport failure, an integrity
+     * refusal will all be just as true for the next caller. A cancellation says only that one
+     * coroutine stopped waiting, so it is forgotten rather than latched, and a healthy caller that
+     * inherits one re-enters and does the work itself.
+     */
     suspend fun run(key: K, block: suspend () -> V): V {
-        var owner = false
-        val deferred = mutex.withLock {
-            inFlight.getOrPut(key) {
-                owner = true
-                CompletableDeferred()
+        while (true) {
+            var owner = false
+            val deferred = mutex.withLock {
+                inFlight.getOrPut(key) {
+                    owner = true
+                    CompletableDeferred()
+                }
+            }
+            if (owner) {
+                return try {
+                    val result = block()
+                    deferred.complete(result)
+                    result
+                } catch (cancellation: CancellationException) {
+                    // Forget BEFORE completing: a sibling woken by the completion must not be able to
+                    // find this entry still standing and park on the deferred that just cancelled it.
+                    forget(key, deferred)
+                    deferred.completeExceptionally(cancellation)
+                    throw cancellation
+                } catch (@Suppress("TooGenericExceptionCaught") failure: Throwable) {
+                    deferred.completeExceptionally(failure)
+                    throw failure
+                }
+            }
+            try {
+                return deferred.await()
+            } catch (cancellation: CancellationException) {
+                // The owner's cancellation arrived here, and it is only ours if we are cancelled too.
+                // ensureActive() rethrows when we are; when we are not, the loop takes another pass,
+                // where the forgotten key makes this caller the owner or joins whoever now is.
+                //
+                // Explicit rather than load-bearing: the loop's next `withLock` is itself a
+                // cancellation point and a cancelled caller would leave through it regardless. This
+                // loop's correctness should not rest on a lock happening to be cancellable.
+                currentCoroutineContext().ensureActive()
             }
         }
-        if (!owner) return deferred.await()
-        return try {
-            val result = block()
-            deferred.complete(result)
-            result
-        } catch (t: Throwable) {
-            deferred.completeExceptionally(t)
-            throw t
+    }
+
+    /**
+     * Drops [key], but only while [deferred] is still the entry under it.
+     *
+     * The identity check is unreachable as this class stands, and says so rather than implying a race
+     * it does not have: the only caller runs this to completion *before* completing its deferred. It
+     * guards the ordering instead -- moving [forget] after `completeExceptionally` looks like a
+     * harmless simplification and would make the race real, and this turns that into a retry rather
+     * than a deferred nothing ever completes (ADR 0050).
+     *
+     * Non-suspending, and that is load-bearing rather than a style choice: the only caller runs this
+     * inside a catch for its own cancellation, where `Mutex.withLock` is a cancellable suspension
+     * point that would throw instead of taking the lock. The critical section is one map read and one
+     * removal, and this class never holds the lock across a suspension, so the spin cannot deadlock.
+     */
+    private fun forget(key: K, deferred: CompletableDeferred<V>) {
+        while (!mutex.tryLock()) {
+            // Uncontended in practice: every critical section here is a map lookup.
+        }
+        try {
+            if (inFlight[key] === deferred) inFlight.remove(key)
+        } finally {
+            mutex.unlock()
         }
     }
 }
@@ -1258,6 +1319,7 @@ private val UNSUPPORTED_SPRITE_ENTRY_FIELDS: Set<String> = setOf("stretchX", "st
 /** Generous enough for any sticker/sprite-sized image; only used to decide whether a sprite image
  *  record decodes at all before answering the engine's read, never to size an actual buffer. */
 private const val SPRITE_IMAGE_DECODE_CEILING_BYTES: Long = 64L * 1024L * 1024L
+private const val SPRITE_IMAGE_WORKING_CEILING_BYTES: Long = 128L * 1024L * 1024L
 
 /** Sprite JSON documents are small, flat atlas manifests; this is a generous nesting ceiling used
  *  only to prove the document parses at all before answering the engine's read. */

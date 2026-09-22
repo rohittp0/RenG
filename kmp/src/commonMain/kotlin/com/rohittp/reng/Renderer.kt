@@ -33,6 +33,8 @@ public class RendererConfiguration(
     maximumConcurrentResourceOperations: Int = 8,
     diagnosticSink: DiagnosticSink = DiagnosticSink.None,
     terrainShading: Boolean = false,
+    maximumCachedConsumerPipelines: Int = 64,
+    maximumConsumerPipelinesPerFrame: Int = 256,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -73,6 +75,12 @@ public class RendererConfiguration(
      */
     public val terrainShading: Boolean
 
+    /** Maximum unleased consumer Geometry/Backdrop pipelines retained between draws. */
+    public val maximumCachedConsumerPipelines: Int
+
+    /** Hard planning limit on distinct consumer Geometry/Backdrop shader pairs in one frame. */
+    public val maximumConsumerPipelinesPerFrame: Int
+
     init {
         require(maximumBasemapTileInstances in 1..4096) {
             "maximumBasemapTileInstances must be within the supported range"
@@ -82,6 +90,12 @@ public class RendererConfiguration(
         }
         require(maximumConcurrentResourceOperations in 1..64) {
             "maximumConcurrentResourceOperations must be within the supported range"
+        }
+        require(maximumCachedConsumerPipelines in 1..4096) {
+            "maximumCachedConsumerPipelines must be within the supported range"
+        }
+        require(maximumConsumerPipelinesPerFrame in 1..4096) {
+            "maximumConsumerPipelinesPerFrame must be within the supported range"
         }
 
         this.outputPixelSize = outputPixelSize
@@ -94,18 +108,37 @@ public class RendererConfiguration(
         this.maximumConcurrentResourceOperations = maximumConcurrentResourceOperations
         this.diagnosticSink = diagnosticSink
         this.terrainShading = terrainShading
+        this.maximumCachedConsumerPipelines = maximumCachedConsumerPipelines
+        this.maximumConsumerPipelinesPerFrame = maximumConsumerPipelinesPerFrame
     }
 }
 
 public sealed interface Renderer : AutoCloseable {
+    /**
+     * [priority] chooses the engine's own resource-gate lane for this frame's basemap tiles (ADR
+     * 0053). It orders nothing inside RenG, which still refuses a second concurrent preparation
+     * rather than queueing it, and it reaches only the basemap: a style, a sticker and a model GLB
+     * are acquired on RenG's driver path, where there is no lane to put them in.
+     *
+     * Declared last, and that is an ABI decision: every parameter before it is positional in shipped
+     * consumer code.
+     */
     public suspend fun prepare(
         plan: FramePlan,
         accessMode: ResourceAccessMode = ResourceAccessMode.NORMAL,
+        priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
     ): PreparedFrame
 
+    /**
+     * [priority] applies to every frame in [plans] alike. A batch is where a consumer most often
+     * knows which frame it needs first, and the way to say so is two calls — the urgent frame, then
+     * the rest — rather than a per-plan priority that would make one batch mean several engine
+     * lanes at once.
+     */
     public suspend fun prepareBatch(
         plans: List<FramePlan>,
         accessMode: ResourceAccessMode = ResourceAccessMode.NORMAL,
+        priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
     ): List<PreparedFrame>
 
     public suspend fun cancelPreparations(): Unit
@@ -113,6 +146,13 @@ public sealed interface Renderer : AutoCloseable {
     public fun clearFrameHistory(): Unit
 
     public fun queryResources(selector: ResourceSelector = ResourceSelector.All): ResourceReport
+
+    /**
+     * Every counter the basemap engine has reported to this renderer, as a running total since it
+     * was created (ADR 0049). A closed renderer answers an empty report, exactly as
+     * [queryResources] does.
+     */
+    public fun queryMetrics(): MetricReport
 
     public fun freeResources(selector: ResourceSelector = ResourceSelector.All): ResourceFreeResult
 

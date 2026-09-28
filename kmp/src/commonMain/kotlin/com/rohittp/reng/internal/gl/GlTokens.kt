@@ -44,10 +44,12 @@ internal const val GL_CLAMP_TO_EDGE: Int = 0x812F
 
 internal const val GL_RGBA: Int = 0x1908
 internal const val GL_RGBA8: Int = 0x8058
+internal const val GL_RGBA16F: Int = 0x881A
 internal const val GL_DEPTH_COMPONENT24: Int = 0x81A6
 internal const val GL_UNSIGNED_BYTE: Int = 0x1401
 internal const val GL_UNSIGNED_SHORT: Int = 0x1403
 internal const val GL_FLOAT: Int = 0x1406
+internal const val GL_HALF_FLOAT: Int = 0x140B
 internal const val GL_UNSIGNED_INT: Int = 0x1405
 
 internal const val GL_REPEAT: Int = 0x2901

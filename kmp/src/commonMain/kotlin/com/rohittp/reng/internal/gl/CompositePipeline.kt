@@ -39,6 +39,11 @@ internal enum class InternalPipelineRole(internal val wireValue: Int) {
 
     /** ADR 0068. Appended, so no existing role's wire value moves. */
     BACKDROP(10),
+
+    /** ADR 0074. Appended, so no existing role's wire value moves. */
+    BLOOM_DOWNSAMPLE(11),
+    BLOOM_UPSAMPLE(12),
+    BLOOM_COMPOSITE(13),
 }
 
 /**

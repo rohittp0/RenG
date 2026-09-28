@@ -40,6 +40,7 @@ final enum class com.rohittp.reng/AnchoringMode : kotlin/Enum<com.rohittp.reng/A
 
 final enum class com.rohittp.reng/DiagnosticCode : kotlin/Enum<com.rohittp.reng/DiagnosticCode> { // com.rohittp.reng/DiagnosticCode|null[0]
     enum entry BASEMAP_NOT_CONFIGURED // com.rohittp.reng/DiagnosticCode.BASEMAP_NOT_CONFIGURED|null[0]
+    enum entry BLOOM_UNAVAILABLE // com.rohittp.reng/DiagnosticCode.BLOOM_UNAVAILABLE|null[0]
     enum entry FAILURE_CONTEXT // com.rohittp.reng/DiagnosticCode.FAILURE_CONTEXT|null[0]
     enum entry GROUND_PRESENTED_PROVISIONALLY // com.rohittp.reng/DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY|null[0]
     enum entry LABEL_CONTENT_EXCLUDED // com.rohittp.reng/DiagnosticCode.LABEL_CONTENT_EXCLUDED|null[0]
@@ -551,6 +552,30 @@ final class com.rohittp.reng/AnimationTrack { // com.rohittp.reng/AnimationTrack
     }
 }
 
+final class com.rohittp.reng/Bloom { // com.rohittp.reng/Bloom|null[0]
+    constructor <init>(kotlin/Float = ..., kotlin.collections/List<kotlin/Float> = ..., kotlin/Float = ..., kotlin/Float = ...) // com.rohittp.reng/Bloom.<init>|<init>(kotlin.Float;kotlin.collections.List<kotlin.Float>;kotlin.Float;kotlin.Float){}[0]
+
+    final val insideSuppression // com.rohittp.reng/Bloom.insideSuppression|{}insideSuppression[0]
+        final fun <get-insideSuppression>(): kotlin/Float // com.rohittp.reng/Bloom.insideSuppression.<get-insideSuppression>|<get-insideSuppression>(){}[0]
+    final val intensity // com.rohittp.reng/Bloom.intensity|{}intensity[0]
+        final fun <get-intensity>(): kotlin/Float // com.rohittp.reng/Bloom.intensity.<get-intensity>|<get-intensity>(){}[0]
+    final val levelWeights // com.rohittp.reng/Bloom.levelWeights|{}levelWeights[0]
+        final fun <get-levelWeights>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.levelWeights.<get-levelWeights>|<get-levelWeights>(){}[0]
+    final val whiteness // com.rohittp.reng/Bloom.whiteness|{}whiteness[0]
+        final fun <get-whiteness>(): kotlin/Float // com.rohittp.reng/Bloom.whiteness.<get-whiteness>|<get-whiteness>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Bloom.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/Bloom.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/Bloom.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/Bloom.Companion|null[0]
+        final val DEFAULT_LEVEL_WEIGHTS // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS|{}DEFAULT_LEVEL_WEIGHTS[0]
+            final fun <get-DEFAULT_LEVEL_WEIGHTS>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS.<get-DEFAULT_LEVEL_WEIGHTS>|<get-DEFAULT_LEVEL_WEIGHTS>(){}[0]
+
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/Bloom> // com.rohittp.reng/Bloom.Companion.serializer|serializer(){}[0]
+    }
+}
+
 final class com.rohittp.reng/Camera { // com.rohittp.reng/Camera|null[0]
     constructor <init>(kotlin/Double, kotlin/Double, kotlin/Double, kotlin/Double, kotlin/Double) // com.rohittp.reng/Camera.<init>|<init>(kotlin.Double;kotlin.Double;kotlin.Double;kotlin.Double;kotlin.Double){}[0]
 
@@ -612,10 +637,12 @@ final class com.rohittp.reng/Diagnostic { // com.rohittp.reng/Diagnostic|null[0]
 }
 
 final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
-    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ..., com.rohittp.reng/Backdrop? = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>;com.rohittp.reng.Backdrop?){}[0]
+    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ..., com.rohittp.reng/Backdrop? = ..., com.rohittp.reng/Bloom? = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>;com.rohittp.reng.Backdrop?;com.rohittp.reng.Bloom?){}[0]
 
     final val backdrop // com.rohittp.reng/FramePlan.backdrop|{}backdrop[0]
         final fun <get-backdrop>(): com.rohittp.reng/Backdrop? // com.rohittp.reng/FramePlan.backdrop.<get-backdrop>|<get-backdrop>(){}[0]
+    final val bloom // com.rohittp.reng/FramePlan.bloom|{}bloom[0]
+        final fun <get-bloom>(): com.rohittp.reng/Bloom? // com.rohittp.reng/FramePlan.bloom.<get-bloom>|<get-bloom>(){}[0]
     final val camera // com.rohittp.reng/FramePlan.camera|{}camera[0]
         final fun <get-camera>(): com.rohittp.reng/Camera // com.rohittp.reng/FramePlan.camera.<get-camera>|<get-camera>(){}[0]
     final val drawBasemap // com.rohittp.reng/FramePlan.drawBasemap|{}drawBasemap[0]
@@ -642,12 +669,14 @@ final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
 }
 
 final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
-    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode){}[0]
+    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean){}[0]
 
     final val altitudeMode // com.rohittp.reng/Geometry.altitudeMode|{}altitudeMode[0]
         final fun <get-altitudeMode>(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.altitudeMode.<get-altitudeMode>|<get-altitudeMode>(){}[0]
     final val bottomRight // com.rohittp.reng/Geometry.bottomRight|{}bottomRight[0]
         final fun <get-bottomRight>(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.bottomRight.<get-bottomRight>|<get-bottomRight>(){}[0]
+    final val emissive // com.rohittp.reng/Geometry.emissive|{}emissive[0]
+        final fun <get-emissive>(): kotlin/Boolean // com.rohittp.reng/Geometry.emissive.<get-emissive>|<get-emissive>(){}[0]
     final val shaderPair // com.rohittp.reng/Geometry.shaderPair|{}shaderPair[0]
         final fun <get-shaderPair>(): com.rohittp.reng/ShaderPair // com.rohittp.reng/Geometry.shaderPair.<get-shaderPair>|<get-shaderPair>(){}[0]
     final val textures // com.rohittp.reng/Geometry.textures|{}textures[0]
@@ -663,7 +692,8 @@ final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
     final fun component4(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/Geometry.component4|component4(){}[0]
     final fun component5(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/Geometry.component5|component5(){}[0]
     final fun component6(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.component6|component6(){}[0]
-    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode){}[0]
+    final fun component7(): kotlin/Boolean // com.rohittp.reng/Geometry.component7|component7(){}[0]
+    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Geometry.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Geometry.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Geometry.toString|toString(){}[0]

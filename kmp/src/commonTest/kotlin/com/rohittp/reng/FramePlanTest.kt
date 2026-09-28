@@ -29,6 +29,7 @@ class FramePlanTest {
         assertEquals(emptyList(), plan.stickers)
         assertEquals(emptyList(), plan.models)
         assertEquals(emptyList(), plan.geometries)
+        assertEquals(null, plan.bloom)
     }
 
     /**
@@ -66,6 +67,21 @@ class FramePlanTest {
     @Test
     fun framePlanRequiresANonNegativeIndex() {
         assertFailsWith<IllegalArgumentException> { FramePlan(-1, camera()) }
+    }
+
+    @Test
+    fun bloomParticipatesInEqualityAndHashing() {
+        val absent = FramePlan(0, camera())
+        val first = FramePlan(0, camera(), bloom = Bloom(intensity = 2f))
+        val equal = FramePlan(0, camera(), bloom = Bloom(intensity = 2f))
+        val different = FramePlan(0, camera(), bloom = Bloom(intensity = 3f))
+
+        assertNotEquals(absent, first)
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertNotEquals(first, different)
+        assertNotEquals(first.hashCode(), different.hashCode())
+        assertEquals(first.bloom, first.bloomForCore())
     }
 
     @Test

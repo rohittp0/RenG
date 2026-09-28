@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.Bloom
 import com.rohittp.reng.AltitudeMode
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
@@ -329,12 +330,14 @@ internal class Scene(
  * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every **model**, then
  * every map-anchored sticker. That is ADR 0025's order with ADR 0030's models inserted before the
  * stickers, because a map-anchored sticker is a marker and a marker paints over the scene it marks.
- * ADR 0034 then adds **phase 5, the labels**, between the two regimes:
+ * ADR 0034 adds the labels between the two regimes, and ADR 0074 inserts optional bloom work after
+ * phase 4 and immediately before phase 5 without renumbering either regime:
  *
  * ```
  * map regime (depth tested throughout, ADR 0027)
  *   1 ground (test, AND write when displaced, ADR 0039)   2 geometries
  *   3 models (test AND write, ADR 0030)                   4 map-anchored stickers
+ *     emissive Geometry redraw and BLOOM (when active, ADR 0074)
  *   5 LABELS   depth test OFF   <-- ADR 0034, and OUTSIDE both regimes
  * screen regime (no depth)
  *   6 consumer screen-anchored stickers, by z (ADR 0024)
@@ -346,8 +349,10 @@ internal class Scene(
  * [beginLabelPass] *disables* the test, which would read as a third exception if the label pass were
  * inside the map regime. It is not: it is a fourth scene list drawn between the regimes, described by
  * a phase number rather than by a regime name, so both of those ADRs continue to describe every pass
- * that *is* in the map regime without amendment. So a consumer's screen-anchored sticker covers a
- * label, and a label covers a map-anchored sticker. What still binds the label pass is
+ * that *is* in the map regime without amendment. Bloom is also outside both regimes: it samples
+ * only the emissive Geometry redraw, so labels stay crisp and never bloom. Thus a consumer's
+ * screen-anchored sticker covers a label, and a label covers bloom and a map-anchored sticker. What
+ * still binds the label pass is
  * `SceneContentTest.exactlyOnePhaseWritesDepthItIsTheModelPassAndTheMaskIsOffAgainOnTheWayOut`:
  * exactly one phase in a whole scene enables depth writes and it is the model pass. The label pass
  * enables none, and the test off is genuinely *needed* here rather than merely restated — phase 4
@@ -356,7 +361,7 @@ internal class Scene(
  *
  * **The phase order is a relative order, not a claim that any earlier phase produced pixels.** The
  * label pass is orthogonal to the basemap (`FramePlan.drawLabels` against `FramePlan.drawBasemap`),
- * so phase 5 runs on a frame with no ground at all — which is why [Scene.labels] joins the
+ * so the label phase runs on a frame with no ground at all — which is why [Scene.labels] joins the
  * nothing-to-draw guard below rather than being reachable only past a ground tile.
  *
  * **Which regime each drawn thing is in, and its order within its own type, is
@@ -467,6 +472,10 @@ internal class SceneContent(
     private val iconPipeline: IconPipeline? = null,
     private val globeGroundPipeline: GlobeGroundPipeline? = null,
     private val backdrop: ResolvedBackdrop? = null,
+    private val bloom: Bloom? = null,
+    private val bloomResources: BloomResources? = null,
+    private val surfaceFramebuffer: Int? = null,
+    private val surfaceDepthRenderbuffer: Int? = null,
 ) : GlFrameContent {
 
     /**
@@ -595,6 +604,7 @@ internal class SceneContent(
                     frameIndex = scene.frameIndex,
                     consumerUniforms = sceneGeometry.consumerUniforms,
                     consumerTextures = sceneGeometry.consumerTextures,
+                    emissionPass = 0,
                 )
             }
         }
@@ -644,8 +654,78 @@ internal class SceneContent(
             )
         }
 
+        drawBloomPhase(binding)
         drawLabelPhase(binding)
         drawScreenStack(binding)
+    }
+
+    /** ADR 0074's emission redraw and dual-Kawase chain, between map stickers and labels. */
+    private fun drawBloomPhase(binding: GlBinding) {
+        val bloom = bloom ?: return
+        val resources = bloomResources ?: return
+        val emissiveGeometries = scene.geometries.filter { it.geometry.emissive }
+        if (emissiveGeometries.isEmpty()) return
+        val framebuffer = requireNotNull(surfaceFramebuffer) {
+            "bloom requires the main offscreen framebuffer"
+        }
+        val depthRenderbuffer = requireNotNull(surfaceDepthRenderbuffer) {
+            "bloom requires the main offscreen depth renderbuffer"
+        }
+        require(resources.sharedDepthRenderbuffer == depthRenderbuffer) {
+            "the emission image must share the main offscreen depth renderbuffer"
+        }
+
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.emission.framebuffer)
+        binding.viewport(0, 0, resources.emission.width, resources.emission.height)
+        binding.clearColor(0f, 0f, 0f, 0f)
+        binding.clear(GL_COLOR_BUFFER_BIT)
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
+        binding.depthMask(false)
+        binding.disable(GL_CULL_FACE)
+        binding.enable(GL_BLEND)
+        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+        binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+
+        val geometryViewProjection = when (camera) {
+            is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
+            is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
+        }
+        for (sceneGeometry in emissiveGeometries) {
+            val drape = groundDrapeFor(sceneGeometry.geometry)
+            val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
+            val grid = when (camera) {
+                is ResolvedMercatorCamera ->
+                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+
+                is ResolvedGlobeCamera ->
+                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+            }.requireResolvedAtDrawTime()
+            drawGeometry(
+                binding = binding,
+                pipeline = sceneGeometry.pipeline,
+                grid = grid,
+                modelViewProjection = geometryViewProjection,
+                resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+                resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+                boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
+                frameIndex = scene.frameIndex,
+                consumerUniforms = sceneGeometry.consumerUniforms,
+                consumerTextures = sceneGeometry.consumerTextures,
+                emissionPass = 1,
+            )
+            endGeometryEmissionPass(binding, sceneGeometry.pipeline)
+        }
+
+        drawBloom(binding, resources, bloom, framebuffer)
+
+        // Phase 5 begins from the framebuffer, viewport and map-regime depth state it followed
+        // before bloom existed. Its icon/label pipelines then disable depth for themselves.
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer)
+        binding.viewport(0, 0, scene.outputPixelSize.width, scene.outputPixelSize.height)
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
+        binding.depthMask(false)
     }
 
     /**

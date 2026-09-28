@@ -40,6 +40,9 @@ internal const val UNIFORM_RESOLUTION: String = "uResolution"
  */
 internal const val UNIFORM_GEOMETRY_BOUNDS: String = "uGeometryBounds"
 internal const val UNIFORM_FRAME_INDEX: String = "uFrameIndex"
+/** `1` only while an emissive Geometry is redrawn into the frame emission image. */
+internal const val UNIFORM_GEOMETRY_EMISSION_PASS: String = "rengGeometryEmissionPass"
+internal const val GEOMETRY_RESERVED_NAME_PREFIX: String = "rengGeometry"
 
 /** Every documented name, for Task 7's reserved-name rejection at `Geometry` construction. */
 internal val RESERVED_SHADER_NAMES: Set<String> = setOf(
@@ -49,6 +52,7 @@ internal val RESERVED_SHADER_NAMES: Set<String> = setOf(
     UNIFORM_RESOLUTION,
     UNIFORM_GEOMETRY_BOUNDS,
     UNIFORM_FRAME_INDEX,
+    UNIFORM_GEOMETRY_EMISSION_PASS,
 )
 
 /**
@@ -88,6 +92,7 @@ internal class GeometryPipeline(
     val resolutionLocation: Int,
     val geometryBoundsLocation: Int,
     val frameIndexLocation: Int,
+    val emissionPassLocation: Int,
 ) {
     /**
      * Consumer uniform and sampler names resolved against [program], memoised on first use.
@@ -283,6 +288,7 @@ internal fun createGeometryPipeline(
             resolutionLocation = binding.getUniformLocation(program, UNIFORM_RESOLUTION),
             geometryBoundsLocation = binding.getUniformLocation(program, UNIFORM_GEOMETRY_BOUNDS),
             frameIndexLocation = binding.getUniformLocation(program, UNIFORM_FRAME_INDEX),
+            emissionPassLocation = binding.getUniformLocation(program, UNIFORM_GEOMETRY_EMISSION_PASS),
         ),
     )
 }
@@ -322,7 +328,7 @@ internal fun deleteGeometryPipeline(
  * into [cameraRelativeCornersXyz] or [modelViewProjection].
  *
  * Every uniform and attribute is set only when [pipeline] recorded a non-negative location for it
- * (ADR 0008): a shader declaring none of the six documented names still compiles and draws here,
+ * (ADR 0008): a shader declaring none of the documented names still compiles and draws here,
  * and this function issues no `uniform*` call for a name [pipeline] did not resolve to a location
  * at creation.
  *
@@ -331,7 +337,7 @@ internal fun deleteGeometryPipeline(
  *
  * [consumerUniforms] and [consumerTextures] are the [PreparedFrame][com.rohittp.reng.PreparedFrame]-time
  * SNAPSHOTS of `Geometry.uniforms` and `Geometry.textures` (Cycle F-1 Task 3), keyed by the
- * consumer's own sampler/uniform names rather than the six documented ones above.
+ * consumer's own sampler/uniform names rather than the documented ones above.
  * [consumerTextures] carries each name's ALREADY-UPLOADED GL texture object name, not a
  * [com.rohittp.reng.internal.image.DecodedImage] — the caller assembling one frame's
  * [SceneGeometry]s uploads (and caches, by `ResourceKey`, through `GlObjectRegistry`) once, so this
@@ -339,7 +345,7 @@ internal fun deleteGeometryPipeline(
  * texture-lifetime leak. Each name is resolved against [pipeline]'s program through
  * [GeometryPipeline.consumerLocation] — the same "bind only when declared" rule [pipeline]'s own six
  * locations already follow, reached differently because a consumer name's location cannot be
- * resolved at pipeline-creation time the way the six documented ones are: the pipeline is shared and
+ * resolved at pipeline-creation time the way the documented ones are: the pipeline is shared and
  * content-keyed by [ShaderPair] alone, while the set of consumer names varies by `Geometry`
  * instance. So it is resolved on **first** draw that names it and memoised on the pipeline
  * thereafter, which is sound for the same reason creation-time resolution is: a location depends on
@@ -374,6 +380,7 @@ internal fun drawGeometry(
     frameIndex: Long,
     consumerUniforms: Map<String, ShaderValue> = emptyMap(),
     consumerTextures: Map<String, Int> = emptyMap(),
+    emissionPass: Int = 0,
 ) {
     require(modelViewProjection.size == GEOMETRY_MVP_FLOAT_COUNT) {
         "a model-view-projection matrix requires exactly sixteen elements"
@@ -429,6 +436,9 @@ internal fun drawGeometry(
     if (pipeline.frameIndexLocation >= 0) {
         binding.uniform1ui(pipeline.frameIndexLocation, frameIndex.toInt())
     }
+    if (pipeline.emissionPassLocation >= 0) {
+        binding.uniform1i(pipeline.emissionPassLocation, emissionPass)
+    }
 
     bindConsumerValues(
         binding = binding,
@@ -438,6 +448,13 @@ internal fun drawGeometry(
     )
 
     binding.drawElements(GL_TRIANGLES, grid.triangleIndices.size, GL_UNSIGNED_SHORT, 0)
+}
+
+/** Restores the documented emission flag after an emission redraw has finished. */
+internal fun endGeometryEmissionPass(binding: GlBinding, pipeline: GeometryPipeline) {
+    if (pipeline.emissionPassLocation < 0) return
+    binding.useProgram(pipeline.program)
+    binding.uniform1i(pipeline.emissionPassLocation, 0)
 }
 
 /**

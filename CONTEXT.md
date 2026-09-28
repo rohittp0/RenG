@@ -13,7 +13,8 @@ A complete, self-contained definition of one frame's content, drawn by whichever
 Its required non-negative `frameIndex` orders strict, history-aware preparation within that renderer;
 `drawBasemap`, defaulting to true, may suppress ground for that frame, and `drawLabels`, also defaulting to
 true, may suppress **Map Label**s. The two are fully orthogonal: all four pairings are legal, including a
-frame that draws labels over no ground at all. Plan list inputs are snapshotted, and
+frame that draws labels over no ground at all. An optional **Bloom** controls the screen-space light added
+by **Emissive** Geometry. Plan list inputs are snapshotted, and
 every public list read returns a defensive copy whose platform mutation cannot change the plan, its equality,
 or its canonical identity.
 It is also a **document**: it and every type it reaches carry a serializer (ADR 0042), so a plan can be
@@ -342,7 +343,20 @@ Top-left latitude is strictly north of bottom-right latitude; its unwrapped long
 with a span no greater than `360` degrees. The northern edge uses `topLeft.z` altitude, the southern edge
 uses `bottomRight.z`, and altitude interpolates north-to-south. A **Geometry** carries no **Placement**,
 so it carries an **Altitude Mode** of its own. Its **Shader Pair** writes colour in premultiplied form.
+It may also be **Emissive**, which matters only when the **Frame Plan** carries a **Bloom**.
 _Avoid_: Layer, overlay, custom layer, primitive
+
+**Emissive**:
+A property of a **Geometry** whose ordinary colour should also seed the frame's **Bloom**. Emissive
+Geometry remains ordinary scene content and keeps the scene's depth occlusion; it is not a separate
+drawn-thing type and has no effect in a Frame Plan without Bloom.
+_Avoid_: Glow, halo, light source, post-effect, bloom flag
+
+**Bloom**:
+The optional frame-wide screen-space spread and additive composite of colour emitted by **Emissive**
+Geometry. It controls intensity, the contribution of each resolution level, suppression inside opaque
+emission and whitening. Labels and screen-anchored content do not participate.
+_Avoid_: Glow, halo, post-effect, blur, emission
 
 **Shader Pair**:
 The `vertexSource` and `fragmentSource` shader sources a **Geometry** is painted with.
@@ -370,7 +384,9 @@ The fixed attribute and uniform names RenG binds by name in a compiled **Shader 
 **Shader Profile**'s substitution rule — ADR 0008 binds a documented name only when the compiled program
 declares it, and never fails a shader for omitting one. Attributes: `aPosition` (`vec3`), `aTexCoord`
 (`vec2`). Uniforms: `uModelViewProjection` (`mat4`); `uResolution` (`vec2`); `uGeometryBounds` (`vec4`,
-west/south/east/north degrees); `uFrameIndex` (`uint`). `uGeometryBounds` is explicitly informational and
+west/south/east/north degrees); `uFrameIndex` (`uint`); `rengGeometryEmissionPass` (`int`, zero for
+the ordinary draw and one for an Emissive redraw).
+`uGeometryBounds` is explicitly informational and
 unsuitable for placement arithmetic — placement stays camera-relative and exact through `aPosition` and
 `uModelViewProjection`, because Cycle B measured camera-relative Float error below 0.001 px and absolute
 degrees packed into a 32-bit float would discard that precision. `uFrameIndex` is narrowed from **Frame
@@ -727,6 +743,7 @@ _Avoid_: Log message, arbitrary metadata, exception cause
 - A consumer may clear **Frame History** without freeing resources or invalidating prepared frames
 - One **Prepared Frame** draws into any number of **Render Target**s, and drawing does not consume it
 - One **Frame Plan** holds ordered lists of **Sticker**s, **Model**s, and **Geometry**s
+- One **Frame Plan** carries at most one **Bloom**, and each **Geometry** independently may be **Emissive**
 - List order is frame content, and each repeated equal value is a distinct drawn thing
 - Each **Sticker** and **Model** carries exactly one **Placement**
 - A **Geometry** carries no **Placement**; its geographic bounds establish its map-space footprint

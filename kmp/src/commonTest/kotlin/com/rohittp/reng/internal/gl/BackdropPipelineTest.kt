@@ -18,6 +18,9 @@ class BackdropPipelineTest {
         assertEquals(2, InternalPipelineRole.STICKER.wireValue)
         assertEquals(9, InternalPipelineRole.TERRAIN_GLOBE_GROUND.wireValue)
         assertEquals(10, InternalPipelineRole.BACKDROP.wireValue)
+        assertEquals(11, InternalPipelineRole.BLOOM_DOWNSAMPLE.wireValue)
+        assertEquals(12, InternalPipelineRole.BLOOM_UPSAMPLE.wireValue)
+        assertEquals(13, InternalPipelineRole.BLOOM_COMPOSITE.wireValue)
     }
 
     @Test

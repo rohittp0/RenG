@@ -28,10 +28,16 @@ public class FramePlan(
      * black, so a consumer compositing RenG's output over its own background does not start
      * receiving opaque pixels because it upgraded.
      *
-     * **Declared last, and that is an ABI decision** -- the same one `ResourceLimits` records for its
-     * own trailing fields: every parameter before it is positional in shipped consumer code.
+     * **Appended after the original fields, and that is an ABI decision** -- the same one
+     * `ResourceLimits` records for its own trailing fields: every earlier parameter is positional
+     * in shipped consumer code.
      */
     backdrop: Backdrop? = null,
+    /**
+     * The screen-space bloom applied to emissive geometries, or `null` for no emission pass.
+     * Declared last so every previously shipped positional parameter keeps its meaning.
+     */
+    bloom: Bloom? = null,
 ) {
     public val frameIndex: Long
     public val camera: Camera
@@ -57,6 +63,7 @@ public class FramePlan(
     public val geometries: List<Geometry>
         get() = freshListCopy(geometrySnapshot)
     public val backdrop: Backdrop?
+    public val bloom: Bloom?
 
     init {
         require(frameIndex >= 0L) { "frameIndex must be non-negative" }
@@ -75,6 +82,7 @@ public class FramePlan(
         this.modelSnapshot = modelCopy
         this.geometrySnapshot = geometryCopy
         this.backdrop = backdrop
+        this.bloom = bloom
     }
 
     override fun equals(other: Any?): Boolean =
@@ -87,7 +95,8 @@ public class FramePlan(
             stickerSnapshot == other.stickerSnapshot &&
             modelSnapshot == other.modelSnapshot &&
             geometrySnapshot == other.geometrySnapshot &&
-            backdrop == other.backdrop
+            backdrop == other.backdrop &&
+            bloom == other.bloom
 
     override fun hashCode(): Int {
         var result = frameIndex.hashCode()
@@ -99,6 +108,7 @@ public class FramePlan(
         result = 31 * result + modelSnapshot.hashCode()
         result = 31 * result + geometrySnapshot.hashCode()
         result = 31 * result + backdrop.hashCode()
+        result = 31 * result + bloom.hashCode()
         return result
     }
 }
@@ -110,3 +120,5 @@ internal fun FramePlan.modelsForCore(): List<Model> = models
 internal fun FramePlan.geometriesForCore(): List<Geometry> = geometries
 
 internal fun FramePlan.backdropForCore(): Backdrop? = backdrop
+
+internal fun FramePlan.bloomForCore(): Bloom? = bloom

@@ -17,6 +17,8 @@ import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
 import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
 import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.TERRAIN_FRAME_READBACK_PIXELS
@@ -236,6 +238,18 @@ class AndroidGlConformanceTest {
             binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
             binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
             runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
         } finally {
             fixture.destroy()
         }

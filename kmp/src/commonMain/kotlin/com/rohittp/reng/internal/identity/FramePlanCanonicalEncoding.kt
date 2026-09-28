@@ -18,6 +18,8 @@ import com.rohittp.reng.Vector3
 import com.rohittp.reng.animationTracksForCore
 import com.rohittp.reng.Backdrop
 import com.rohittp.reng.backdropForCore
+import com.rohittp.reng.Bloom
+import com.rohittp.reng.bloomForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
@@ -46,6 +48,9 @@ internal enum class FramePlanSegment(internal val tag: Int) {
      * full structural diff on the first frame after an upgrade and nothing after that.
      */
     BACKDROP(9),
+
+    /** ADR 0074's bloom, appended so no existing tag moves. */
+    BLOOM(10),
 }
 
 internal class EncodedFramePlan(
@@ -84,6 +89,7 @@ internal class FramePlanCanonicalEncoder(
             // are orthogonal, so all four pairings must reach four distinct Frame Identities.
             CanonicalBinary.boolean(plan.drawLabels),
             CanonicalBinary.optional(plan.backdropForCore()?.let(::encodeBackdrop)),
+            CanonicalBinary.optional(plan.bloomForCore()?.let(::encodeBloom)),
         )
         val root = CanonicalBinary.root(CanonicalRootKind.FRAME) {
             FramePlanSegment.entries.forEach { segment ->
@@ -148,6 +154,18 @@ internal class FramePlanCanonicalEncoder(
         }
     }
 
+    private fun encodeBloom(bloom: Bloom): CanonicalBytes = CanonicalBinary.fields {
+        field(1, CanonicalBinary.binary64(bloom.intensity.toDouble()))
+        field(
+            2,
+            CanonicalBinary.list(
+                bloom.levelWeights.map { CanonicalBinary.binary64(it.toDouble()) },
+            ),
+        )
+        field(3, CanonicalBinary.binary64(bloom.insideSuppression.toDouble()))
+        field(4, CanonicalBinary.binary64(bloom.whiteness.toDouble()))
+    }
+
     private fun encodeSticker(sticker: Sticker): CanonicalBytes = CanonicalBinary.fields {
         field(1, encodePlacement(sticker.placement))
         field(2, CanonicalBinary.exactUtf8(sticker.image.value))
@@ -193,6 +211,7 @@ internal class FramePlanCanonicalEncoder(
         // Tag 6, the next free one: a Geometry carries no Placement, so its altitude mode is its own
         // field here exactly as it is on the public type.
         field(6, CanonicalBinary.u16(geometry.altitudeMode.wireValue))
+        field(7, CanonicalBinary.boolean(geometry.emissive))
     }
 
     private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes = CanonicalBinary.fields {

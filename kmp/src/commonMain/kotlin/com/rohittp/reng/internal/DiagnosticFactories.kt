@@ -93,6 +93,13 @@ internal fun groundPresentedProvisionallyDiagnostic(tileCount: Int): Diagnostic 
         actual = tileCount.toLong(),
     )
 
+internal fun bloomUnavailableDiagnostic(): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.BLOOM_UNAVAILABLE,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+    )
+
 /**
  * A draw ended with more budget-tracked texture bytes resident than
  * [com.rohittp.reng.ResourceLimits.maximumResidentGpuTextureBytes] allows, and eviction could do

@@ -59,6 +59,7 @@ class DiagnosticsAndFailuresTest {
                 "TERRAIN_COVERAGE_INCOMPLETE", "TERRAIN_UNAVAILABLE",
                 // Appended, never inserted: declaration order is ordinal order (ADR 0057).
                 "GROUND_PRESENTED_PROVISIONALLY",
+                "BLOOM_UNAVAILABLE",
             ),
             DiagnosticCode.entries.map { it.name },
         )

@@ -78,7 +78,14 @@ class FramePlanSerializationTest {
                         ),
                         textures = mapOf("uTexture" to ResourceLocator("geometry://one.png")),
                         altitudeMode = AltitudeMode.GROUND_RELATIVE,
+                        emissive = true,
                     ),
+                ),
+                bloom = Bloom(
+                    intensity = 1.5f,
+                    levelWeights = listOf(0.25f, 0.75f),
+                    insideSuppression = 0.5f,
+                    whiteness = 0.25f,
                 ),
             )
         }
@@ -110,7 +117,7 @@ class FramePlanSerializationTest {
         val expectedKeys = listOf(
             // FramePlan
             "frameIndex", "camera", "projectionMode", "drawBasemap", "drawLabels",
-            "stickers", "models", "geometries",
+            "stickers", "models", "geometries", "bloom",
             // Camera
             "latitude", "unwrappedLongitude", "zoom", "bearing", "pitch",
             // Placement
@@ -125,7 +132,9 @@ class FramePlanSerializationTest {
             // AnimationTrack + AnimationSelector
             "animation", "timeSeconds", "value",
             // Geometry
-            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures",
+            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive",
+            // Bloom
+            "intensity", "levelWeights", "insideSuppression", "whiteness",
             // ShaderPair
             "vertexSource", "fragmentSource",
             // ShaderValue

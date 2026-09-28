@@ -4,6 +4,7 @@ import com.rohittp.reng.internal.canonicalDouble
 import com.rohittp.reng.internal.canonicalFloat
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.gl.BACKDROP_RESERVED_NAME_PREFIX
+import com.rohittp.reng.internal.gl.GEOMETRY_RESERVED_NAME_PREFIX
 import com.rohittp.reng.internal.gl.MAXIMUM_CONSUMER_TEXTURES
 import com.rohittp.reng.internal.gl.RESERVED_SHADER_NAMES
 import com.rohittp.reng.internal.requireFiniteFloat
@@ -101,6 +102,79 @@ private const val DEFAULT_BACKDROP_TILE_SIZE_LOGICAL_PIXELS: Double = 256.0
  */
 private fun isReservedBackdropShaderName(name: String): Boolean =
     name in RESERVED_SHADER_NAMES || name.startsWith(BACKDROP_RESERVED_NAME_PREFIX)
+
+/**
+ * A screen-space bloom applied to this frame's emissive [Geometry]s.
+ *
+ * [intensity] scales the light added to the frame. [levelWeights] weights each emission-image mip
+ * level, where index zero is full resolution and index `k` is the output size divided by `2^k`.
+ * [insideSuppression] removes bloom from opaque emission interiors, and [whiteness] moves bloom
+ * colour toward its brightest channel.
+ */
+@kotlinx.serialization.Serializable(with = BloomSerializer::class)
+public class Bloom(
+    intensity: Float = 1f,
+    levelWeights: List<Float> = DEFAULT_LEVEL_WEIGHTS,
+    insideSuppression: Float = 0f,
+    whiteness: Float = 0f,
+) {
+    public val intensity: Float
+    private val levelWeightSnapshot: ArrayList<Float>
+    public val insideSuppression: Float
+    public val whiteness: Float
+
+    public val levelWeights: List<Float>
+        get() = freshListCopy(levelWeightSnapshot)
+
+    init {
+        require(requireFiniteFloat(intensity, "intensity") >= 0f) {
+            "intensity must be non-negative"
+        }
+        require(levelWeights.size in 1..8) {
+            "levelWeights must contain between one and eight values"
+        }
+        levelWeights.forEachIndexed { index, weight ->
+            require(requireFiniteFloat(weight, "levelWeights[$index]") >= 0f) {
+                "levelWeights[$index] must be non-negative"
+            }
+        }
+        require(insideSuppression in 0f..1f) { "insideSuppression must be between zero and one" }
+        require(whiteness in 0f..1f) { "whiteness must be between zero and one" }
+
+        this.intensity = canonicalFloat(intensity, "intensity")
+        levelWeightSnapshot = ArrayList(
+            levelWeights.mapIndexed { index, weight ->
+                canonicalFloat(weight, "levelWeights[$index]")
+            },
+        )
+        this.insideSuppression = canonicalFloat(insideSuppression, "insideSuppression")
+        this.whiteness = canonicalFloat(whiteness, "whiteness")
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is Bloom &&
+            intensity == other.intensity &&
+            levelWeightSnapshot == other.levelWeightSnapshot &&
+            insideSuppression == other.insideSuppression &&
+            whiteness == other.whiteness
+
+    override fun hashCode(): Int {
+        var result = intensity.hashCode()
+        result = 31 * result + levelWeightSnapshot.hashCode()
+        result = 31 * result + insideSuppression.hashCode()
+        result = 31 * result + whiteness.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "Bloom(intensity=$intensity, levelWeights=$levelWeightSnapshot, " +
+            "insideSuppression=$insideSuppression, whiteness=$whiteness)"
+
+    public companion object {
+        public val DEFAULT_LEVEL_WEIGHTS: List<Float>
+            get() = listOf(0f, 0.9f, 0.8f, 0.6f, 0.45f, 0.35f, 0.3f)
+    }
+}
 
 @kotlinx.serialization.Serializable(with = StickerSerializer::class)
 public data class Sticker(
@@ -339,7 +413,7 @@ public data class Geometry(
     /**
      * Consumer uniform values, bound by name at draw time to whichever of `shaderPair`'s programs
      * declares that name (ADR 0008: undeclared names are silently never bound, never an error).
-     * A name matching one of RenG's six documented shader-interface names (see
+     * A name matching one of RenG's documented shader-interface names (see
      * `internal.gl.RESERVED_SHADER_NAMES`) is rejected at construction, loudly, rather than being
      * silently overwritten by RenG's own binding at draw time.
      *
@@ -386,13 +460,23 @@ public data class Geometry(
      * sampled at every subdivided vertex rather than only at the two corners — the difference
      * between a quad draped over a ridge and one cutting through it.
      *
-     * **Declared last, after [textures], so no existing `componentN` moves.** [Geometry] is a
+     * **Appended after [textures], so no earlier `componentN` moved.** [Geometry] is a
      * `data class`, so a field inserted between [bottomRight] and [shaderPair] — where it would read
      * best — would renumber `component3` through `component5` and break every consumer that
      * destructures one. It takes `component6` instead, and the canonical encoder takes the next free
      * tag for the same reason (ADR 0018).
      */
     public val altitudeMode: AltitudeMode = AltitudeMode.ABSOLUTE,
+    /**
+     * Whether this Geometry contributes light to the frame's emission image.
+     *
+     * An emissive Geometry is drawn normally and drawn again into the frame's emission image when
+     * the frame has a [Bloom]; it has no effect when [FramePlan.bloom] is `null`.
+     *
+     * Declared last so the append-only data-class ABI gives it `component7` without moving any
+     * existing component.
+     */
+    public val emissive: Boolean = false,
 ) {
     init {
         require(topLeft.x in -90.0..90.0) { "topLeft latitude must be within the supported range" }
@@ -400,10 +484,10 @@ public data class Geometry(
         require(topLeft.x > bottomRight.x) { "topLeft latitude must be north of bottomRight latitude" }
         require(topLeft.y < bottomRight.y) { "topLeft longitude must be west of bottomRight longitude" }
         require(bottomRight.y - topLeft.y <= 360.0) { "geometry longitude span must not exceed 360 degrees" }
-        require(uniforms.keys.none { it in RESERVED_SHADER_NAMES }) {
+        require(uniforms.keys.none(::isReservedGeometryShaderName)) {
             "a geometry uniform must not use a name reserved for RenG's own documented shader interface"
         }
-        require(textures.keys.none { it in RESERVED_SHADER_NAMES }) {
+        require(textures.keys.none(::isReservedGeometryShaderName)) {
             "a geometry texture must not use a name reserved for RenG's own documented shader interface"
         }
         require(textures.size <= MAXIMUM_CONSUMER_TEXTURES) {
@@ -412,6 +496,9 @@ public data class Geometry(
     }
 
     override fun toString(): String =
-        "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
-            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode)"
+            "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
+            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive)"
 }
+
+private fun isReservedGeometryShaderName(name: String): Boolean =
+    name in RESERVED_SHADER_NAMES || name.startsWith(GEOMETRY_RESERVED_NAME_PREFIX)

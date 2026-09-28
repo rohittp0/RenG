@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
+import com.rohittp.reng.internal.bloomUnavailableDiagnostic
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.cache.ResidentGenerationId
@@ -27,6 +28,8 @@ import com.rohittp.reng.internal.firewall.reportTerrainDegradation
 import com.rohittp.reng.internal.gl.BACKDROP_SAMPLER_STATE
 import com.rohittp.reng.internal.gl.BackdropPipeline
 import com.rohittp.reng.internal.gl.BackdropPipelineResult
+import com.rohittp.reng.internal.gl.BloomResources
+import com.rohittp.reng.internal.gl.BloomResourcesResult
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.CompositePipelineResult
 import com.rohittp.reng.internal.gl.ConsumerBackdropPipeline
@@ -84,6 +87,7 @@ import com.rohittp.reng.internal.gl.UploadedPrimitive
 import com.rohittp.reng.internal.gl.allModelShaderVariants
 import com.rohittp.reng.internal.gl.ancestorOf
 import com.rohittp.reng.internal.gl.createBackdropPipeline
+import com.rohittp.reng.internal.gl.createBloomResources
 import com.rohittp.reng.internal.gl.createCompositePipeline
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
 import com.rohittp.reng.internal.gl.createGeometryPipeline
@@ -96,6 +100,7 @@ import com.rohittp.reng.internal.gl.createOffscreenSurface
 import com.rohittp.reng.internal.gl.createStickerPipeline
 import com.rohittp.reng.internal.gl.defaultSamplerStateFor
 import com.rohittp.reng.internal.gl.deleteBackdropPipeline
+import com.rohittp.reng.internal.gl.deleteBloomResources
 import com.rohittp.reng.internal.gl.deleteCompositePipeline
 import com.rohittp.reng.internal.gl.deleteGlObjects
 import com.rohittp.reng.internal.gl.deleteGlobeGroundPipeline
@@ -583,6 +588,8 @@ internal class RenGPreparedFrame(
     internal val groundSelectedLod: Int? = null,
     /** What this frame paints behind everything else, or `null` for none (ADR 0068). */
     backdrop: PreparedBackdrop? = null,
+    /** The frame's screen-space bloom parameters, or `null` when the pass is absent. */
+    bloom: Bloom? = null,
     /**
      * This frame's terrain, or `null` when its style declared none, when RenG and the engine did not
      * name the same source, or when the acquisition failed — the last two being ADR 0041's two
@@ -652,6 +659,7 @@ internal class RenGPreparedFrame(
     private var mapOrderSnapshot: List<DrawnThingReference> = ArrayList(mapOrder)
     private var screenOrderSnapshot: List<DrawnThingReference> = ArrayList(screenOrder)
     private var backdropSnapshot: PreparedBackdrop? = backdrop
+    private var bloomSnapshot: Bloom? = bloom
     private var terrainSnapshot: PreparedTerrain? = terrain
     private var groundSurfaceSnapshot: GroundSurface? = groundSurface
     private var labelSnapshot: PreparedLabelFrame? = labels
@@ -688,6 +696,7 @@ internal class RenGPreparedFrame(
         ArrayList(screenOrderSnapshot)
     }
     internal val backdrop: PreparedBackdrop? get() = ownershipLock.withLock { backdropSnapshot }
+    internal val bloom: Bloom? get() = ownershipLock.withLock { bloomSnapshot }
     internal val terrain: PreparedTerrain? get() = ownershipLock.withLock { terrainSnapshot }
     internal val groundSurface: GroundSurface? get() = ownershipLock.withLock { groundSurfaceSnapshot }
     internal val labels: PreparedLabelFrame? get() = ownershipLock.withLock { labelSnapshot }
@@ -734,6 +743,7 @@ internal class RenGPreparedFrame(
         mapOrderSnapshot = emptyList()
         screenOrderSnapshot = emptyList()
         backdropSnapshot = null
+        bloomSnapshot = null
         terrainSnapshot = null
         groundSurfaceSnapshot = null
         labelSnapshot = null
@@ -1181,6 +1191,9 @@ internal class RenGRenderer(
      * model pipelines are, and deleted by `close()`.
      */
     private var globeGroundPipeline: GlobeGroundPipeline? = null
+
+    /** ADR 0074's fixed-size targets and three programs, allocated on the first active bloom. */
+    private var bloomResources: BloomResources? = null
 
     private var identityRegistry: CanonicalIdentityRegistry = CanonicalIdentityRegistry()
     private var framePlanningCore: FramePlanningCore = newFramePlanningCore(identityRegistry)
@@ -2035,6 +2048,7 @@ internal class RenGRenderer(
                 groundInstances = groundInstances,
                 groundSelectedLod = planned.spatialPlan.lodObservation.selectedLod,
                 backdrop = preparedBackdrop,
+                bloom = plan.bloom,
                 terrain = terrain,
                 groundSurface = groundSurface,
                 labels = labels,
@@ -3350,6 +3364,7 @@ internal class RenGRenderer(
         labelPipeline = null
         iconPipeline = null
         globeGroundPipeline = null
+        bloomResources = null
         consumerPipelines.forgetAll()
         modelPipelines.clear()
     }
@@ -3378,6 +3393,7 @@ internal class RenGRenderer(
                         groundPipeline = recreated.state.groundPipeline
                         labelPipeline = recreated.state.labelPipeline
                         iconPipeline = recreated.state.iconPipeline
+                        bloomResources = null
                         // The lifecycle adoption establishes the context first, while this call
                         // establishes that the replacement context now owns deletable objects. Both
                         // happen under the outer operation gate, so free/close can observe neither
@@ -3518,6 +3534,7 @@ internal class RenGRenderer(
                         textureLeases = textureLeases,
                         gpuAllocationLeases = gpuAllocationLeases,
                         consumerPipelineLeases = consumerPipelineLeases,
+                        stagedDiagnostics = stagedDiagnostics,
                         binding = captured,
                     )
                 }
@@ -3593,6 +3610,7 @@ internal class RenGRenderer(
         textureLeases: MutableList<TextureLease>,
         gpuAllocationLeases: MutableList<GpuAllocationLease>,
         consumerPipelineLeases: MutableList<ConsumerPipelineLease<*>>,
+        stagedDiagnostics: MutableList<Diagnostic>,
         /** The captured binding (ADR 0054), shadowing the renderer's own for this draw. */
         binding: GlBinding,
     ): FailureDescriptor? {
@@ -3673,6 +3691,28 @@ internal class RenGRenderer(
             mapOrder = frame.mapOrder,
             screenOrder = frame.screenOrder,
         )
+        val frameBloom = frame.bloom
+        val resolvedBloomResources = if (
+            frameBloom != null && sceneGeometries.any { it.geometry.emissive }
+        ) {
+            bloomResources ?: when (
+                val result = createBloomResources(
+                    binding = binding,
+                    profile = profile,
+                    cache = programs,
+                    outputSize = configuration.outputPixelSize,
+                    sharedDepthRenderbuffer = surface.depthRenderbuffer,
+                )
+            ) {
+                is BloomResourcesResult.Created -> result.resources.also { bloomResources = it }
+                is BloomResourcesResult.Failed -> {
+                    stagedDiagnostics += bloomUnavailableDiagnostic()
+                    null
+                }
+            }
+        } else {
+            null
+        }
         // Compiled on the first globe frame that actually has ground to draw, and never on a
         // mercator one: a `Failed` here is this draw's failure, exactly as a model pipeline's is a
         // few lines above.
@@ -3758,6 +3798,10 @@ internal class RenGRenderer(
             iconPipeline = icon,
             globeGroundPipeline = globeGround,
             backdrop = resolvedBackdrop,
+            bloom = frameBloom,
+            bloomResources = resolvedBloomResources,
+            surfaceFramebuffer = surface.framebuffer,
+            surfaceDepthRenderbuffer = surface.depthRenderbuffer,
         )
 
         return drawFrame(
@@ -4315,6 +4359,7 @@ internal class RenGRenderer(
                 backdropPipeline?.let { deleteBackdropPipeline(binding, programs, it) }
                 groundPipeline?.let { deleteGroundPipeline(binding, programs, it) }
                 globeGroundPipeline?.let { deleteGlobeGroundPipeline(binding, programs, it) }
+                bloomResources?.let { deleteBloomResources(binding, programs, it) }
                 labelPipeline?.let { deleteLabelPipeline(binding, programs, it) }
                 iconPipeline?.let { deleteIconPipeline(binding, programs, it) }
                 consumerPipelines.deleteAll(binding, programs)
@@ -4338,6 +4383,7 @@ internal class RenGRenderer(
                 labelPipeline = null
                 iconPipeline = null
                 globeGroundPipeline = null
+                bloomResources = null
                 residentCache.closeAll()
                 // CONTEXT.md's Close entry says a close "releases CPU state", and these two are exactly
                 // that and nothing more: an immutable Rentile batch and one decoded atlas, no GL handle

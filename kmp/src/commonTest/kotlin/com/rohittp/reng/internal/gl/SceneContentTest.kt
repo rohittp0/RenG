@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.Bloom
 import com.rohittp.reng.Camera
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
@@ -783,6 +784,104 @@ class SceneContentTest {
             1,
             log.count { it == LABEL_DRAW_CALL },
             "$LABEL_QUADS glyph quads are one batch and therefore exactly one draw: $log",
+        )
+    }
+
+    // --- ADR 0074: bloom is phase 4.5 ---------------------------------------------------------
+
+    @Test
+    fun emissiveGeometryWithoutBloomDoesNotRunAnEmissionOrBloomPass() {
+        val binding = RecordingGlBinding().withDeclaredNames(UNIFORM_GEOMETRY_EMISSION_PASS to 60)
+        val geometry = testGeometry().copy(emissive = true)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(geometry, newGeometryPipeline(binding), consumerUniforms = emptyMap()),
+            ),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(), newGroundPipeline()).draw(binding)
+
+        assertEquals(1, binding.log.count { it.startsWith("drawElements") })
+        assertFalse(binding.log.any { it.startsWith("bindFramebuffer") }, binding.log.toString())
+        assertEquals(listOf("uniform1i(60,0)"), binding.log.filter { it.startsWith("uniform1i(60,") })
+    }
+
+    @Test
+    fun bloomWithoutEmissiveGeometryDoesNotRunAnEmissionOrBloomPass() {
+        val binding = RecordingGlBinding().withDeclaredNames(UNIFORM_GEOMETRY_EMISSION_PASS to 60)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(testGeometry(), newGeometryPipeline(binding), consumerUniforms = emptyMap()),
+            ),
+        )
+        binding.log.clear()
+
+        SceneContent(
+            topDownCamera(), scene, newStickerPipeline(), newGroundPipeline(), bloom = Bloom(),
+        ).draw(binding)
+
+        assertEquals(1, binding.log.count { it.startsWith("drawElements") })
+        assertFalse(binding.log.any { it.startsWith("bindFramebuffer") }, binding.log.toString())
+        assertEquals(listOf("uniform1i(60,0)"), binding.log.filter { it.startsWith("uniform1i(60,") })
+    }
+
+    @Test
+    fun bloomRedrawsAndCompositesAfterMapStickersBeforeLabelsAndResetsTheEmissionFlag() {
+        val binding = RecordingGlBinding().withDeclaredNames(UNIFORM_GEOMETRY_EMISSION_PASS to 60)
+        val geometryPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val groundPipeline = newGroundPipeline(binding)
+        val labelPipeline = newLabelPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val geometry = testGeometry().copy(emissive = true)
+        val mapStickerTexture = 101
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(SceneSticker(mapPlacement(), texture = mapStickerTexture)),
+            geometries = listOf(
+                SceneGeometry(geometry, geometryPipeline, consumerUniforms = emptyMap()),
+            ),
+            labels = listOf(labelBatch()),
+            mapOrder = listOf(StickerAt(0)),
+        )
+        binding.log.clear()
+
+        SceneContent(
+            camera = topDownCamera(),
+            scene = scene,
+            stickerPipeline = stickerPipeline,
+            groundPipeline = groundPipeline,
+            labelPipeline = labelPipeline,
+            bloom = Bloom(),
+            bloomResources = resources,
+            surfaceFramebuffer = 55,
+            surfaceDepthRenderbuffer = 77,
+        ).draw(binding)
+
+        val mapSticker = binding.log.indexOfFirst {
+            it == "bindTexture(${hex(GL_TEXTURE_2D)},$mapStickerTexture)"
+        }
+        val emissionFramebuffer = binding.log.indexOfFirst {
+            it == "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})"
+        }
+        val compositeProgram = binding.log.indexOfFirst { it == "useProgram(${resources.composite.program})" }
+        val labelDraw = binding.log.indexOfFirst { it == LABEL_DRAW_CALL }
+        assertTrue(mapSticker in 0 until emissionFramebuffer, "phase 4 must precede emission: ${binding.log}")
+        assertTrue(emissionFramebuffer < compositeProgram, "emission must precede the chain composite: ${binding.log}")
+        assertTrue(compositeProgram < labelDraw, "bloom must composite before phase 5: ${binding.log}")
+        assertTrue(
+            binding.log.contains("blendFuncSeparate(0x1,0x1,0x0,0x1)"),
+            "the bloom composite adds RGB and preserves destination alpha: ${binding.log}",
+        )
+        assertEquals(
+            listOf("uniform1i(60,0)", "uniform1i(60,1)", "uniform1i(60,0)"),
+            binding.log.filter { it.startsWith("uniform1i(60,") },
         )
     }
 
@@ -2063,6 +2162,28 @@ class SceneContentTest {
         createGlobeGroundPipeline(binding, ShaderDialect.GLES, GlProgramCache())
             as GlobeGroundPipelineResult.Created
         ).pipeline
+
+    private fun newBloomResources(binding: RecordingGlBinding, depthRenderbuffer: Int): BloomResources =
+        (
+            createBloomResources(
+                binding = binding,
+                profile = RenderContextProfile(
+                    dialect = ShaderDialect.GLES,
+                    version = GlVersion(3, 0),
+                    vendorName = "test",
+                    rendererName = "test",
+                    shadingLanguageVersionText = "OpenGL ES GLSL ES 3.00",
+                    supportsEs3Compatibility = false,
+                    supportsSrgbWriteControl = false,
+                    maxTextureSize = 16384,
+                    maxColorAttachments = 8,
+                    maxCombinedTextureImageUnits = 16,
+                ),
+                cache = GlProgramCache(),
+                outputSize = OUTPUT_SIZE,
+                sharedDepthRenderbuffer = depthRenderbuffer,
+            ) as BloomResourcesResult.Created
+            ).resources
 
     /**
      * A [RecordingGlBinding] a model pipeline can actually be built on. [createModelPipeline] reads

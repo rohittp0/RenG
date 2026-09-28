@@ -50,6 +50,9 @@ public enum class DiagnosticCode {
      * no existing constant's ordinal moves.
      */
     GROUND_PRESENTED_PROVISIONALLY,
+
+    /** Bloom GPU resources could not be created, so the frame drew without bloom. */
+    BLOOM_UNAVAILABLE,
 }
 
 @ConsistentCopyVisibility
@@ -212,6 +215,19 @@ public data class Diagnostic internal constructor(
                     fieldName == null && resourceClass == null && resourceKey == null &&
                         statusCode == null && limit == null,
                 ) { "terrain-unavailable diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BLOOM_UNAVAILABLE -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "bloom-unavailable diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "bloom availability is decided during draw"
+                }
+                require(
+                    fieldName == null && resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "bloom-unavailable diagnostics carry no further context" }
             }
         }
     }

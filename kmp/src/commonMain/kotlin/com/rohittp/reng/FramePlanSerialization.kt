@@ -202,6 +202,36 @@ internal object BackdropSerializer : KSerializer<Backdrop> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Bloom
+// ---------------------------------------------------------------------------------------------
+
+@Serializable
+@SerialName("Bloom")
+private class BloomSurrogate(
+    @SerialName("intensity") val intensity: Float = 1f,
+    @SerialName("levelWeights") val levelWeights: List<Float> = Bloom.DEFAULT_LEVEL_WEIGHTS,
+    @SerialName("insideSuppression") val insideSuppression: Float = 0f,
+    @SerialName("whiteness") val whiteness: Float = 0f,
+)
+
+internal object BloomSerializer : KSerializer<Bloom> {
+    private val delegate = BloomSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: Bloom) {
+        encoder.encodeSerializableValue(
+            delegate,
+            BloomSurrogate(
+                value.intensity, value.levelWeights, value.insideSuppression, value.whiteness,
+            ),
+        )
+    }
+    override fun deserialize(decoder: Decoder): Bloom {
+        val it = decoder.decodeSerializableValue(delegate)
+        return Bloom(it.intensity, it.levelWeights, it.insideSuppression, it.whiteness)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Sticker
 // ---------------------------------------------------------------------------------------------
 
@@ -463,6 +493,7 @@ private class GeometrySurrogate(
     @SerialName("uniforms") val uniforms: Map<String, ShaderValue> = emptyMap(),
     @SerialName("textures") val textures: Map<String, ResourceLocator> = emptyMap(),
     @SerialName("altitudeMode") val altitudeMode: AltitudeMode = AltitudeMode.ABSOLUTE,
+    @SerialName("emissive") val emissive: Boolean = false,
 )
 
 internal object GeometrySerializer : KSerializer<Geometry> {
@@ -473,7 +504,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
             delegate,
             GeometrySurrogate(
                 value.topLeft, value.bottomRight, value.shaderPair,
-                value.uniforms, value.textures, value.altitudeMode,
+                value.uniforms, value.textures, value.altitudeMode, value.emissive,
             ),
         )
     }
@@ -481,6 +512,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
         val it = decoder.decodeSerializableValue(delegate)
         return Geometry(
             it.topLeft, it.bottomRight, it.shaderPair, it.uniforms, it.textures, it.altitudeMode,
+            it.emissive,
         )
     }
 }
@@ -501,6 +533,7 @@ private class FramePlanSurrogate(
     @SerialName("models") val models: List<Model> = emptyList(),
     @SerialName("geometries") val geometries: List<Geometry> = emptyList(),
     @SerialName("backdrop") val backdrop: Backdrop? = null,
+    @SerialName("bloom") val bloom: Bloom? = null,
 )
 
 internal object FramePlanSerializer : KSerializer<FramePlan> {
@@ -512,6 +545,7 @@ internal object FramePlanSerializer : KSerializer<FramePlan> {
             FramePlanSurrogate(
                 value.frameIndex, value.camera, value.projectionMode, value.drawBasemap,
                 value.drawLabels, value.stickers, value.models, value.geometries, value.backdrop,
+                value.bloom,
             ),
         )
     }
@@ -519,7 +553,7 @@ internal object FramePlanSerializer : KSerializer<FramePlan> {
         val it = decoder.decodeSerializableValue(delegate)
         return FramePlan(
             it.frameIndex, it.camera, it.projectionMode, it.drawBasemap, it.drawLabels,
-            it.stickers, it.models, it.geometries, it.backdrop,
+            it.stickers, it.models, it.geometries, it.backdrop, it.bloom,
         )
     }
 }

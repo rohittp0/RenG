@@ -19,11 +19,12 @@ import kotlin.test.assertTrue
 class GeometryPipelineTest {
 
     @Test
-    fun theReservedNamesAreExactlyTheSixDocumentedShaderNames() {
+    fun theReservedNamesAreExactlyTheDocumentedShaderNames() {
         assertEquals(
             setOf(
                 "aPosition", "aTexCoord",
                 "uModelViewProjection", "uResolution", "uGeometryBounds", "uFrameIndex",
+                "rengGeometryEmissionPass",
             ),
             RESERVED_SHADER_NAMES,
         )

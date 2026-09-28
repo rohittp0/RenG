@@ -143,13 +143,37 @@ class DrawnThingsTest {
         assertNotEquals(absolute, groundRelative)
         assertEquals(absolute, absolute.copy(altitudeMode = AltitudeMode.ABSOLUTE))
 
-        val (topLeft, bottomRight, pair, uniforms, textures, altitudeMode) = groundRelative
+        val emissive = groundRelative.copy(emissive = true)
+        assertEquals(false, absolute.emissive)
+        assertNotEquals(groundRelative, emissive)
+
+        val (topLeft, bottomRight, pair, uniforms, textures, altitudeMode, emits) = emissive
         assertEquals(Vector3(1.0, 0.0, 0.0), topLeft)
         assertEquals(Vector3(0.0, 1.0, 0.0), bottomRight)
         assertEquals(shaderPair, pair)
         assertEquals(emptyMap(), uniforms)
         assertEquals(emptyMap(), textures)
         assertEquals(AltitudeMode.GROUND_RELATIVE, altitudeMode)
+        assertEquals(true, emits)
+    }
+
+    @Test
+    fun aConsumerMayNotClaimAnyNameUnderRengsGeometryPrefix() {
+        val geometry = Geometry(
+            Vector3(1.0, 0.0, 0.0),
+            Vector3(0.0, 1.0, 0.0),
+            ShaderPair("vertex", "fragment"),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            geometry.copy(uniforms = mapOf("rengGeometryEmissionPass" to ShaderValue.Integer(0)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            geometry.copy(uniforms = mapOf("rengGeometryFuture" to ShaderValue.Scalar(1f)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            geometry.copy(textures = mapOf("rengGeometryMask" to ResourceLocator("mask")))
+        }
+        geometry.copy(uniforms = mapOf("myRengGeometryTint" to ShaderValue.Scalar(1f)))
     }
 
     @Test
@@ -192,6 +216,45 @@ class DrawnThingsTest {
         )
 }
 
+class BloomTest {
+    @Test
+    fun defaultsAndValueSemanticsAreExactAndTheLevelListIsDefensive() {
+        val bloom = Bloom()
+        assertEquals(1f, bloom.intensity)
+        assertEquals(Bloom.DEFAULT_LEVEL_WEIGHTS, bloom.levelWeights)
+        assertEquals(0f, bloom.insideSuppression)
+        assertEquals(0f, bloom.whiteness)
+        assertEquals(bloom, Bloom())
+        assertEquals(bloom.hashCode(), Bloom().hashCode())
+        assertEquals(
+            Bloom(intensity = 0f),
+            Bloom(
+                intensity = -0f,
+                levelWeights = listOf(-0f, 0.9f, 0.8f, 0.6f, 0.45f, 0.35f, 0.3f),
+            ),
+        )
+
+        (bloom.levelWeights as MutableList<Float>).clear()
+        assertEquals(Bloom.DEFAULT_LEVEL_WEIGHTS, bloom.levelWeights)
+    }
+
+    @Test
+    fun invalidBloomParametersAreRejected() {
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.1f).forEach { value ->
+            assertFailsWith<IllegalArgumentException> { Bloom(intensity = value) }
+        }
+        assertFailsWith<IllegalArgumentException> { Bloom(levelWeights = emptyList()) }
+        assertFailsWith<IllegalArgumentException> { Bloom(levelWeights = List(9) { 1f }) }
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.1f).forEach { value ->
+            assertFailsWith<IllegalArgumentException> { Bloom(levelWeights = listOf(value)) }
+        }
+        listOf(Float.NaN, -0.1f, 1.1f).forEach { value ->
+            assertFailsWith<IllegalArgumentException> { Bloom(insideSuppression = value) }
+            assertFailsWith<IllegalArgumentException> { Bloom(whiteness = value) }
+        }
+    }
+}
+
 /** ADR 0071's public surface: the two backdrop cases and what `Shader` refuses. */
 class BackdropTest {
 
@@ -214,7 +277,7 @@ class BackdropTest {
         }
     }
 
-    /** The six documented interface names stay refused here exactly as they are on a `Geometry`. */
+    /** The documented interface names stay refused here exactly as they are on a `Geometry`. */
     @Test
     fun aConsumerMayNotClaimADocumentedInterfaceName() {
         assertFailsWith<IllegalArgumentException> {

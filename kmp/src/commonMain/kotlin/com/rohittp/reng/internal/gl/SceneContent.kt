@@ -561,6 +561,10 @@ internal class SceneContent(
             // the disable belongs here beside the depth state, for the same reason the depth state
             // does: `drawGeometry` cannot make these calls for itself.
             binding.disable(GL_CULL_FACE)
+            // ADR 0073: Geometry writes premultiplied colour and the pass owns its blend state.
+            binding.enable(GL_BLEND)
+            binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+            binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
             val geometryViewProjection = when (camera) {
                 is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
                 is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)

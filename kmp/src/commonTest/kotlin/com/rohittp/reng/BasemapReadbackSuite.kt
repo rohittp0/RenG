@@ -1132,7 +1132,7 @@ private val READBACK_STYLE_JSON: String =
  * different source, a stale style — still fails closed here rather than being handed a plausible
  * body.
  */
-private class ReadbackTransport : Transport {
+internal class ReadbackTransport : Transport {
     override suspend fun execute(request: TransportRequest): TransportResponse {
         val url = request.locator.value
         return when {

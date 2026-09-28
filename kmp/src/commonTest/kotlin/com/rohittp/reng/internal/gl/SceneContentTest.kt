@@ -1988,6 +1988,42 @@ class SceneContentTest {
         }
     }
 
+    @Test
+    fun theGeometryPhaseSetsPremultipliedBlendStateBeforeItsFirstDraw() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val geometryPipeline = newGeometryPipeline(binding)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap())),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(), newGroundPipeline()).draw(binding)
+
+        val firstGeometryDraw = binding.log.indexOfFirst { it.startsWith("drawElements") }
+        val blendEnable = binding.log.indexOf("enable(${hex(GL_BLEND)})")
+        val blendEquation = binding.log.indexOf(
+            "blendEquationSeparate(${hex(GL_FUNC_ADD)},${hex(GL_FUNC_ADD)})",
+        )
+        val blendFunction = binding.log.indexOf(
+            "blendFuncSeparate(" +
+                "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)}," +
+                "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)})",
+        )
+
+        assertTrue(firstGeometryDraw >= 0, "the fixture must issue a Geometry draw: ${binding.log}")
+        assertTrue(blendEnable in 0 until firstGeometryDraw, "phase 2 must enable blending before drawing: ${binding.log}")
+        assertTrue(
+            blendEquation in 0 until firstGeometryDraw,
+            "phase 2 must select additive blend equations before drawing: ${binding.log}",
+        )
+        assertTrue(
+            blendFunction in 0 until firstGeometryDraw,
+            "phase 2 must select premultiplied blend factors before drawing: ${binding.log}",
+        )
+    }
+
     private fun testGeometry(): Geometry = Geometry(
         topLeft = Vector3(1.0, -1.0, 10.0),
         bottomRight = Vector3(-1.0, 1.0, 0.0),

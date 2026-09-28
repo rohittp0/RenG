@@ -9,6 +9,8 @@ import com.rohittp.reng.MODEL_READBACK_PIXELS
 import com.rohittp.reng.runBasemapReadbackSuite
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.GROUND_ANCHOR_READBACK_PIXELS
@@ -463,6 +465,24 @@ class MacosGlConformanceTest {
                 binding.viewport(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
                 binding.scissor(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
                 runGeometrySubdivisionReadbackSuite(binding, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    @Test fun theGeometryBlendReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG geometry blend readback: skipped, $glRenderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+                binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+                runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
             } finally {
                 fixture.destroy()
             }

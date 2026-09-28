@@ -341,7 +341,7 @@ A shader-painted geographic rectangle defined by opposite `topLeft` and `bottomR
 Top-left latitude is strictly north of bottom-right latitude; its unwrapped longitude is strictly west,
 with a span no greater than `360` degrees. The northern edge uses `topLeft.z` altitude, the southern edge
 uses `bottomRight.z`, and altitude interpolates north-to-south. A **Geometry** carries no **Placement**,
-so it carries an **Altitude Mode** of its own.
+so it carries an **Altitude Mode** of its own. Its **Shader Pair** writes colour in premultiplied form.
 _Avoid_: Layer, overlay, custom layer, primitive
 
 **Shader Pair**:
@@ -376,7 +376,8 @@ unsuitable for placement arithmetic — placement stays camera-relative and exac
 degrees packed into a 32-bit float would discard that precision. `uFrameIndex` is narrowed from **Frame
 Plan**'s `frameIndex` (`Long`) because GLSL ES 3.00 has no 64-bit integer type, wrapping at roughly 2.3
 years of continuous 60fps; `frameIndex` is an ordering key rather than a clock, so that wrap is not a
-correctness hazard. See ADR 0024 for the hazard of renaming one of these names later.
+correctness hazard. A Geometry fragment shader writes premultiplied colour: each RGB channel already
+includes the output alpha. See ADR 0024 for the hazard of renaming one of these names later.
 _Avoid_: uniform preamble, injected include, varying, built-in attribute
 
 **Terrain**:

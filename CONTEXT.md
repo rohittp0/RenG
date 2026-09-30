@@ -115,6 +115,13 @@ returns at once, does nothing before the first successful `prepare` or in `CACHE
 later `prepare` returns, and does not spare a frame from failing on a tile that cannot be fetched.
 _Avoid_: Prefetch, preload, background download, tile cache, warm-up step
 
+**Tile Rasterisation Workers**:
+The number of a batch's output tiles the basemap engine may draw at once, `RendererConfiguration.maximumConcurrentTileRasterisations`,
+from `1` through `16` and `1` by default. Each busy worker holds a Skia surface and a bitmap and blocks one
+`Dispatchers.Default` thread for the length of a tile's draw, so a consumer chooses a count that leaves cores free.
+The pixels and their order do not depend on it (ADR 0076).
+_Avoid_: Thread count, render threads, parallelism, concurrency limit
+
 **Output Pixel Size**:
 The renderer-lifetime positive integer width and height of every frame and target in physical output pixels.
 It determines camera aspect ratio, screen anchoring, and basemap coverage and is not read from a framebuffer.

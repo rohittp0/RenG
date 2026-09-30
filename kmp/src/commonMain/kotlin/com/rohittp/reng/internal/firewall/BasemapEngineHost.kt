@@ -41,6 +41,7 @@ import com.rohittp.rentile.GlyphTemplateMismatchException
 import com.rohittp.rentile.GroundRadianceDescriptor
 import com.rohittp.rentile.LabelCandidateBatch
 import com.rohittp.rentile.LabelCandidatePlan
+import com.rohittp.rentile.ExecutionPolicy
 import com.rohittp.rentile.MapSessionProvider
 import com.rohittp.rentile.PreparedBatch
 import com.rohittp.rentile.PreparedStyle
@@ -111,6 +112,12 @@ internal class BasemapEngineHost(
      * every test constructing this host keeps working and no metric escapes into a shared one.
      */
     private val metricRecorder: EngineMetricRecorder = EngineMetricRecorder(),
+    /**
+     * How many of a batch's output tiles the engine draws at once (ADR 0076), forwarded as
+     * `ExecutionPolicy.maxConcurrentMetatileWorkers`. One, the engine's own default, unless the consumer
+     * chose otherwise.
+     */
+    maximumConcurrentTileRasterisations: Int = 1,
 ) : AutoCloseable {
 
     private val consumerTransport: Transport = transport
@@ -184,6 +191,9 @@ internal class BasemapEngineHost(
             // are the only measurement of this renderer's basemap path, and ADR 0049 gives them
             // a RenG vocabulary to arrive in.
             metricsSink = metricRecorder,
+            // Only the metatile workers move (ADR 0076). The exchange, decode and resident-decode limits
+            // keep the engine's defaults: they govern the network and the decoder, not the drawing.
+            executionPolicy = ExecutionPolicy(maxConcurrentMetatileWorkers = maximumConcurrentTileRasterisations),
         ),
     )
 

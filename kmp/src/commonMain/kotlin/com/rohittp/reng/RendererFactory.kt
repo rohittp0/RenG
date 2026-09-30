@@ -98,6 +98,7 @@ internal fun createRenderer(
         store = configuration.store,
         cache = residentCache,
         metricRecorder = metricRecorder,
+        maximumConcurrentTileRasterisations = configuration.maximumConcurrentTileRasterisations,
     )
     val preparationDriver = PreparationDriver(
         transport = configuration.transport,

@@ -803,7 +803,7 @@ final class com.rohittp.reng/RenGException : kotlin/RuntimeException { // com.ro
 }
 
 final class com.rohittp.reng/RendererConfiguration { // com.rohittp.reng/RendererConfiguration|null[0]
-    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Int = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean;kotlin.Int;kotlin.Int){}[0]
+    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean;kotlin.Int;kotlin.Int;kotlin.Int){}[0]
 
     final val basemapStyle // com.rohittp.reng/RendererConfiguration.basemapStyle|{}basemapStyle[0]
         final fun <get-basemapStyle>(): com.rohittp.reng/ResourceLocator? // com.rohittp.reng/RendererConfiguration.basemapStyle.<get-basemapStyle>|<get-basemapStyle>(){}[0]
@@ -815,6 +815,8 @@ final class com.rohittp.reng/RendererConfiguration { // com.rohittp.reng/Rendere
         final fun <get-maximumCachedConsumerPipelines>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumCachedConsumerPipelines.<get-maximumCachedConsumerPipelines>|<get-maximumCachedConsumerPipelines>(){}[0]
     final val maximumConcurrentResourceOperations // com.rohittp.reng/RendererConfiguration.maximumConcurrentResourceOperations|{}maximumConcurrentResourceOperations[0]
         final fun <get-maximumConcurrentResourceOperations>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConcurrentResourceOperations.<get-maximumConcurrentResourceOperations>|<get-maximumConcurrentResourceOperations>(){}[0]
+    final val maximumConcurrentTileRasterisations // com.rohittp.reng/RendererConfiguration.maximumConcurrentTileRasterisations|{}maximumConcurrentTileRasterisations[0]
+        final fun <get-maximumConcurrentTileRasterisations>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConcurrentTileRasterisations.<get-maximumConcurrentTileRasterisations>|<get-maximumConcurrentTileRasterisations>(){}[0]
     final val maximumConsumerPipelinesPerFrame // com.rohittp.reng/RendererConfiguration.maximumConsumerPipelinesPerFrame|{}maximumConsumerPipelinesPerFrame[0]
         final fun <get-maximumConsumerPipelinesPerFrame>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConsumerPipelinesPerFrame.<get-maximumConsumerPipelinesPerFrame>|<get-maximumConsumerPipelinesPerFrame>(){}[0]
     final val maximumPreparationBatchSize // com.rohittp.reng/RendererConfiguration.maximumPreparationBatchSize|{}maximumPreparationBatchSize[0]

@@ -35,6 +35,7 @@ public class RendererConfiguration(
     terrainShading: Boolean = false,
     maximumCachedConsumerPipelines: Int = 64,
     maximumConsumerPipelinesPerFrame: Int = 256,
+    maximumConcurrentTileRasterisations: Int = 1,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -81,6 +82,25 @@ public class RendererConfiguration(
     /** Hard planning limit on distinct consumer Geometry/Backdrop shader pairs in one frame. */
     public val maximumConsumerPipelinesPerFrame: Int
 
+    /**
+     * How many of one frame's basemap tiles the engine may draw at once, from `1` through `16`; **`1`
+     * by default**, which draws them one after another exactly as before (ADR 0076).
+     *
+     * Drawing a tile is CPU work, and a frame needing dozens of them spends most of its preparation on it
+     * while the device's other cores idle. A higher count draws that many at a time. It changes how long
+     * preparation takes and nothing it produces: the tiles' pixels, and the order they come back in, are
+     * identical at every count.
+     *
+     * **It is the consumer's to set, because the consumer owns the cores.** Each busy worker holds a
+     * raster surface and a bitmap, a few megabytes, and occupies one `Dispatchers.Default` thread for the
+     * whole of a tile's draw, since the draw blocks rather than suspends. `Dispatchers.Default` has as
+     * many threads as the device has cores, so a count at or above that starves everything else scheduled
+     * on it, RenG's own coroutines and the resource acquisition a frame is waiting on among them. Leave
+     * cores free: an offline export might pick the core count less one or two, an interactive view should
+     * keep the default. RenG does not clamp the value to the device.
+     */
+    public val maximumConcurrentTileRasterisations: Int
+
     init {
         require(maximumBasemapTileInstances in 1..4096) {
             "maximumBasemapTileInstances must be within the supported range"
@@ -97,6 +117,9 @@ public class RendererConfiguration(
         require(maximumConsumerPipelinesPerFrame in 1..4096) {
             "maximumConsumerPipelinesPerFrame must be within the supported range"
         }
+        require(maximumConcurrentTileRasterisations in 1..16) {
+            "maximumConcurrentTileRasterisations must be within 1 through 16"
+        }
 
         this.outputPixelSize = outputPixelSize
         this.transport = transport
@@ -110,6 +133,7 @@ public class RendererConfiguration(
         this.terrainShading = terrainShading
         this.maximumCachedConsumerPipelines = maximumCachedConsumerPipelines
         this.maximumConsumerPipelinesPerFrame = maximumConsumerPipelinesPerFrame
+        this.maximumConcurrentTileRasterisations = maximumConcurrentTileRasterisations
     }
 }
 

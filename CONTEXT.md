@@ -106,6 +106,15 @@ LOD. It defaults to `512`, is configurable from `1` through `4096`, and fails pr
 before acquisition when exceeded; RenG never drops required tiles.
 _Avoid_: Cache size, tile limit fallback, resource retry budget
 
+**Read-Ahead**:
+A consumer's hint, `Renderer.readAhead(plans)`, naming Frame Plans it expects to prepare soon. RenG selects the
+basemap tiles those plans need with the planning code `prepare` uses, drops tiles already resident on the GPU,
+and fetches the rest into the consumer's Store while earlier frames are still being prepared, in windows of at
+most 64 tiles. Each window is its own operation and is discarded when it ends (ADR 0075). It is a hint: it
+returns at once, does nothing before the first successful `prepare` or in `CACHE_ONLY`, never changes what a
+later `prepare` returns, and does not spare a frame from failing on a tile that cannot be fetched.
+_Avoid_: Prefetch, preload, background download, tile cache, warm-up step
+
 **Output Pixel Size**:
 The renderer-lifetime positive integer width and height of every frame and target in physical output pixels.
 It determines camera aspect ratio, screen anchoring, and basemap coverage and is not read from a framebuffer.

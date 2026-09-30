@@ -99,10 +99,33 @@ public enum class RenGMetricName {
      * than an exhaustive translation that would crash a consumer whose dependency resolution raised
      * the engine above the version RenG was built against (ADR 0049).
      *
-     * **Declared last, and that is an ABI decision**, the same one `ResourceLimits` documents for
-     * its trailing fields: appending a constant leaves every existing ordinal where it is.
+     * **Declared after every engine counter, and that is an ABI decision**, the same one
+     * `ResourceLimits` documents for its trailing fields: appending a constant leaves every existing
+     * ordinal where it is. The three `READ_AHEAD_` counters below follow it for the same reason.
      */
     ENGINE_METRICS_UNRECOGNISED,
+
+    /**
+     * Raw resources a read-ahead window fetched into the consumer's Store (ADR 0075).
+     *
+     * A resource, not a tile: one tile may need a raster sample, a vector sample and a DEM
+     * neighbourhood, and one sample may serve several tiles. Kept by RenG itself rather than read from
+     * the engine, which is why it carries no `ENGINE_` prefix.
+     */
+    READ_AHEAD_FETCHED,
+
+    /**
+     * Raw resources a read-ahead window found already stored, or already being fetched by an
+     * on-demand acquisition (ADR 0075). Neither is a fault.
+     */
+    READ_AHEAD_ALREADY_CACHED,
+
+    /**
+     * Raw resources a read-ahead window could not fetch (ADR 0075). A rising total with none fetched
+     * is how a consumer learns it is offline before a frame fails on it. The failure itself is not
+     * surfaced: the frame that needs the tile fails on it exactly as it would have without read-ahead.
+     */
+    READ_AHEAD_FAILED,
 }
 
 /**

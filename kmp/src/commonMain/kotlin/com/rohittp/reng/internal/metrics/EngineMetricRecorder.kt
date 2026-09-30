@@ -36,6 +36,16 @@ internal class EngineMetricRecorder : MetricsSink {
         }
     }
 
+    /**
+     * Adds [value] to a counter RenG keeps itself (ADR 0075), the other half of the vocabulary the
+     * engine's own translation never produces. A zero is not recorded, so a counter reads as absent
+     * until something has actually happened, as every engine counter does.
+     */
+    fun record(name: RenGMetricName, value: Long) {
+        if (value == 0L) return
+        locked { totals[name] = (totals[name] ?: 0L) + value }
+    }
+
     /** Every total as it stands, as the public report. */
     fun snapshot(): MetricReport = locked { MetricReport(totals) }
 

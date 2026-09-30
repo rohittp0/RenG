@@ -30,6 +30,7 @@ import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.ResourceAccessMode as RenGResourceAccessMode
+import com.rohittp.reng.RenGMetricName
 import com.rohittp.reng.RenGRenderPriority
 import com.rohittp.reng.internal.metrics.EngineMetricRecorder
 import com.rohittp.reng.internal.metrics.toEnginePriority
@@ -60,6 +61,7 @@ import com.rohittp.rentile.TileSubstitutionPolicy
 import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.ValidatedDemTile
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 
@@ -115,8 +117,24 @@ internal class BasemapEngineHost(
     private val renderOptions = RenderOptions(outputSizePx = tileOutputSizePixels)
     private val tileOutputSize = OutputPixelSize(tileOutputSizePixels, tileOutputSizePixels)
 
-    /** The one preparation invocation currently allowed to reach the consumer, or `null` between them. */
+    /**
+     * The one preparation invocation currently allowed to reach the consumer, or `null` between them.
+     *
+     * Volatile because Rentile's workers read it, on threads that are not the one preparing (ADR 0075):
+     * with a read-ahead window open, an engine callback is routed by looking at this and
+     * [readAheadOperation] together, and it must see whichever the preparing thread last published.
+     */
+    @Volatile
     private var activeOperation: FirewallOperation? = null
+
+    /**
+     * The one read-ahead window currently allowed to reach the consumer, or `null` between windows
+     * (ADR 0075). A second operation beside [activeOperation], never a replacement for it: it exists
+     * from just before [warmWindow] hands tiles to the engine until that call has returned, and its
+     * registry is discarded with it. Written only by [warmWindow] and [close].
+     */
+    @Volatile
+    private var readAheadOperation: FirewallOperation? = null
 
     private var compiledStyle: CompiledStyleBinding? = null
 
@@ -128,6 +146,7 @@ internal class BasemapEngineHost(
      */
     private val rememberedTileKeys: MutableMap<RememberedTileKeyIdentity, ResourceKey> = LinkedHashMap()
 
+    @Volatile
     private var closed: Boolean = false
 
     val isClosed: Boolean get() = closed
@@ -262,6 +281,68 @@ internal class BasemapEngineHost(
      * level later — an exchange RenG never planned — so it fails the same way, rather than silently
      * accruing routes into a registry that does not exist.
      */
+    /**
+     * Warms the raw resources [tiles] need, as one read-ahead window (ADR 0075), and reports what the
+     * engine did.
+     *
+     * A fresh [OperationRegistry] is built for the window, preregistered with [routes], and installed
+     * as [readAheadOperation]; it is discarded only after `warmRawResources` has returned. That is the
+     * whole safety argument: when the engine's call returns, every flight the window started has
+     * finished, including one a foreground acquisition joined, so no raw-store write can arrive after
+     * the transport digest it must match has gone.
+     *
+     * Always `NORMAL`. Warming under `CACHE_ONLY` would be a contradiction and `RELOAD` would fetch what
+     * is already stored, so the renderer never asks for either, and every route must agree with that.
+     *
+     * A per-resource failure is absorbed by the engine and counted in the summary; a transport fault
+     * that reached the consumer is latched in this window's registry and is gone with it, so a later
+     * window retries. Only cancellation and a closed engine propagate.
+     *
+     * One window at a time: the renderer's worker is the only caller, and a second concurrent window
+     * would be the bug this check names.
+     */
+    suspend fun warmWindow(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+        routes: List<ResourceRouteKey>,
+    ): ReadAheadWarmSummary {
+        requireOpen()
+        require(routes.all { it.accessMode == RenGResourceAccessMode.NORMAL }) {
+            "a read-ahead window is always NORMAL"
+        }
+        check(readAheadOperation == null) { "a basemap engine host warms one read-ahead window at a time" }
+        val registry = OperationRegistry(
+            transport = consumerTransport,
+            store = consumerStore,
+            privateKeyResolver = privateKeyResolver,
+            sha256 = sha256,
+        )
+        registry.preregister(routes)
+        val operation = FirewallOperation(RenGResourceAccessMode.NORMAL, registry)
+        readAheadOperation = operation
+        try {
+            // Re-checked after publication: a close that ran between requireOpen and here has already
+            // cleared this slot once, and must not be undone by the assignment above.
+            requireOpen()
+            val summary = coroutineScope {
+                engineCall {
+                    engine.warmRawResources(style, tiles.map(::engineTileIdOf), EngineResourceAccessMode.NORMAL)
+                }
+            }
+            val warmed = ReadAheadWarmSummary(
+                fetched = summary.fetched,
+                alreadyCached = summary.alreadyCached,
+                failed = summary.failed,
+            )
+            metricRecorder.record(RenGMetricName.READ_AHEAD_FETCHED, warmed.fetched.toLong())
+            metricRecorder.record(RenGMetricName.READ_AHEAD_ALREADY_CACHED, warmed.alreadyCached.toLong())
+            metricRecorder.record(RenGMetricName.READ_AHEAD_FAILED, warmed.failed.toLong())
+            return warmed
+        } finally {
+            readAheadOperation = null
+        }
+    }
+
     /**
      * The sprite atlas manifest the open invocation proxied, or `null` when it held no jointly valid
      * pair -- because the style declares no sprite, because only one member was ever seen, or because
@@ -993,6 +1074,10 @@ internal class BasemapEngineHost(
         releaseCompiledStyle()
         releaseStyleManifest()
         activeOperation = null
+        // Cleared before the engine closes, so that a Rentile callback still on its way -- a warm flight
+        // a foreground acquisition had joined -- finds no operation and is refused before it can reach
+        // the consumer's Transport or Store (ADR 0075).
+        readAheadOperation = null
         engine.close()
     }
 
@@ -1120,21 +1205,62 @@ internal class BasemapEngineHost(
         val store: EngineRawResourceStore = FirewallStore(registry)
     }
 
+    /**
+     * The engine's transport, routed by what each open operation knows (ADR 0075).
+     *
+     * The foreground operation goes first and the read-ahead one second, and an exchange neither knows
+     * goes to whichever is open so that the refusal is that registry's own -- `AMBIGUOUS_RESOURCE_ROUTE`,
+     * with the same observations, exactly as before a second operation existed. With none open it is
+     * the same refusal one level earlier.
+     */
     private inner class RoutedEngineTransport : EngineResourceTransport {
         override suspend fun execute(request: EngineTransportRequest): EngineTransportResponse {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsTransport(request.url, request.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsTransport(request.url, request.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
             return operation.transport.execute(request)
         }
     }
 
     private inner class RoutedEngineStore : EngineRawResourceStore {
+        /** Reads route as transport does: by what each open operation knows, foreground first. */
         override suspend fun read(key: EngineRawResourceKey): EngineStoredRawResource? {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
             return operation.store.read(key)
         }
 
+        /**
+         * A write goes to the operation whose own Transport call produced these bytes, judged by the
+         * latched digest, foreground first. The route alone cannot decide it: a warm flight's write can
+         * arrive after a foreground registered the same url, and the foreground never latched the bytes.
+         *
+         * When neither latched them, the write goes to whichever knows the route, foreground first, so
+         * the registry refuses it as an integrity failure exactly as it always has.
+         */
         override suspend fun write(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null &&
+                    foreground.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    foreground
+                readAhead != null &&
+                    readAhead.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    readAhead
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
             operation.store.write(key, resource)
         }
 
@@ -1370,3 +1496,14 @@ internal const val MAXIMUM_REMEMBERED_TILE_KEYS: Int = 4096
 /** The failure for work asked of an already-closed host: the ground did not draw, and nothing more. */
 private fun basemapRenderFailure(): FailureDescriptor =
     FailureDescriptor(code = RenGErrorCode.BASEMAP_RENDER_FAILED, stage = PipelineStage.BASEMAP_RENDER)
+
+/**
+ * What one read-ahead window did, in resources rather than tiles: a tile may need several samples and
+ * one sample may serve several tiles, so these do not sum to the window's tile count. [alreadyCached]
+ * includes a resource some other acquisition was already fetching, which is not a fault (ADR 0075).
+ */
+internal data class ReadAheadWarmSummary(
+    val fetched: Int,
+    val alreadyCached: Int,
+    val failed: Int,
+)

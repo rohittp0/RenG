@@ -405,6 +405,34 @@ internal class OperationRegistry(
         return renGResourceKeyFor(route)
     }
 
+    // ---- Lookups for routing between two operations (ADR 0075) -----------------------------------
+    //
+    // [BasemapEngineHost] may hold a foreground registry and a read-ahead registry at once, and must
+    // pick between them before calling either. These three questions are that choice, and each is
+    // deliberately non-throwing: the answer path that then runs is the one that refuses an unknown
+    // route, so the refusal, its glyph-lookup observation and its sanitized failure stay in exactly
+    // one place. Each reads the volatile route snapshot with no lock, so none can ever nest.
+
+    /** Whether this registry preregistered a route for the exact `(url, engine class)` Transport carries. */
+    fun knowsTransport(url: String, engineClass: EngineResourceClass): Boolean =
+        routeIndex.transportRoutes.containsKey(TransportIndexKey(url, engineClass))
+
+    /** Whether this registry preregistered a route for the exact `(stableId, engine class)` a Store key carries. */
+    fun knowsStore(stableId: String, engineClass: EngineResourceClass): Boolean =
+        routeIndex.storeRoutes.containsKey(StoreIndexKey(stableId, engineClass))
+
+    /**
+     * Whether this registry latched a Transport response for the route [stableId] and [engineClass] name,
+     * and that response's digest is exactly [digest].
+     *
+     * This is what decides which registry judges a Store write: the one whose own Transport call produced
+     * these bytes. A registry that merely knows the route cannot judge it, because it never latched them.
+     */
+    suspend fun hasLatchedDigest(stableId: String, engineClass: EngineResourceClass, digest: String): Boolean {
+        val route = routeIndex.storeRoutes[StoreIndexKey(stableId, engineClass)] ?: return false
+        return latchedTransportDigestFor(route) == digest
+    }
+
     private fun requireNoCollision(existing: ResourceRouteKey?, route: ResourceRouteKey) {
         if (existing != null && existing != route) throw ambiguousRouteFailure()
     }

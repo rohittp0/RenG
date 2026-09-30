@@ -61,6 +61,7 @@ import com.rohittp.rentile.TileSubstitutionPolicy
 import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.ValidatedDemTile
+import com.rohittp.reng.internal.thread.PlatformLock
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
@@ -145,6 +146,14 @@ internal class BasemapEngineHost(
      * the bound is spent oldest-first.
      */
     private val rememberedTileKeys: MutableMap<RememberedTileKeyIdentity, ResourceKey> = LinkedHashMap()
+
+    /**
+     * Guards [rememberedTileKeys], which drawing and preparation both reach: CONTEXT.md lets a draw
+     * overlap GL-free preparation, and `groundInstances` and `residentAncestorOf` ask for keys from the
+     * draw path while `renderBasemapTiles` asks from prepare. Held only around the map's get, put and
+     * eviction, never around a derivation.
+     */
+    private val rememberedKeysLock = PlatformLock()
 
     @Volatile
     private var closed: Boolean = false
@@ -1052,16 +1061,22 @@ internal class BasemapEngineHost(
      */
     private fun rememberedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey {
         val identity = RememberedTileKeyIdentity(styleDigest, tile)
-        rememberedTileKeys[identity]?.let { return it }
+        rememberedKeysLock.withLock { rememberedTileKeys[identity] }?.let { return it }
 
-        val key = basemapTileKey(styleDigest, tile, tileOutputSize, sha256)
-        rememberedTileKeys[identity] = key
-        val oldest = rememberedTileKeys.iterator()
-        while (rememberedTileKeys.size > MAXIMUM_REMEMBERED_TILE_KEYS) {
-            oldest.next()
-            oldest.remove()
+        // Derived outside the lock: the SHA-256 is the cost this memo exists to avoid repeating, and
+        // holding a lock across it would serialise drawing behind preparation for nothing. Two threads
+        // that both miss derive the same key, and the insert below keeps whichever arrived first.
+        val derived = basemapTileKey(styleDigest, tile, tileOutputSize, sha256)
+        return rememberedKeysLock.withLock {
+            rememberedTileKeys[identity]?.let { return@withLock it }
+            rememberedTileKeys[identity] = derived
+            val oldest = rememberedTileKeys.iterator()
+            while (rememberedTileKeys.size > MAXIMUM_REMEMBERED_TILE_KEYS) {
+                oldest.next()
+                oldest.remove()
+            }
+            derived
         }
-        return key
     }
 
     /**

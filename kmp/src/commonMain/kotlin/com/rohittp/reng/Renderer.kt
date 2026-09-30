@@ -166,8 +166,9 @@ public sealed interface Renderer : AutoCloseable {
      * one already running, so it may be called as often as the consumer likes; one window covers at most
      * 64 tiles that are not already warmed, taken in [plans]' order.
      *
-     * Call it from the thread or coroutine that drives [prepare] and [draw], and not concurrently with
-     * them: it consults the renderer's tile residency to decide what is already drawn.
+     * Safe to call from any thread, including concurrently with [prepare] and [draw]: it reads only
+     * immutable configuration, a snapshot [prepare] publishes, and residency and tile-key state that are
+     * locked.
      */
     public fun readAhead(plans: List<FramePlan>): Unit
 

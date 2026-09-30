@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
@@ -90,6 +91,32 @@ class RendererReadAheadTest {
         assertEquals(before, transport.tileRequests(), "an already-stored tile costs no exchange")
         assertEquals(0L, renderer.queryMetrics()[RenGMetricName.READ_AHEAD_FETCHED])
         assertTrue(renderer.queryMetrics()[RenGMetricName.READ_AHEAD_ALREADY_CACHED] > 0L)
+        renderer.close()
+    }
+
+    @Test
+    fun hintingFromAnotherThreadWhilePreparingAndDrawingIsSafe() = runTest {
+        val transport = FreshTileTransport()
+        val renderer = styleRenderer(transport, store = PersistentStore()) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+
+        val hints = listOf(shiftedPlan(frameIndex = 100L), farShiftedPlan(frameIndex = 101L), basemapPlan(frameIndex = 102L))
+        // Hints come from a worker thread; preparing and drawing stay on the test's own thread, which
+        // is the one the render context belongs to.
+        val hinting = async(Dispatchers.Default) {
+            runCatching { repeat(400) { renderer.readAhead(hints) } }.exceptionOrNull()
+        }
+        val driving = runCatching {
+            for (index in 1L..6L) {
+                val frame = renderer.prepare(if (index % 2L == 0L) shiftedPlan(index) else basemapPlan(index))
+                renderer.draw(frame, target)
+                frame.close()
+            }
+        }.exceptionOrNull()
+        val failure = driving ?: real { hinting.await() }
+        assertEquals(null, failure, "a hint concurrent with prepare and draw must neither throw nor break them")
+        real { renderer.awaitReadAheadIdle() }
         renderer.close()
     }
 

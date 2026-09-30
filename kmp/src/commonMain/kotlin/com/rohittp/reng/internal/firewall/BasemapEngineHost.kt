@@ -15,7 +15,7 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
 import com.rohittp.reng.internal.basemap.glyphRangeRoutes
 import com.rohittp.reng.internal.basemap.parseBasemapTileJson
-import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
+import com.rohittp.reng.internal.basemap.StyleManifestMemo
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -140,6 +140,16 @@ internal class BasemapEngineHost(
     private var compiledStyle: CompiledStyleBinding? = null
 
     private var derivedManifest: StyleManifestBinding? = null
+
+    private val styleManifestMemo = StyleManifestMemo()
+
+    /**
+     * The manifest of [stored], read once per distinct document and base URI rather than once per
+     * prepare. The driver's style validation and [styleManifest] share it, so a style validated on one
+     * frame is not parsed again by the next frame's validation.
+     */
+    fun derivedStyleManifest(stored: StoredRawResource, baseUri: String): BasemapStyleManifestOutcome =
+        styleManifestMemo.manifestFor(stored, baseUri)
 
     /**
      * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069). A `LinkedHashMap` because
@@ -615,7 +625,7 @@ internal class BasemapEngineHost(
         // document: this method's one caller reads `stored` from ResidentCache.current() after the
         // driver's visibility install. See the KDoc -- the compilation beside this one runs before that
         // install and so must read the caller's content.
-        val outcome = deriveBasemapStyleManifest(lease.generation.stored.bytes, baseUri)
+        val outcome = styleManifestMemo.manifestFor(lease.generation.stored, baseUri)
         if (outcome !is BasemapStyleManifestOutcome.Derived) {
             cache.releaseLease(lease)
             return outcome

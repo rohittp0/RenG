@@ -8,7 +8,6 @@ import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
-import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.styleTimeRoutes
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
@@ -207,8 +206,8 @@ internal class ResourceActionExecutor(
      * refuses.
      */
     private fun validateBasemapStyle(action: ValidateBasemapStyle): BasemapStyleValidationOutcome {
-        val derivation = deriveBasemapStyleManifest(
-            styleBytes = action.content.stored.bytes,
+        val derivation = basemapEngineHost.derivedStyleManifest(
+            stored = action.content.stored,
             baseUri = action.content.route.locator.value,
         )
         return when (derivation) {

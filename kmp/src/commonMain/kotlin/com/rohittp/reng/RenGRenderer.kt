@@ -195,8 +195,16 @@ import com.rohittp.reng.internal.thread.CallingThread
 import com.rohittp.reng.internal.thread.PlatformLock
 import com.rohittp.reng.internal.thread.currentCallingThread
 import com.rohittp.reng.internal.thread.isCurrentThread
+import com.rohittp.reng.internal.planning.planSpatial
+import com.rohittp.reng.internal.readahead.ReadAheadScheduler
+import com.rohittp.reng.internal.readahead.ReadAheadSnapshot
+import com.rohittp.reng.internal.readahead.ReadAheadWindow
 import com.rohittp.rentile.PreparedStyle
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -905,6 +913,12 @@ private class FrameAcquisition(
      * property entirely, so nothing in the descriptor could carry it.
      */
     val terrainExaggeration: Double = 1.0,
+    /**
+     * The completed style manifest this frame's ground and labels read, or `null` when the frame
+     * needed none. Carried out so the read-ahead snapshot (ADR 0075) can be built from what this
+     * `prepare` actually used, rather than asking the host's unlocked manifest map afterwards.
+     */
+    val styleManifest: BasemapStyleManifest? = null,
 )
 
 private data class PreparationHistory(
@@ -924,6 +938,7 @@ private data class PreparedItemResult(
     val frame: RenGPreparedFrame,
     val nextHistory: PreparationHistory,
     val preparedStyle: PreparedStyle?,
+    val styleManifest: BasemapStyleManifest?,
 )
 
 /**
@@ -934,6 +949,7 @@ private class PreparedInvocationDelivery(
     val frames: List<RenGPreparedFrame>,
     val initialHistory: PreparationHistory,
     val initialStyle: PreparedStyle?,
+    val initialReadAheadSnapshot: ReadAheadSnapshot?,
 )
 
 /**
@@ -1342,6 +1358,100 @@ internal class RenGRenderer(
     internal var preparedBasemapStyle: PreparedStyle? = null
         private set
 
+    // ---- Read-ahead (ADR 0075) ----------------------------------------------------------------
+
+    /**
+     * What the read-ahead worker may know about this renderer: the style, manifest, access mode and
+     * committed LOD of the last successful `prepare`. Published by `prepare`'s commit and read from
+     * `readAhead`, hence volatile; `null` until one `prepare` has succeeded, and after close.
+     */
+    @Volatile
+    private var readAheadSnapshot: ReadAheadSnapshot? = null
+
+    /**
+     * Created on the first hint that has something to warm, so a renderer that never reads ahead
+     * allocates no scope and starts no coroutine. Its scope is the renderer's own, and [close] cancels
+     * it.
+     */
+    private val readAheadScheduler: Lazy<ReadAheadScheduler<ReadAheadSnapshot>> = lazy {
+        ReadAheadScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            warm = { snapshot, cold ->
+                basemapEngineHost.warmWindow(
+                    style = snapshot.style,
+                    tiles = cold,
+                    routes = tileTimeRoutes(
+                        manifest = snapshot.manifest,
+                        tiles = cold,
+                        accessMode = ResourceAccessMode.NORMAL,
+                        limits = configuration.resourceLimits,
+                    ),
+                )
+            },
+        )
+    }
+
+    private fun readAheadSnapshotOf(
+        style: PreparedStyle?,
+        manifest: BasemapStyleManifest?,
+        accessMode: ResourceAccessMode,
+        selectedLod: Int?,
+    ): ReadAheadSnapshot? =
+        if (style == null || manifest == null) null else ReadAheadSnapshot(style, manifest, accessMode, selectedLod)
+
+    override fun readAhead(plans: List<FramePlan>) {
+        if (plans.isEmpty() || basemapEngineHost.isClosed) return
+        val snapshot = readAheadSnapshot ?: return
+        if (snapshot.accessMode == ResourceAccessMode.CACHE_ONLY) return
+
+        // The same spatial step prepare runs, minus everything that touches state: no frame identity
+        // is registered and no history moves. The LOD chain is prepareBatch's own -- each plan's
+        // selected LOD is the next one's previous -- starting from the last committed one.
+        val wanted = LinkedHashSet<CanonicalBasemapTile>()
+        var lod = snapshot.selectedLod
+        for (plan in plans) {
+            val outcome = try {
+                planSpatial(
+                    plan,
+                    configuration.outputPixelSize,
+                    lod,
+                    configuration.maximumBasemapTileInstances,
+                    configuration.basemapStyle != null,
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (@Suppress("TooGenericExceptionCaught") unplannable: Throwable) {
+                // A hint about a frame RenG cannot plan is dropped; prepare will say why when it
+                // reaches that frame.
+                continue
+            }
+            if (outcome !is SpatialOutcome.Success) continue
+            val spatial = outcome.value
+            lod = spatial.lodObservation.selectedLod
+            // The ground draw's own gate: labels acquire their vector tiles on their own path.
+            if (plan.drawBasemap) spatial.tileSelection?.canonicalResources?.let(wanted::addAll)
+        }
+
+        // Tiles already resident on the GPU need nothing. This reads the residency registry, which is
+        // why `readAhead` belongs on the thread that prepares and draws.
+        val cold = wanted.filter { tile ->
+            glObjectRegistry.resident(basemapEngineHost.renderedTileKey(snapshot.style, tile)) == null
+        }
+        if (cold.isEmpty()) return
+        readAheadScheduler.value.submit(
+            ReadAheadWindow(
+                context = snapshot,
+                styleDigest = snapshot.style.digest,
+                tiles = cold,
+            ),
+        )
+    }
+
+    /** Suspends until no read-ahead window is queued or running. For tests only. */
+    internal suspend fun awaitReadAheadIdle() {
+        if (readAheadScheduler.isInitialized()) readAheadScheduler.value.awaitIdle()
+    }
+
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
         frameEncoder = FramePlanCanonicalEncoder(),
         frameIdentityRegistry = registry,
@@ -1389,6 +1499,7 @@ internal class RenGRenderer(
                 validatePreparationPlans(plans)
                 val initialHistory = preparationHistory()
                 val initialStyle = preparedBasemapStyle
+                val initialReadAheadSnapshot = readAheadSnapshot
                 var planningPlan = initialHistory.encodedPlan
                 var planningLod = initialHistory.selectedLod
                 val plannedItems = plans.map { plan ->
@@ -1420,6 +1531,7 @@ internal class RenGRenderer(
                     val provisional = ArrayList<RenGPreparedFrame>(plannedItems.size)
                     var history = initialHistory
                     var finalStyle: PreparedStyle? = initialStyle
+                    var finalManifest: BasemapStyleManifest? = null
                     var committed = false
                     try {
                         for (item in plannedItems) {
@@ -1433,6 +1545,7 @@ internal class RenGRenderer(
                             }
                             history = prepared.nextHistory
                             finalStyle = prepared.preparedStyle
+                            finalManifest = prepared.styleManifest
                         }
 
                         // Allocate the public snapshot and the coordinator's rollback record before
@@ -1441,10 +1554,13 @@ internal class RenGRenderer(
                             frames = ArrayList(provisional),
                             initialHistory = initialHistory,
                             initialStyle = initialStyle,
+                            initialReadAheadSnapshot = initialReadAheadSnapshot,
                         )
                         currentCoroutineContext().ensureActive()
                         commitPreparationHistory(history)
                         preparedBasemapStyle = finalStyle
+                        readAheadSnapshot =
+                            readAheadSnapshotOf(finalStyle, finalManifest, accessMode, history.selectedLod)
                         committed = true
                         currentCoroutineContext().ensureActive()
                         delivery
@@ -1452,6 +1568,7 @@ internal class RenGRenderer(
                         if (committed) {
                             commitPreparationHistory(initialHistory)
                             preparedBasemapStyle = initialStyle
+                            readAheadSnapshot = initialReadAheadSnapshot
                         }
                         disposePreparedFrames(provisional)
                         throw failure
@@ -1607,6 +1724,7 @@ internal class RenGRenderer(
     private fun rollbackPreparedInvocation(delivery: PreparedInvocationDelivery) {
         commitPreparationHistory(delivery.initialHistory)
         preparedBasemapStyle = delivery.initialStyle
+        readAheadSnapshot = delivery.initialReadAheadSnapshot
         disposePreparedFrames(delivery.frames)
     }
 
@@ -2069,6 +2187,7 @@ internal class RenGRenderer(
                     labelTiles = if (plan.drawLabels) labelCanonicalTiles else history.labelTiles,
                 ),
                 preparedStyle = acquired.preparedStyle,
+                styleManifest = acquired.styleManifest,
             )
             // This is the ownership handoff: every allocation which could still fail happened first,
             // and owner-wide close can now find the frame even if it wins immediately after publication.
@@ -2684,6 +2803,7 @@ internal class RenGRenderer(
 
         var basemapTiles: List<RenderedBasemapTile> = emptyList()
         var observedStyle: PreparedStyle? = null
+        var observedManifest: BasemapStyleManifest? = null
         var basemapStyleDigest: String? = null
         var terrain: TerrainAcquisitionOutcome? = null
         var terrainExaggeration = 1.0
@@ -2732,6 +2852,7 @@ internal class RenGRenderer(
                     } else {
                         completedStyleManifest(styleReference)
                     }
+                    observedManifest = manifest
                     if (manifest != null && canonicalTiles.isNotEmpty()) {
                         basemapTiles =
                             renderBasemapTiles(
@@ -2852,6 +2973,7 @@ internal class RenGRenderer(
             spriteAtlas,
             terrain,
             terrainExaggeration,
+            styleManifest = observedManifest,
         )
     }
 
@@ -3207,6 +3329,8 @@ internal class RenGRenderer(
                 previousFrameIndex = null
                 previousEncodedPlan = null
                 previousSelectedLod = null
+                // The hint's LOD chain starts where prepare's now does.
+                readAheadSnapshot = readAheadSnapshot?.withSelectedLod(null)
                 previousLabelFade = LabelFadeState.EMPTY
                 // `retainedLabelHandover`, `retainedGlyphAtlas` and `retainedSpriteAtlas` are
                 // deliberately NOT cleared here,
@@ -4397,6 +4521,12 @@ internal class RenGRenderer(
                 // The renderer owns exactly one Rentile engine (ADR 0016), so closing the renderer closes
                 // it. Its close() is idempotent and, unlike everything above it here, not GL-scoped -- so
                 // it neither needs nor consults the exact current context (ADRs 0007/0015).
+                // Read-ahead stops first (ADR 0075): the snapshot is dropped so no new window can form,
+                // and the worker is cancelled so no new one can start. `close()` cannot suspend, so the
+                // worker is not joined; the host clears its read-ahead operation before it closes the
+                // engine, which is what refuses any callback still on its way.
+                readAheadSnapshot = null
+                if (readAheadScheduler.isInitialized()) readAheadScheduler.value.cancel()
                 basemapEngineHost.close()
                 null
             } else {

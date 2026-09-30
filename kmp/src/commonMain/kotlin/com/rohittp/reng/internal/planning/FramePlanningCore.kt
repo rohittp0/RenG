@@ -160,6 +160,38 @@ internal sealed interface FramePlanningOutcome {
     data class Failure(val failure: FailureDescriptor) : FramePlanningOutcome
 }
 
+/**
+ * The spatial half of planning one frame: camera, LOD, footprint, tile selection and placements, and
+ * nothing else. **Pure**: it registers no frame identity, reads no history and touches no state, which
+ * is why `Renderer.readAhead` (ADR 0075) can ask it what tiles a *future* plan will need. Both
+ * [FramePlanningCore.plan] and read-ahead call this one function, so the tiles warmed for a frame cannot
+ * drift from the tiles `prepare` later selects for it.
+ *
+ * Cycle G task 10: this dispatch used to be `GLOBE -> return unsupportedProjectionModeFailure()`. It is
+ * an exhaustive dispatch to two sibling planners rather than one planner taking a mode, because the
+ * globe's footprint and tile selection are not the Mercator ones reparameterised -- see
+ * `planGlobeSpatial` and `selectGlobeTiles` for what actually differs.
+ */
+internal fun planSpatial(
+    plan: FramePlan,
+    outputPixelSize: OutputPixelSize,
+    previousSelectedLod: Int?,
+    maximumBasemapTileInstances: Int,
+    basemapStyleConfigured: Boolean,
+): SpatialOutcome<FrameSpatialPlan> {
+    val spatialPlanner = when (plan.projectionMode) {
+        ProjectionMode.GLOBE -> ::planGlobeSpatial
+        ProjectionMode.MERCATOR -> ::planMercatorSpatial
+    }
+    return spatialPlanner(
+        plan,
+        outputPixelSize,
+        previousSelectedLod,
+        maximumBasemapTileInstances,
+        basemapStyleConfigured,
+    )
+}
+
 internal class FramePlanningCore(
     private val frameEncoder: FramePlanCanonicalEncoder,
     private val frameIdentityRegistry: CanonicalIdentityRegistry,
@@ -168,15 +200,7 @@ internal class FramePlanningCore(
 ) {
     internal fun plan(request: FramePlanningRequest): FramePlanningOutcome {
         val plan = request.plan
-        // Cycle G task 10: this `when` used to be `GLOBE -> return unsupportedProjectionModeFailure()`.
-        // It is spelled as an exhaustive dispatch to two sibling planners rather than as one planner
-        // taking a mode, because the globe's footprint and tile selection are not the Mercator ones
-        // reparameterised -- see `planGlobeSpatial` and `selectGlobeTiles` for what actually differs.
-        val spatialPlanner = when (plan.projectionMode) {
-            ProjectionMode.GLOBE -> ::planGlobeSpatial
-            ProjectionMode.MERCATOR -> ::planMercatorSpatial
-        }
-        val spatialOutcome = spatialPlanner(
+        val spatialOutcome = planSpatial(
             plan,
             request.outputPixelSize,
             request.previousSelectedLod,

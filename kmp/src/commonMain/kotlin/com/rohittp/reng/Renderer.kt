@@ -141,6 +141,36 @@ public sealed interface Renderer : AutoCloseable {
         priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
     ): List<PreparedFrame>
 
+    /**
+     * Tells RenG which frames the consumer expects to prepare next, so it can fetch their basemap
+     * tiles into the consumer's [Store] while earlier frames are still being prepared and drawn
+     * (ADR 0075). [plans] are in the order the consumer will prepare them; that order decides which
+     * tiles are fetched first.
+     *
+     * **A hint, never a promise.** It returns at once, produces no result, and throws nothing for a
+     * network or Store fault. It never changes what a later [prepare] returns, and it does not spare a
+     * frame from failing on a tile that cannot be fetched: that frame fails when [prepare] reaches it,
+     * as it would have without the hint. What the hint buys is that a tile which *can* be fetched is
+     * usually already in the Store by then, so the frame reads it from disk instead of waiting on the
+     * network. [queryMetrics] reports how many resources those fetches loaded, found already stored, and
+     * failed to load ([RenGMetricName.READ_AHEAD_FETCHED], [RenGMetricName.READ_AHEAD_ALREADY_CACHED],
+     * [RenGMetricName.READ_AHEAD_FAILED]), which is how a consumer can tell it is offline before a frame
+     * fails on it.
+     *
+     * **It does nothing** until one [prepare] has succeeded (the tile set is planned against the style
+     * that call compiled), when that call used [ResourceAccessMode.CACHE_ONLY], for a plan that draws no
+     * basemap or that RenG cannot plan, and after [close]. Tiles already resident on the GPU are skipped.
+     *
+     * Only the frames' basemap ground tiles are fetched, through the ordinary [Transport] and [Store],
+     * always in [ResourceAccessMode.NORMAL]. Each call replaces a window still queued and never cancels
+     * one already running, so it may be called as often as the consumer likes; one window covers at most
+     * 64 tiles that are not already warmed, taken in [plans]' order.
+     *
+     * Call it from the thread or coroutine that drives [prepare] and [draw], and not concurrently with
+     * them: it consults the renderer's tile residency to decide what is already drawn.
+     */
+    public fun readAhead(plans: List<FramePlan>): Unit
+
     public suspend fun cancelPreparations(): Unit
 
     public fun clearFrameHistory(): Unit

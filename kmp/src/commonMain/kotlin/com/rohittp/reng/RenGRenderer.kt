@@ -133,6 +133,7 @@ import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.ShaderPairMemo
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.decodePng
@@ -1137,7 +1138,13 @@ internal class RenGRenderer(
     )
     internal val inFlightPreparedFrameCpuBytes: Long
         get() = preparedFrameCpuBudget.outstandingBytes()
-    private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver()
+
+    /**
+     * The canonical form and derived keys of every consumer shader pair this renderer has seen, shared
+     * by the validation, planning, encoding and draw paths that each used to derive them again.
+     */
+    private val shaderPairMemo = ShaderPairMemo()
+    private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo)
 
     /**
      * Cycle C's task 20, reached at last: the frame's terrain descriptor and its DEM ring, acquired
@@ -1453,9 +1460,9 @@ internal class RenGRenderer(
     }
 
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
-        frameEncoder = FramePlanCanonicalEncoder(),
+        frameEncoder = FramePlanCanonicalEncoder(shaderPairs = shaderPairMemo),
         frameIdentityRegistry = registry,
-        resourceKeyDeriver = ResourceKeyDeriver(),
+        resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo),
         rentilePrivateKeyResolver = rentilePrivateKeyResolver,
     )
 

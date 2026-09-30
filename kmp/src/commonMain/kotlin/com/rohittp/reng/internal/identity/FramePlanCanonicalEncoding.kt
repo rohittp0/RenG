@@ -72,6 +72,8 @@ internal class EncodedFramePlan(
 
 internal class FramePlanCanonicalEncoder(
     private val sha256: Sha256Function = AcceleratedSha256,
+    /** Shared with the renderer's key derivers, so a shader pair's sources are encoded once in all. */
+    private val shaderPairs: ShaderPairMemo = ShaderPairMemo(),
 ) {
     internal fun encode(plan: FramePlan): EncodedFramePlan {
         val stickers = plan.stickersForCore()
@@ -214,10 +216,8 @@ internal class FramePlanCanonicalEncoder(
         field(7, CanonicalBinary.boolean(geometry.emissive))
     }
 
-    private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes = CanonicalBinary.fields {
-        field(1, CanonicalBinary.exactUtf8(shaderPair.vertexSource))
-        field(2, CanonicalBinary.exactUtf8(shaderPair.fragmentSource))
-    }
+    private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes =
+        shaderPairs.canonicalOf(shaderPair).encodedPair
 
     // A Map has no inherent iteration order, and the canonical encoding must be deterministic
     // regardless of how a consumer happened to build the map. Sorting by Kotlin's default String

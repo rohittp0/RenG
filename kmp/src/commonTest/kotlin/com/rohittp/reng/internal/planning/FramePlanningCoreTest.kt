@@ -28,6 +28,7 @@ import com.rohittp.reng.internal.identity.FramePlanSegment
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.Sha256Digest
+import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.projection.ResolvedGlobeCamera
 import com.rohittp.reng.internal.resource.RentilePrivateKey
@@ -983,7 +984,9 @@ class FramePlanningCoreTest {
     )
 
     private fun constantDigestEncoder(): FramePlanCanonicalEncoder =
-        FramePlanCanonicalEncoder { Sha256Digest(ByteArray(SHA256_DIGEST_BYTES) { CONSTANT_DIGEST_BYTE }) }
+        FramePlanCanonicalEncoder(
+            sha256 = Sha256Function { Sha256Digest(ByteArray(SHA256_DIGEST_BYTES) { CONSTANT_DIGEST_BYTE }) },
+        )
 
     private fun request(
         plan: FramePlan,

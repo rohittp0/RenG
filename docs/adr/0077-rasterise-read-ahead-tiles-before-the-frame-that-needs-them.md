@@ -178,3 +178,22 @@ nothing running", and a cancelled worker can leave a window pending for ever, so
 would have hung. The scheduler now records that it has stopped, whether `close()` cancelled it, a scope was
 cancelled from outside, or it never started, and a stopped scheduler is idle: it discards what was queued,
 refuses new windows, and releases every waiter, including those already waiting when the cancel arrived.
+
+## A latched store miss must not outlive the write that fills it (erratum to ADR 0016)
+
+ADR 0016 latches every outcome of a route for the life of an operation's registry, so the engine's second
+attempt is never a consumer retry. A device run showed the cost of treating a store *miss* like the rest:
+eight real downloads were counted as sixteen resource requests, and with a foreground prepare open on the
+same tiles some were fetched twice. Rentile's warm probes the Store (its default `metadata` is `read`),
+latching a null; it then fetches and writes inside the same registry, and the rasterising acquire that
+follows replayed the stale null as `RAW_CACHE_MISS` and called the transport again.
+
+Two changes, both inside the firewall. A successful `writeStore` now invalidates that route's completed
+store-read entry, so the next read sees the Store as it now is; an in-flight read still shares one consumer
+read, and a miss with no write behind it stays latched, so repeated misses are still one read, not a storm.
+Invalidating at the write was chosen over letting a join forget every null, because the latter would turn
+each repeated miss into a consumer read and weaken ADR 0016 for the cases it was written for. Second,
+`FirewallStore` and the routed engine store override `metadata` with a probe that shares the read join but
+forgets its own miss. The consumer `Store` has only `read` and `write`, so the probe still reads the whole
+record and hashes it on a hit; that cost is unchanged, but the hit is latched and the acquire that follows
+replays it instead of reading and hashing again. No public API changes.

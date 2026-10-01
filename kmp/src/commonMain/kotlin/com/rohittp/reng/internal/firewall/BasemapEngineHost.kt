@@ -46,6 +46,7 @@ import com.rohittp.rentile.MapSessionProvider
 import com.rohittp.rentile.PreparedBatch
 import com.rohittp.rentile.PreparedStyle
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
+import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.RawResourceStore as EngineRawResourceStore
 import com.rohittp.rentile.RenderOptions
 import com.rohittp.rentile.Rentile
@@ -1315,6 +1316,18 @@ internal class BasemapEngineHost(
                 else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
             }
             return operation.store.read(key)
+        }
+
+        /** Probes route exactly as reads do, so the probe's miss is forgotten by the registry that took it. */
+        override suspend fun metadata(key: EngineRawResourceKey): EngineRawResourceMetadata? {
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
+            return operation.store.metadata(key)
         }
 
         /**

@@ -533,6 +533,20 @@ internal class OperationRegistry(
         }
     }
 
+    /**
+     * Rentile's "is it already stored?" warm probe. Shares [readStore]'s join -- the consumer's Store
+     * has only `read`, so the probe costs one read -- but a miss is forgotten at once. A probe asks
+     * before the warm fetches and writes; latching its null would answer the engine's own acquire
+     * moments later with a stale miss (ADR 0016 erratum). A hit stays latched: it is true, and the
+     * acquire that follows replays it instead of reading and hashing the payload a second time.
+     */
+    suspend fun probeStore(key: EngineRawResourceKey): EngineStoredRawResource? {
+        val route = routeIndex.storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)]
+        val stored = readStore(key)
+        if (stored == null && route != null) storeReadJoin.invalidate(route)
+        return stored
+    }
+
     suspend fun writeStore(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
         val route = routeIndex.storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)]
             ?: run {
@@ -614,6 +628,11 @@ internal class OperationRegistry(
             } catch (@Suppress("TooGenericExceptionCaught") adapterFailure: Throwable) {
                 throw storeWriteFailure(route).toException()
             }
+            // The consumer Store now holds this route, so a read latched earlier -- in practice a miss,
+            // such as Rentile's warm probe -- describes a store that no longer exists. Without this the
+            // engine's next acquire replays the stale null, reports RAW_CACHE_MISS and transports again
+            // (ADR 0016 erratum). Outside the catch above: invalidation cannot fail the write.
+            storeReadJoin.invalidate(route)
         }
     }
 
@@ -1018,6 +1037,17 @@ private class SuspendJoin<K : Any, V> {
                 currentCoroutineContext().ensureActive()
             }
         }
+    }
+
+    /**
+     * Forgets [key]'s entry, completed or in flight, so the next caller runs [block] afresh.
+     *
+     * Callers already holding the old deferred still receive its outcome; only callers arriving
+     * afterwards are redirected. An in-flight owner that completes later therefore cannot latch a
+     * stale outcome, because its entry is no longer in the map.
+     */
+    suspend fun invalidate(key: K) {
+        mutex.withLock { inFlight.remove(key) }
     }
 
     /**

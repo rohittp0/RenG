@@ -329,6 +329,84 @@ class RendererReadAheadRasterisationTest {
         real { renderer.awaitReadAheadIdle() }
     }
 
+    /**
+     * A tile the warm fetched and stored is read back from the Store by the render-ahead step that follows
+     * it inside the same registry. Rentile's warm probe reads the Store before fetching, and that probe's
+     * miss used to be latched, so the acquire after the write saw a miss, transported the tile again and
+     * counted every resource twice.
+     */
+    @Test
+    fun theRenderAheadStepReadsWhatTheWarmStoredInsteadOfFetchingAndCountingItAgain() = runTest {
+        val transport = TileUrlCountingTransport(PaintedFreshTransport())
+        val renderer = renderer(budgetBytes = ROOMY_BUDGET, transport = transport)
+        try {
+            renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+            val before = renderer.queryMetrics()
+            val tilesBefore = transport.tileCalls()
+
+            renderer.readAhead(listOf(shifted(1L), farShifted(2L)))
+            real { renderer.awaitReadAheadIdle() }
+
+            val after = renderer.queryMetrics()
+            val fetched = transport.tileCalls() - tilesBefore
+            assertTrue(fetched > 0, "the hint named tiles the first frame never needed")
+            assertTrue(after[RenGMetricName.READ_AHEAD_RASTERISED] > 0L, "the worker drew them")
+            assertEquals(
+                transport.tileUrls().size,
+                transport.tileCalls(),
+                "no tile url reached the Transport twice: ${transport.tileUrls().filterValues { it > 1 }}",
+            )
+            assertEquals(
+                fetched.toLong(),
+                after[RenGMetricName.ENGINE_RESOURCE_REQUESTS] - before[RenGMetricName.ENGINE_RESOURCE_REQUESTS],
+                "the engine counted one request per distinct tile it fetched, not two",
+            )
+            assertEquals(
+                0L,
+                after[RenGMetricName.ENGINE_STORE_MISSES] - before[RenGMetricName.ENGINE_STORE_MISSES],
+                "the warm's probe is not an acquire miss, and the acquire after the write finds the record",
+            )
+            assertTrue(
+                after[RenGMetricName.ENGINE_STORE_HITS] - before[RenGMetricName.ENGINE_STORE_HITS] > 0L,
+                "the render-ahead step read the stored tiles",
+            )
+        } finally {
+            renderer.close()
+        }
+    }
+
+    /**
+     * The same, with a foreground prepare open on the same tiles. The transport routes to the foreground
+     * registry first when it knows the url, so a stale miss in the worker's registry used to become a real
+     * second download through the consumer.
+     */
+    @Test
+    fun noTileReachesTheTransportTwiceWhileAForegroundPrepareIsOpenOnTheSameTiles() = runTest {
+        val transport = TileUrlCountingTransport(PaintedFreshTransport())
+        val store = SlowRasterStore()
+        val renderer = renderer(budgetBytes = ROOMY_BUDGET, transport = transport, store = store)
+        try {
+            renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+            store.delayMillis = 60L
+
+            val foreground = async(Dispatchers.Default) {
+                renderer.prepare(shifted(1L)).close()
+                renderer.prepare(farShifted(2L)).close()
+            }
+            renderer.readAhead(listOf(shifted(1L), farShifted(2L), shifted(3L)))
+            real { foreground.await() }
+            real { renderer.awaitReadAheadIdle() }
+
+            assertEquals(
+                transport.tileUrls().size,
+                transport.tileCalls(),
+                "no tile url reached the Transport twice: ${transport.tileUrls().filterValues { it > 1 }}",
+            )
+        } finally {
+            renderer.close()
+        }
+    }
+
     // ---- fixtures -------------------------------------------------------------------------------
 
     private class Outcome(
@@ -449,6 +527,22 @@ private class PaintedFreshTransport : Transport {
                 ),
             )
         }
+    }
+}
+
+/** Counts the tile exchanges that reach the wrapped Transport, per url. */
+private class TileUrlCountingTransport(private val inner: Transport) : Transport {
+    private val mutex = Mutex()
+    private val perUrl = HashMap<String, Int>()
+
+    suspend fun tileUrls(): Map<String, Int> = mutex.withLock { HashMap(perUrl) }
+
+    suspend fun tileCalls(): Int = mutex.withLock { perUrl.values.sum() }
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        if (url.startsWith("https://tiles.example/")) mutex.withLock { perUrl[url] = (perUrl[url] ?: 0) + 1 }
+        return inner.execute(request)
     }
 }
 

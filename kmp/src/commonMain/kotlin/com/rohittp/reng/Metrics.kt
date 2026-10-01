@@ -101,7 +101,7 @@ public enum class RenGMetricName {
      *
      * **Declared after every engine counter, and that is an ABI decision**, the same one
      * `ResourceLimits` documents for its trailing fields: appending a constant leaves every existing
-     * ordinal where it is. The three `READ_AHEAD_` counters below follow it for the same reason.
+     * ordinal where it is. The `READ_AHEAD_` and `RENDERED_TILE_CACHE_` counters below follow it for the same reason.
      */
     ENGINE_METRICS_UNRECOGNISED,
 
@@ -126,6 +126,27 @@ public enum class RenGMetricName {
      * surfaced: the frame that needs the tile fails on it exactly as it would have without read-ahead.
      */
     READ_AHEAD_FAILED,
+
+    /**
+     * Tiles the read-ahead worker drew and put into the rendered-tile cache (ADR 0077). Counts only with
+     * `RendererConfiguration.maximumReadAheadRasterisedTileBytes` above zero. Each is also counted by
+     * [ENGINE_TILES_RENDERED], so the tiles a `prepare` had to draw itself are that counter less this one.
+     */
+    READ_AHEAD_RASTERISED,
+
+    /**
+     * Tiles a `prepare` took from the rendered-tile cache instead of drawing (ADR 0077). A tile is
+     * counted once, by the frame that took it, and a tile taken is gone from the cache.
+     */
+    RENDERED_TILE_CACHE_HITS,
+
+    /**
+     * Tiles the rendered-tile cache dropped to stay within its byte budget before any frame took them
+     * (ADR 0077). Rising beside few hits says the budget is too small for the window, or the window too
+     * far ahead for the frames to reach it. Tiles dropped by a style change, `freeResources` or close are
+     * not counted: they are not a consequence of the budget.
+     */
+    RENDERED_TILE_CACHE_EVICTIONS,
 }
 
 /**

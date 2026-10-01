@@ -15,6 +15,9 @@ public sealed interface RenderTarget {
     public val framebufferName: FramebufferName
 }
 
+/** The largest `maximumReadAheadRasterisedTileBytes` accepted: 1 GiB (ADR 0077). */
+private const val MAXIMUM_READ_AHEAD_RASTERISED_TILE_BYTES: Long = 1024L * 1024L * 1024L
+
 /**
  * Everything a renderer is fixed by for its whole life: where it draws, what it draws through, and
  * the handful of options that are properties of the renderer rather than of any one [FramePlan].
@@ -36,6 +39,7 @@ public class RendererConfiguration(
     maximumCachedConsumerPipelines: Int = 64,
     maximumConsumerPipelinesPerFrame: Int = 256,
     maximumConcurrentTileRasterisations: Int = 1,
+    maximumReadAheadRasterisedTileBytes: Long = 0L,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -101,6 +105,40 @@ public class RendererConfiguration(
      */
     public val maximumConcurrentTileRasterisations: Int
 
+    /**
+     * How many bytes of already-drawn basemap tiles [Renderer.readAhead] may hold for frames not yet
+     * prepared, from `0` through 1 GiB (`1_073_741_824`); **`0` by default**, which draws nothing ahead and
+     * leaves `readAhead` and `prepare` exactly as they were without this option (ADR 0077).
+     *
+     * With a positive budget the read-ahead worker does more than fetch a window's tile bytes. It also draws
+     * the window's tiles that are neither on the GPU nor already held, up to the 64-tile window cap and what
+     * the budget can hold, and keeps their pixels, so that the `prepare` which later needs one takes it
+     * instead of drawing it. Drawing is CPU work that a cold frame otherwise waits for, and on a phone that
+     * wait, not the network, was most of an export's wall time. The pixels are identical to the ones
+     * `prepare` would have drawn.
+     *
+     * **The budget is memory you are choosing to hold.** A tile is `width * height * 4` bytes of pixels,
+     * about a megabyte at 512 by 512, charged against this budget as it is stored. When storing a tile would
+     * pass the budget the least recently used tile is dropped first. A tile a `prepare` takes leaves the
+     * cache as it enters that frame, and from then on the frame holds it under
+     * [ResourceLimits.maximumInFlightRawBasemapTileBytes] like any tile it drew itself; the two budgets are
+     * separate ceilings and are never charged for the same tile at once, so size this one with the
+     * in-flight budget in mind. Tiles drawn for frames that never arrive stay until they are evicted, a
+     * style change or [Renderer.freeResources] drops them, or the renderer closes.
+     *
+     * **While this is positive, `prepare` renders its own tiles as [RenGRenderPriority.URGENT]**, whatever
+     * priority its caller passed, so that the worker's drawing can never delay the frame being prepared.
+     * Among a consumer's own concurrent frames that is then one first-in first-out lane. A `prepare` in
+     * [ResourceAccessMode.RELOAD] does not use the cache and empties it, since it asked for the tiles to be
+     * fetched again. The worker draws on the same workers a frame does, so raise
+     * [maximumConcurrentTileRasterisations] with this.
+     *
+     * Does nothing unless [Renderer.readAhead] is called. Counted by
+     * [RenGMetricName.READ_AHEAD_RASTERISED], [RenGMetricName.RENDERED_TILE_CACHE_HITS] and
+     * [RenGMetricName.RENDERED_TILE_CACHE_EVICTIONS].
+     */
+    public val maximumReadAheadRasterisedTileBytes: Long
+
     init {
         require(maximumBasemapTileInstances in 1..4096) {
             "maximumBasemapTileInstances must be within the supported range"
@@ -120,6 +158,9 @@ public class RendererConfiguration(
         require(maximumConcurrentTileRasterisations in 1..16) {
             "maximumConcurrentTileRasterisations must be within 1 through 16"
         }
+        require(maximumReadAheadRasterisedTileBytes in 0L..MAXIMUM_READ_AHEAD_RASTERISED_TILE_BYTES) {
+            "maximumReadAheadRasterisedTileBytes must be within 0 through 1073741824"
+        }
 
         this.outputPixelSize = outputPixelSize
         this.transport = transport
@@ -134,6 +175,7 @@ public class RendererConfiguration(
         this.maximumCachedConsumerPipelines = maximumCachedConsumerPipelines
         this.maximumConsumerPipelinesPerFrame = maximumConsumerPipelinesPerFrame
         this.maximumConcurrentTileRasterisations = maximumConcurrentTileRasterisations
+        this.maximumReadAheadRasterisedTileBytes = maximumReadAheadRasterisedTileBytes
     }
 }
 
@@ -189,6 +231,10 @@ public sealed interface Renderer : AutoCloseable {
      * always in [ResourceAccessMode.NORMAL]. Each call replaces a window still queued and never cancels
      * one already running, so it may be called as often as the consumer likes; one window covers at most
      * 64 tiles that are not already warmed, taken in [plans]' order.
+     *
+     * With [RendererConfiguration.maximumReadAheadRasterisedTileBytes] above zero the worker also draws
+     * the window's tiles and keeps their pixels for the [prepare] that will need them (ADR 0077), so the
+     * frame skips the drawing as well as the fetch. The pixels are identical to a [prepare]'s own.
      *
      * Safe to call from any thread, including concurrently with [prepare] and [draw]: it reads only
      * immutable configuration, a snapshot [prepare] publishes, and residency and tile-key state that are

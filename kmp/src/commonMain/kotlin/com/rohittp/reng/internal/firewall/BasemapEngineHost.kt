@@ -334,6 +334,14 @@ internal class BasemapEngineHost(
         style: PreparedStyle,
         tiles: List<CanonicalBasemapTile>,
         routes: List<ResourceRouteKey>,
+        /**
+         * Work to do with the window's registry still open, after the bytes are warmed (ADR 0077): the
+         * renderer's rasterisation of the window's tiles. Run inside this operation so that every engine
+         * callback it causes is routed through the window's own registry, which is discarded only after it
+         * returns. Cancellation propagates; any other failure is absorbed, because it is a hint and the
+         * warm's own summary is reported whatever becomes of it.
+         */
+        afterWarm: (suspend () -> Unit)? = null,
     ): ReadAheadWarmSummary {
         requireOpen()
         require(routes.all { it.accessMode == RenGResourceAccessMode.NORMAL }) {
@@ -366,6 +374,16 @@ internal class BasemapEngineHost(
             metricRecorder.record(RenGMetricName.READ_AHEAD_FETCHED, warmed.fetched.toLong())
             metricRecorder.record(RenGMetricName.READ_AHEAD_ALREADY_CACHED, warmed.alreadyCached.toLong())
             metricRecorder.record(RenGMetricName.READ_AHEAD_FAILED, warmed.failed.toLong())
+            if (afterWarm != null) {
+                try {
+                    afterWarm()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (@Suppress("TooGenericExceptionCaught") absorbed: Throwable) {
+                    // A tile that would not prepare or draw is left for the frame that needs it, which
+                    // fails on it exactly as it would have without read-ahead.
+                }
+            }
             return warmed
         } finally {
             readAheadOperation = null
@@ -648,7 +666,16 @@ internal class BasemapEngineHost(
      * Acquires everything [tiles] need — through the firewall, so through this invocation's preregistered
      * routes and nothing else — and returns a network-free batch. Substitution is disabled explicitly.
      */
-    suspend fun prepareTiles(style: PreparedStyle, tiles: List<CanonicalBasemapTile>): PreparedBasemapTiles {
+    suspend fun prepareTiles(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+        /**
+         * The access mode to prepare under, or `null` for the open invocation's own (`NORMAL` when none is
+         * open). The read-ahead worker passes `NORMAL` explicitly (ADR 0077): the invocation open at that
+         * moment can belong to a foreground `prepare` in any mode, and the worker's tiles are not its.
+         */
+        accessMode: RenGResourceAccessMode? = null,
+    ): PreparedBasemapTiles {
         requireOpen()
         val distinct = tiles.distinct()
         val batch = engineCall {
@@ -656,7 +683,9 @@ internal class BasemapEngineHost(
                 style = style,
                 tiles = distinct.map(::engineTileIdOf),
                 options = renderOptions,
-                resourceAccess = engineAccessModeOf(activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL),
+                resourceAccess = engineAccessModeOf(
+                    accessMode ?: activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL,
+                ),
                 substitutionPolicy = TileSubstitutionPolicy.Disabled,
             )
         }
@@ -685,10 +714,19 @@ internal class BasemapEngineHost(
      * one place, so [lastForwardedRenderPriority] is written by the same expression that supplies
      * the argument rather than beside it (ADR 0053).
      */
-    private fun forwarding(priority: RenGRenderPriority): EngineRenderPriority {
-        lastForwardedRenderPriority = priority
+    private fun forwarding(priority: RenGRenderPriority, forReadAhead: Boolean): EngineRenderPriority {
+        if (forReadAhead) lastReadAheadRenderPriority = priority else lastForwardedRenderPriority = priority
         return priority.toEnginePriority()
     }
+
+    /**
+     * The priority the read-ahead worker's most recent draw forwarded (ADR 0077), kept apart from
+     * [lastForwardedRenderPriority] so a background draw running beside a foreground `prepare` cannot
+     * overwrite the answer to what that `prepare` forwarded.
+     */
+    @Volatile
+    var lastReadAheadRenderPriority: RenGRenderPriority? = null
+        private set
 
     /**
      * Draws [prepared]'s tiles. Makes no adapter call: [prepareTiles] acquired everything.
@@ -701,6 +739,11 @@ internal class BasemapEngineHost(
         prepared: PreparedBasemapTiles,
         asRawPixels: Boolean,
         priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
+        /**
+         * Whether this is the read-ahead worker's draw (ADR 0077), whose priority is observed through
+         * [lastReadAheadRenderPriority] and not [lastForwardedRenderPriority].
+         */
+        forReadAhead: Boolean = false,
     ): List<RenderedBasemapTile> {
         requireOpen()
         val styleDigest = prepared.style.digest
@@ -725,7 +768,7 @@ internal class BasemapEngineHost(
         }
 
         return if (asRawPixels) {
-            val batch = engineCall { engine.renderRaw(prepared.batch, priority = forwarding(priority)) }
+            val batch = engineCall { engine.renderRaw(prepared.batch, priority = forwarding(priority, forReadAhead)) }
             batch.tiles.map { rendered ->
                 carry(
                     rendered.id,
@@ -734,7 +777,7 @@ internal class BasemapEngineHost(
                 )
             }
         } else {
-            val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority)) }
+            val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority, forReadAhead)) }
             batch.tiles.map { rendered ->
                 carry(rendered.id, rendered.contentKey, BasemapTilePixels.Encoded(rendered.pngBytes))
             }

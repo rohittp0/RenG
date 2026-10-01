@@ -92,10 +92,10 @@ class EngineMetricRecorderTest {
         // send, so no caller downstream ever has to ask what engine produced a number.
         assertTrue(MetricName.entries.size >= 17, "engine vocabulary shrank unexpectedly")
         assertEquals(
-            MetricName.entries.size + 1 + 3,
+            MetricName.entries.size + 1 + 3 + 3,
             RenGMetricName.entries.size,
-            "RenG's vocabulary is the engine's plus ENGINE_METRICS_UNRECOGNISED and the three " +
-                "READ_AHEAD_ counters RenG keeps itself",
+            "RenG's vocabulary is the engine's plus ENGINE_METRICS_UNRECOGNISED, the three " +
+                "READ_AHEAD_ counters and the three rasterised-tile-cache counters RenG keeps itself",
         )
     }
 }

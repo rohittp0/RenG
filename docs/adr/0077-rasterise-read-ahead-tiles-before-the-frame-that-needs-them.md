@@ -124,6 +124,12 @@ so the tiles a frame wants first are available first and a cancellation loses at
 closed in a `finally`, so a window cancelled mid-draw releases its engine-side resources, and nothing the worker
 holds outlives the window.
 
+The pixels of a slice in the air are held by the worker outside both budgets until they enter the cache, at most
+sixteen tiles' worth, about sixteen megabytes at 512 pixels, and they are gone when the slice is stored or
+cancelled. The window decides what to draw from every tile the hint named that is neither on the GPU nor held,
+not from the cold list that decides what to warm, because a tile whose bytes an earlier window warmed is still
+undrawn. A window with nothing cold therefore still opens its operation when drawing is on, with an empty warm.
+
 The cache holds pixels and keys, and no GL object, so no operation on it needs the render context and none can
 leak a handle. It is cleared in four situations:
 

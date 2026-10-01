@@ -197,9 +197,13 @@ import com.rohittp.reng.internal.thread.PlatformLock
 import com.rohittp.reng.internal.thread.currentCallingThread
 import com.rohittp.reng.internal.thread.isCurrentThread
 import com.rohittp.reng.internal.planning.planSpatial
+import com.rohittp.reng.internal.firewall.ReadAheadWarmSummary
+import com.rohittp.reng.internal.readahead.MAX_READ_AHEAD_TILES
+import com.rohittp.reng.internal.readahead.ReadAheadRequest
 import com.rohittp.reng.internal.readahead.ReadAheadScheduler
 import com.rohittp.reng.internal.readahead.ReadAheadSnapshot
 import com.rohittp.reng.internal.readahead.ReadAheadWindow
+import com.rohittp.reng.internal.readahead.RenderedTileCache
 import com.rohittp.rentile.PreparedStyle
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
@@ -1348,6 +1352,10 @@ internal class RenGRenderer(
     internal val lastForwardedRenderPriority: RenGRenderPriority?
         get() = basemapEngineHost.lastForwardedRenderPriority
 
+    /** The lane the read-ahead worker's most recent draw was forwarded under (ADR 0077). For tests. */
+    internal val lastReadAheadRenderPriority: RenGRenderPriority?
+        get() = basemapEngineHost.lastReadAheadRenderPriority
+
     /**
      * The compiled basemap style of the **most recently prepared frame**, or `null` when that frame drew
      * neither the basemap nor its labels (or when no preparation has succeeded yet). Since E-labels task
@@ -1380,22 +1388,123 @@ internal class RenGRenderer(
      * allocates no scope and starts no coroutine. Its scope is the renderer's own, and [close] cancels
      * it.
      */
-    private val readAheadScheduler: Lazy<ReadAheadScheduler<ReadAheadSnapshot>> = lazy {
+    private val readAheadScheduler: Lazy<ReadAheadScheduler<ReadAheadRequest>> = lazy {
         ReadAheadScheduler(
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
-            warm = { snapshot, cold ->
-                basemapEngineHost.warmWindow(
-                    style = snapshot.style,
-                    tiles = cold,
-                    routes = tileTimeRoutes(
-                        manifest = snapshot.manifest,
-                        tiles = cold,
-                        accessMode = ResourceAccessMode.NORMAL,
-                        limits = configuration.resourceLimits,
-                    ),
-                )
+            warmWhenNothingIsCold = renderedTileCache != null,
+            warm = ::warmReadAheadWindow,
+        )
+    }
+
+    /**
+     * The tiles the read-ahead worker has drawn for frames not yet prepared (ADR 0077), or `null` when
+     * `maximumReadAheadRasterisedTileBytes` is zero, which is what "disabled" means everywhere below: no
+     * cache, no worker rasterisation, and `prepare` forwards the caller's priority as it always did.
+     */
+    private val renderedTileCache: RenderedTileCache? =
+        configuration.maximumReadAheadRasterisedTileBytes.takeIf { it > 0L }?.let(::RenderedTileCache)
+
+    /**
+     * One read-ahead window: warms the cold tiles' bytes, then draws the window's tiles into
+     * [renderedTileCache] while the window's operation is still open (ADR 0077).
+     *
+     * Reads only [request]'s snapshot, never the host's unlocked style maps, which belong to the
+     * preparing thread.
+     */
+    private suspend fun warmReadAheadWindow(
+        request: ReadAheadRequest,
+        cold: List<CanonicalBasemapTile>,
+    ): ReadAheadWarmSummary {
+        val snapshot = request.snapshot
+        val cache = renderedTileCache
+        val toDraw = if (cache == null) emptyList() else rasterisationCandidates(cache, snapshot.style, request.tiles)
+        if (cold.isEmpty() && toDraw.isEmpty()) return ReadAheadWarmSummary(fetched = 0, alreadyCached = 0, failed = 0)
+        val routed = if (toDraw.isEmpty()) cold else LinkedHashSet<CanonicalBasemapTile>(cold).apply { addAll(toDraw) }.toList()
+        return basemapEngineHost.warmWindow(
+            style = snapshot.style,
+            tiles = cold,
+            routes = tileTimeRoutes(
+                manifest = snapshot.manifest,
+                tiles = routed,
+                accessMode = ResourceAccessMode.NORMAL,
+                limits = configuration.resourceLimits,
+            ),
+            afterWarm = if (cache == null || toDraw.isEmpty()) {
+                null
+            } else {
+                { rasteriseReadAheadTiles(cache, snapshot.style, toDraw) }
             },
         )
+    }
+
+    /**
+     * The tiles of [wanted], in cursor order, a window should draw: those neither held by [cache] nor
+     * resident on the GPU, at most a window's worth and at most as many as the cache can hold. A tile
+     * drawn only to be evicted before its frame arrives is work thrown away, and the later tiles of a
+     * window are the ones that would push out the earlier.
+     */
+    private fun rasterisationCandidates(
+        cache: RenderedTileCache,
+        style: PreparedStyle,
+        wanted: List<CanonicalBasemapTile>,
+    ): List<CanonicalBasemapTile> {
+        val perTile = checkedRawTileBytes(1) ?: return emptyList()
+        if (perTile <= 0L) return emptyList()
+        val capacity = minOf(
+            configuration.maximumReadAheadRasterisedTileBytes / perTile,
+            MAX_READ_AHEAD_TILES.toLong(),
+        ).toInt()
+        if (capacity <= 0) return emptyList()
+        val chosen = ArrayList<CanonicalBasemapTile>(minOf(capacity, wanted.size))
+        for (tile in wanted) {
+            if (chosen.size == capacity) break
+            val key = basemapEngineHost.renderedTileKey(style, tile)
+            if (cache.contains(key) || glObjectRegistry.resident(key) != null) continue
+            chosen += tile
+        }
+        return chosen
+    }
+
+    /**
+     * Draws [tiles] at `NORMAL` priority, a slice at a time, and puts each slice's pixels into [cache] as
+     * it finishes (ADR 0077). Runs inside the read-ahead window's operation, from the worker.
+     *
+     * Reuses the host's `prepareTiles` and `renderTiles`, which `prepare` uses, under an explicit `NORMAL`
+     * access mode: the invocation open at this moment can be a foreground `prepare` in any mode. Each batch
+     * is closed in a `finally` as soon as its pixels are in hand, exactly as `prepare` closes its own, so a
+     * cancellation mid-draw releases the engine's resources and leaves nothing here.
+     */
+    private suspend fun rasteriseReadAheadTiles(
+        cache: RenderedTileCache,
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+    ) {
+        for (slice in tiles.chunked(READ_AHEAD_RASTERISE_SLICE_TILES)) {
+            currentCoroutineContext().ensureActive()
+            // Re-checked per slice: a foreground frame may have drawn or uploaded a tile meanwhile.
+            val todo = slice.filter { tile ->
+                val key = basemapEngineHost.renderedTileKey(style, tile)
+                !cache.contains(key) && glObjectRegistry.resident(key) == null
+            }
+            if (todo.isEmpty()) continue
+            val rendered = basemapEngineHost.prepareTiles(style, todo, ResourceAccessMode.NORMAL).use { prepared ->
+                basemapEngineHost.renderTiles(
+                    prepared,
+                    asRawPixels = true,
+                    priority = RenGRenderPriority.NORMAL,
+                    forReadAhead = true,
+                )
+            }
+            var stored = 0L
+            var evicted = 0L
+            for (tile in rendered) {
+                val outcome = cache.put(style.digest, tile)
+                if (outcome.stored) stored += 1L
+                evicted += outcome.evicted.toLong()
+            }
+            metricRecorder.record(RenGMetricName.READ_AHEAD_RASTERISED, stored)
+            metricRecorder.record(RenGMetricName.RENDERED_TILE_CACHE_EVICTIONS, evicted)
+        }
     }
 
     private fun readAheadSnapshotOf(
@@ -1439,20 +1548,26 @@ internal class RenGRenderer(
             if (plan.drawBasemap) spatial.tileSelection?.canonicalResources?.let(wanted::addAll)
         }
 
-        // Tiles already resident on the GPU need nothing. This reads the residency registry, which is
-        // why `readAhead` belongs on the thread that prepares and draws.
+        // Tiles already resident on the GPU need nothing. The residency registry and the tile-key memo
+        // are locked, so this is safe from any thread, as `readAhead` documents.
         val cold = wanted.filter { tile ->
             glObjectRegistry.resident(basemapEngineHost.renderedTileKey(snapshot.style, tile)) == null
         }
         if (cold.isEmpty()) return
         readAheadScheduler.value.submit(
             ReadAheadWindow(
-                context = snapshot,
+                context = ReadAheadRequest(snapshot, cold),
                 styleDigest = snapshot.style.digest,
                 tiles = cold,
             ),
         )
     }
+
+    /** Tiles and bytes the rendered-tile cache holds, or zero when it is disabled. For tests only. */
+    internal val renderedTileCacheTiles: Int
+        get() = renderedTileCache?.size ?: 0
+    internal val renderedTileCacheBytes: Long
+        get() = renderedTileCache?.bytes ?: 0L
 
     /** Suspends until no read-ahead window is queued or running. For tests only. */
     internal suspend fun awaitReadAheadIdle() {
@@ -3093,6 +3208,20 @@ internal class RenGRenderer(
         val alreadyRendered = ArrayList<RenderedBasemapTile>()
         val rememberedRaw = ArrayList<Pair<CanonicalBasemapTile, RenderedBasemapTile>>()
         val missing = ArrayList<CanonicalBasemapTile>(canonicalTiles.size)
+
+        // ADR 0077. Tiles the read-ahead worker has already drawn are taken before anything is
+        // rasterised, and enter the frame as raw tiles the batch memo handed back, so they take the same
+        // raw-tile reservation and the same fallback when it does not fit. `RELOAD` asked for the bytes to
+        // be fetched again, so it neither reads nor keeps what was drawn from the old ones.
+        val cache = renderedTileCache
+        if (cache != null) {
+            if (accessMode == ResourceAccessMode.RELOAD) cache.clear()
+            cache.adoptStyle(style.digest)
+        }
+        val takeFromCache = if (accessMode == ResourceAccessMode.RELOAD) null else cache
+        val cachedKeys = ArrayList<ResourceKey>()
+        val cachedHits = ArrayList<RenderedBasemapTile>()
+
         for (tile in canonicalTiles) {
             val key = basemapEngineHost.renderedTileKey(style, tile)
             if (glObjectRegistry.resident(key) != null) continue
@@ -3100,7 +3229,16 @@ internal class RenGRenderer(
             when (remembered?.pixels) {
                 is BasemapTilePixels.Raw -> rememberedRaw += tile to remembered
                 is BasemapTilePixels.Encoded -> alreadyRendered += remembered
-                null -> missing += tile
+                null -> {
+                    val drawnAhead = takeFromCache?.peek(key)
+                    if (drawnAhead == null) {
+                        missing += tile
+                    } else {
+                        rememberedRaw += tile to drawnAhead
+                        cachedKeys += key
+                        cachedHits += drawnAhead
+                    }
+                }
             }
         }
         // ADR 0057's budget, applied here because here is where the rasterising happens. A tile left
@@ -3146,6 +3284,16 @@ internal class RenGRenderer(
         }
         rawReservation?.let(rawReservationSink)
         if (useRememberedRaw) alreadyRendered += rememberedRaw.map { it.second }
+        if (takeFromCache != null && cachedKeys.isNotEmpty()) {
+            // A tile leaves the cache as it enters the frame (or, when the reservation did not fit, as it
+            // is redrawn): the frame holds it now, and a copy left behind would be the unbounded store of
+            // pixels ADR 0052 refused. Counted as a hit only when the frame actually took it.
+            cachedKeys.forEach(takeFromCache::remove)
+            if (useRememberedRaw) {
+                metricRecorder.record(RenGMetricName.RENDERED_TILE_CACHE_HITS, cachedKeys.size.toLong())
+                if (memo != null) cachedHits.forEach { memo[it.key] = it }
+            }
+        }
         if (missing.isEmpty()) return alreadyRendered
         // The batch owns engine-side resources and is closed as soon as the pixels are in hand: nothing
         // downstream of here reads it, because rendering is where a PreparedBatch's whole purpose ends.
@@ -3156,7 +3304,9 @@ internal class RenGRenderer(
             basemapEngineHost.renderTiles(
                 prepared,
                 asRawPixels = renderFreshAsRaw,
-                priority = priority,
+                // The foreground goes first (ADR 0077): with a read-ahead worker drawing at NORMAL in
+                // the same gate, the frame being prepared is the one thing that must never wait for it.
+                priority = if (cache != null) RenGRenderPriority.URGENT else priority,
             )
         }
         if (memo != null) freshlyRendered.forEach { memo[it.key] = it }
@@ -3403,6 +3553,10 @@ internal class RenGRenderer(
                 val generations = residentCache.generationIds(operation.selector)
                 val gpu = glObjectRegistry.retireResources(operation.selector, generations, binding)
                 val cpu = residentCache.free(operation.selector)
+                // The tiles the read-ahead worker drew are resources the selector can name too (ADR
+                // 0077). They are CPU pixels with no GL object, so this needs no context, and they are
+                // not in the resident cache, so they add nothing to its counts.
+                renderedTileCache?.free(operation.selector)
                 result = mergeFreeResults(cpu, generations, gpu)
                 null
             } else {
@@ -4534,6 +4688,9 @@ internal class RenGRenderer(
                 // engine, which is what refuses any callback still on its way.
                 readAheadSnapshot = null
                 if (readAheadScheduler.isInitialized()) readAheadScheduler.value.cancel()
+                // After the worker is cancelled, so nothing is inserting. Closed rather than merely
+                // emptied: a draw already finishing in the worker must not leave pixels behind (ADR 0077).
+                renderedTileCache?.close()
                 basemapEngineHost.close()
                 null
             } else {
@@ -4546,6 +4703,13 @@ internal class RenGRenderer(
 
 /** RGBA8, the one decoded form Cycle C produces and the one GL upload format RenG uses. */
 private const val RGBA_BYTES_PER_PIXEL: Long = 4L
+
+/**
+ * How many tiles the read-ahead worker draws in one engine batch (ADR 0077). Small enough that the tiles a
+ * frame wants first reach the cache first and a cancellation loses little; large enough that sources
+ * shared by neighbouring tiles are still acquired and decoded together.
+ */
+private const val READ_AHEAD_RASTERISE_SLICE_TILES: Int = 16
 
 private fun RenderedBasemapTile.rawPixelBytes(): Long = when (val value = pixels) {
     is BasemapTilePixels.Raw -> value.rgba.size.toLong()

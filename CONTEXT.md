@@ -112,7 +112,8 @@ basemap tiles those plans need with the planning code `prepare` uses, drops tile
 and fetches the rest into the consumer's Store while earlier frames are still being prepared, in windows of at
 most 64 tiles. Each window is its own operation and is discarded when it ends (ADR 0075). It is a hint: it
 returns at once, does nothing before the first successful `prepare` or in `CACHE_ONLY`, never changes what a
-later `prepare` returns, and does not spare a frame from failing on a tile that cannot be fetched.
+later `prepare` returns, and does not spare a frame from failing on a tile that cannot be fetched. When the
+**Rendered-Tile Cache** is enabled the same worker also draws the window's tiles ahead of the frames (ADR 0077).
 _Avoid_: Prefetch, preload, background download, tile cache, warm-up step
 
 **Tile Rasterisation Workers**:
@@ -121,6 +122,15 @@ from `1` through `16` and `1` by default. Each busy worker holds a Skia surface 
 `Dispatchers.Default` thread for the length of a tile's draw, so a consumer chooses a count that leaves cores free.
 The pixels and their order do not depend on it (ADR 0076).
 _Avoid_: Thread count, render threads, parallelism, concurrency limit
+
+**Rendered-Tile Cache**:
+The bounded, least-recently-used queue of raw tile pixels the read-ahead worker has drawn for frames not yet prepared,
+sized by `RendererConfiguration.maximumReadAheadRasterisedTileBytes` (`0`, the default, means none). It holds only
+read-ahead output, keyed by the tile's rendered-tile key and charged by byte size; a `prepare` takes a tile out of it
+as the tile enters the frame, under the same raw-tile reservation as a tile it drew itself. A style change,
+`freeResources`, a `RELOAD` preparation and `close()` empty it, and it holds no GL object. While it exists `prepare`
+renders its own tiles `URGENT` and the worker draws at `NORMAL` (ADR 0077).
+_Avoid_: Tile memo, render cache, pixel cache, prefetch cache
 
 **Output Pixel Size**:
 The renderer-lifetime positive integer width and height of every frame and target in physical output pixels.

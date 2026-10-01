@@ -44,6 +44,17 @@ internal class ReadAheadSnapshot(
 }
 
 /**
+ * What the renderer's window needs beyond the cold list the scheduler computes (ADR 0077): the
+ * [snapshot] it was planned against, and every [tiles] the hint named that are not GPU-resident, in
+ * cursor order. The scheduler's cold list leaves out tiles an earlier window already warmed, but a tile
+ * warmed by one window may still be undrawn, so the drawing works from this list instead.
+ */
+internal class ReadAheadRequest(
+    val snapshot: ReadAheadSnapshot,
+    val tiles: List<CanonicalBasemapTile>,
+)
+
+/**
  * One hint's worth of work: the candidate tiles in cursor order, the [styleDigest] they are warmed
  * under, and the [context] the warm needs -- in the renderer, the [ReadAheadSnapshot] it was planned
  * against. Generic over that context so the scheduler can be exercised without an engine.
@@ -73,6 +84,13 @@ internal class ReadAheadWindow<C : Any>(
 internal class ReadAheadScheduler<C : Any>(
     private val scope: CoroutineScope,
     private val maximumTiles: Int = MAX_READ_AHEAD_TILES,
+    /**
+     * Whether [warm] is called for a window with nothing cold left to warm (ADR 0077). Off, such a window
+     * is skipped, as in ADR 0075. On, it is called with an empty list, because the renderer draws a
+     * window's tiles inside the window's own operation even when their bytes were warmed by an earlier
+     * window, and an operation is only opened by [warm].
+     */
+    private val warmWhenNothingIsCold: Boolean = false,
     private val warm: suspend (C, List<CanonicalBasemapTile>) -> ReadAheadWarmSummary,
 ) {
     private class State<C : Any>(val pending: ReadAheadWindow<C>?, val running: Boolean)
@@ -143,7 +161,7 @@ internal class ReadAheadScheduler<C : Any>(
             if (cold.size == maximumTiles) break
             if (tile !in warmed) cold += tile
         }
-        if (cold.isEmpty()) return
+        if (cold.isEmpty() && !warmWhenNothingIsCold) return
         val summary = warm(window.context, cold)
         if (summary.failed == 0 && summary.fetched + summary.alreadyCached > 0) warmed.addAll(cold)
     }

@@ -171,7 +171,7 @@ private class DistinctTileTransport : Transport {
  * (uncompressed) deflate blocks so the test needs neither a compressor nor a stored blob. Its checksums
  * are computed here, by the textbook bitwise CRC-32 and Adler-32, and not by anything under test.
  */
-private fun colouredPng(url: String): ByteArray {
+internal fun colouredPng(url: String): ByteArray {
     var hash = 0x811C9DC5.toInt()
     for (character in url) hash = (hash xor character.code) * 16777619
     val rows = ByteArray(4 * (1 + 4 * 3))

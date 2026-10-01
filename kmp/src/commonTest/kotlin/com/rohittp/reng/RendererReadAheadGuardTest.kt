@@ -53,4 +53,14 @@ class RendererReadAheadGuardTest {
         assertEquals(emptyList(), transport.requestedUrls())
         assertEquals(0L, renderer.queryMetrics()[RenGMetricName.READ_AHEAD_FETCHED], "a closed renderer reports nothing")
     }
+
+    @Test
+    fun waitingForIdleWithNothingEverHintedReturnsAtOnce() = runTest {
+        val renderer = styleRenderer(StyleTransport())
+
+        // Nothing has been hinted, so no worker exists: the public wait must not create one or block.
+        kotlinx.coroutines.withTimeout(5_000) { renderer.awaitReadAheadIdle() }
+        renderer.close()
+        kotlinx.coroutines.withTimeout(5_000) { renderer.awaitReadAheadIdle() }
+    }
 }

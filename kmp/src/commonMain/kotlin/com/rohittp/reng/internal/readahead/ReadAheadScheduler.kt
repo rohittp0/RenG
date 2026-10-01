@@ -93,7 +93,12 @@ internal class ReadAheadScheduler<C : Any>(
     private val warmWhenNothingIsCold: Boolean = false,
     private val warm: suspend (C, List<CanonicalBasemapTile>) -> ReadAheadWarmSummary,
 ) {
-    private class State<C : Any>(val pending: ReadAheadWindow<C>?, val running: Boolean)
+    private class State<C : Any>(
+        val pending: ReadAheadWindow<C>?,
+        val running: Boolean,
+        /** The worker is cancelled or finished: nothing queued will ever run, so nobody should wait for it. */
+        val stopped: Boolean = false,
+    )
 
     private val state = MutableStateFlow(State<C>(pending = null, running = false))
 
@@ -104,24 +109,40 @@ internal class ReadAheadScheduler<C : Any>(
 
     private val worker: Job = scope.launch { runWorker() }
 
-    /** Queues [window], replacing any window queued but not yet started. Non-suspending and thread-safe. */
-    fun submit(window: ReadAheadWindow<C>) {
-        state.update { State(pending = window, running = it.running) }
+    init {
+        // However the worker ends -- cancel(), a scope cancelled from outside, or a coroutine that never
+        // got to start -- a waiter must be released and a later window must not look pending forever.
+        worker.invokeOnCompletion { markStopped() }
     }
 
-    /** Suspends until nothing is queued and nothing is running. For tests: the renderer never waits. */
+    private fun markStopped() {
+        state.update { State(pending = null, running = false, stopped = true) }
+    }
+
+    /** Queues [window], replacing any window queued but not yet started. Non-suspending and thread-safe. */
+    fun submit(window: ReadAheadWindow<C>) {
+        state.update {
+            if (it.stopped) it else State(pending = window, running = it.running)
+        }
+    }
+
+    /**
+     * Suspends until nothing is queued and nothing is running, or the worker has been cancelled, in which
+     * case nothing queued will ever run and this returns at once (ADR 0077).
+     */
     suspend fun awaitIdle() {
-        state.first { it.pending == null && !it.running }
+        state.first { it.stopped || (it.pending == null && !it.running) }
     }
 
     /** Cancels the worker and everything it owns. Non-blocking and idempotent. */
     fun cancel() {
         scope.cancel()
+        markStopped()
     }
 
     /** Cancels and waits for the worker to finish. For tests. */
     suspend fun cancelAndJoin() {
-        scope.cancel()
+        cancel()
         worker.join()
     }
 
@@ -136,7 +157,7 @@ internal class ReadAheadScheduler<C : Any>(
                 // Best-effort by contract. A closed engine, an unowned style or a firewall refusal all
                 // end this window and nothing else; the next one starts clean.
             } finally {
-                state.update { State(pending = it.pending, running = false) }
+                state.update { State(pending = it.pending, running = false, stopped = it.stopped) }
             }
         }
     }
@@ -145,7 +166,9 @@ internal class ReadAheadScheduler<C : Any>(
         while (true) {
             val observed = state.first { it.pending != null }
             val window = observed.pending ?: continue
-            if (state.compareAndSet(observed, State<C>(pending = null, running = true))) return window
+            if (state.compareAndSet(observed, State<C>(pending = null, running = true, stopped = observed.stopped))) {
+                return window
+            }
         }
     }
 

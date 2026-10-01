@@ -9,6 +9,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
@@ -88,6 +90,43 @@ class ReadAheadRasterisationSchedulingTest {
         withContext(Dispatchers.Default) { kotlinx.coroutines.delay(100) }
         assertEquals(listOf("first"), started.snapshot(), "nothing runs after the worker is cancelled")
         assertTrue(unwound.isCompleted, "the window's cleanup ran, which is where a batch is closed")
+    }
+
+    @Test
+    fun waitingForIdleReturnsOnceTheWorkerIsCancelledEvenWithAWindowStillQueued() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val neverReleased = CompletableDeferred<Unit>()
+        val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
+            entered.complete(Unit)
+            neverReleased.await()
+            ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
+        }
+        scheduler.submit(ReadAheadWindow("running", "style", tiles(2)))
+        real { entered.await() }
+        scheduler.submit(ReadAheadWindow("queued", "style", tiles(3)))
+
+        // Someone is already waiting when the cancel arrives: it must be released, not left hanging on a
+        // queue that will never drain.
+        val waiter = async(Dispatchers.Default) { scheduler.awaitIdle() }
+        withContext(Dispatchers.Default) { delay(50) }
+        assertTrue(!waiter.isCompleted, "still waiting while a window runs and another is queued")
+
+        scheduler.cancel()
+        real { waiter.await() }
+        real { scheduler.awaitIdle() }
+        real { scheduler.cancelAndJoin() }
+    }
+
+    @Test
+    fun waitingForIdleOnACancelledOrNeverUsedSchedulerReturnsAtOnce() = runTest {
+        val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
+            ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
+        }
+        real { scheduler.awaitIdle() }
+        scheduler.cancelAndJoin()
+        scheduler.submit(ReadAheadWindow("late", "style", tiles(1)))
+        real { scheduler.awaitIdle() }
+        real { scheduler.awaitIdle() }
     }
 
     private class Collected<T> {

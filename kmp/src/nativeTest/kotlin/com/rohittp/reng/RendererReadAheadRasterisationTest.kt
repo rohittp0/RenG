@@ -292,6 +292,43 @@ class RendererReadAheadRasterisationTest {
         }
     }
 
+    @Test
+    fun waitingForIdleReturnsAfterAWindowCompletesAndHoldsWhileOneRuns() = runTest {
+        val store = SlowRasterStore()
+        val renderer = renderer(budgetBytes = ROOMY_BUDGET, store = store)
+        try {
+            renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+            store.delayMillis = 200L
+            renderer.readAhead(listOf(shifted(1L)))
+            val waiter = async(Dispatchers.Default) { renderer.awaitReadAheadIdle() }
+            real { delay(50) }
+            assertTrue(!waiter.isCompleted, "a window is running, so the wait holds")
+
+            real { waiter.await() }
+            assertTrue(renderer.queryMetrics()[RenGMetricName.READ_AHEAD_RASTERISED] > 0L, "returned only after the drawing")
+            real { renderer.awaitReadAheadIdle() }
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun waitingForIdleReturnsWhenCloseRunsWhileAWindowIsRunning() = runTest {
+        val store = SlowRasterStore()
+        val renderer = renderer(budgetBytes = ROOMY_BUDGET, store = store)
+        renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+        store.delayMillis = 400L
+        renderer.readAhead(listOf(shifted(1L), farShifted(2L)))
+        val waiter = async(Dispatchers.Default) { renderer.awaitReadAheadIdle() }
+        real { delay(100) }
+        assertTrue(!waiter.isCompleted, "the window is still running")
+
+        renderer.close()
+
+        real { waiter.await() }
+        real { renderer.awaitReadAheadIdle() }
+    }
+
     // ---- fixtures -------------------------------------------------------------------------------
 
     private class Outcome(

@@ -242,6 +242,22 @@ public sealed interface Renderer : AutoCloseable {
      */
     public fun readAhead(plans: List<FramePlan>): Unit
 
+    /**
+     * Suspends until no read-ahead window is queued or running, and returns at once when there is none:
+     * before any [readAhead] has queued work, and after [close], including when [close] runs while this is
+     * waiting (ADR 0077).
+     *
+     * **It is for pacing, not for gating frames.** A consumer sweeping a long timeline can call [readAhead]
+     * for the next stretch and wait here before hinting the one after, so the worker is never asked to
+     * fetch and draw further ahead than the frames will reach. A [prepare] never needs this: it is correct
+     * whether or not a window has finished, and waiting for one only delays a frame that could have gone
+     * ahead and drawn for itself. A window that fails still ends, so a tile that will not load cannot hold
+     * this up.
+     *
+     * Cancelling the caller cancels the wait and nothing else; the worker carries on.
+     */
+    public suspend fun awaitReadAheadIdle(): Unit
+
     public suspend fun cancelPreparations(): Unit
 
     public fun clearFrameHistory(): Unit

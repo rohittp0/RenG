@@ -163,3 +163,18 @@ whether or not its frames arrive as hinted: a hint the consumer abandons has dra
 the cost the cap and the budget bound, and it is why the default is off. The engine's concurrency is relied on
 to be safe for a second `prepareBatch` and `renderRaw` beside a foreground preparation's own, as it already is
 for a warm; a test runs the two together to put that reliance on record.
+
+## Pacing a sweep, and why the wait must not hang
+
+Drawing makes a window long enough that a consumer sweeping a timeline wants to know when the worker has
+caught up, so it hints the next stretch only when the last is done rather than naming frames minutes ahead.
+`Renderer.awaitReadAheadIdle()` suspends until no window is queued or running. It is for that pacing and not
+for gating frames: `prepare` is correct whether or not a window has finished, and waiting for one only delays
+a frame that could have drawn for itself.
+
+The wait is a public promise, so it must end in every state the worker can be in. With no hint yet there is no
+worker and it returns at once, without creating one. The scheduler's idle test used to be "nothing pending and
+nothing running", and a cancelled worker can leave a window pending for ever, so a waiter on a closed renderer
+would have hung. The scheduler now records that it has stopped, whether `close()` cancelled it, a scope was
+cancelled from outside, or it never started, and a stopped scheduler is idle: it discards what was queued,
+refuses new windows, and releases every waiter, including those already waiting when the cancel arrived.

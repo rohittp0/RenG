@@ -1569,8 +1569,7 @@ internal class RenGRenderer(
     internal val renderedTileCacheBytes: Long
         get() = renderedTileCache?.bytes ?: 0L
 
-    /** Suspends until no read-ahead window is queued or running. For tests only. */
-    internal suspend fun awaitReadAheadIdle() {
+    override suspend fun awaitReadAheadIdle() {
         if (readAheadScheduler.isInitialized()) readAheadScheduler.value.awaitIdle()
     }
 

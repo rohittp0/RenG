@@ -40,6 +40,7 @@ public class RendererConfiguration(
     maximumConsumerPipelinesPerFrame: Int = 256,
     maximumConcurrentTileRasterisations: Int = 1,
     maximumReadAheadRasterisedTileBytes: Long = 0L,
+    presentFailedTilesProvisionally: Boolean = false,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -139,6 +140,45 @@ public class RendererConfiguration(
      */
     public val maximumReadAheadRasterisedTileBytes: Long
 
+    /**
+     * Whether a `prepare` may draw a basemap tile whose own imagery could not be downloaded from a resident
+     * ancestor of that tile instead of failing; **off by default**, which fails the frame exactly as every
+     * earlier release did (ADR 0057, "A tile that could not be downloaded").
+     *
+     * **Why it exists.** Measured in an editor on a phone with no network, two imagery tiles missing from
+     * the Store could not be fetched. Every `prepare` whose view needed either one threw
+     * [RenGErrorCode.RESOURCE_UNAVAILABLE] at [PipelineStage.RESOURCE_LOOKUP]: 397 failures, and 5.6 s of
+     * playback in which the preview did not move, although the ground around both tiles, and a coarser
+     * tile covering each of them, was already on the GPU. Which tile the engine could not acquire is
+     * known exactly, so the frame can do what [ResourceLimits.maximumTilesRasterisedPerFrame] already lets
+     * it do for a tile it chose not to draw: magnify the nearest resident ancestor over it, and say so.
+     *
+     * **On**, a `prepare` whose basemap tiles fail to acquire leaves out every failed tile that has a
+     * resident ancestor and asks for the rest once more. The frame draws those tiles from their
+     * ancestors, reports [DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY] when it is drawn, and counts them
+     * in [RenGMetricName.TILES_PRESENTED_AFTER_FAILURE]. A tile drawn that way is still not resident, so
+     * the next `prepare` asks for it again, and the real tile replaces the ancestor's pixels on the first
+     * frame its download succeeds; nothing runs in the background.
+     *
+     * The frame still fails, with exactly the failure it fails with today, when:
+     * - a failed tile has no resident ancestor. Zooming *out* into ground never drawn before has nothing
+     *   coarser to borrow, and a frame that cannot draw its ground is not an improvement on one that fails;
+     * - anything other than a raster or vector colour tile failed: a `raster-dem` tile (a hillshade
+     *   layer's or terrain's), the style, a sprite, a TileJSON or a glyph range;
+     * - the failure is not a failure to *acquire* the resource: a tile that arrived and does not decode, a
+     *   store fault, or any rendering error;
+     * - the engine could not name which tiles the failure belongs to, or named a resource RenG never
+     *   routed (that is RenG's own defect, and an ancestor must not hide it);
+     * - the second request fails too.
+     *
+     * **Leave it off for an export.** A frame drawn this way has a coarser picture where the missing tile
+     * belongs, and a video encoder cannot tell; the diagnostic is the only record of it. It is meant for an
+     * interactive preview, where a blurred patch for a few frames is better than a frozen view. Tile
+     * substitution inside the engine stays disabled either way (ADR 0016): this never draws a tile the
+     * frame did not already have on the GPU.
+     */
+    public val presentFailedTilesProvisionally: Boolean
+
     init {
         require(maximumBasemapTileInstances in 1..4096) {
             "maximumBasemapTileInstances must be within the supported range"
@@ -176,6 +216,7 @@ public class RendererConfiguration(
         this.maximumConsumerPipelinesPerFrame = maximumConsumerPipelinesPerFrame
         this.maximumConcurrentTileRasterisations = maximumConcurrentTileRasterisations
         this.maximumReadAheadRasterisedTileBytes = maximumReadAheadRasterisedTileBytes
+        this.presentFailedTilesProvisionally = presentFailedTilesProvisionally
     }
 }
 

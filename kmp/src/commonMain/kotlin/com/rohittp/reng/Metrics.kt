@@ -101,7 +101,8 @@ public enum class RenGMetricName {
      *
      * **Declared after every engine counter, and that is an ABI decision**, the same one
      * `ResourceLimits` documents for its trailing fields: appending a constant leaves every existing
-     * ordinal where it is. The `READ_AHEAD_` and `RENDERED_TILE_CACHE_` counters below follow it for the same reason.
+     * ordinal where it is. The `READ_AHEAD_`, `RENDERED_TILE_CACHE_` and `TILES_PRESENTED_AFTER_FAILURE`
+     * counters below follow it for the same reason.
      */
     ENGINE_METRICS_UNRECOGNISED,
 
@@ -147,6 +148,19 @@ public enum class RenGMetricName {
      * not counted: they are not a consequence of the budget.
      */
     RENDERED_TILE_CACHE_EVICTIONS,
+
+    /**
+     * Tiles a `prepare` drew from a resident ancestor because their own resources could not be acquired
+     * (ADR 0057). Counts only with `RendererConfiguration.presentFailedTilesProvisionally` on, and only for
+     * frames that then prepared: a frame that failed anyway counts nothing.
+     *
+     * A tile is counted once per `prepare` that left it out, so a tile still missing across thirty frames
+     * counts thirty; that is the useful reading, because each is a frame shown with a coarser patch.
+     * Tiles a rasterisation budget deferred are not counted here: those were a choice, these a failure.
+     * Kept by RenG itself, which is why it carries no `ENGINE_` prefix, and appended last for the ordinal
+     * reason [ENGINE_METRICS_UNRECOGNISED] gives.
+     */
+    TILES_PRESENTED_AFTER_FAILURE,
 }
 
 /**

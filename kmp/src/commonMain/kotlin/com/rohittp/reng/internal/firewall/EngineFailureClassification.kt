@@ -14,6 +14,7 @@ import com.rohittp.rentile.RentileException
 import com.rohittp.rentile.ResourceAcquisitionException
 import com.rohittp.rentile.ResourceDecodeException
 import com.rohittp.rentile.TileSubstitutionException
+import com.rohittp.rentile.TileId
 import com.rohittp.rentile.TileSubstitutionLimitException
 import kotlinx.coroutines.CancellationException
 import com.rohittp.rentile.ResourceClass as RentileResourceClass
@@ -48,8 +49,10 @@ private const val MAXIMUM_UNWRAP_DEPTH: Int = 8
  *
  * **Redaction.** Exactly three engine values are ever carried across: the [RentileErrorCode] itself,
  * `resourceClass` (an enum), and `sanitizedResourceId` (already `sha256Hex` of a credential-redacted
- * url). The engine's `message` is dropped whole, the `diagnostics` hanging off a *failure* are never
- * read (Rentile's `RenderDiagnostic` carries free-form `details`), and neither is `affectedTiles`.
+ * url). The engine's `message` is dropped whole, and the `diagnostics` hanging off a *failure* are never
+ * read (Rentile's `RenderDiagnostic` carries free-form `details`). `affectedTiles` is not read *here*
+ * either: [unavailableColourResourcesOf] reads it beside this function, for one opt-in decision about
+ * which tiles a frame may draw from an ancestor (ADR 0057), and nothing it reads reaches a descriptor.
  * The one place RenG does read an engine diagnostic is [reportLabelContentExclusions], on a batch
  * that succeeded, and it carries across a severity and nothing else (ADR 0036) -- never a `details`
  * entry, and never here.
@@ -234,4 +237,72 @@ private fun externalResourceFailure(
             ),
         ),
     )
+}
+
+/**
+ * One colour resource the engine could not acquire, and the requested tiles it names.
+ *
+ * Engine vocabulary on purpose, and confined to this package: [BasemapEngineHost] turns it into RenG's
+ * own tiles and keys before anything leaves the firewall (ADR 0016).
+ */
+internal class UnavailableColourResource(
+    val resourceClass: RentileResourceClass,
+    val sanitizedResourceId: String,
+    val affectedTiles: List<TileId>,
+)
+
+/**
+ * The engine classes whose failure a frame may present from an ancestor: the two that colour a tile.
+ *
+ * `DEM_TILE` is excluded although the engine would substitute one, because elevation is not colour. A
+ * hillshade layer's DEM shades the tile's pixels in ways a magnified ancestor does not reproduce, and
+ * terrain's DEM is acquired on a different path that this decision never sees. Everything else a
+ * preparation fetches is shared by every tile (a sprite, a TileJSON, a glyph range) and so has no
+ * per-tile answer at all.
+ */
+private val PRESENTABLE_COLOUR_CLASSES: Set<RentileResourceClass> =
+    setOf(RentileResourceClass.RASTER_TILE, RentileResourceClass.VECTOR_TILE)
+
+/**
+ * Every colour resource a failed `prepareBatch` could not acquire, or `null` when the failure is anything
+ * else as well (ADR 0057, "A tile that could not be downloaded").
+ *
+ * The shapes accepted are exactly the two Rentile 0.11.3's `throwAcquisitionFailures` produces for a batch
+ * whose substitution is disabled: one [ResourceAcquisitionException], or a [BatchRenderException] whose
+ * primary and concurrent failures are each one. **Every** member must be an acquisition failure of a
+ * [PRESENTABLE_COLOUR_CLASSES] class naming at least one tile and carrying a well-formed digest; a single
+ * member that is not, of any kind, makes the whole answer `null`, because a frame that is allowed to hide
+ * some of its failures must be told about all of them. A wrapper nested more deeply, a substitution
+ * wrapper (unreachable with substitution disabled), a decode or store failure, and any throwable the
+ * engine did not declare are all `null` too.
+ *
+ * Reads `affectedTiles` and nothing else [classifyEngineFailure] declines to read: never the `message`,
+ * never `diagnostics`, never `statusCode`. A status code is deliberately not consulted. The phone this
+ * was measured on was offline, which produces no status at all, and a 403 on one tile whose ancestor the
+ * same credential fetched is no different to the consumer from a 503: either way the frame has the
+ * ancestor's pixels and not the tile's.
+ *
+ * **One limit, inherited from the engine.** Rentile acquires a source sample once however many requested
+ * tiles share it, and the failure names only the tile whose sample it acquired. Two tiles overzoomed past
+ * a source's `maxzoom` can share one sample, so the failure names one of them; the other fails again on
+ * the second request and the frame fails closed, as it does today.
+ */
+internal fun unavailableColourResourcesOf(failure: Throwable): List<UnavailableColourResource>? {
+    if (failure is CancellationException) throw failure
+    val members: List<RentileException> = when (failure) {
+        is ResourceAcquisitionException -> listOf(failure)
+        is BatchRenderException -> listOf(failure.primaryFailure) + failure.concurrentFailures
+        else -> return null
+    }
+    return members.map { member ->
+        val acquisition = member as? ResourceAcquisitionException ?: return null
+        if (acquisition.resourceClass !in PRESENTABLE_COLOUR_CLASSES) return null
+        if (acquisition.affectedTiles.isEmpty()) return null
+        if (!isLowercaseSha256(acquisition.sanitizedResourceId)) return null
+        UnavailableColourResource(
+            resourceClass = acquisition.resourceClass,
+            sanitizedResourceId = acquisition.sanitizedResourceId,
+            affectedTiles = acquisition.affectedTiles,
+        )
+    }
 }

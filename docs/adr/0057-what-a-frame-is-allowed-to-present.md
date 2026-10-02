@@ -88,3 +88,70 @@ preparation time, and it was easy to miss because the two are worded differently
 hundred lines apart. It admits the same third way. Both are widened by exactly one clause, and
 neither is relaxed: a tile with no rendered bytes, no resident texture and no resident ancestor is
 still a defect at prepare and still a typed failure at draw.
+
+## A tile that could not be downloaded
+
+The permission above was granted for a tile the frame *chose* not to draw. The same permission, opted
+into separately, now covers a tile the frame *could not* draw because its resource never arrived.
+
+**What it answers.** Measured in Geoanimator's editor on an OPPO phone with no network: two raster
+imagery tiles were missing from the consumer's Store and could not download. Every `prepare()` whose
+view needed either one threw `RESOURCE_UNAVAILABLE` at `RESOURCE_LOOKUP` — 397 failures — and the
+preview froze for 5.6 s of playback, while a coarser tile over each of them was resident on the GPU
+throughout. The engine reports exactly which tiles it could not acquire (Rentile's `affectedTiles`), so
+the frame knows which of its tiles it could draw from an ancestor instead.
+
+**The permission.** With `RendererConfiguration.presentFailedTilesProvisionally` on, a preparation whose
+basemap tiles fail to acquire may leave out every failed tile that has a resident ancestor, ask the
+engine for the rest once more, and draw the left-out tiles from their ancestors exactly as a
+budget-deferred tile is drawn: through the same colour window, reported by the same
+`GROUND_PRESENTED_PROVISIONALLY`, and counted separately by
+`RenGMetricName.TILES_PRESENTED_AFTER_FAILURE`.
+
+**Why opt-in, and why for a preview only.** An export must never encode a frame with a hole it was not
+told about, and a video encoder cannot read a diagnostic. Off, the default, is every earlier release's
+behaviour. A preview is the opposite trade: a blurred patch for a few frames is better than a view that
+does not move.
+
+**Why `RendererConfiguration` and not `ResourceLimits`, where the budget lives.** The budget is a limit
+— a number bounding work — and `ResourceLimits` is a `data class` of limits whose every field is a
+number. This is a policy about what a frame may show, the same kind of renderer-lifetime choice as
+`terrainShading`, and `RendererConfiguration` is the plain class built so that such an option costs one
+constructor parameter and no `copy`/`componentN` growth on the ABI. It is a property of the renderer
+rather than of a frame because the choice belongs to what the renderer is *for*: a consumer that both
+previews and exports keeps it off on the exporting renderer.
+
+**Ancestors only.** The rule is the one above, unchanged: never a fetch, never a render, never a guess.
+A failed tile with no resident ancestor fails the frame, which means zooming *out* into ground never
+shown before still fails, because there is nothing coarser on the GPU to borrow. The decision is all or
+nothing: if any tile the failure names has no ancestor, the original failure is rethrown unchanged, so a
+consumer's handling of it is exactly what it is today.
+
+**What stays fail-closed.** Everything that is not a colour tile failing to *acquire*:
+
+- a `raster-dem` tile, a hillshade layer's or terrain's: elevation is not colour, and terrain's DEM is
+  acquired on a separate path this never sees;
+- the style, a sprite, a TileJSON, a glyph range: shared by every tile, so there is no per-tile answer;
+- a tile that arrived and does not decode, a Store fault, any rendering error;
+- a failure that names no tile, a tile the frame did not ask for, or a resource whose digest names no
+  route this invocation preregistered. The last is load-bearing: the firewall refusing a url RenG never
+  derived also reaches the engine as an acquisition failure, and an ancestor must not hide RenG's own
+  defect;
+- the second request failing. The retry happens once, and whatever it throws is the frame's failure.
+
+One limit is inherited from the engine. It acquires a source sample once however many requested tiles
+share it, and the failure names only the tile whose sample it was. Two tiles overzoomed past a source's
+`maxzoom` can share one sample, so only one of them is named; the other fails the second request and the
+frame fails as it does today.
+
+**Refinement is unchanged.** A tile drawn from its ancestor is still not resident, so the next
+`prepare()` asks for it again. The first frame whose download succeeds draws the real tile, and nothing
+runs in the background. The retry costs no network for the tiles that did arrive, because the
+invocation's firewall registry latched their responses. The read-ahead worker (ADR 0075, ADR 0077) is
+not affected; its own preparation fails as it always did.
+
+**The firewall is unchanged in shape.** Tile substitution stays disabled at every engine call (ADR 0016).
+The affected tiles are read at the one seam allowed to read a Rentile exception, mapped back onto the
+`CanonicalBasemapTile`s the frame asked for, and handed to the renderer as an internal result beside the
+exact `RenGException` today's path would throw. No engine type reaches the public API, and the public
+failure gains no field.

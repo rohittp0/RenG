@@ -180,6 +180,7 @@ final enum class com.rohittp.reng/RenGMetricName : kotlin/Enum<com.rohittp.reng/
     enum entry READ_AHEAD_RASTERISED // com.rohittp.reng/RenGMetricName.READ_AHEAD_RASTERISED|null[0]
     enum entry RENDERED_TILE_CACHE_EVICTIONS // com.rohittp.reng/RenGMetricName.RENDERED_TILE_CACHE_EVICTIONS|null[0]
     enum entry RENDERED_TILE_CACHE_HITS // com.rohittp.reng/RenGMetricName.RENDERED_TILE_CACHE_HITS|null[0]
+    enum entry TILES_PRESENTED_AFTER_FAILURE // com.rohittp.reng/RenGMetricName.TILES_PRESENTED_AFTER_FAILURE|null[0]
 
     final val entries // com.rohittp.reng/RenGMetricName.entries|#static{}entries[0]
         final fun <get-entries>(): kotlin.enums/EnumEntries<com.rohittp.reng/RenGMetricName> // com.rohittp.reng/RenGMetricName.entries.<get-entries>|<get-entries>#static(){}[0]
@@ -807,7 +808,7 @@ final class com.rohittp.reng/RenGException : kotlin/RuntimeException { // com.ro
 }
 
 final class com.rohittp.reng/RendererConfiguration { // com.rohittp.reng/RendererConfiguration|null[0]
-    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Long = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean;kotlin.Int;kotlin.Int;kotlin.Int;kotlin.Long){}[0]
+    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Boolean = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean;kotlin.Int;kotlin.Int;kotlin.Int;kotlin.Long;kotlin.Boolean){}[0]
 
     final val basemapStyle // com.rohittp.reng/RendererConfiguration.basemapStyle|{}basemapStyle[0]
         final fun <get-basemapStyle>(): com.rohittp.reng/ResourceLocator? // com.rohittp.reng/RendererConfiguration.basemapStyle.<get-basemapStyle>|<get-basemapStyle>(){}[0]
@@ -829,6 +830,8 @@ final class com.rohittp.reng/RendererConfiguration { // com.rohittp.reng/Rendere
         final fun <get-maximumReadAheadRasterisedTileBytes>(): kotlin/Long // com.rohittp.reng/RendererConfiguration.maximumReadAheadRasterisedTileBytes.<get-maximumReadAheadRasterisedTileBytes>|<get-maximumReadAheadRasterisedTileBytes>(){}[0]
     final val outputPixelSize // com.rohittp.reng/RendererConfiguration.outputPixelSize|{}outputPixelSize[0]
         final fun <get-outputPixelSize>(): com.rohittp.reng/OutputPixelSize // com.rohittp.reng/RendererConfiguration.outputPixelSize.<get-outputPixelSize>|<get-outputPixelSize>(){}[0]
+    final val presentFailedTilesProvisionally // com.rohittp.reng/RendererConfiguration.presentFailedTilesProvisionally|{}presentFailedTilesProvisionally[0]
+        final fun <get-presentFailedTilesProvisionally>(): kotlin/Boolean // com.rohittp.reng/RendererConfiguration.presentFailedTilesProvisionally.<get-presentFailedTilesProvisionally>|<get-presentFailedTilesProvisionally>(){}[0]
     final val resourceLimits // com.rohittp.reng/RendererConfiguration.resourceLimits|{}resourceLimits[0]
         final fun <get-resourceLimits>(): com.rohittp.reng/ResourceLimits // com.rohittp.reng/RendererConfiguration.resourceLimits.<get-resourceLimits>|<get-resourceLimits>(){}[0]
     final val store // com.rohittp.reng/RendererConfiguration.store|{}store[0]

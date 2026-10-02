@@ -46,7 +46,9 @@ matches the latched response and the stricter RenG record rules. A valid `304` i
 stale baseline and presented to Rentile as a bounded full response; every other redirect or disallowed status
 fails.
 
-Tile substitution remains disabled, and RenG never invokes Rentile's exact-tile retry helper. Internal
+Tile substitution remains disabled, and RenG never invokes Rentile's exact-tile retry helper. (A frame
+that opts into ADR 0057's `presentFailedTilesProvisionally` may draw a failed colour tile from an ancestor
+*already resident on RenG's GPU*; that is not engine substitution, and the engine call is unchanged.) Internal
 Rentile adapter counts are not public retries: only consumer Transport and Store calls define RenG's
 observable boundary. Adapter text, locators, validators, and causes never cross that boundary; cancellation
 remains an unwrapped coroutine cancellation rather than a RenG failure.

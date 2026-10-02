@@ -2,7 +2,12 @@ package com.rohittp.reng
 
 import com.rohittp.reng.internal.firewall.BasemapTilePixels
 import com.rohittp.reng.internal.firewall.basemapTileKey
+import com.rohittp.reng.internal.gl.GROUND_COLOUR_WINDOW_UNIFORM_NAME
+import com.rohittp.reng.internal.gl.RecordingGlBinding
+import com.rohittp.reng.internal.gl.RenderContextIdentity
+import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
+import kotlin.concurrent.Volatile
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -215,6 +220,178 @@ class RendererBasemapTileTest {
         assertEquals(4L, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
         assertEquals(emptyList(), sink.provisional, "an unbudgeted frame presents nothing provisional")
         frame.close()
+    }
+
+    // ---- ADR 0057, "A tile that could not be downloaded" -------------------------------------------
+    //
+    // One tile of the fine frame's four, `(lod 4, x 2, y 11)`, cannot be fetched: its transport throws,
+    // which is what a phone with no network produces. The coarse frame's LOD-2 tile over it is resident.
+    //
+    // The recording binding rasterises nothing, so "the tile's region is the ancestor's pixels" is
+    // asserted as the relationship the GPU would turn into those pixels: the tile's ground draw binds a
+    // texture the coarse frame uploaded and samples it through a window that is not the identity, while
+    // every other tile binds a texture of its own through the identity. GroundPipelineTest pins what the
+    // window does to the uv, and GroundTileWindowTest the window's arithmetic.
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedIsDrawnFromItsResidentAncestorWhenTheConsumerOptsIn() = runTest {
+        val sink = RecordingProvisionalSink()
+        val transport = OfflineTileTransport(FAILING_TILE_URL)
+        val binding = windowRecordingBinding()
+        val renderer = failedTileRenderer(transport, presentFailedTiles = true, sink = sink, binding = binding)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val coarseTextures = drawAndCollect(renderer, binding, target, coarseBasemapPlan(frameIndex = 0L))
+            .mapTo(HashSet()) { it.texture }
+        assertTrue(coarseTextures.isNotEmpty(), "the coarse frame must draw ground, or nothing below means anything")
+
+        val fine = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        assertEquals(
+            listOf(
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 1),
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 2),
+                CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 1),
+            ),
+            fine.basemapTiles.map { it.tile }.sortedWith(compareBy({ it.tileY }, { it.canonicalX })),
+            "every tile but the one that failed is rasterised; the failed one is left out, not faked",
+        )
+        // ADR 0044: the reservation was taken before the failure removed a tile, and must have been
+        // given back down to exactly the three tiles' raw pixels the frame now carries.
+        assertEquals(3L * TILE_OUTPUT_SIZE.width * TILE_OUTPUT_SIZE.height * 4L, fine.rawTileBytes)
+        assertEquals(fine.rawTileBytes, renderer.inFlightRawTileBytes, "the reservation covers exactly those pixels")
+        binding.log.clear()
+        renderer.draw(fine, target)
+        val draws = groundDraws(binding.log)
+        fine.close()
+        assertEquals(0L, renderer.inFlightRawTileBytes, "and closing the frame returns all of it")
+
+        val provisional = draws.filter { it.window != IDENTITY_WINDOW }
+        val exact = draws.filter { it.window == IDENTITY_WINDOW }
+        assertEquals(1, provisional.map { it.window }.distinct().size, "exactly one tile is provisional: $draws")
+        assertTrue(
+            provisional.all { it.texture in coarseTextures },
+            "the failed tile is drawn from a texture the coarse frame uploaded, its ancestor's: $draws",
+        )
+        assertEquals(
+            0.25f,
+            provisional.first().window[0],
+            "the nearest resident ancestor is two levels up, so the window is a quarter of it",
+        )
+        assertEquals(3, exact.map { it.texture }.distinct().size, "the three other tiles draw their own textures")
+        assertTrue(exact.none { it.texture in coarseTextures }, "and none of them borrows the ancestor: $draws")
+
+        val reported = assertNotNull(sink.provisional.singleOrNull(), "the frame must say so: ${sink.provisional}")
+        assertEquals(1L, reported.actual, "for exactly the one tile that failed")
+        assertEquals(1L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+        // The second request is free: the three tiles that arrived were latched by this invocation's
+        // firewall, so the consumer is asked for each once, and the failed url is not asked again.
+        val fineUrls = transport.requestedUrls().filter { it.startsWith("https://tiles.example/r/4/") }
+        assertEquals(fineUrls.distinct(), fineUrls, "no tile url is fetched twice within one prepare: $fineUrls")
+        assertTrue(FAILING_TILE_URL in fineUrls, "the fixture must actually have failed the tile it names")
+    }
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedStillFailsTheFrameByDefault() = runTest {
+        val sink = RecordingProvisionalSink()
+        val renderer = failedTileRenderer(
+            OfflineTileTransport(FAILING_TILE_URL),
+            presentFailedTiles = false,
+            sink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val coarse = renderer.prepare(coarseBasemapPlan(frameIndex = 0L))
+        renderer.draw(coarse, target)
+        coarse.close()
+
+        // Off is every earlier release: the ancestor is resident and the frame fails anyway, because an
+        // export must never encode a frame with a hole it was not told about.
+        val failure = assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 1L)) }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failure.stage)
+        assertEquals(ResourceClass.BASEMAP_RASTER_TILE, failure.diagnostics.single().resourceClass)
+        assertEquals(emptyList(), sink.provisional)
+        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedAndHasNoResidentAncestorFailsExactlyAsItDoesWithTheOptionOff() = runTest {
+        // Nothing drawn first, so nothing is resident: this is zooming into ground never shown before.
+        val on = failedTileRenderer(OfflineTileTransport(FAILING_TILE_URL), presentFailedTiles = true)
+        val off = failedTileRenderer(OfflineTileTransport(FAILING_TILE_URL), presentFailedTiles = false)
+
+        val withOption = assertFailsWith<RenGException> { on.prepare(basemapPlan(frameIndex = 0L)) }
+        val without = assertFailsWith<RenGException> { off.prepare(basemapPlan(frameIndex = 0L)) }
+
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, withOption.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, withOption.stage)
+        assertEquals(without.code, withOption.code, "the option changes nothing when there is no ancestor")
+        assertEquals(without.stage, withOption.stage)
+        assertEquals(without.diagnostics, withOption.diagnostics, "down to the resource the failure names")
+        assertEquals(0L, on.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aTileDrawnFromItsAncestorIsReplacedByItsOwnOnceItDownloads() = runTest {
+        val sink = RecordingProvisionalSink()
+        val transport = OfflineTileTransport(FAILING_TILE_URL)
+        val binding = windowRecordingBinding()
+        val renderer = failedTileRenderer(transport, presentFailedTiles = true, sink = sink, binding = binding)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val coarseTextures = drawAndCollect(renderer, binding, target, coarseBasemapPlan(frameIndex = 0L))
+            .mapTo(HashSet()) { it.texture }
+        val whileOffline = drawAndCollect(renderer, binding, target, basemapPlan(frameIndex = 1L))
+        assertTrue(
+            whileOffline.any { it.window != IDENTITY_WINDOW },
+            "the precondition: while offline, one tile is provisional: $whileOffline",
+        )
+
+        transport.failing = false
+        val refined = renderer.prepare(basemapPlan(frameIndex = 2L)) as RenGPreparedFrame
+        // ADR 0057's refinement, unchanged: the tile drawn provisionally was never resident, so the very
+        // next prepare asks for it, and it is the only tile that prepare has to rasterise.
+        assertEquals(
+            listOf(CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 2)),
+            refined.basemapTiles.map { it.tile },
+            "the tile that failed is asked for again and rasterised; the other three are resident",
+        )
+        binding.log.clear()
+        renderer.draw(refined, target)
+        val draws = groundDraws(binding.log)
+        refined.close()
+
+        assertTrue(draws.isNotEmpty(), "the refined frame draws ground")
+        assertTrue(draws.all { it.window == IDENTITY_WINDOW }, "no tile is provisional any more: $draws")
+        assertTrue(draws.none { it.texture in coarseTextures }, "and none borrows the ancestor: $draws")
+        assertEquals(1, sink.provisional.size, "only the offline frame said it was provisional")
+        assertEquals(1L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aDemTileThatCouldNotBeDownloadedStillFailsTheFrameWithTheOptionOn() = runTest {
+        // A hillshade layer's raster-dem source: elevation, not colour, so it is never presentable. The
+        // coarse frame's DEM tiles are LOD 2, so it draws and leaves its colour tile resident first.
+        val sink = RecordingProvisionalSink()
+        val renderer = failedTileRenderer(
+            OfflineTileTransport(FAILING_DEM_TILE_URL, styleJson = DEM_HILLSHADE_STYLE),
+            presentFailedTiles = true,
+            sink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val coarse = renderer.prepare(coarseBasemapPlan(frameIndex = 0L))
+        renderer.draw(coarse, target)
+        coarse.close()
+
+        val failure = assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 1L)) }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failure.stage)
+        assertEquals(
+            ResourceClass.BASEMAP_DEM_TILE,
+            failure.diagnostics.single().resourceClass,
+            "the failure must be the DEM's, or this case proves nothing about DEMs",
+        )
+        assertEquals(emptyList(), sink.provisional)
+        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
     }
 
     @Test
@@ -915,6 +1092,107 @@ private class RecordingProvisionalSink : DiagnosticSink {
     override fun emit(diagnostic: Diagnostic) {
         recorded += diagnostic
     }
+}
+
+/** The colour tile of `(lod 4, x 2, y 11)`, one of [basemapPlan]'s four, which [OfflineTileTransport] fails. */
+private const val FAILING_TILE_URL: String = "https://tiles.example/r/4/2/11.png"
+
+/** One of the sixteen DEM tiles [DEM_HILLSHADE_STYLE]'s hillshade layer needs for [basemapPlan]'s frame. */
+private const val FAILING_DEM_TILE_URL: String = "https://dem.example/4/2/11.png"
+
+/** Any location the recording binding does not hand to another name, so its writes can be told apart. */
+private const val FAILED_TILE_COLOUR_WINDOW_LOCATION: Int = 4057
+
+/** `GroundTileWindow.WHOLE` as the uniform's three floats: a tile drawn from its own texture. */
+private val IDENTITY_WINDOW: List<Float> = listOf(1.0f, 0.0f, 0.0f)
+
+/**
+ * [TileTransport] with one url that fails while [failing] is true, the way a phone with no network
+ * fails it: the call throws rather than answering a status. Every url is recorded, failed or not.
+ */
+private class OfflineTileTransport(
+    private val failingUrl: String,
+    styleJson: String = STYLE_WITH_SPRITE_JSON,
+) : Transport {
+    private val delegate = TileTransport(styleJson)
+    private val recorded = ConcurrentRecorder<String>()
+
+    /** Written by the test between preparations, read on the engine's own threads. */
+    @Volatile
+    var failing: Boolean = true
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        if (failing && url == failingUrl) throw IllegalStateException("offline")
+        return delegate.execute(request)
+    }
+}
+
+/** [styleGlBinding] with the ground's colour-window uniform declared, so each tile's window is logged. */
+private fun windowRecordingBinding(): RecordingGlBinding =
+    styleGlBinding().withDeclaredNames(GROUND_COLOUR_WINDOW_UNIFORM_NAME to FAILED_TILE_COLOUR_WINDOW_LOCATION)
+
+private fun failedTileRenderer(
+    transport: Transport,
+    presentFailedTiles: Boolean,
+    sink: DiagnosticSink = DiagnosticSink { },
+    binding: RecordingGlBinding = styleGlBinding(),
+): RenGRenderer = createRenderer(
+    RendererConfiguration(
+        outputPixelSize = OutputPixelSize(64, 64),
+        transport = transport,
+        store = RecordingStyleStore(),
+        basemapStyle = ResourceLocator(STYLE_URL),
+        diagnosticSink = sink,
+        presentFailedTilesProvisionally = presentFailedTiles,
+    ),
+    binding,
+    RenderContextProbe { RenderContextIdentity(1L) },
+) as RenGRenderer
+
+/** One ground tile's draw: the texture it bound and the colour window it sampled that texture through. */
+private data class GroundDraw(val texture: Int, val window: List<Float>)
+
+/**
+ * The ground draws in [log], in order. A draw counts as a ground tile's only when the colour-window
+ * uniform was written since the previous draw, which the ground pipeline does for every tile, identity
+ * included, and nothing else does.
+ */
+private fun groundDraws(log: List<String>): List<GroundDraw> {
+    val windowPrefix = "uniform3f($FAILED_TILE_COLOUR_WINDOW_LOCATION,"
+    val bindPrefix = "bindTexture(0xDE1,"
+    var window: List<Float>? = null
+    var texture = 0
+    val draws = ArrayList<GroundDraw>()
+    for (entry in log) {
+        when {
+            entry.startsWith(windowPrefix) ->
+                window = entry.removePrefix(windowPrefix).removeSuffix(")").split(',').map(String::toFloat)
+            entry.startsWith(bindPrefix) -> texture = entry.removePrefix(bindPrefix).removeSuffix(")").toInt()
+            entry.startsWith("drawElements(") -> {
+                window?.let { draws += GroundDraw(texture, it) }
+                window = null
+            }
+        }
+    }
+    return draws
+}
+
+private suspend fun drawAndCollect(
+    renderer: RenGRenderer,
+    binding: RecordingGlBinding,
+    target: RenderTarget,
+    plan: FramePlan,
+): List<GroundDraw> {
+    val frame = renderer.prepare(plan)
+    binding.log.clear()
+    renderer.draw(frame, target)
+    val draws = groundDraws(binding.log)
+    frame.close()
+    return draws
 }
 
 /**

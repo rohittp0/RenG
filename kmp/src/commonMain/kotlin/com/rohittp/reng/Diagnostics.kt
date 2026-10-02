@@ -43,7 +43,10 @@ public enum class DiagnosticCode {
 
     /**
      * Some of this frame's ground was drawn from a resident ancestor tile rather than its own,
-     * because the consumer's `maximumTilesRasterisedPerFrame` declined to rasterise it (ADR 0057).
+     * because the consumer's `maximumTilesRasterisedPerFrame` declined to rasterise it, or because its
+     * own resources could not be acquired and `RendererConfiguration.presentFailedTilesProvisionally`
+     * is on (ADR 0057). `actual` counts both kinds together; [RenGMetricName.TILES_PRESENTED_AFTER_FAILURE]
+     * counts the second alone.
      *
      * A frame that presented an ancestor is not the same artefact as one that did not, and a consumer
      * compositing a still or capturing a video frame needs to know which they have. Appended last, so

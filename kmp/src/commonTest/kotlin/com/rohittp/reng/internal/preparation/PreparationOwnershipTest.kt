@@ -18,6 +18,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -81,6 +82,24 @@ class PreparationOwnershipTest {
 
         assertEquals("settlement failed", failure.message)
         assertEquals("owned", reclaimed)
+    }
+
+    @Test
+    fun aRawReservationShrinksInPlaceAndReleasesOnlyWhatItStillHolds() {
+        val budget = RawTileBudget(10L)
+        val reservation = requireNotNull(budget.tryReserve(8L))
+
+        reservation.shrinkTo(3L)
+
+        assertEquals(3L, reservation.bytes)
+        assertEquals(3L, budget.outstandingBytes(), "the difference is back in the budget at once")
+        assertNotNull(budget.tryReserve(7L), "and another frame can take it").release()
+        assertFailsWith<IllegalArgumentException> { reservation.shrinkTo(4L) }
+        reservation.shrinkTo(0L)
+        assertEquals(0L, budget.outstandingBytes())
+        reservation.release()
+        assertEquals(0L, budget.outstandingBytes(), "releasing a shrunk reservation never goes negative")
+        assertFailsWith<IllegalStateException> { reservation.shrinkTo(0L) }
     }
 
     @Test

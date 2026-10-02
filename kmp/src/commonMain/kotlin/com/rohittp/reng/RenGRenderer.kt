@@ -18,6 +18,8 @@ import com.rohittp.reng.internal.firewall.AcquiredDemTile
 import com.rohittp.reng.internal.firewall.AcquiredLabelCandidates
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.firewall.BasemapTilePixels
+import com.rohittp.reng.internal.firewall.BasemapTilePreparation
+import com.rohittp.reng.internal.firewall.PreparedBasemapTiles
 import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
 import com.rohittp.reng.internal.firewall.RenderedBasemapTile
 import com.rohittp.reng.internal.firewall.SpriteAtlasManifest
@@ -197,6 +199,7 @@ import com.rohittp.reng.internal.thread.PlatformLock
 import com.rohittp.reng.internal.thread.currentCallingThread
 import com.rohittp.reng.internal.thread.isCurrentThread
 import com.rohittp.reng.internal.planning.planSpatial
+import com.rohittp.reng.internal.planning.presentableFailedTiles
 import com.rohittp.reng.internal.firewall.ReadAheadWarmSummary
 import com.rohittp.reng.internal.readahead.MAX_READ_AHEAD_TILES
 import com.rohittp.reng.internal.readahead.ReadAheadRequest
@@ -1142,6 +1145,10 @@ internal class RenGRenderer(
     )
     internal val inFlightPreparedFrameCpuBytes: Long
         get() = preparedFrameCpuBudget.outstandingBytes()
+
+    /** Raw tile bytes open frames hold against ADR 0044's budget; tests compare it to the frames' own pixels. */
+    internal val inFlightRawTileBytes: Long
+        get() = rawTileBudget.outstandingBytes()
 
     /**
      * The canonical form and derived keys of every consumer shader pair this renderer has seen, shared
@@ -2681,7 +2688,8 @@ internal class RenGRenderer(
             // moment earlier in this same frame.
             val key = basemapEngineHost.renderedTileKey(styleDigest, instance)
             // Rendered this frame, already on the GPU from an earlier one, or -- since ADR 0057 --
-            // coming from a resident ancestor because this frame's budget declined to rasterise it.
+            // coming from a resident ancestor because this frame's budget declined to rasterise it or,
+            // opted into, because it could not be downloaded.
             // All three are ways for the draw to have pixels; only naming none of them is a defect.
             check(
                 key in renderedKeys ||
@@ -3299,7 +3307,21 @@ internal class RenGRenderer(
         // `missing`, not `canonicalTiles`, on both halves: ADR 0044's raw budget is charged for the
         // tiles this frame actually rasterises rather than every tile it draws, which is where that
         // budget belongs now that a resident tile is never asked for (ADR 0046).
-        val freshlyRendered = basemapEngineHost.prepareTiles(style, missing).use { prepared ->
+        val tilesAskedFor = missing.size
+        val preparedFresh = prepareFreshTiles(style, missing)
+        if (missing.size != tilesAskedFor) {
+            // ADR 0057's failed tiles left `missing`, and the reservation above was taken for them too.
+            // ADR 0044 holds a frame's reservation to exactly the raw pixels it carries (the frame's own
+            // `init` enforces it), so give the difference back now, before anything is rendered. The
+            // same arithmetic that sized it: what the remembered tiles hold if the frame keeps them raw,
+            // plus the tiles still to rasterise if they are rendered raw. Zero is a legal reservation.
+            rawReservation?.shrinkTo(
+                (if (useRememberedRaw) rememberedRawBytes else 0L) +
+                    (if (renderFreshAsRaw) checkNotNull(checkedRawTileBytes(missing.size)) else 0L),
+            )
+        }
+        if (preparedFresh == null) return alreadyRendered
+        val freshlyRendered = preparedFresh.use { prepared ->
             basemapEngineHost.renderTiles(
                 prepared,
                 asRawPixels = renderFreshAsRaw,
@@ -3310,6 +3332,61 @@ internal class RenGRenderer(
         }
         if (memo != null) freshlyRendered.forEach { memo[it.key] = it }
         return if (alreadyRendered.isEmpty()) freshlyRendered else alreadyRendered + freshlyRendered
+    }
+
+    /**
+     * Acquires [missing] for rasterising, or answers `null` when nothing is left to rasterise.
+     *
+     * With [RendererConfiguration.presentFailedTilesProvisionally] off this is exactly
+     * [BasemapEngineHost.prepareTiles], and fails exactly as it does. On, it is ADR 0057's "A tile that
+     * could not be downloaded": a preparation whose only failure is colour tiles the engine could not
+     * acquire drops those of them that have a resident ancestor from [missing] and asks for the rest once
+     * more, and `resolveGroundTiles` then draws the dropped ones from their ancestors through the same
+     * `colourWindow` a budget-deferred tile uses, reporting `GROUND_PRESENTED_PROVISIONALLY` the same way.
+     *
+     * **Why this exists.** Measured in a consumer's editor on a phone with no network: two imagery tiles
+     * the Store did not hold could not download, and every `prepare` whose view needed either threw
+     * `RESOURCE_UNAVAILABLE` at `RESOURCE_LOOKUP` -- 397 failures, and 5.6 s of playback with the preview
+     * frozen -- while a coarser tile over each of them sat resident on the GPU the whole time.
+     *
+     * **All-or-nothing, deliberately.** If any tile the failure names has no resident ancestor, the
+     * original failure is rethrown unchanged rather than the presentable ones being dropped and the
+     * frame failing on the next request instead: the frame fails either way, and failing with the
+     * failure it fails with today keeps the consumer's error handling exactly as it is. A frame that
+     * cannot draw its ground is not an improvement on one that fails.
+     *
+     * **Once, deliberately.** The second request is [BasemapEngineHost.prepareTiles] itself, and whatever
+     * it throws is the frame's failure. It costs no network for the tiles that succeeded the first
+     * time: this invocation's firewall registry latched their responses and answers the engine's second
+     * request from them. Nor does a failed route get a second attempt within the frame, because the tile
+     * it belonged to is no longer asked for. The next `prepare` asks for it again: the tile is still not
+     * resident, so refinement is ADR 0057's ordinary one and needs nothing here.
+     *
+     * The raw-tile reservation the caller took covered the tiles this leaves out, so the caller shrinks it
+     * as soon as this returns with [missing] smaller: a frame's reservation must cover exactly the raw
+     * pixels it carries (ADR 0044), and `RenGPreparedFrame`'s `init` refuses a frame for which it does not.
+     */
+    private suspend fun prepareFreshTiles(
+        style: PreparedStyle,
+        missing: MutableList<CanonicalBasemapTile>,
+    ): PreparedBasemapTiles? {
+        if (!configuration.presentFailedTilesProvisionally) return basemapEngineHost.prepareTiles(style, missing)
+        val outcome = basemapEngineHost.prepareTilesReportingUnavailableColour(style, missing)
+        val unavailable = when (outcome) {
+            is BasemapTilePreparation.Prepared -> return outcome.tiles
+            is BasemapTilePreparation.ColourUnavailable -> outcome
+        }
+        val presentable = presentableFailedTiles(
+            failed = unavailable.tiles,
+            requested = missing,
+            hasResidentAncestor = { tile -> residentAncestorOf(style.digest, tile) != null },
+        ) ?: throw unavailable.failure
+        missing.removeAll(presentable)
+        val retried = if (missing.isEmpty()) null else basemapEngineHost.prepareTiles(style, missing)
+        // Counted only once the frame is going to prepare: a frame that failed on the second request
+        // presents nothing, and a counter that said otherwise would be counting attempts, not frames.
+        metricRecorder.record(RenGMetricName.TILES_PRESENTED_AFTER_FAILURE, presentable.size.toLong())
+        return retried
     }
 
     /**
@@ -4367,7 +4444,8 @@ internal class RenGRenderer(
                 continue
             }
             val reused = glObjectRegistry.leaseResident(key)
-            // ADR 0057: a tile this frame's budget declined to rasterise has no texture and no
+            // ADR 0057: a tile this frame's budget declined to rasterise, or whose own resources could
+            // not be acquired under `presentFailedTilesProvisionally`, has no texture and no
             // rendered bytes, so it is drawn from the nearest resident ancestor, magnified through
             // the window it occupies there. Tried only when the two ordinary sources have failed,
             // and never instead of the typed failure below: a tile with no ancestor either is still

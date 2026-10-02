@@ -679,18 +679,93 @@ internal class BasemapEngineHost(
     ): PreparedBasemapTiles {
         requireOpen()
         val distinct = tiles.distinct()
-        val batch = engineCall {
-            engine.prepareBatch(
-                style = style,
-                tiles = distinct.map(::engineTileIdOf),
-                options = renderOptions,
-                resourceAccess = engineAccessModeOf(
-                    accessMode ?: activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL,
-                ),
-                substitutionPolicy = TileSubstitutionPolicy.Disabled,
-            )
-        }
+        val batch = engineCall { prepareEngineBatch(style, distinct, accessMode) }
         return PreparedBasemapTiles(batch, style, distinct)
+    }
+
+    /**
+     * [prepareTiles] for a foreground frame that may present a failed colour tile from an ancestor (ADR
+     * 0057, "A tile that could not be downloaded"): the same engine call under the same disabled
+     * substitution, and the same failure, except that a failure which is **only** colour tiles the engine
+     * could not acquire comes back as [BasemapTilePreparation.ColourUnavailable] instead of being thrown.
+     *
+     * **Why a result rather than a field on the failure.** The tiles are known only here, at the one seam
+     * that may read a `RentileException`, and the public [RenGException] has no room for them and must not
+     * grow any: a consumer's failure would start carrying RenG's internal tile identity. So the host
+     * answers with RenG's own [CanonicalBasemapTile]s, matched back onto the tiles it was asked for, plus
+     * the exact [RenGException] [prepareTiles] would have thrown, so a caller that declines to present the
+     * tiles rethrows a failure byte-identical to today's. No engine type crosses.
+     *
+     * The answer is `ColourUnavailable` only when every failed resource is a raster or vector tile
+     * ([unavailableColourResourcesOf]), every one of them is a route this invocation preregistered, and
+     * every tile the engine named is one of [tiles]. The second condition is what keeps a defect of RenG's
+     * own fail-closed: the firewall refusing a url RenG never derived also reaches Rentile as an
+     * acquisition failure, and an ancestor must not paper over a route RenG got wrong. A digest no route
+     * claims is exactly that case, so it is thrown. Anything else is thrown as [prepareTiles] throws it.
+     *
+     * The read-ahead worker never calls this: its own [prepareTiles] keeps failing exactly as before.
+     */
+    suspend fun prepareTilesReportingUnavailableColour(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+    ): BasemapTilePreparation {
+        requireOpen()
+        val distinct = tiles.distinct()
+        val batch = try {
+            prepareEngineBatch(style, distinct, accessMode = null)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (rengFailure: RenGException) {
+            throw rengFailure
+        } catch (@Suppress("TooGenericExceptionCaught") engineFailure: Throwable) {
+            // Classified first and unconditionally, so the failure handed back is the one engineCall
+            // would have thrown, built by the same two functions in the same order.
+            val failure = translateForeignIdentity(classifyEngineFailure(engineFailure)).toException()
+            val unavailable = unavailableColourTilesOf(engineFailure, distinct) ?: throw failure
+            return BasemapTilePreparation.ColourUnavailable(unavailable, failure)
+        }
+        return BasemapTilePreparation.Prepared(PreparedBasemapTiles(batch, style, distinct))
+    }
+
+    /** The one `prepareBatch` both preparation entry points make, so their arguments cannot drift apart. */
+    private suspend fun prepareEngineBatch(
+        style: PreparedStyle,
+        distinct: List<CanonicalBasemapTile>,
+        accessMode: RenGResourceAccessMode?,
+    ): PreparedBatch = engine.prepareBatch(
+        style = style,
+        tiles = distinct.map(::engineTileIdOf),
+        options = renderOptions,
+        resourceAccess = engineAccessModeOf(
+            accessMode ?: activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL,
+        ),
+        substitutionPolicy = TileSubstitutionPolicy.Disabled,
+    )
+
+    /**
+     * RenG's own tiles for the colour resources [engineFailure] says could not be acquired, or `null` when
+     * any part of it is something else. See [prepareTilesReportingUnavailableColour] for the three
+     * conditions; this is where they are checked.
+     *
+     * Matched back through [engineTileIdOf] over [requested] rather than by constructing a tile from the
+     * engine's `TileId`, for the reason `renderTiles` does the same: the inverse of a two-field mapping
+     * written out a second time is a second thing that can drift, and a `TileId` the request did not
+     * contain is a failure about something this frame did not ask for, which is not presentable.
+     */
+    private fun unavailableColourTilesOf(
+        engineFailure: Throwable,
+        requested: List<CanonicalBasemapTile>,
+    ): Set<CanonicalBasemapTile>? {
+        val resources = unavailableColourResourcesOf(engineFailure) ?: return null
+        val registry = activeOperation?.registry ?: return null
+        val requestedById = requested.associateBy(::engineTileIdOf)
+        val tiles = LinkedHashSet<CanonicalBasemapTile>()
+        for (resource in resources) {
+            val resourceClass = rengResourceClassOf(resource.resourceClass) ?: return null
+            registry.renGResourceKeyForEngineDigest(resourceClass, resource.sanitizedResourceId) ?: return null
+            for (id in resource.affectedTiles) tiles += requestedById[id] ?: return null
+        }
+        return tiles
     }
 
     /**
@@ -1402,6 +1477,21 @@ internal class BasemapEngineHost(
  * idempotent, non-blocking, and non-throwing, because Rentile documents `PreparedBatch.close()` as
  * exactly that.
  */
+/** What [BasemapEngineHost.prepareTilesReportingUnavailableColour] produced (ADR 0057). */
+internal sealed interface BasemapTilePreparation {
+    class Prepared(val tiles: PreparedBasemapTiles) : BasemapTilePreparation
+
+    /**
+     * The engine prepared nothing, because it could not acquire the colour resources of [tiles] and for
+     * no other reason. [failure] is exactly what [BasemapEngineHost.prepareTiles] throws for the same
+     * call, for a caller that decides not to present them.
+     */
+    class ColourUnavailable(
+        val tiles: Set<CanonicalBasemapTile>,
+        val failure: RenGException,
+    ) : BasemapTilePreparation
+}
+
 internal class PreparedBasemapTiles(
     internal val batch: PreparedBatch,
     internal val style: PreparedStyle,

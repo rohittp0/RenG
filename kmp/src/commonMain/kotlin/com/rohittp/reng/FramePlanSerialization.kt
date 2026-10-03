@@ -240,17 +240,22 @@ internal object BloomSerializer : KSerializer<Bloom> {
 private class StickerSurrogate(
     @SerialName("placement") val placement: Placement,
     @SerialName("image") val image: ResourceLocator,
+    @SerialName("opacity") val opacity: Float = 1f,
+    @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
 )
 
 internal object StickerSerializer : KSerializer<Sticker> {
     private val delegate = StickerSurrogate.serializer()
     override val descriptor: SerialDescriptor = delegate.descriptor
     override fun serialize(encoder: Encoder, value: Sticker) {
-        encoder.encodeSerializableValue(delegate, StickerSurrogate(value.placement, value.image))
+        encoder.encodeSerializableValue(
+            delegate,
+            StickerSurrogate(value.placement, value.image, value.opacity, value.blend),
+        )
     }
     override fun deserialize(decoder: Decoder): Sticker {
         val it = decoder.decodeSerializableValue(delegate)
-        return Sticker(it.placement, it.image)
+        return Sticker(it.placement, it.image, it.opacity, it.blend)
     }
 }
 
@@ -325,6 +330,7 @@ private class ModelSurrogate(
     @SerialName("glb") val glb: ResourceLocator,
     @SerialName("texture") val texture: ResourceLocator? = null,
     @SerialName("animationTracks") val animationTracks: List<AnimationTrack> = emptyList(),
+    @SerialName("opacity") val opacity: Float = 1f,
 )
 
 internal object ModelSerializer : KSerializer<Model> {
@@ -333,12 +339,12 @@ internal object ModelSerializer : KSerializer<Model> {
     override fun serialize(encoder: Encoder, value: Model) {
         encoder.encodeSerializableValue(
             delegate,
-            ModelSurrogate(value.placement, value.glb, value.texture, value.animationTracks),
+            ModelSurrogate(value.placement, value.glb, value.texture, value.animationTracks, value.opacity),
         )
     }
     override fun deserialize(decoder: Decoder): Model {
         val it = decoder.decodeSerializableValue(delegate)
-        return Model(it.placement, it.glb, it.texture, it.animationTracks)
+        return Model(it.placement, it.glb, it.texture, it.animationTracks, it.opacity)
     }
 }
 
@@ -494,6 +500,7 @@ private class GeometrySurrogate(
     @SerialName("textures") val textures: Map<String, ResourceLocator> = emptyMap(),
     @SerialName("altitudeMode") val altitudeMode: AltitudeMode = AltitudeMode.ABSOLUTE,
     @SerialName("emissive") val emissive: Boolean = false,
+    @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
 )
 
 internal object GeometrySerializer : KSerializer<Geometry> {
@@ -504,7 +511,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
             delegate,
             GeometrySurrogate(
                 value.topLeft, value.bottomRight, value.shaderPair,
-                value.uniforms, value.textures, value.altitudeMode, value.emissive,
+                value.uniforms, value.textures, value.altitudeMode, value.emissive, value.blend,
             ),
         )
     }
@@ -512,7 +519,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
         val it = decoder.decodeSerializableValue(delegate)
         return Geometry(
             it.topLeft, it.bottomRight, it.shaderPair, it.uniforms, it.textures, it.altitudeMode,
-            it.emissive,
+            it.emissive, it.blend,
         )
     }
 }

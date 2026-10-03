@@ -91,6 +91,8 @@ internal const val GL_BLEND_COLOR: Int = 0x8005
 internal const val GL_ZERO: Int = 0x0000
 internal const val GL_ONE: Int = 0x0001
 internal const val GL_SRC_ALPHA: Int = 0x0302
+internal const val GL_DST_COLOR: Int = 0x0306
+internal const val GL_ONE_MINUS_SRC_COLOR: Int = 0x0301
 internal const val GL_ONE_MINUS_SRC_ALPHA: Int = 0x0303
 internal const val GL_FUNC_ADD: Int = 0x8006
 

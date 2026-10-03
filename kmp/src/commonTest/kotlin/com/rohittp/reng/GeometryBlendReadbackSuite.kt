@@ -16,6 +16,7 @@ import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.ShaderDialect
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -41,24 +42,26 @@ internal fun runGeometryBlendReadbackSuite(
     val failures = GeometryBlendCollectedFailures()
     try {
         val renderTarget = renderer.mintRenderTarget(FramebufferName(target.toUInt()))
-        failures.run("a translucent Geometry blends over an earlier opaque Geometry") {
-            val actual = clearAndDrawGeometryBlend(
-                binding = binding,
-                renderer = renderer,
-                renderTarget = renderTarget,
-                targetFramebuffer = target,
-                plan = geometryBlendFramePlan(),
-            )
-            val expected = intArrayOf(80, 112, 144, 255)
-            println(
-                "RenG geometry blend readback: dialect=$dialect actual=${actual.describe()} " +
-                    "expected=${expected.describe()}",
-            )
-            assertTrue(
-                actual.indices.all { abs(actual[it] - expected[it]) <= 2 },
-                "premultiplied (64,64,64,128) over opaque ${OPAQUE_BYTES.describe()} must be " +
-                    "${expected.describe()} within 2, was ${actual.describe()}",
-            )
+        BlendMode.entries.forEach { mode ->
+            failures.run("a translucent Geometry composites with $mode") {
+                val actual = clearAndDrawGeometryBlend(
+                    binding = binding,
+                    renderer = renderer,
+                    renderTarget = renderTarget,
+                    targetFramebuffer = target,
+                    plan = geometryBlendFramePlan(mode),
+                )
+                val expected = expectedGeometryBlendPixel(mode)
+                println(
+                    "RenG geometry blend readback: dialect=$dialect mode=$mode " +
+                        "actual=${actual.describe()} expected=${expected.describe()}",
+                )
+                assertTrue(
+                    actual.indices.all { abs(actual[it] - expected[it]) <= 2 },
+                    "$mode over opaque ${OPAQUE_BYTES.describe()} must be " +
+                        "${expected.describe()} within 2, was ${actual.describe()}",
+                )
+            }
         }
     } finally {
         renderer.close()
@@ -67,8 +70,8 @@ internal fun runGeometryBlendReadbackSuite(
     failures.throwIfAny()
 }
 
-private fun geometryBlendFramePlan(): FramePlan = FramePlan(
-    frameIndex = 0L,
+private fun geometryBlendFramePlan(blend: BlendMode): FramePlan = FramePlan(
+    frameIndex = blend.ordinal.toLong(),
     camera = Camera(
         latitude = -55.0,
         unwrappedLongitude = -135.0,
@@ -78,15 +81,36 @@ private fun geometryBlendFramePlan(): FramePlan = FramePlan(
     ),
     geometries = listOf(
         geometryAtAltitude(0.0, OPAQUE_FRAGMENT_SOURCE),
-        geometryAtAltitude(1.0, TRANSLUCENT_FRAGMENT_SOURCE),
+        geometryAtAltitude(1.0, TRANSLUCENT_FRAGMENT_SOURCE, blend),
     ),
 )
 
-private fun geometryAtAltitude(altitudeMetres: Double, fragmentSource: String): Geometry = Geometry(
+private fun geometryAtAltitude(
+    altitudeMetres: Double,
+    fragmentSource: String,
+    blend: BlendMode = BlendMode.OVER,
+): Geometry = Geometry(
     topLeft = Vector3(-54.4, -136.0, altitudeMetres),
     bottomRight = Vector3(-55.6, -134.0, altitudeMetres),
     shaderPair = ShaderPair(GEOMETRY_VERTEX_SOURCE, fragmentSource),
+    blend = blend,
 )
+
+private fun expectedGeometryBlendPixel(mode: BlendMode): IntArray {
+    val source = 0.25
+    val sourceAlpha = 0.5
+    val rgb = OPAQUE_BYTES.take(3).map { byte ->
+        val destination = byte / 255.0
+        val result = when (mode) {
+            BlendMode.OVER -> source + destination * (1.0 - sourceAlpha)
+            BlendMode.ADDITIVE -> source + destination
+            BlendMode.MULTIPLY -> source * destination + destination * (1.0 - sourceAlpha)
+            BlendMode.SCREEN -> source + destination * (1.0 - source)
+        }
+        (result * 255.0).roundToInt().coerceIn(0, 255)
+    }
+    return (rgb + 255).toIntArray()
+}
 
 private fun clearAndDrawGeometryBlend(
     binding: GlBinding,

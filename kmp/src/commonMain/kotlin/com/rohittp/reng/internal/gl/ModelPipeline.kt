@@ -75,6 +75,7 @@ internal const val MODEL_AMBIENT_UNIFORM_NAME: String = "rengModelAmbient"
  * one-instruction difference.
  */
 internal const val MODEL_FORCE_OPAQUE_UNIFORM_NAME: String = "rengModelForceOpaque"
+internal const val MODEL_OPACITY_UNIFORM_NAME: String = "rengModelOpacity"
 
 /**
  * Whether the primitive actually carries a `COLOR_0` attribute (`1.0`) or not (`0.0`).
@@ -266,6 +267,7 @@ internal fun modelFragmentSource(variant: ModelShaderVariant): String = buildStr
     append("uniform vec3 $MODEL_LIGHT_DIRECTION_UNIFORM_NAME;\n")
     append("uniform float $MODEL_AMBIENT_UNIFORM_NAME;\n")
     append("uniform float $MODEL_FORCE_OPAQUE_UNIFORM_NAME;\n")
+    append("uniform float $MODEL_OPACITY_UNIFORM_NAME;\n")
     append("in vec2 $MODEL_UV_VARYING_NAME;\n")
     append("in vec4 $MODEL_TINT_VARYING_NAME;\n")
     append("in vec3 $MODEL_SHADING_NORMAL_VARYING_NAME;\n")
@@ -302,7 +304,8 @@ internal fun modelFragmentSource(variant: ModelShaderVariant): String = buildStr
             "(1.0 - $MODEL_AMBIENT_UNIFORM_NAME) * rengModelLambert;\n",
     )
     append(
-        "    float rengModelAlpha = mix(rengModelBase.a, 1.0, $MODEL_FORCE_OPAQUE_UNIFORM_NAME);\n",
+        "    float rengModelAlpha = mix(rengModelBase.a, 1.0, $MODEL_FORCE_OPAQUE_UNIFORM_NAME) * " +
+            "$MODEL_OPACITY_UNIFORM_NAME;\n",
     )
     append(
         "    $MODEL_FRAGMENT_COLOUR_OUTPUT_NAME = vec4(rengModelBase.rgb * rengModelShade * " +
@@ -342,6 +345,7 @@ internal class ModelPipeline(
     val ambientLocation: Int,
     val forceOpaqueLocation: Int,
     val vertexColourPresentLocation: Int,
+    val opacityLocation: Int = -1,
 )
 
 internal sealed interface ModelPipelineResult {
@@ -429,6 +433,7 @@ internal fun createModelPipeline(
             lightDirectionLocation = binding.getUniformLocation(program, MODEL_LIGHT_DIRECTION_UNIFORM_NAME),
             ambientLocation = binding.getUniformLocation(program, MODEL_AMBIENT_UNIFORM_NAME),
             forceOpaqueLocation = binding.getUniformLocation(program, MODEL_FORCE_OPAQUE_UNIFORM_NAME),
+            opacityLocation = binding.getUniformLocation(program, MODEL_OPACITY_UNIFORM_NAME),
             vertexColourPresentLocation = binding.getUniformLocation(
                 program,
                 MODEL_VERTEX_COLOUR_PRESENT_UNIFORM_NAME,
@@ -561,6 +566,7 @@ internal class ResolvedModelPrimitive(
     val baseColourTexture: Int?,
     val jointMatrices: FloatArray?,
     val reverseWinding: Boolean,
+    val opacity: Float = 1f,
 )
 
 /** One model's primitives, in the order its draw items were walked. */
@@ -629,8 +635,8 @@ internal fun drawModels(
     val primitives = models.flatMap { it.primitives }
     if (primitives.isEmpty()) return
 
-    val blended = primitives.filter { it.material.alphaMode == MODEL_ALPHA_MODE_BLEND }
-    val opaque = primitives.filter { it.material.alphaMode != MODEL_ALPHA_MODE_BLEND }
+    val blended = primitives.filter { it.material.alphaMode == MODEL_ALPHA_MODE_BLEND || it.opacity < 1f }
+    val opaque = primitives.filter { it.material.alphaMode != MODEL_ALPHA_MODE_BLEND && it.opacity >= 1f }
 
     val state = ModelDrawState(binding, pipelines, lightDirectionCameraSpace)
     binding.enable(GL_DEPTH_TEST)
@@ -702,6 +708,9 @@ private class ModelDrawState(
         if (pipeline.forceOpaqueLocation >= 0) {
             val blended = primitive.material.alphaMode == MODEL_ALPHA_MODE_BLEND
             binding.uniform1f(pipeline.forceOpaqueLocation, if (blended) 0.0f else 1.0f)
+        }
+        if (pipeline.opacityLocation >= 0) {
+            binding.uniform1f(pipeline.opacityLocation, primitive.opacity)
         }
         if (variant.masked && pipeline.alphaCutoffLocation >= 0) {
             binding.uniform1f(pipeline.alphaCutoffLocation, primitive.material.alphaCutoff)

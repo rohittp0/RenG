@@ -48,7 +48,12 @@ class FramePlanSerializationTest {
                 drawBasemap = false,
                 drawLabels = false,
                 stickers = listOf(
-                    Sticker(placement = mapPlacement, image = ResourceLocator("sticker://one.png")),
+                    Sticker(
+                        placement = mapPlacement,
+                        image = ResourceLocator("sticker://one.png"),
+                        opacity = 0.75f,
+                        blend = BlendMode.SCREEN,
+                    ),
                 ),
                 models = listOf(
                     Model(
@@ -59,6 +64,7 @@ class FramePlanSerializationTest {
                             AnimationTrack(AnimationSelector.Name("walk"), 1.5),
                             AnimationTrack(AnimationSelector.Index(7L), 2.25),
                         ),
+                        opacity = 0.5f,
                     ),
                 ),
                 geometries = listOf(
@@ -79,6 +85,7 @@ class FramePlanSerializationTest {
                         textures = mapOf("uTexture" to ResourceLocator("geometry://one.png")),
                         altitudeMode = AltitudeMode.GROUND_RELATIVE,
                         emissive = true,
+                        blend = BlendMode.MULTIPLY,
                     ),
                 ),
                 bloom = Bloom(
@@ -126,13 +133,13 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image",
+            "placement", "image", "opacity", "blend",
             // Model
-            "glb", "texture", "animationTracks",
+            "glb", "texture", "animationTracks", "opacity",
             // AnimationTrack + AnimationSelector
             "animation", "timeSeconds", "value",
             // Geometry
-            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive",
+            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive", "blend",
             // Bloom
             "intensity", "levelWeights", "insideSuppression", "whiteness",
             // ShaderPair

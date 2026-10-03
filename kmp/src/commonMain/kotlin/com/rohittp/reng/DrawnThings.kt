@@ -180,7 +180,18 @@ public class Bloom(
 public data class Sticker(
     public val placement: Placement,
     public val image: ResourceLocator,
-)
+    public val opacity: Float = 1f,
+    public val blend: BlendMode = BlendMode.OVER,
+) {
+    init {
+        require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
+            "opacity must be between zero and one"
+        }
+        require(!(opacity == 0f && 1f / opacity < 0f)) {
+            "opacity must not be negative zero"
+        }
+    }
+}
 
 @kotlinx.serialization.Serializable
 public sealed interface AnimationSelector {
@@ -225,6 +236,7 @@ public class Model(
     glb: ResourceLocator,
     texture: ResourceLocator? = null,
     animationTracks: List<AnimationTrack> = emptyList(),
+    opacity: Float = 1f,
 ) {
     public val placement: Placement
     public val glb: ResourceLocator
@@ -232,17 +244,22 @@ public class Model(
     private val animationTrackSnapshot: ArrayList<AnimationTrack>
     public val animationTracks: List<AnimationTrack>
         get() = freshListCopy(animationTrackSnapshot)
+    public val opacity: Float
 
     init {
         val validatedPlacement = placement
         val validatedGlb = glb
         val validatedTexture = texture
         val snapshot = ArrayList(animationTracks)
+        require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
+            "opacity must be between zero and one"
+        }
 
         this.placement = validatedPlacement
         this.glb = validatedGlb
         this.texture = validatedTexture
         this.animationTrackSnapshot = snapshot
+        this.opacity = canonicalFloat(opacity, "opacity")
     }
 
     override fun equals(other: Any?): Boolean =
@@ -250,13 +267,15 @@ public class Model(
             placement == other.placement &&
             glb == other.glb &&
             texture == other.texture &&
-            animationTrackSnapshot == other.animationTrackSnapshot
+            animationTrackSnapshot == other.animationTrackSnapshot &&
+            opacity == other.opacity
 
     override fun hashCode(): Int {
         var result = placement.hashCode()
         result = 31 * result + glb.hashCode()
         result = 31 * result + (texture?.hashCode() ?: 0)
         result = 31 * result + animationTrackSnapshot.hashCode()
+        result = 31 * result + opacity.hashCode()
         return result
     }
 }
@@ -477,6 +496,13 @@ public data class Geometry(
      * existing component.
      */
     public val emissive: Boolean = false,
+    /**
+     * How this Geometry composites with the colour already in the frame.
+     *
+     * Declared last so the append-only data-class ABI gives it `component8` without moving any
+     * existing component.
+     */
+    public val blend: BlendMode = BlendMode.OVER,
 ) {
     init {
         require(topLeft.x in -90.0..90.0) { "topLeft latitude must be within the supported range" }
@@ -497,7 +523,8 @@ public data class Geometry(
 
     override fun toString(): String =
             "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
-            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive)"
+            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive, " +
+            "blend=$blend)"
 }
 
 private fun isReservedGeometryShaderName(name: String): Boolean =

@@ -234,6 +234,8 @@ internal class PreparedSticker(
     internal val resourceKey: ResourceKey,
     internal val generationId: ResidentGenerationId,
     internal val image: DecodedImage,
+    internal val opacity: Float = 1f,
+    internal val blend: BlendMode = BlendMode.OVER,
 )
 
 /**
@@ -319,6 +321,7 @@ internal class PreparedModel(
     internal val overrideTexture: PreparedGeometryTexture?,
     internal val nodeTransforms: List<DoubleMatrix4?>,
     internal val jointMatricesBySkin: Map<Int, List<DoubleMatrix4>>,
+    internal val opacity: Float = 1f,
 )
 
 /**
@@ -2151,6 +2154,8 @@ internal class RenGRenderer(
                     image = requireNotNull(decodedByKey[reference.resourceKey]) {
                         "a successful sticker acquisition must decode every traversed image"
                     },
+                    opacity = sticker.opacity,
+                    blend = sticker.blend,
                 )
             }
 
@@ -2862,6 +2867,7 @@ internal class RenGRenderer(
             },
             nodeTransforms = nodeTransforms,
             jointMatricesBySkin = jointMatricesBySkin,
+            opacity = model.opacity,
         )
     }
 
@@ -3997,6 +4003,8 @@ internal class RenGRenderer(
                 texture = texture,
                 imageWidthPixels = preparedSticker.image.width,
                 imageHeightPixels = preparedSticker.image.height,
+                opacity = preparedSticker.opacity,
+                blend = preparedSticker.blend,
             )
         }
 
@@ -4376,6 +4384,7 @@ internal class RenGRenderer(
                     binding = binding,
                 )
             },
+            opacity = preparedModel.opacity,
         )
     }
 

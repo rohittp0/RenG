@@ -35,6 +35,18 @@ public enum class AltitudeMode {
     GROUND_RELATIVE,
 }
 
+@kotlinx.serialization.Serializable
+public enum class BlendMode {
+    @kotlinx.serialization.SerialName("OVER")
+    OVER,
+    @kotlinx.serialization.SerialName("ADDITIVE")
+    ADDITIVE,
+    @kotlinx.serialization.SerialName("MULTIPLY")
+    MULTIPLY,
+    @kotlinx.serialization.SerialName("SCREEN")
+    SCREEN,
+}
+
 @kotlinx.serialization.Serializable(with = Vector3Serializer::class)
 public class Vector3(x: Double, y: Double, z: Double) {
     public val x: Double

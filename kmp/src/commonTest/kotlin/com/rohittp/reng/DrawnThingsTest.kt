@@ -9,6 +9,37 @@ import kotlin.test.assertNotSame
 
 class DrawnThingsTest {
     @Test
+    fun stickerAndModelOpacityDefaultsAndValidationAreExact() {
+        val placement = screenPlacement()
+        val sticker = Sticker(placement, ResourceLocator("sticker"))
+        val model = Model(placement, ResourceLocator("model"))
+
+        assertEquals(1f, sticker.opacity)
+        assertEquals(BlendMode.OVER, sticker.blend)
+        assertEquals(1f, model.opacity)
+        assertNotEquals(sticker, sticker.copy(opacity = 0.5f, blend = BlendMode.SCREEN))
+        assertNotEquals(model, Model(placement, ResourceLocator("model"), opacity = 0.5f))
+
+        listOf(-0.01f, 1.01f, Float.NaN).forEach { invalid ->
+            assertFailsWith<IllegalArgumentException> {
+                Sticker(placement, ResourceLocator("sticker"), opacity = invalid)
+            }
+            assertFailsWith<IllegalArgumentException> {
+                Model(placement, ResourceLocator("model"), opacity = invalid)
+            }
+        }
+        Sticker(placement, ResourceLocator("sticker"), opacity = 0f)
+        val negativeZeroFailure = assertFailsWith<IllegalArgumentException> {
+            Sticker(placement, ResourceLocator("sticker"), opacity = -0f)
+        }
+        assertEquals("opacity must not be negative zero", negativeZeroFailure.message)
+        assertEquals(
+            0f.toBits(),
+            Model(placement, ResourceLocator("model"), opacity = -0f).opacity.toBits(),
+        )
+    }
+
+    @Test
     fun animationSelectorAndTimeValidationIsExact() {
         AnimationSelector.Index(0)
         AnimationSelector.Name("é")
@@ -147,7 +178,11 @@ class DrawnThingsTest {
         assertEquals(false, absolute.emissive)
         assertNotEquals(groundRelative, emissive)
 
-        val (topLeft, bottomRight, pair, uniforms, textures, altitudeMode, emits) = emissive
+        val blended = emissive.copy(blend = BlendMode.MULTIPLY)
+        assertEquals(BlendMode.OVER, emissive.blend)
+        assertNotEquals(emissive, blended)
+
+        val (topLeft, bottomRight, pair, uniforms, textures, altitudeMode, emits, blend) = blended
         assertEquals(Vector3(1.0, 0.0, 0.0), topLeft)
         assertEquals(Vector3(0.0, 1.0, 0.0), bottomRight)
         assertEquals(shaderPair, pair)
@@ -155,6 +190,7 @@ class DrawnThingsTest {
         assertEquals(emptyMap(), textures)
         assertEquals(AltitudeMode.GROUND_RELATIVE, altitudeMode)
         assertEquals(true, emits)
+        assertEquals(BlendMode.MULTIPLY, blend)
     }
 
     @Test

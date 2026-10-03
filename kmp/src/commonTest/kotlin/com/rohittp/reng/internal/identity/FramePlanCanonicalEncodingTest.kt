@@ -6,6 +6,7 @@ import com.rohittp.reng.AnimationSelector
 import com.rohittp.reng.AnimationTrack
 import com.rohittp.reng.Backdrop
 import com.rohittp.reng.Bloom
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Camera
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.Geometry
@@ -26,6 +27,65 @@ import kotlin.test.assertTrue
 
 class FramePlanCanonicalEncodingTest {
     private val encoder = FramePlanCanonicalEncoder()
+
+    @Test
+    fun opacityAndBlendDefaultsKeepTheTrackedRepresentativeIdentity() {
+        val encoded = encoder.encode(canonicalV1RepresentativeFramePlan())
+
+        assertContentEquals(
+            CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray(),
+            encoded.identity.canonicalBytes.bytes,
+        )
+        assertEquals(
+            "reng-frame-v1:1c57383f67c3bd7df8d92388b93e642a96fd380db36384eae281c58b4c333e09",
+            encoded.frameIdentityText(),
+        )
+    }
+
+    @Test
+    fun nonDefaultOpacityAndBlendUseTheirExactAppendedFields() {
+        val base = encoder.encode(representativeFieldsPlan())
+        val changed = encoder.encode(
+            representativeFieldsPlan(
+                stickers = listOf(
+                    sticker("sticker-a").copy(opacity = 0.5f, blend = BlendMode.SCREEN),
+                ),
+                models = listOf(
+                    Model(placement(), ResourceLocator("model-a"), opacity = 0.25f),
+                ),
+                geometries = listOf(geometry("vertex-a").copy(blend = BlendMode.MULTIPLY)),
+            ),
+        )
+
+        assertEquals(
+            listOf(FramePlanSegment.STICKERS, FramePlanSegment.MODELS, FramePlanSegment.GEOMETRIES),
+            changedSegments(base, changed),
+        )
+        val stickerHex = changed.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex()
+        val modelHex = changed.segmentPayloads[FramePlanSegment.MODELS.index].fixtureLowercaseHex()
+        val geometryHex = changed.segmentPayloads[FramePlanSegment.GEOMETRIES.index].fixtureLowercaseHex()
+        // Sticker tag 3 contains opacity binary64 at tag 1 and SCREEN u16(4) at tag 2.
+        val stickerField3Hex =
+            "000300000016" +
+                "0001000000083fe0000000000000" +
+                "0002000000020004"
+        assertEquals(
+            stickerField3Hex,
+            stickerHex.takeLast(stickerField3Hex.length),
+        )
+        // Model tag 5 contains opacity 0.25 as canonical binary64.
+        val modelField5Hex = "0005000000083fd0000000000000"
+        assertEquals(
+            modelField5Hex,
+            modelHex.takeLast(modelField5Hex.length),
+        )
+        // Geometry tag 8 contains MULTIPLY's stable u16 wire value 3.
+        val geometryField8Hex = "0008000000020003"
+        assertEquals(
+            geometryField8Hex,
+            geometryHex.takeLast(geometryField8Hex.length),
+        )
+    }
 
     @Test
     fun minimalFrameHasExactCanonicalLengthAndIdentity() {

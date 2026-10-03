@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.Bloom
 import com.rohittp.reng.AltitudeMode
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
@@ -51,6 +52,8 @@ internal class SceneSticker(
     val texture: Int,
     val imageWidthPixels: Int = 1,
     val imageHeightPixels: Int = 1,
+    val opacity: Float = 1f,
+    val blend: BlendMode = BlendMode.OVER,
 )
 
 /**
@@ -220,6 +223,7 @@ internal class SceneModel(
     val uploaded: Map<Pair<Int, Int>, UploadedPrimitive>,
     val imageTextures: List<Int>,
     val overrideTexture: Int?,
+    val opacity: Float = 1f,
 )
 
 /**
@@ -573,12 +577,16 @@ internal class SceneContent(
             // ADR 0073: Geometry writes premultiplied colour and the pass owns its blend state.
             binding.enable(GL_BLEND)
             binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-            binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
             val geometryViewProjection = when (camera) {
                 is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
                 is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
             }
+            var currentBlend: BlendMode? = null
             for (sceneGeometry in scene.geometries) {
+                if (sceneGeometry.geometry.blend != currentBlend) {
+                    applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
+                    currentBlend = sceneGeometry.geometry.blend
+                }
                 // Subdivided and CPU-projected, in both projection modes, so that the matrix above
                 // stays linear and a consumer's shader pair survives a globe unchanged (ADR 0008's
                 // 2026-08-29 erratum). Under Mercator the camera implies a single cell, so this
@@ -607,6 +615,7 @@ internal class SceneContent(
                     emissionPass = 0,
                 )
             }
+            applyPremultipliedBlendMode(binding, BlendMode.OVER)
         }
 
         // ADR 0030's phase order over the planner's per-type order. `Scene.mapOrder` is
@@ -816,20 +825,28 @@ internal class SceneContent(
 
         binding.disable(GL_DEPTH_TEST)
         var boundProgram: Int? = null
+        var stickerBlend = BlendMode.OVER
         for (reference in scene.screenOrder) {
             when (reference) {
                 is DrawnThingReference.StickerAt -> {
                     if (boundProgram != stickerPipeline.program) {
                         beginStickerPass(binding, stickerPipeline)
                         boundProgram = stickerPipeline.program
+                        stickerBlend = BlendMode.OVER
                     }
-                    drawOneSticker(binding, stickerPipeline, screenCompositedSticker(scene.stickers[reference.index]))
+                    val sticker = screenCompositedSticker(scene.stickers[reference.index])
+                    if (sticker.blend != stickerBlend) {
+                        applyPremultipliedBlendMode(binding, sticker.blend)
+                        stickerBlend = sticker.blend
+                    }
+                    drawOneSticker(binding, stickerPipeline, sticker)
                 }
                 is DrawnThingReference.ModelAt -> throw IllegalArgumentException(
                     "ADR 0029 refuses a SCREEN-positioned Model before drawing; one reached the screen stack",
                 )
             }
         }
+        applyPremultipliedBlendMode(binding, BlendMode.OVER)
     }
 
     /**
@@ -1139,6 +1156,8 @@ internal class SceneContent(
         return ResolvedSticker(
             modelViewProjection = composeMapModelViewProjection(camera, resolved, sticker.localDimensions()),
             texture = sticker.texture,
+            opacity = sticker.opacity,
+            blend = sticker.blend,
         )
     }
 
@@ -1154,6 +1173,8 @@ internal class SceneContent(
                 sticker.localDimensions(),
             ),
             texture = sticker.texture,
+            opacity = sticker.opacity,
+            blend = sticker.blend,
         )
     }
 }
@@ -1222,6 +1243,7 @@ private fun resolveModel(
                 ?.let { sceneModel.jointMatricesBySkin[it] }
                 ?.let { packJointMatrices(it) },
             reverseWinding = nodeTransform.linearDeterminant() < 0.0,
+            opacity = sceneModel.opacity,
         )
     }
     return ResolvedModel(primitives)

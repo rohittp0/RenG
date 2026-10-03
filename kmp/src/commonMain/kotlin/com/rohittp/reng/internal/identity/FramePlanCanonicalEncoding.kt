@@ -19,6 +19,7 @@ import com.rohittp.reng.animationTracksForCore
 import com.rohittp.reng.Backdrop
 import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.Bloom
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.bloomForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.modelsForCore
@@ -171,6 +172,12 @@ internal class FramePlanCanonicalEncoder(
     private fun encodeSticker(sticker: Sticker): CanonicalBytes = CanonicalBinary.fields {
         field(1, encodePlacement(sticker.placement))
         field(2, CanonicalBinary.exactUtf8(sticker.image.value))
+        if (sticker.opacity != 1f || sticker.blend != BlendMode.OVER) {
+            field(3, CanonicalBinary.fields {
+                field(1, CanonicalBinary.binary64(sticker.opacity.toDouble()))
+                field(2, CanonicalBinary.u16(sticker.blend.wireValue))
+            })
+        }
     }
 
     private fun encodeModel(model: Model): CanonicalBytes {
@@ -183,6 +190,9 @@ internal class FramePlanCanonicalEncoder(
                 CanonicalBinary.optional(model.texture?.let { CanonicalBinary.exactUtf8(it.value) }),
             )
             field(4, CanonicalBinary.list(animationTracks.map(::encodeAnimationTrack)))
+            if (model.opacity != 1f) {
+                field(5, CanonicalBinary.binary64(model.opacity.toDouble()))
+            }
         }
     }
 
@@ -214,6 +224,9 @@ internal class FramePlanCanonicalEncoder(
         // field here exactly as it is on the public type.
         field(6, CanonicalBinary.u16(geometry.altitudeMode.wireValue))
         field(7, CanonicalBinary.boolean(geometry.emissive))
+        if (geometry.blend != BlendMode.OVER) {
+            field(8, CanonicalBinary.u16(geometry.blend.wireValue))
+        }
     }
 
     private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes =
@@ -318,6 +331,14 @@ private val AltitudeMode.wireValue: Int
     get() = when (this) {
         AltitudeMode.ABSOLUTE -> 1
         AltitudeMode.GROUND_RELATIVE -> 2
+    }
+
+private val BlendMode.wireValue: Int
+    get() = when (this) {
+        BlendMode.OVER -> 1
+        BlendMode.ADDITIVE -> 2
+        BlendMode.MULTIPLY -> 3
+        BlendMode.SCREEN -> 4
     }
 
 private val AnchoringMode.wireValue: Int

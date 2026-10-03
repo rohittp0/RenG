@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.AnchoringMode
 import com.rohittp.reng.Bloom
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Camera
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
@@ -2120,6 +2121,75 @@ class SceneContentTest {
         assertTrue(
             blendFunction in 0 until firstGeometryDraw,
             "phase 2 must select premultiplied blend factors before drawing: ${binding.log}",
+        )
+    }
+
+    @Test
+    fun geometryBlendFactorsChangeOnlyWithTheModeAndRestoreOver() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val pipeline = newGeometryPipeline(binding)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(testGeometry(), pipeline, consumerUniforms = emptyMap()),
+                SceneGeometry(
+                    testGeometry().copy(blend = BlendMode.ADDITIVE),
+                    pipeline,
+                    consumerUniforms = emptyMap(),
+                ),
+                SceneGeometry(
+                    testGeometry().copy(blend = BlendMode.ADDITIVE),
+                    pipeline,
+                    consumerUniforms = emptyMap(),
+                ),
+                SceneGeometry(
+                    testGeometry().copy(blend = BlendMode.MULTIPLY),
+                    pipeline,
+                    consumerUniforms = emptyMap(),
+                ),
+            ),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(), newGroundPipeline()).draw(binding)
+
+        assertEquals(
+            listOf(
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x1,0x1,0x303)",
+                "blendFuncSeparate(0x306,0x303,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+            ),
+            binding.log.filter { it.startsWith("blendFuncSeparate") },
+        )
+    }
+
+    @Test
+    fun screenStickerBlendFactorsChangeOnlyWithTheModeThenRestoreOver() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(screenPlacement(z = 1.0), 1, blend = BlendMode.ADDITIVE),
+                SceneSticker(screenPlacement(z = 2.0), 2, blend = BlendMode.ADDITIVE),
+                SceneSticker(screenPlacement(z = 3.0), 3, blend = BlendMode.SCREEN),
+            ),
+            screenOrder = listOf(StickerAt(0), StickerAt(1), StickerAt(2)),
+        )
+        binding.log.clear()
+
+        SceneContent(topDownCamera(), scene, newStickerPipeline(), newGroundPipeline()).draw(binding)
+
+        assertEquals(
+            listOf(
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x1,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x301,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+            ),
+            binding.log.filter { it.startsWith("blendFuncSeparate") },
         )
     }
 

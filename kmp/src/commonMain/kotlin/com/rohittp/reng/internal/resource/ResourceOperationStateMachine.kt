@@ -2604,9 +2604,11 @@ internal object ResourceOperationStateMachine {
         is AwaitingStyleVisibilityInstall -> cursor.actionId
     }
 
-    private fun copyStored(stored: StoredRawResource): StoredRawResource = StoredRawResource(
-        bytes = stored.byteSnapshot,
-        contentDigest = stored.contentDigest,
+    // Shares the byte snapshot rather than copying it (ADR 0062 erratum): a StoredRawResource's array
+    // is already unreachable and immutable, so the per-frame resident copy at `residentObserved` was a
+    // full memcpy of every tile, DEM and style that defended nothing -- 2.2% of an export's CPU on the
+    // reference phone. The metadata is still rebuilt, exactly as before.
+    private fun copyStored(stored: StoredRawResource): StoredRawResource = stored.withSharedBytes(
         metadata = StoredRawResourceMetadata(
             contentType = stored.metadata.contentType,
             etag = stored.metadata.etag,

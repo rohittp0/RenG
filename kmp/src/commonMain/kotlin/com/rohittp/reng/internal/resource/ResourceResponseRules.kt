@@ -59,13 +59,15 @@ internal fun copyValidStoredResource(
     if (bytes.isEmpty() || bytes.size.toLong() > maximumResponseBytes) return null
     if (!isLowercaseSha256(stored.contentDigest)) return null
     if (!isValidMetadata(stored.metadata)) return null
-    val computedDigest = sha256.digest(CanonicalBytes(bytes)).lowercaseHex
+    // Adopted, not copied: `bytes` is `stored`'s private snapshot, never written, and only read here.
+    val computedDigest = sha256.digest(CanonicalBytes.adopting(bytes)).lowercaseHex
     if (computedDigest != stored.contentDigest) return null
-    return StoredRawResource(
-        bytes = bytes,
-        contentDigest = stored.contentDigest,
-        metadata = copyMetadata(stored.metadata),
-    )
+    // Shares `stored`'s snapshot instead of copying it (ADR 0062 erratum). `stored` is already a
+    // StoredRawResource, whose public constructor took the boundary copy of whatever array its caller --
+    // the consumer's Store included -- supplied; its array is unreachable from outside and never mutated,
+    // so a second copy here defended nothing and cost a full memcpy on every validated Store read and
+    // every engine Store write.
+    return stored.withSharedBytes(copyMetadata(stored.metadata))
 }
 
 private fun resolveFullResponse(
@@ -92,7 +94,8 @@ private fun resolveFullResponse(
         )
     }
 
-    val digest = sha256.digest(CanonicalBytes(body)).lowercaseHex
+    // Adopted, not copied: `body` is the immutable response's private snapshot, only read here.
+    val digest = sha256.digest(CanonicalBytes.adopting(body)).lowercaseHex
     val stored = StoredRawResource(
         bytes = body,
         contentDigest = digest,
@@ -154,9 +157,8 @@ private fun resolveNotModifiedResponse(
 
     val baselineMetadata = baseline.metadata
     val responseMetadata = response.metadata
-    val merged = StoredRawResource(
-        bytes = baseline.byteSnapshot,
-        contentDigest = baseline.contentDigest,
+    // Shares the validated baseline's snapshot (ADR 0062 erratum): a 304 changes metadata only.
+    val merged = baseline.withSharedBytes(
         metadata = StoredRawResourceMetadata(
             contentType = responseMetadata.contentType ?: baselineMetadata.contentType,
             etag = responseMetadata.etag ?: baselineMetadata.etag,

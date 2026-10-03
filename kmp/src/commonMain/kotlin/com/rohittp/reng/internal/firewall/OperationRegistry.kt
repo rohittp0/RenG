@@ -519,7 +519,11 @@ internal class OperationRegistry(
                     // a consumer's Store has one: Rentile's acquirer parses a valid hit and never
                     // transports. Observing only the transport would leave a cached style deriving no
                     // tile route at all.
-                    observeTileJsonDocument(route, validated.bytes)
+                    //
+                    // The snapshot, not `bytes`: `observeTileJsonDocument` copies before it retains, and
+                    // returns at once for every class but TileJSON -- so `bytes` cost a full copy of every
+                    // tile and DEM read from the Store, discarded unread (ADR 0062 erratum).
+                    observeTileJsonDocument(route, validated.byteSnapshot)
                     validated.toEngineStoredRawResource()
                 }
             } catch (cancellation: CancellationException) {
@@ -845,7 +849,9 @@ internal class OperationRegistry(
 
     private fun sha256Hex(value: String): String = sha256Hex(value.encodeToByteArray())
 
-    private fun sha256Hex(bytes: ByteArray): String = sha256.digest(CanonicalBytes(bytes)).lowercaseHex
+    // Adopted, not copied: both callers pass an array nothing writes again -- a fresh `encodeToByteArray`,
+    // or a TransportResponse's private snapshot -- and the digest only reads it.
+    private fun sha256Hex(bytes: ByteArray): String = sha256.digest(CanonicalBytes.adopting(bytes)).lowercaseHex
 
     private fun TransportResponse.toEngineResponse(): EngineTransportResponse = EngineTransportResponse(
         statusCode = statusCode,

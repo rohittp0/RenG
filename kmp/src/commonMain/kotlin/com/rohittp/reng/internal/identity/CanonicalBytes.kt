@@ -1,7 +1,29 @@
 package com.rohittp.reng.internal.identity
 
-internal class CanonicalBytes(bytes: ByteArray) {
-    private val snapshot: ByteArray = bytes.copyOf()
+internal class CanonicalBytes private constructor(bytes: ByteArray, adopt: Boolean) {
+    constructor(bytes: ByteArray) : this(bytes, adopt = false)
+
+    private val snapshot: ByteArray = if (adopt) bytes else bytes.copyOf()
+
+    internal companion object {
+        /**
+         * Wraps an array nothing will ever write again, without the copy the constructor takes.
+         *
+         * The caller promises one of two things about [unwritten]: it is an array the caller has just
+         * allocated and filled, and drops on return -- every encoder in [CanonicalBinary] -- or it is the
+         * private snapshot of another immutable holder, such as `StoredRawResource.byteSnapshot`, read
+         * only to be digested. Either way no reference that could write to it survives, so the copy
+         * defended nothing, and the bytes, equality and hash are those the copying constructor gives.
+         *
+         * **Why.** Each level of a canonical encoding allocated its output, filled it, and then copied it
+         * again in this constructor; a frame plan is nested several levels deep and carries its
+         * geometries' vertices, so it was copied that many extra times on every `prepare`. Hashing a
+         * stored resource copied the whole tile or DEM to read it once. Simpleperf on an OPPO CPH2629
+         * exporting a 28 s 720p24 project put `CanonicalFieldWriter.encode` and `CanonicalBinary.list`
+         * among the memcpy-heavy frames, with 8.3% of the app's CPU in the garbage collector.
+         */
+        internal fun adopting(unwritten: ByteArray): CanonicalBytes = CanonicalBytes(unwritten, adopt = true)
+    }
 
     internal val bytes: ByteArray
         get() = snapshot.copyOf()

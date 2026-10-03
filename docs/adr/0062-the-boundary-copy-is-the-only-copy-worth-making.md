@@ -35,3 +35,30 @@ The rule this records is therefore about the *boundary*, not about this function
 copied where it enters RenG, and nowhere after.** A future caller of `selectContent` is bound by the
 same rule its four existing callers already follow, and a caller that cannot honour it should copy at
 its own boundary rather than ask this function to copy for everyone.
+
+## Erratum, 2026-10-03 — the boundary is the constructor, so the observation copy goes too
+
+This ADR kept two copies as "the boundary": `copyStored` on the resident observation, and
+`copyValidStoredResource`'s own construction. **Neither was a boundary.** Both copied from a
+`StoredRawResource`, never from a raw `ByteArray`, and a `StoredRawResource` is already immutable: its
+public constructor copies whatever array the caller passed, keeps that copy private, never mutates it,
+and copies it out of every `bytes` read. So a consumer — or the resident cache, or the engine — that
+keeps a reference to a resource can reach nothing behind it, and re-copying the resource defended the
+same nothing the removed `selectContent` copy did.
+
+They were not free. On an OPPO CPH2629 exporting a 28 s 720p24 project, simpleperf charged 2.2% of all
+of the app's CPU to `memcpy` under `StoredRawResource.<init>`, reached through `PreparationDriver.run`:
+every resident tile, DEM and style was copied once a frame, and the garbage those copies made fed a
+collector that took another 8.3%.
+
+So the rule stands, sharpened: **a resource is copied where a `ByteArray` enters RenG, which is the
+public `StoredRawResource` constructor, and nowhere after.** RenG re-wraps a resource it already holds
+with the internal `StoredRawResource.withSharedBytes(metadata)`, which shares the snapshot. It takes no
+`ByteArray`, so it cannot be handed a borrowed one — the aliasing bug this ADR warned about cannot be
+written through it. `copyStored`, `copyValidStoredResource` and the 304 merge now use it. The public
+constructor, `bytes` and the ABI are unchanged.
+
+The same reasoning, applied to `CanonicalBytes`: an encoder's freshly built output, and a resource's
+snapshot read only to be hashed, are now wrapped by the internal `CanonicalBytes.adopting` instead of
+copied, and `CanonicalIdentityRegistry.register` retains the identity it is given instead of
+deep-copying it — `CanonicalBytes` and `Sha256Digest` are immutable on the same terms.

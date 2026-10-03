@@ -30,6 +30,7 @@ import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -178,17 +179,27 @@ internal fun planSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
-): SpatialOutcome<FrameSpatialPlan> {
-    val spatialPlanner = when (plan.projectionMode) {
-        ProjectionMode.GLOBE -> ::planGlobeSpatial
-        ProjectionMode.MERCATOR -> ::planMercatorSpatial
-    }
-    return spatialPlanner(
+    // A renderer passes the one it owns, so a consumer's shader text is scanned once rather than on every
+    // frame. The memo is of a pure function of an immutable `String`, so it changes no answer and leaves
+    // this function as pure as the KDoc above says; the default, a memo of this call alone, is what a
+    // caller with no renderer to own one gets.
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
+): SpatialOutcome<FrameSpatialPlan> = when (plan.projectionMode) {
+    ProjectionMode.GLOBE -> planGlobeSpatial(
         plan,
         outputPixelSize,
         previousSelectedLod,
         maximumBasemapTileInstances,
         basemapStyleConfigured,
+        shaderProfileMemo,
+    )
+    ProjectionMode.MERCATOR -> planMercatorSpatial(
+        plan,
+        outputPixelSize,
+        previousSelectedLod,
+        maximumBasemapTileInstances,
+        basemapStyleConfigured,
+        shaderProfileMemo,
     )
 }
 
@@ -197,6 +208,7 @@ internal class FramePlanningCore(
     private val frameIdentityRegistry: CanonicalIdentityRegistry,
     private val resourceKeyDeriver: ResourceKeyDeriver,
     private val rentilePrivateKeyResolver: RentilePrivateKeyResolver,
+    private val shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ) {
     internal fun plan(request: FramePlanningRequest): FramePlanningOutcome {
         val plan = request.plan
@@ -206,6 +218,7 @@ internal class FramePlanningCore(
             request.previousSelectedLod,
             request.maximumBasemapTileInstances,
             request.basemapStyle != null,
+            shaderProfileMemo,
         )
         if (spatialOutcome is SpatialOutcome.Failure) {
             return FramePlanningOutcome.Failure(spatialOutcome.failure)

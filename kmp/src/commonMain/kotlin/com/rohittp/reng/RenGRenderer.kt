@@ -183,6 +183,7 @@ import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.renGFailure
 import com.rohittp.reng.internal.residentGpuTexturesOverBudgetDiagnostic
 import com.rohittp.reng.internal.resource.ResourceOperationOutcome
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.terrain.DemEncoding
 import com.rohittp.reng.internal.terrain.DemTexels
 import com.rohittp.reng.internal.terrain.DemTileCoordinate
@@ -1155,6 +1156,11 @@ internal class RenGRenderer(
      * by the validation, planning, encoding and draw paths that each used to derive them again.
      */
     private val shaderPairMemo = ShaderPairMemo()
+
+    // Every planSpatial this renderer runs -- prepare's, through each FramePlanningCore, and readAhead's
+    // -- shares it, so a consumer's shader sources are scanned for their profile directive once rather
+    // than once a frame. Locked, because readAhead may plan on another thread.
+    private val shaderProfileMemo = ShaderProfileMemo()
     private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo)
 
     /**
@@ -1540,6 +1546,7 @@ internal class RenGRenderer(
                     lod,
                     configuration.maximumBasemapTileInstances,
                     configuration.basemapStyle != null,
+                    shaderProfileMemo,
                 )
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -1585,6 +1592,7 @@ internal class RenGRenderer(
         frameIdentityRegistry = registry,
         resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo),
         rentilePrivateKeyResolver = rentilePrivateKeyResolver,
+        shaderProfileMemo = shaderProfileMemo,
     )
 
     // ---- Preparation --------------------------------------------------------------------------

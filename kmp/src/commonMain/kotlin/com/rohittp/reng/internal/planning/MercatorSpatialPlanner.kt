@@ -16,8 +16,8 @@ import com.rohittp.reng.internal.projection.ClosedMercatorFootprint
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.clippedPhysicalPixelFootprint
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
-import com.rohittp.reng.internal.shader.scanShaderProfile
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -27,6 +27,7 @@ internal fun planMercatorSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ): SpatialOutcome<FrameSpatialPlan> {
     val cameraOutcome = resolveMercatorCamera(plan.camera, outputPixelSize)
     if (cameraOutcome is SpatialOutcome.Failure) return cameraOutcome
@@ -91,8 +92,10 @@ internal fun planMercatorSpatial(
     for (geometry in plan.geometriesForCore()) {
         val geometryOutcome = resolveGeometry(geometry, camera)
         if (geometryOutcome is SpatialOutcome.Failure) return geometryOutcome
-        val vertexProfile = scanShaderProfile(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
-        val fragmentProfile = scanShaderProfile(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+        val vertexProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        val fragmentProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
         geometries += (geometryOutcome as SpatialOutcome.Success).value
         shaderProfiles += vertexProfile to fragmentProfile
     }
@@ -102,8 +105,8 @@ internal fun planMercatorSpatial(
     // consumer's INVALID_VALUE at FRAME_PLANNING rather than as a GL fault at draw;
     // `createConsumerBackdropPipeline` re-scans for itself, as `createGeometryPipeline` does.
     (plan.backdropForCore() as? Backdrop.Shader)?.let { backdrop ->
-        scanShaderProfile(backdrop.shaderPair.vertexSource) ?: return shaderProfileFailure()
-        scanShaderProfile(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+        shaderProfileMemo.profileOf(backdrop.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
     return SpatialOutcome.Success(

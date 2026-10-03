@@ -161,20 +161,56 @@ public class StoredRawResourceMetadata(
             "storedAtEpochMillisPresent=true)"
 }
 
-public class StoredRawResource(
+public class StoredRawResource private constructor(
     bytes: ByteArray,
     public val contentDigest: String,
     public val metadata: StoredRawResourceMetadata,
+    shareSnapshot: Boolean,
 ) {
-    private val storedBytes: ByteArray = bytes.freshCopy()
+    /**
+     * The only way a caller -- a consumer or RenG itself -- constructs a resource from a `ByteArray`. It
+     * copies [bytes], so the caller may mutate its own array afterwards without reaching this resource.
+     */
+    public constructor(
+        bytes: ByteArray,
+        contentDigest: String,
+        metadata: StoredRawResourceMetadata,
+    ) : this(bytes, contentDigest, metadata, shareSnapshot = false)
+
+    // `shareSnapshot` is true only from [withSharedBytes], which passes another StoredRawResource's own
+    // `storedBytes`. So every array held here was copied by the public constructor above, from whatever
+    // array its caller supplied, and is referenced by StoredRawResource instances alone.
+    private val storedBytes: ByteArray = if (shareSnapshot) bytes else bytes.freshCopy()
 
     /**
      * The construction snapshot, read without a further copy by RenG-internal code only. This array is
-     * never handed to a caller, never mutated, and never retained past the reading call; [bytes] remains
-     * the only externally visible read and still returns a fresh copy on every access.
+     * never handed to a caller, never mutated, and never retained past the reading call except by
+     * another [StoredRawResource] through [withSharedBytes]; [bytes] remains the only externally visible
+     * read and still returns a fresh copy on every access.
      */
     internal val byteSnapshot: ByteArray
         get() = storedBytes
+
+    /**
+     * An equal-bytes resource carrying [metadata], which shares this one's snapshot instead of copying
+     * it (ADR 0062 erratum).
+     *
+     * **Why.** RenG used to re-wrap a resource it already held as `StoredRawResource(other.byteSnapshot,
+     * ...)` -- on every resident hit in every preparation, on every validated store read, and on every
+     * write it hands to the consumer's `Store` -- and each of those ran the public constructor's full
+     * array copy. On an OPPO CPH2629 exporting a 28 s 720p24 project, simpleperf charged 2.2% of all of
+     * the app's CPU to `memcpy` under this constructor, reached through `PreparationDriver.run`: tiles,
+     * terrain DEMs and styles are the largest arrays RenG holds, copied once a frame each, and the copies
+     * fed a garbage collector that took another 8.3%.
+     *
+     * **Why it is safe.** The copy defended nothing. The array is private, never mutated, and reachable
+     * from outside only through [bytes], which copies; so two resources sharing it are as independent
+     * as two that do not. The boundary copy a consumer's array needs is taken by the public
+     * constructor, and this function cannot be handed a borrowed array at all -- it has no `ByteArray`
+     * parameter. Equality, hashing, the digest and every byte read are unchanged.
+     */
+    internal fun withSharedBytes(metadata: StoredRawResourceMetadata): StoredRawResource =
+        StoredRawResource(storedBytes, contentDigest, metadata, shareSnapshot = true)
 
     public val bytes: ByteArray
         get() = storedBytes.freshCopy()

@@ -105,6 +105,14 @@ internal fun runBloomReadbackSuite(
             binding, renderer, renderTarget, target.framebuffer,
             bloomPlan(frameIndex = 11L, bloom = Bloom(), emissive = true, model = true),
         )
+        val partlyOccludedEmitterWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            partlyOccludedEmitterPlan(frameIndex = 12L, bloom = null),
+        )
+        val partlyOccludedEmitterWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            partlyOccludedEmitterPlan(frameIndex = 13L, bloom = Bloom(insideSuppression = 1f)),
+        )
 
         failures.run("bloom null ignores emissive") {
             val differentBytes = differingBytes(nullBloomEmissive, nullBloomOrdinary)
@@ -203,6 +211,33 @@ internal fun runBloomReadbackSuite(
                 "a model drawn after the emitter must not receive bloom light",
             )
         }
+        failures.run("an emitter partly behind a model still feeds bloom past its silhouette") {
+            val modelWithoutBloom = partlyOccludedEmitterWithoutBloom.pixel(OCCLUDED_MODEL_X, OCCLUDED_MODEL_Y)
+            val modelWithBloom = partlyOccludedEmitterWithBloom.pixel(OCCLUDED_MODEL_X, OCCLUDED_MODEL_Y)
+            val haloWithoutBloom = partlyOccludedEmitterWithoutBloom.pixel(OCCLUDED_HALO_X, OCCLUDED_HALO_Y)
+            val haloWithBloom = partlyOccludedEmitterWithBloom.pixel(OCCLUDED_HALO_X, OCCLUDED_HALO_Y)
+            val haloIncrease = haloWithBloom[0] - haloWithoutBloom[0]
+            println(
+                "RenG bloom readback case 9: dialect=$dialect " +
+                    "modelWithoutBloom=${modelWithoutBloom.describe()} " +
+                    "modelWithBloom=${modelWithBloom.describe()} " +
+                    "haloWithoutBloom=${haloWithoutBloom.describe()} " +
+                    "haloWithBloom=${haloWithBloom.describe()} haloIncrease=$haloIncrease",
+            )
+            assertTrue(
+                maxChannelDelta(BLOCKER_COLOUR, modelWithoutBloom) <= 2,
+                "the opaque model sample must carry the model's own colour",
+            )
+            assertContentEquals(
+                modelWithoutBloom,
+                modelWithBloom,
+                "the model's own opaque pixels must remain unbrightened",
+            )
+            assertTrue(
+                haloIncrease > 4,
+                "emission collected before model depth exists must still feed halo outside the silhouette",
+            )
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target.framebuffer))
@@ -277,6 +312,43 @@ private fun bloomPlan(
     } else {
         emptyList()
     },
+    bloom = bloom,
+)
+
+/**
+ * The white emitter crosses the small blocker's left silhouette: its right-hand portion is behind
+ * opaque model pixels, while its left-hand portion remains visible. `insideSuppression=1` removes
+ * the source interior from the composite but still counts that whole pre-model emission image when
+ * producing the halo sampled just beyond the blocker's opposite edge.
+ */
+private fun partlyOccludedEmitterPlan(frameIndex: Long, bloom: Bloom?): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(0.0, 0.0, BLOOM_ZOOM, 0.0, 0.0),
+    drawBasemap = false,
+    geometries = listOf(
+        Geometry(
+            topLeft = geoAtPixel(FULL_LEFT, FULL_TOP, altitude = 0.0),
+            bottomRight = geoAtPixel(FULL_RIGHT, FULL_BOTTOM, altitude = 0.0),
+            shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, GREY_FRAGMENT_SOURCE),
+        ),
+        Geometry(
+            topLeft = geoAtPixel(OCCLUDED_EMITTER_LEFT, OCCLUDED_EMITTER_TOP, altitude = 1.0),
+            bottomRight = geoAtPixel(OCCLUDED_EMITTER_RIGHT, OCCLUDED_EMITTER_BOTTOM, altitude = 1.0),
+            shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, WHITE_FRAGMENT_SOURCE),
+            emissive = true,
+        ),
+    ),
+    models = listOf(
+        Model(
+            placement = bloomPlacement(
+                BLOOM_READBACK_PIXELS / 2,
+                BLOOM_READBACK_PIXELS / 2,
+                altitude = 3.0,
+                scale = OCCLUDING_MODEL_SCALE,
+            ),
+            glb = ResourceLocator(BLOOM_MODEL_URL),
+        ),
+    ),
     bloom = bloom,
 )
 
@@ -425,6 +497,15 @@ private const val COVER_TOP: Int = 100
 private const val MIRRORED_OUTSIDE_Y: Int = BLOOM_READBACK_PIXELS - 1 - OUTSIDE_Y
 private const val FAR_X: Int = 100
 private const val FAR_Y: Int = 16
+private const val OCCLUDED_EMITTER_LEFT: Int = 55
+private const val OCCLUDED_EMITTER_RIGHT: Int = 64
+private const val OCCLUDED_EMITTER_BOTTOM: Int = 60
+private const val OCCLUDED_EMITTER_TOP: Int = 68
+private const val OCCLUDED_MODEL_X: Int = 62
+private const val OCCLUDED_MODEL_Y: Int = 64
+private const val OCCLUDED_HALO_X: Int = 75
+private const val OCCLUDED_HALO_Y: Int = 64
+private const val OCCLUDING_MODEL_SCALE: Double = 4.0
 private const val BLOOM_STICKER_URL: String = "https://images.example/bloom-cover.png"
 private const val BLOOM_MODEL_URL: String = "https://models.example/bloom-cover.glb"
 

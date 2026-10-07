@@ -384,7 +384,11 @@ Geometry. It controls intensity, the contribution of each resolution level, supp
 emission and whitening. It is composited immediately after the last Emissive Geometry in the Frame
 Plan's Geometry order: later Geometry, Models, Map Stickers, Map Labels and screen-anchored content
 cover it, while content already drawn receives it. A non-emissive Geometry between two emitters is
-therefore below the final emitter's Bloom boundary and receives the composite.
+therefore below the final emitter's Bloom boundary and receives the composite. The emission redraw
+happens before Models write depth: an emitter behind a Model still contributes to the halo beyond the
+Model's silhouette and to inside suppression, although the Model's own opaque pixels cover the
+composite when it draws. For the same ordering reason, an emitter-last frame is byte-identical to the
+older post-map placement only when no Models or Map Stickers follow it.
 _Avoid_: Glow, halo, post-effect, blur, emission
 
 **Shader Pair**:

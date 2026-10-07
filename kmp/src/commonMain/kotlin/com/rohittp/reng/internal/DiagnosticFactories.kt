@@ -540,11 +540,20 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             FailureRule.Context(setOf(DiagnosticField.RESOURCE)),
         )
 
-        RenGErrorCode.RESOURCE_UNAVAILABLE -> ruleAt(
-            stage,
-            PipelineStage.RESOURCE_LOOKUP,
-            externalResourceRule,
-        )
+        RenGErrorCode.RESOURCE_UNAVAILABLE -> when (stage) {
+            PipelineStage.RESOURCE_LOOKUP -> externalResourceRule
+
+            // A rendered basemap tile whose texture was evicted between the frame's preparation and
+            // its draw (`RenGRenderer.resolveGroundTiles`, ADR 0046), named by its BASEMAP_TILE key --
+            // RESOURCE_DECODE_FAILED's DRAW pair below, for the same reason. Without this pair the
+            // draw built a failure this table refused, so the "typed" eviction failure surfaced as an
+            // IllegalArgumentException ("error code is not valid at this pipeline stage") that no
+            // consumer could answer by preparing again; found 2026-10-08 by
+            // RendererBasemapTileTest's overlapping-draw case, the first test to reach it.
+            PipelineStage.DRAW -> establishedResourceRule
+
+            else -> null
+        }
 
         RenGErrorCode.TRANSPORT_EXECUTION_FAILED -> ruleAt(
             stage,

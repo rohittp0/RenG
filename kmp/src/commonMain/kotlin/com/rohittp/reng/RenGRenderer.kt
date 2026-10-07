@@ -931,6 +931,17 @@ private class FrameAcquisition(
      * `prepare` actually used, rather than asking the host's unlocked manifest map afterwards.
      */
     val styleManifest: BasemapStyleManifest? = null,
+    /**
+     * The rendered-tile keys `renderBasemapTiles` left out of [basemapTiles] because their texture was
+     * resident when this frame selected them -- the tiles it chose to draw from the GPU rather than ask
+     * the engine for. Empty when the frame rendered no ground.
+     *
+     * Carried out because residency is not a fact that stays true for the rest of `prepare`: a draw may
+     * overlap preparation (CONTEXT.md), and that draw's byte-budget eviction can take an unleased
+     * texture between selection and `groundInstances`. What this frame *decided* at selection is the
+     * only stable thing to check the ground against; see `groundInstances`.
+     */
+    val residentAtSelection: Set<ResourceKey> = emptySet(),
 )
 
 private data class PreparationHistory(
@@ -2089,6 +2100,7 @@ internal class RenGRenderer(
             val groundInstances = groundInstances(
                 instances = planned.spatialPlan.tileSelection?.instances.orEmpty(),
                 renderedTiles = acquired.basemapTiles,
+                residentAtSelection = acquired.residentAtSelection,
                 styleDigest = acquired.basemapStyleDigest,
             )
             val terrain = preparedTerrain(acquired)
@@ -2681,10 +2693,29 @@ internal class RenGRenderer(
      * and still has ground to place. Keying this on the rendered list dropped the ground entirely on
      * exactly those frames — caught by `MacosGlConformanceTest`'s coplanar-geometry case, which found
      * a quad with no ground beneath it and called itself vacuous rather than passing.
+     *
+     * **"Already resident" means resident when this frame selected the tile, not resident now.**
+     * [residentAtSelection] is the set `renderBasemapTiles` skipped for that reason, and it is accepted
+     * here without asking the registry again. Asking again was a race: a skipped tile holds no lease,
+     * a draw may overlap preparation by contract (CONTEXT.md), and that draw's byte-budget eviction
+     * could delete the texture between selection and this `check`. The `check` then threw a bare
+     * `IllegalStateException` out of `prepare` -- measured on a OnePlus 12 on 2026-10-08, where a video
+     * export preparing frame N+1 while frame N drew failed at the same frame on 3 of 3 runs, and
+     * completed with the overlap disabled. Nothing about that frame was wrong at selection; the tile
+     * left afterwards, and it could equally leave after this `check` passed and before the frame's own
+     * draw. So the draw is the one place that answers it: `resolveGroundTiles` leases the texture if
+     * it is still there, falls back to a resident ancestor, or fails with the typed
+     * RESOURCE_UNAVAILABLE at DRAW that a consumer can answer by preparing again. The live registry
+     * read stays as a fourth way to pass, for a tile that became resident since selection.
+     *
+     * The `check` keeps its real job: a key this frame neither rendered, nor saw resident at
+     * selection, nor can find now, nor can cover from an ancestor is a key the acquisition path never
+     * named -- the divergence between the two derivations this function exists to catch.
      */
     private fun groundInstances(
         instances: List<BasemapTileInstance>,
         renderedTiles: List<RenderedBasemapTile>,
+        residentAtSelection: Set<ResourceKey>,
         styleDigest: String?,
     ): List<PreparedGroundInstance> {
         if (instances.isEmpty() || styleDigest == null) return emptyList()
@@ -2700,12 +2731,14 @@ internal class RenGRenderer(
             // and it could never see the derivations `renderBasemapTiles` made for the same tiles a
             // moment earlier in this same frame.
             val key = basemapEngineHost.renderedTileKey(styleDigest, instance)
-            // Rendered this frame, already on the GPU from an earlier one, or -- since ADR 0057 --
-            // coming from a resident ancestor because this frame's budget declined to rasterise it or,
-            // opted into, because it could not be downloaded.
-            // All three are ways for the draw to have pixels; only naming none of them is a defect.
+            // Rendered this frame, on the GPU when this frame selected it (and possibly evicted since
+            // by an overlapping draw -- the draw answers that, see the KDoc), on the GPU now, or --
+            // since ADR 0057 -- coming from a resident ancestor because this frame's budget declined
+            // to rasterise it or, opted into, because it could not be downloaded.
+            // All are ways for the draw to have pixels; only naming none of them is a defect.
             check(
                 key in renderedKeys ||
+                    key in residentAtSelection ||
                     glObjectRegistry.resident(key) != null ||
                     residentAncestorOf(styleDigest, canonical) != null,
             ) {
@@ -2945,6 +2978,7 @@ internal class RenGRenderer(
         )
 
         var basemapTiles: List<RenderedBasemapTile> = emptyList()
+        val residentAtSelection = HashSet<ResourceKey>()
         var observedStyle: PreparedStyle? = null
         var observedManifest: BasemapStyleManifest? = null
         var basemapStyleDigest: String? = null
@@ -3005,6 +3039,7 @@ internal class RenGRenderer(
                                 accessMode,
                                 priority,
                                 rawReservationSink,
+                                residentAtSelection,
                             )
                         basemapStyleDigest = style.digest
                         // Inside the invocation, on the routes `tileTimeRoutes` already preregistered
@@ -3117,6 +3152,7 @@ internal class RenGRenderer(
             terrain,
             terrainExaggeration,
             styleManifest = observedManifest,
+            residentAtSelection = residentAtSelection,
         )
     }
 
@@ -3188,6 +3224,10 @@ internal class RenGRenderer(
     /**
      * Declares the tile routes [manifest] says this frame's ground will make the engine ask for, then
      * acquires and draws it. Runs inside the style's own invocation, as [completedStyleManifest] does.
+     *
+     * Every tile it skips because its texture is already resident is added to [residentAtSelection],
+     * which `groundInstances` reads instead of asking the registry a second time; see the comment at
+     * the skip for why that second answer cannot be trusted.
      */
     private suspend fun renderBasemapTiles(
         manifest: BasemapStyleManifest,
@@ -3196,6 +3236,7 @@ internal class RenGRenderer(
         accessMode: ResourceAccessMode,
         priority: RenGRenderPriority,
         rawReservationSink: (RawTileBudget.Reservation) -> Unit,
+        residentAtSelection: MutableSet<ResourceKey>,
     ): List<RenderedBasemapTile> {
         // Routes for EVERY visible tile, never only the missing ones. `tileTimeRoutes` expands a
         // `raster-dem` source through `demNeighbourhoodOrSelf`, so terrain's routes come from this
@@ -3222,9 +3263,14 @@ internal class RenGRenderer(
         // RenderedBasemapTile is immutable and holds one copy of the pixels.
         //
         // Reading the registry here is the one cross-phase read: preparation touches it, every
-        // other touch is under a draw. A consumer that drew one frame while preparing another
-        // would race a LinkedHashMap; every RenG consumer prepares and draws in sequence on the
-        // thread owning the GL context.
+        // other touch is under a draw. CONTEXT.md lets a draw overlap GL-free preparation, and a
+        // consumer does exactly that -- an exporter prepares frame N+1 on a worker while frame N
+        // draws on the GL thread. The read itself is safe, because `GlObjectRegistry` guards every
+        // map behind its own PlatformLock. What it answers is not stable: a skipped tile is NOT
+        // leased, so the overlapping draw's byte-budget eviction may delete its texture a moment
+        // after this read. That is why a skip is recorded in [residentAtSelection] rather than
+        // re-asked later in this `prepare`, and why the draw, not preparation, is where a tile gone
+        // by then is answered (`resolveGroundTiles`' typed RESOURCE_UNAVAILABLE).
         val memo = batchRenderedTiles
         val alreadyRendered = ArrayList<RenderedBasemapTile>()
         val rememberedRaw = ArrayList<Pair<CanonicalBasemapTile, RenderedBasemapTile>>()
@@ -3245,7 +3291,10 @@ internal class RenGRenderer(
 
         for (tile in canonicalTiles) {
             val key = basemapEngineHost.renderedTileKey(style, tile)
-            if (glObjectRegistry.resident(key) != null) continue
+            if (glObjectRegistry.resident(key) != null) {
+                residentAtSelection += key
+                continue
+            }
             val remembered = memo?.get(key)
             when (remembered?.pixels) {
                 is BasemapTilePixels.Raw -> rememberedRaw += tile to remembered

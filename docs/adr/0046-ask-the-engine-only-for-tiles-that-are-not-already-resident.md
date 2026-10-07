@@ -94,3 +94,29 @@ what "prepare() has no render context" already implies about how these phases in
 `prepare()` refuses to run twice concurrently in any case. Making this safe for a genuinely concurrent
 consumer is a synchronisation question this ADR does not answer, and it is the question any future
 batched or pipelined preparation has to answer first.
+
+## Erratum, 2026-10-08: the assumption above expired, and a phone export found where
+
+**Consumers no longer prepare and draw in sequence.** CONTEXT.md lets a draw overlap GL-free
+preparation, and an exporter now does exactly that: it prepares frame N+1 on a worker while frame N
+draws on the GL thread. The `LinkedHashMap` race this ADR warned of is not the problem —
+`GlObjectRegistry` guards every map behind its own `PlatformLock`, so the cross-phase read is safe. What
+it answers is not stable.
+
+`renderBasemapTiles` skips a resident tile **without leasing it**, and `groundInstances` then asked the
+registry again whether it was resident. Between the two, frame N's draw could release its own leases and
+let the byte budget evict that unleased texture, and the `check` threw a bare `IllegalStateException`
+out of `prepare()`. Measured on a OnePlus 12: the export failed at the same frame on 3 of 3 runs, and
+completed with the overlap disabled.
+
+**The fix keeps this ADR's second change and corrects its condition.** `renderBasemapTiles` records the
+keys it skipped as resident, and `groundInstances` admits a key that is rendered, **resident at
+selection**, resident now, or covered by a resident ancestor. A tile evicted after selection is the
+draw's to answer, which this ADR's third change already does — `resolveGroundTiles` returns the typed
+`RESOURCE_UNAVAILABLE` at `DRAW` — and that was always the real guard, because the tile can as easily be
+evicted after the `check` passes and before the frame's own draw. The `check` keeps its job of catching a
+key the acquisition path never named.
+
+Gated by `RendererBasemapTileTest.aTileEvictedByAnOverlappingDrawAfterSelectionFailsTheDrawTypedRatherThanThePreparation`,
+which runs the overlapping draw inside a real `prepare()`, from the transport fetch of a tile that frame
+is missing.

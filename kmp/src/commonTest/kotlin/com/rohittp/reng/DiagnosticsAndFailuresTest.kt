@@ -110,10 +110,11 @@ class DiagnosticsAndFailuresTest {
     @Test
     fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
         // 104 until ADR 0071 admitted an internal-pipeline identity for the two shader codes, then
-        // the prepared-frame aggregate CPU ceiling added one FRAME_PREPARATION limit shape.
-        assertEquals(107, allowedFailureCases.size)
+        // the prepared-frame aggregate CPU ceiling added one FRAME_PREPARATION limit shape, then
+        // 107 until a tile evicted before its draw got RESOURCE_UNAVAILABLE's four DRAW identities.
+        assertEquals(111, allowedFailureCases.size)
         assertEquals(33, allowedFailureCases.count { !it.hasDiagnostic })
-        assertEquals(74, allowedFailureCases.count { it.hasDiagnostic })
+        assertEquals(78, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
         allowedFailureCases.forEach(::assertFailureTableOutcome)
@@ -918,6 +919,16 @@ class DiagnosticsAndFailuresTest {
                 add(
                     failureContext(
                         RenGErrorCode.RESOURCE_DECODE_FAILED,
+                        PipelineStage.DRAW,
+                        DiagnosticField.RESOURCE,
+                        identity,
+                    ),
+                )
+                // The same pair for a rendered tile evicted between preparation and draw
+                // (`resolveGroundTiles`): before it was allowed, that failure could not be built.
+                add(
+                    failureContext(
+                        RenGErrorCode.RESOURCE_UNAVAILABLE,
                         PipelineStage.DRAW,
                         DiagnosticField.RESOURCE,
                         identity,

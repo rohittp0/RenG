@@ -8,6 +8,7 @@ import com.rohittp.reng.internal.gl.RenderContextIdentity
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import kotlin.concurrent.Volatile
+import kotlin.coroutines.ContinuationInterceptor
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -21,6 +22,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 
 /**
  * The renderer end of basemap **tiles**: one `prepare()` acquires the style, compiles it through the
@@ -594,6 +596,62 @@ class RendererBasemapTileTest {
     }
 
     /**
+     * A tile that was resident when a `prepare()` selected it, and that an overlapping draw evicts
+     * before that `prepare()` places its ground, is the draw's failure to report -- typed
+     * RESOURCE_UNAVAILABLE at DRAW -- and never an `IllegalStateException` out of `prepare()`.
+     *
+     * Measured on a OnePlus 12 on 2026-10-08: an exporter preparing frame N+1 while frame N drew (which
+     * CONTEXT.md allows) failed at the same frame on 3 of 3 runs, because `groundInstances` re-asked
+     * the registry about a tile `renderBasemapTiles` had skipped, unleased, as resident.
+     *
+     * **The overlap is real, not simulated.** The draw runs inside this `prepare()`, on the test thread
+     * that owns the context, from the transport fetch of a tile the frame is missing -- which the engine
+     * makes strictly after selection and strictly before `groundInstances`. Cameras, at LOD 4:
+     * `basemapPlan` covers x 1-2, `shiftedBasemapPlan` x 2-3, and [westBasemapPlan] x 0-1. The budget is
+     * five 1 MiB tiles: the first frame leaves four resident; drawing the shifted frame leases x 2 and
+     * uploads x 3, six tiles, so releasing its leases evicts the least recently used unleased ones --
+     * the x 1 pair, exactly the tiles the west frame skipped as resident a moment earlier.
+     *
+     * Each step is asserted rather than assumed, so a fixture that stopped producing the race fails
+     * here instead of passing: the shifted and west frames each render only their two new tiles (the
+     * others were resident at selection), the hook fired, and the west frame's draw fails -- which it
+     * can only do if a tile it was promised at selection is gone. Without the fix, the west `prepare()`
+     * itself throws.
+     */
+    @Test
+    fun aTileEvictedByAnOverlappingDrawAfterSelectionFailsTheDrawTypedRatherThanThePreparation() = runTest {
+        val testThread = requireNotNull(coroutineContext[ContinuationInterceptor])
+        val transport = DrawDuringFetchTransport(WEST_ONLY_TILE_URL_PREFIX)
+        val renderer = styleRenderer(
+            transport,
+            resourceLimits = ResourceLimits(maximumResidentGpuTextureBytes = 5L * TILE_TEXTURE_BYTES),
+        ) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L))
+        renderer.draw(first, target)
+        first.close()
+
+        val shifted = renderer.prepare(shiftedBasemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        assertEquals(2, shifted.basemapTiles.size, "the shifted frame's x 2 pair is resident, so only x 3 renders")
+
+        transport.duringFetch = {
+            withContext(testThread) { renderer.draw(shifted, target) }
+        }
+        val west = renderer.prepare(westBasemapPlan(frameIndex = 2L)) as RenGPreparedFrame
+
+        assertTrue(transport.fired, "the overlapping draw must have run inside the west frame's preparation")
+        assertEquals(2, west.basemapTiles.size, "the west frame's x 1 pair was resident at selection, so only x 0 renders")
+        val failure = assertFailsWith<RenGException>("a tile evicted since selection must fail the draw") {
+            renderer.draw(west, target)
+        }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.DRAW, failure.stage)
+        west.close()
+        shifted.close()
+    }
+
+    /**
      * The exact four urls Rentile composes for `{z}/{x}/{y}` at the frame's own LOD, pinned as strings.
      * `min(z, maxZoom)`, the template hash, and the `{y}`/`{-y}` distinction are all silent-failure
      * traps: get one wrong and the firewall refuses every tile, which reads as a dead basemap rather
@@ -1068,6 +1126,61 @@ private fun shiftedBasemapPlan(frameIndex: Long): FramePlan = FramePlan(
     ),
     drawBasemap = true,
 )
+
+/**
+ * [styleCamera] moved one LOD-4 tile west: -157.5 is the x = 1.0 boundary, so this frame selects x 0
+ * and x 1 -- sharing the x 1 pair with [basemapPlan] and nothing with [shiftedBasemapPlan].
+ */
+private fun westBasemapPlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(
+        latitude = -55.0,
+        unwrappedLongitude = -157.5,
+        zoom = 4.0,
+        bearing = 0.0,
+        pitch = 0.0,
+    ),
+    drawBasemap = true,
+)
+
+/** The colour tiles only [westBasemapPlan] selects, `(lod 4, x 0)`, under [STYLE_TILE_TEMPLATE]. */
+private const val WEST_ONLY_TILE_URL_PREFIX: String = "https://tiles.example/r/4/0/"
+
+/** One [TILE_OUTPUT_SIZE] tile as an RGBA8 texture, which is what the residency budget is charged. */
+private const val TILE_TEXTURE_BYTES: Long = 512L * 512L * 4L
+
+/**
+ * [TileTransport] that runs [duringFetch] once, the first time a url under [triggerPrefix] is fetched,
+ * before answering it. The engine fetches a frame's missing tiles after `renderBasemapTiles` has
+ * selected which tiles are resident and before `prepare()` places its ground, so this is a seam in
+ * exactly the window the overlapping-draw race lives in, reached through the public adapter alone.
+ */
+private class DrawDuringFetchTransport(private val triggerPrefix: String) : Transport {
+    private val delegate = TileTransport()
+    private val mutex = Mutex()
+
+    /** Set by the test on its own thread, taken on the engine's. */
+    @Volatile
+    var duringFetch: (suspend () -> Unit)? = null
+
+    @Volatile
+    var fired: Boolean = false
+        private set
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        if (request.locator.value.startsWith(triggerPrefix)) {
+            mutex.withLock {
+                val hook = duringFetch
+                if (hook != null) {
+                    duringFetch = null
+                    hook()
+                    fired = true
+                }
+            }
+        }
+        return delegate.execute(request)
+    }
+}
 
 /** A camera two LODs out from [styleCamera], so its tiles are ancestors of that camera's. */
 private fun coarseBasemapPlan(frameIndex: Long): FramePlan = FramePlan(

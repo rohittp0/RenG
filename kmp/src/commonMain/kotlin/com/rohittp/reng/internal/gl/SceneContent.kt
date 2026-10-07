@@ -325,6 +325,139 @@ internal class Scene(
 }
 
 /**
+ * The exact GL state at ADR 0080's interstitial boundary inside the Geometry loop.
+ *
+ * This is intentionally narrower than [GlStateSnapshot]: it captures every value the emission
+ * redraw or [drawBloom] writes, plus the array-buffer binding paired with the Geometry program and
+ * vertex array. The chain touches texture units zero and one, while an emissive consumer Geometry's
+ * redraw can touch every unit its texture map names; [activeTexture] preserves whichever of those
+ * consumer units was current before the boundary. Lists, rather than arrays, make the state
+ * structurally comparable in the test that proves capture/bloom/restore is an exact round trip.
+ */
+internal data class GeometryLoopGlState(
+    val drawFramebuffer: Int,
+    val viewport: List<Int>,
+    val colourClearValue: List<Float>,
+    val depthTestEnabled: Boolean,
+    val depthFunction: Int,
+    val depthWriteMask: Boolean,
+    val cullEnabled: Boolean,
+    val blendEnabled: Boolean,
+    val blendSourceRgb: Int,
+    val blendDestinationRgb: Int,
+    val blendSourceAlpha: Int,
+    val blendDestinationAlpha: Int,
+    val blendEquationRgb: Int,
+    val blendEquationAlpha: Int,
+    val program: Int,
+    val vertexArray: Int,
+    val arrayBuffer: Int,
+    val activeTexture: Int,
+    val textureUnits: List<GlTextureUnitState>,
+)
+
+internal fun captureGeometryLoopGlState(binding: GlBinding, textureUnitCount: Int): GeometryLoopGlState {
+    require(textureUnitCount >= BLOOM_TEXTURE_UNIT_COUNT) {
+        "the bloom state must include both chain texture units"
+    }
+    val activeTexture = binding.sceneInteger(GL_ACTIVE_TEXTURE)
+    val textureUnits = ArrayList<GlTextureUnitState>(textureUnitCount)
+    repeat(textureUnitCount) { index ->
+        val unit = GL_TEXTURE0 + index
+        binding.activeTexture(unit)
+        textureUnits += GlTextureUnitState(
+            unit = unit,
+            texture2d = binding.sceneInteger(GL_TEXTURE_BINDING_2D),
+            sampler = binding.sceneInteger(GL_SAMPLER_BINDING),
+        )
+    }
+    binding.activeTexture(activeTexture)
+
+    return GeometryLoopGlState(
+        drawFramebuffer = binding.sceneInteger(GL_DRAW_FRAMEBUFFER_BINDING),
+        viewport = binding.sceneIntegers(GL_VIEWPORT, 4),
+        colourClearValue = binding.sceneFloats(GL_COLOR_CLEAR_VALUE, 4),
+        depthTestEnabled = binding.isEnabled(GL_DEPTH_TEST),
+        depthFunction = binding.sceneInteger(GL_DEPTH_FUNC),
+        depthWriteMask = binding.sceneBooleans(GL_DEPTH_WRITEMASK, 1).single(),
+        cullEnabled = binding.isEnabled(GL_CULL_FACE),
+        blendEnabled = binding.isEnabled(GL_BLEND),
+        blendSourceRgb = binding.sceneInteger(GL_BLEND_SRC_RGB),
+        blendDestinationRgb = binding.sceneInteger(GL_BLEND_DST_RGB),
+        blendSourceAlpha = binding.sceneInteger(GL_BLEND_SRC_ALPHA),
+        blendDestinationAlpha = binding.sceneInteger(GL_BLEND_DST_ALPHA),
+        blendEquationRgb = binding.sceneInteger(GL_BLEND_EQUATION_RGB),
+        blendEquationAlpha = binding.sceneInteger(GL_BLEND_EQUATION_ALPHA),
+        program = binding.sceneInteger(GL_CURRENT_PROGRAM),
+        vertexArray = binding.sceneInteger(GL_VERTEX_ARRAY_BINDING),
+        arrayBuffer = binding.sceneInteger(GL_ARRAY_BUFFER_BINDING),
+        activeTexture = activeTexture,
+        textureUnits = textureUnits,
+    )
+}
+
+private fun restoreGeometryLoopGlState(binding: GlBinding, state: GeometryLoopGlState) {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, state.drawFramebuffer)
+    binding.viewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3])
+    binding.clearColor(
+        state.colourClearValue[0],
+        state.colourClearValue[1],
+        state.colourClearValue[2],
+        state.colourClearValue[3],
+    )
+
+    binding.setSceneEnabled(GL_DEPTH_TEST, state.depthTestEnabled)
+    binding.depthFunc(state.depthFunction)
+    binding.depthMask(state.depthWriteMask)
+    binding.setSceneEnabled(GL_CULL_FACE, state.cullEnabled)
+    binding.setSceneEnabled(GL_BLEND, state.blendEnabled)
+    binding.blendFuncSeparate(
+        state.blendSourceRgb,
+        state.blendDestinationRgb,
+        state.blendSourceAlpha,
+        state.blendDestinationAlpha,
+    )
+    binding.blendEquationSeparate(state.blendEquationRgb, state.blendEquationAlpha)
+
+    binding.useProgram(state.program)
+    binding.bindVertexArray(state.vertexArray)
+    binding.bindBuffer(GL_ARRAY_BUFFER, state.arrayBuffer)
+
+    state.textureUnits.forEach { unit ->
+        binding.activeTexture(unit.unit)
+        binding.bindTexture(GL_TEXTURE_2D, unit.texture2d)
+        binding.bindSampler(unit.unit - GL_TEXTURE0, unit.sampler)
+    }
+    binding.activeTexture(state.activeTexture)
+}
+
+private fun GlBinding.sceneInteger(pname: Int): Int = sceneIntegers(pname, 1).single()
+
+private fun GlBinding.sceneIntegers(pname: Int, count: Int): List<Int> {
+    val values = IntArray(count)
+    getIntegerv(pname, values)
+    return values.toList()
+}
+
+private fun GlBinding.sceneFloats(pname: Int, count: Int): List<Float> {
+    val values = FloatArray(count)
+    getFloatv(pname, values)
+    return values.toList()
+}
+
+private fun GlBinding.sceneBooleans(pname: Int, count: Int): List<Boolean> {
+    val values = BooleanArray(count)
+    getBooleanv(pname, values)
+    return values.toList()
+}
+
+private fun GlBinding.setSceneEnabled(capability: Int, enabled: Boolean) {
+    if (enabled) enable(capability) else disable(capability)
+}
+
+private const val BLOOM_TEXTURE_UNIT_COUNT: Int = 2
+
+/**
  * The [GlFrameContent] Cycle D always left a seam for: its own KDoc says "Cycle D draws no frame
  * content of its own; Cycle E replaces this with the real scene draw." This is that replacement.
  *
@@ -334,14 +467,19 @@ internal class Scene(
  * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every **model**, then
  * every map-anchored sticker. That is ADR 0025's order with ADR 0030's models inserted before the
  * stickers, because a map-anchored sticker is a marker and a marker paints over the scene it marks.
- * ADR 0034 adds the labels between the two regimes, and ADR 0074 inserts optional bloom work after
- * phase 4 and immediately before phase 5 without renumbering either regime:
+ * ADR 0034 adds the labels between the two regimes. ADR 0080 amends ADR 0074 by inserting optional
+ * bloom work immediately after the last emissive Geometry in phase 2, without renumbering either
+ * regime. Later Geometry, models and map-anchored stickers consequently cover that light in the
+ * same order in which the consumer declared them:
  *
  * ```
  * map regime (depth tested throughout, ADR 0027)
- *   1 ground (test, AND write when displaced, ADR 0039)   2 geometries
+ *   1 ground (test, AND write when displaced, ADR 0039)
+ *   2 geometries in FramePlan order
+ *       ... last emissive Geometry
+ *       [emissive redraw tests depth; BLOOM chain/composite is screen-space, ADR 0080]
+ *       ... later Geometry
  *   3 models (test AND write, ADR 0030)                   4 map-anchored stickers
- *     emissive Geometry redraw and BLOOM (when active, ADR 0074)
  *   5 LABELS   depth test OFF   <-- ADR 0034, and OUTSIDE both regimes
  * screen regime (no depth)
  *   6 consumer screen-anchored stickers, by z (ADR 0024)
@@ -353,10 +491,13 @@ internal class Scene(
  * [beginLabelPass] *disables* the test, which would read as a third exception if the label pass were
  * inside the map regime. It is not: it is a fourth scene list drawn between the regimes, described by
  * a phase number rather than by a regime name, so both of those ADRs continue to describe every pass
- * that *is* in the map regime without amendment. Bloom is also outside both regimes: it samples
- * only the emissive Geometry redraw, so labels stay crisp and never bloom. Thus a consumer's
- * screen-anchored sticker covers a label, and a label covers bloom and a map-anchored sticker. What
- * still binds the label pass is
+ * that *is* in the map regime without amendment. Bloom is interstitial work inside phase 2 rather
+ * than a drawn-thing type: it samples only the emissive Geometry redraw, so later Geometry, models,
+ * map-anchored stickers, labels and the screen stack cover it. A non-emissive Geometry between two
+ * emitters is necessarily below the last-emitter boundary and still receives bloom; removing that
+ * known sandwich limit would require a later-content occlusion mask (ADR 0080). Thus a consumer's
+ * screen-anchored sticker covers a label, and a label covers every map-regime item. What still binds
+ * the label pass is
  * `SceneContentTest.exactlyOnePhaseWritesDepthItIsTheModelPassAndTheMaskIsOffAgainOnTheWayOut`:
  * exactly one phase in a whole scene enables depth writes and it is the model pass. The label pass
  * enables none, and the test off is genuinely *needed* here rather than merely restated — phase 4
@@ -581,8 +722,13 @@ internal class SceneContent(
                 is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
                 is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
             }
+            val lastEmissiveGeometryIndex = if (bloom == null) {
+                -1
+            } else {
+                scene.geometries.indexOfLast { it.geometry.emissive }
+            }
             var currentBlend: BlendMode? = null
-            for (sceneGeometry in scene.geometries) {
+            for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
                 if (sceneGeometry.geometry.blend != currentBlend) {
                     applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
                     currentBlend = sceneGeometry.geometry.blend
@@ -614,6 +760,13 @@ internal class SceneContent(
                     consumerTextures = sceneGeometry.consumerTextures,
                     emissionPass = 0,
                 )
+                if (geometryIndex == lastEmissiveGeometryIndex) {
+                    // ADR 0080: compositing here makes the rest of the existing phase order an
+                    // occluder in painter's order. drawBloomPhase restores the exact interstitial
+                    // state because a following Geometry with the same blend mode deliberately
+                    // skips re-establishing it through currentBlend.
+                    drawBloomPhase(binding)
+                }
             }
             applyPremultipliedBlendMode(binding, BlendMode.OVER)
         }
@@ -663,12 +816,11 @@ internal class SceneContent(
             )
         }
 
-        drawBloomPhase(binding)
         drawLabelPhase(binding)
         drawScreenStack(binding)
     }
 
-    /** ADR 0074's emission redraw and dual-Kawase chain, between map stickers and labels. */
+    /** ADR 0080's emission redraw and dual-Kawase chain, immediately after the last emitter. */
     private fun drawBloomPhase(binding: GlBinding) {
         val bloom = bloom ?: return
         val resources = bloomResources ?: return
@@ -684,57 +836,62 @@ internal class SceneContent(
             "the emission image must share the main offscreen depth renderbuffer"
         }
 
-        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.emission.framebuffer)
-        binding.viewport(0, 0, resources.emission.width, resources.emission.height)
-        binding.clearColor(0f, 0f, 0f, 0f)
-        binding.clear(GL_COLOR_BUFFER_BIT)
-        binding.enable(GL_DEPTH_TEST)
-        binding.depthFunc(GL_GEQUAL)
-        binding.depthMask(false)
-        binding.disable(GL_CULL_FACE)
-        binding.enable(GL_BLEND)
-        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-        binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        // Unlike ADR 0074's old position before labels, this is inside a loop that may continue.
+        // Capture every state value the chain writes and put it back exactly: in particular, two
+        // adjacent Geometry values with the same BlendMode rely on currentBlend to skip a redundant
+        // blendFuncSeparate, and consumer textures may have left any of units 0..14 active.
+        val textureUnitCount = maxOf(
+            BLOOM_TEXTURE_UNIT_COUNT,
+            emissiveGeometries.maxOf { it.consumerTextures.size },
+        )
+        val geometryLoopState = captureGeometryLoopGlState(binding, textureUnitCount)
+        try {
+            binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.emission.framebuffer)
+            binding.viewport(0, 0, resources.emission.width, resources.emission.height)
+            binding.clearColor(0f, 0f, 0f, 0f)
+            binding.clear(GL_COLOR_BUFFER_BIT)
+            binding.enable(GL_DEPTH_TEST)
+            binding.depthFunc(GL_GEQUAL)
+            binding.depthMask(false)
+            binding.disable(GL_CULL_FACE)
+            binding.enable(GL_BLEND)
+            binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+            binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
-        val geometryViewProjection = when (camera) {
-            is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
-            is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
+            val geometryViewProjection = when (camera) {
+                is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
+                is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
+            }
+            for (sceneGeometry in emissiveGeometries) {
+                val drape = groundDrapeFor(sceneGeometry.geometry)
+                val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
+                val grid = when (camera) {
+                    is ResolvedMercatorCamera ->
+                        geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+
+                    is ResolvedGlobeCamera ->
+                        geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+                }.requireResolvedAtDrawTime()
+                drawGeometry(
+                    binding = binding,
+                    pipeline = sceneGeometry.pipeline,
+                    grid = grid,
+                    modelViewProjection = geometryViewProjection,
+                    resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+                    resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+                    boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
+                    frameIndex = scene.frameIndex,
+                    consumerUniforms = sceneGeometry.consumerUniforms,
+                    consumerTextures = sceneGeometry.consumerTextures,
+                    emissionPass = 1,
+                )
+                endGeometryEmissionPass(binding, sceneGeometry.pipeline)
+            }
+
+            drawBloom(binding, resources, bloom, framebuffer)
+        } finally {
+            restoreGeometryLoopGlState(binding, geometryLoopState)
         }
-        for (sceneGeometry in emissiveGeometries) {
-            val drape = groundDrapeFor(sceneGeometry.geometry)
-            val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
-            val grid = when (camera) {
-                is ResolvedMercatorCamera ->
-                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-
-                is ResolvedGlobeCamera ->
-                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-            }.requireResolvedAtDrawTime()
-            drawGeometry(
-                binding = binding,
-                pipeline = sceneGeometry.pipeline,
-                grid = grid,
-                modelViewProjection = geometryViewProjection,
-                resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
-                resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
-                boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
-                frameIndex = scene.frameIndex,
-                consumerUniforms = sceneGeometry.consumerUniforms,
-                consumerTextures = sceneGeometry.consumerTextures,
-                emissionPass = 1,
-            )
-            endGeometryEmissionPass(binding, sceneGeometry.pipeline)
-        }
-
-        drawBloom(binding, resources, bloom, framebuffer)
-
-        // Phase 5 begins from the framebuffer, viewport and map-regime depth state it followed
-        // before bloom existed. Its icon/label pipelines then disable depth for themselves.
-        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer)
-        binding.viewport(0, 0, scene.outputPixelSize.width, scene.outputPixelSize.height)
-        binding.enable(GL_DEPTH_TEST)
-        binding.depthFunc(GL_GEQUAL)
-        binding.depthMask(false)
     }
 
     /**

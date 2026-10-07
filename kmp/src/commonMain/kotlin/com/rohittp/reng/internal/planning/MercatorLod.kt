@@ -3,7 +3,9 @@ package com.rohittp.reng.internal.planning
 import com.rohittp.reng.internal.projection.ClosedMercatorFootprint
 import com.rohittp.reng.internal.projection.GroundRayResult
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
+import com.rohittp.reng.internal.projection.admissibleGroundRows
 import com.rohittp.reng.internal.projection.footprintForAdmissibleRowRange
+import com.rohittp.reng.internal.projection.fullScanAdmissibleGroundRows
 import com.rohittp.reng.internal.projection.physicalPixelGroundRay
 import com.rohittp.reng.internal.projection.pixelRayCoordinates
 import kotlin.math.ceil
@@ -135,22 +137,66 @@ internal fun groundLodBands(
     }
 
     val height = camera.outputPixelSize.height
-    var firstAdmissibleRow = -1
-    var lastAdmissibleRow = -1
-    for (pixelY in 0 until height) {
-        if (physicalPixelGroundRay(camera, pixelX = 0, pixelY = pixelY) is GroundRayResult.Hit) {
-            if (firstAdmissibleRow < 0) firstAdmissibleRow = pixelY
-            lastAdmissibleRow = pixelY
+    val rows = admissibleGroundRows(camera) ?: return emptyList()
+    val raw = lodRuns(rows.first, rows.last) { pixelY -> lodForRow(camera, pixelY, selectedLod) }
+    return mergeBandsTooShortToEarnTheirOwnSelection(raw, height)
+}
+
+/** [groundLodForRow] for one admissible row: the per-row level [groundLodBands] runs over. */
+private fun lodForRow(camera: ResolvedMercatorCamera, pixelY: Int, selectedLod: Int): Int {
+    val hit = physicalPixelGroundRay(camera, pixelX = 0, pixelY = pixelY) as GroundRayResult.Hit
+    val v = pixelRayCoordinates(camera.outputPixelSize, 0, pixelY).v
+    return groundLodForRow(q = hit.q, v = v, cosinePitch = camera.cameraBack.z, selectedLod = selectedLod)
+}
+
+/**
+ * The maximal runs of equal [lodOf] over rows [first]..[last], in row order: what evaluating every
+ * row and joining equal neighbours gives, found by bisection instead.
+ *
+ * Sound because the level is monotone in row (the offsets are, which is also why
+ * [selectBandedBasemapTiles] can say bands never share a level): two rows with the same level bound
+ * a run of it, so a range whose ends agree is one run without looking inside, and only ranges whose
+ * ends differ are split. That is about `bands x log2(rows)` evaluations instead of one per row; at a
+ * low pitch, where the angle is not monotone in row, the offset is 0 throughout, so the ends agree.
+ * `MercatorLodTest` checks it against the per-row scan across a sweep of cameras.
+ */
+private fun lodRuns(first: Int, last: Int, lodOf: (Int) -> Int): List<GroundLodBand> {
+    val runs = ArrayList<GroundLodBand>()
+    fun extend(from: Int, to: Int, lod: Int) {
+        val open = runs.lastOrNull()
+        if (open != null && open.lod == lod && open.lastRow == from - 1) {
+            runs[runs.size - 1] = open.copy(lastRow = to)
+        } else {
+            runs.add(GroundLodBand(firstRow = from, lastRow = to, lod = lod))
         }
     }
-    if (firstAdmissibleRow < 0) return emptyList()
 
-    val cosinePitch = camera.cameraBack.z
+    // Covers rows a until b - 1, given the levels at a and b.
+    fun cover(a: Int, lodA: Int, b: Int, lodB: Int) {
+        when {
+            lodA == lodB -> extend(a, b - 1, lodA)
+            b - a == 1 -> extend(a, a, lodA)
+            else -> {
+                val mid = (a + b) ushr 1
+                val lodMid = lodOf(mid)
+                cover(a, lodA, mid, lodMid)
+                cover(mid, lodMid, b, lodB)
+            }
+        }
+    }
+
+    val lastLod = lodOf(last)
+    if (last > first) cover(first, lodOf(first), last, lastLod)
+    extend(last, last, lastLod)
+    return runs
+}
+
+/** Every row evaluated: the reference [groundLodBands] must agree with. Test use only. */
+internal fun fullScanGroundLodBands(camera: ResolvedMercatorCamera, selectedLod: Int): List<GroundLodBand> {
+    val rows = fullScanAdmissibleGroundRows(camera) ?: return emptyList()
     val raw = ArrayList<GroundLodBand>()
-    for (pixelY in firstAdmissibleRow..lastAdmissibleRow) {
-        val hit = physicalPixelGroundRay(camera, pixelX = 0, pixelY = pixelY) as GroundRayResult.Hit
-        val v = pixelRayCoordinates(camera.outputPixelSize, 0, pixelY).v
-        val lod = groundLodForRow(q = hit.q, v = v, cosinePitch = cosinePitch, selectedLod = selectedLod)
+    for (pixelY in rows) {
+        val lod = lodForRow(camera, pixelY, selectedLod)
         val open = raw.lastOrNull()
         if (open != null && open.lod == lod) {
             raw[raw.size - 1] = open.copy(lastRow = pixelY)
@@ -158,8 +204,7 @@ internal fun groundLodBands(
             raw.add(GroundLodBand(firstRow = pixelY, lastRow = pixelY, lod = lod))
         }
     }
-
-    return mergeBandsTooShortToEarnTheirOwnSelection(raw, height)
+    return mergeBandsTooShortToEarnTheirOwnSelection(raw, camera.outputPixelSize.height)
 }
 
 /**

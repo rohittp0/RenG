@@ -263,9 +263,10 @@ internal object ResourceOperationStateMachine {
          * append. An entry whose route has since left ELIGIBLE is dropped when the walk reaches it.
          *
          * Consumed from [eligibleHead] rather than by removing index 0, which shifted the whole remaining
-         * list on every route start and made the walk quadratic again for long operations. Only a route
-         * started from behind an entry that cannot start yet (its private key's claim is unusable) is
-         * removed from the middle. The consumed prefix is compacted away once it is most of the list.
+         * list on every route start and made the walk quadratic again for long operations. A route that can
+         * never start (its private key's claim is unusable) is dropped when the walk reaches it, so nothing
+         * stays in front of the live head for long; the consumed prefix is compacted away once it is most of
+         * the list.
          */
         private val eligibleOrdinals: MutableList<Long> = ArrayList()
         private var eligibleHead: Int = 0
@@ -337,6 +338,9 @@ internal object ResourceOperationStateMachine {
         }
 
         fun nextPendingStyleCommitOrdinal(): Long? {
+            // Nothing pending is the common case after every event; under cross-checking the scan below
+            // still runs, so an index that is wrongly empty is caught.
+            if (!crossCheckIndexes && pendingClassGateRouteIndexes.isEmpty()) return null
             val staged = styleCommitStates.mapTo(mutableSetOf()) { it.ordinal }
             val indexed = pendingClassGateRouteIndexes
                 .filter { index -> isStyleCommitReady(routeRecords[index], staged) }
@@ -2248,7 +2252,11 @@ internal object ResourceOperationStateMachine {
                 if (ceiling != null && ordinal >= ceiling) break
                 val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
                 if (claimIndex == null || !privateRentileKeyClaims[claimIndex].usable) {
-                    position += 1
+                    // It can never start: a claim is made unusable only by a key collision, which also
+                    // fails the operation, and nothing makes one usable again. Dropping it now, rather
+                    // than stepping over it on every later call, keeps every later start a head
+                    // consumption instead of a removal from the middle.
+                    position = consumeEligible(position)
                     continue
                 }
                 position = consumeEligible(position)

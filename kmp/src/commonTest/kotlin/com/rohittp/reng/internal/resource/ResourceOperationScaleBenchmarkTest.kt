@@ -133,13 +133,14 @@ class ResourceOperationScaleBenchmarkTest {
      * `deriveVisibleResourcesByOwner` quadratic on its own), eight routes at a time as production runs them
      * (which is what makes every completion start the next route).
      *
-     * Before the session, the pure path above measured ~4x per doubling. Measured 2026-10-08 on an Apple
-     * Silicon macOS host with the session: see the printed figures. The ceiling of 3.0x separates linear
-     * (~2x) from the quadratic shape this replaced with room for host noise.
+     * Before the session, the pure path above measured ~4x per doubling. Sized in the thousands because an
+     * O(n) step per route start (an eligible queue consumed by removing its first element) still looked
+     * linear at a few hundred routes. The ceiling of 3.0x separates linear (~2x) from the quadratic shape
+     * this replaced, with room for host noise.
      */
     @Test
     fun aSessionDrivesManyDistinctRoutesUnderOneOwnerInNearLinearTime() {
-        val routeCounts = listOf(256, 512, 1024)
+        val routeCounts = listOf(1024, 2048, 4096)
         val elapsed = routeCounts.associateWith { driveDistinctRoutesThroughSession(it) }
         println("session routes -> elapsedMillis: $elapsed")
         val ratios = routeCounts.zipWithNext { smaller, larger ->
@@ -149,17 +150,28 @@ class ResourceOperationScaleBenchmarkTest {
         println("session doubling ratios for route counts $routeCounts: $ratios")
         assertTrue(
             ratios.last() < 3.0,
-            "session scheduling is no longer near-linear: doubling routes from 512 to 1024 scaled elapsed " +
+            "session scheduling is no longer near-linear: doubling routes from 2048 to 4096 scaled elapsed " +
                 "time by ${ratios.last()}x (ceiling 3.0x; linear ~2x, quadratic ~4x); measurements: $elapsed",
         )
     }
 
-    private fun driveDistinctRoutesThroughSession(routeCount: Int): Long {
+    /**
+     * The session's two indexes -- the eligible-route queue and the pending class-gate index -- checked
+     * against the scans they replaced at every use, over an operation long enough that routes queue for
+     * capacity. Renderer frames elsewhere in the suite rarely hold more than eight routes at once, so a
+     * wrong queue would pass them unnoticed; the cross-checks throw on any disagreement.
+     */
+    @Test
+    fun aSessionsIndexesAgreeWithTheScansTheyReplaceWhileRoutesQueueForCapacity() {
+        driveDistinctRoutesThroughSession(routeCount = 300, crossCheckIndexes = true)
+    }
+
+    private fun driveDistinctRoutesThroughSession(routeCount: Int, crossCheckIndexes: Boolean = false): Long {
         // Eight at a time, as a renderer's default `maximumConcurrentResourceOperations` runs them: the
         // production shape, where routes queue for capacity and every completion starts the next.
         val definition = definitionOfDistinctStickerRoutes(routeCount, sharedOwner = true, maximumConcurrentRoutes = 8)
         val started = TimeSource.Monotonic.markNow()
-        val (session, first) = ResourceOperationStateMachine.startSession(definition)
+        val (session, first) = ResourceOperationStateMachine.startSession(definition, crossCheckIndexes)
         requireNotNull(session) { "the definition must not fail registration" }
         val pending = ArrayDeque<ResourceOperationAction>()
         var outcome: ResourceOperationOutcome? = first.outcome

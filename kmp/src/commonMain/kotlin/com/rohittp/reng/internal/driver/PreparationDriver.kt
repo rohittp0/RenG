@@ -153,16 +153,22 @@ internal class PreparationDriver(
             var pendingActionCount = 0
 
             // The pure path's result for the same step, compared with what the session produced. Only
-            // when [shadowCheck] is on; the session itself never needs [shadow]. Actions and outcome are
-            // everything state can affect, so equal ones at every step are equal behaviour; building the
-            // session's snapshot runs Running's whole invariant validation on the session's own state.
+            // when [shadowCheck] is on; the session itself never needs [shadow]. Actions, outcome and the
+            // whole state are compared at every step, and building the session's snapshot runs Running's
+            // invariant validation on it. The session's own indexes (pending cursors, eligible routes) are
+            // cross-checked inside it against the scans they replace, since both paths share them.
             fun checkShadow(step: ResourceOperationStateMachine.Session.Step, pure: ResourceOperationTransition) {
                 check(pure.actions == step.actions) {
                     "session actions diverged from the pure transition: ${step.actions} vs ${pure.actions}"
                 }
                 check(pure.outcome == step.outcome) { "session outcome diverged from the pure transition" }
-                requireNotNull(session).snapshot()
-                pure.state?.let { shadow = it }
+                val snapshot = requireNotNull(session).snapshot()
+                pure.state?.let { expected ->
+                    check(ResourceOperationStateMachine.sameState(expected, snapshot)) {
+                        "session state diverged from the pure transition"
+                    }
+                    shadow = expected
+                }
             }
 
             fun apply(step: ResourceOperationStateMachine.Session.Step) {
@@ -225,7 +231,7 @@ internal class PreparationDriver(
                 }
             }
 
-            val (started, firstStep) = ResourceOperationStateMachine.startSession(definition)
+            val (started, firstStep) = ResourceOperationStateMachine.startSession(definition, crossCheckIndexes = shadowCheck)
             session = started
             if (shadowCheck) {
                 val pure = ResourceOperationStateMachine.start(definition)

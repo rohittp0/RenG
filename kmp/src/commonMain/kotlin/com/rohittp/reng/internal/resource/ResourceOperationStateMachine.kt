@@ -17,6 +17,9 @@ import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.identity.AcceleratedSha256
 
 internal object ResourceOperationStateMachine {
+    /** Consumed eligible-queue entries tolerated before [SchedulerWork] compacts them away. */
+    private const val COMPACT_ELIGIBLE_AFTER = 64
+
     internal fun preRegister(
         definition: ResourceOperationDefinition,
     ): ResourceOperationTransition {
@@ -144,12 +147,16 @@ internal object ResourceOperationStateMachine {
      * Starts [definition] as a [Session]: [start]'s first step, without freezing the state it leaves into
      * an immutable [ResourceOperationState.Running] the session would only copy straight back.
      */
-    internal fun startSession(definition: ResourceOperationDefinition): Pair<Session?, Session.Step> {
+    internal fun startSession(
+        definition: ResourceOperationDefinition,
+        crossCheckIndexes: Boolean = false,
+    ): Pair<Session?, Session.Step> {
         val preRegistered = preRegister(definition)
         if (preRegistered.outcome != null) {
             return null to Session.Step(preRegistered.actions, preRegistered.outcome)
         }
         val work = SchedulerWork(requireNotNull(preRegistered.state))
+        work.crossCheckIndexes = crossCheckIndexes
         work.setStaticContinuation(definition.staticOccurrences.map(ResourceOccurrence::id))
         work.releaseKnownTraversal()
         work.scheduleEligibleOccurrences()
@@ -254,19 +261,46 @@ internal object ResourceOperationStateMachine {
          * it now walks this queue from the front, in the same ordinal order, under the same filters. Ordinals
          * are assigned in increasing order as routes become eligible, so an insertion is almost always an
          * append. An entry whose route has since left ELIGIBLE is dropped when the walk reaches it.
+         *
+         * Consumed from [eligibleHead] rather than by removing index 0, which shifted the whole remaining
+         * list on every route start and made the walk quadratic again for long operations. Only a route
+         * started from behind an entry that cannot start yet (its private key's claim is unusable) is
+         * removed from the middle. The consumed prefix is compacted away once it is most of the list.
          */
         private val eligibleOrdinals: MutableList<Long> = ArrayList()
+        private var eligibleHead: Int = 0
+
+        /** Whether the session's indexes are checked against the scans they replace; see [Session]. */
+        var crossCheckIndexes: Boolean = false
 
         private fun trackEligible(previous: ResourceRouteStatus?, status: ResourceRouteStatus, ordinal: Long?) {
             if (status != ResourceRouteStatus.ELIGIBLE || previous == ResourceRouteStatus.ELIGIBLE || ordinal == null) {
                 return
             }
-            if (eligibleOrdinals.isEmpty() || eligibleOrdinals.last() < ordinal) {
+            if (eligibleOrdinals.size == eligibleHead || eligibleOrdinals.last() < ordinal) {
                 eligibleOrdinals += ordinal
             } else {
-                val insertionPoint = eligibleOrdinals.binarySearch(ordinal)
+                val insertionPoint = eligibleOrdinals.binarySearch(ordinal, fromIndex = eligibleHead)
                 if (insertionPoint < 0) eligibleOrdinals.add(-insertionPoint - 1, ordinal)
             }
+        }
+
+        /**
+         * Takes the entry at [position] out of the live queue, by advancing the head when it is the head, and
+         * returns where the walk continues: the new head, or the same position when an entry behind the head
+         * was removed and the rest shifted down onto it.
+         */
+        private fun consumeEligible(position: Int): Int {
+            if (position != eligibleHead) {
+                eligibleOrdinals.removeAt(position)
+                return position
+            }
+            eligibleHead += 1
+            if (eligibleHead >= COMPACT_ELIGIBLE_AFTER && eligibleHead * 2 >= eligibleOrdinals.size) {
+                eligibleOrdinals.subList(0, eligibleHead).clear()
+                eligibleHead = 0
+            }
+            return eligibleHead
         }
 
         fun dispatch(event: ResourceOperationEvent) = dispatchEvent(this, event)
@@ -283,29 +317,47 @@ internal object ResourceOperationStateMachine {
 
         fun snapshotState(): ResourceOperationState.Running = runningSnapshot()
 
-        fun nextPendingClassGateOrdinal(): Long? = pendingClassGateRouteIndexes
-            .filter { index ->
-                val cursor = routeRecords[index].cursor
-                cursor is PendingClassGates && ordinaryResourceClassGates(cursor.content.route.resourceClass) != null
-            }
-            .minOrNull()
-            ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
-
-        fun nextPendingStyleCommitOrdinal(): Long? {
-            if (pendingClassGateRouteIndexes.isEmpty()) return null
-            val staged = styleCommitStates.mapTo(mutableSetOf()) { it.ordinal }
-            return pendingClassGateRouteIndexes
-                .filter { index ->
-                    val record = routeRecords[index]
-                    val cursor = record.cursor
-                    cursor is PendingClassGates &&
-                        cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
-                        record.status == ResourceRouteStatus.RUNNING &&
-                        cursor.ordinal in activeRouteOrdinals &&
-                        cursor.ordinal !in staged
-                }
+        fun nextPendingClassGateOrdinal(): Long? {
+            val indexed = pendingClassGateRouteIndexes
+                .filter { index -> isOrdinaryClassGateReady(routeRecords[index]) }
                 .minOrNull()
                 ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+            if (crossCheckIndexes) {
+                val scanned = routeRecords.firstOrNull(::isOrdinaryClassGateReady)?.let {
+                    (it.cursor as PendingClassGates).ordinal
+                }
+                check(indexed == scanned) { "pending class-gate index chose $indexed where the scan chooses $scanned" }
+            }
+            return indexed
+        }
+
+        private fun isOrdinaryClassGateReady(record: RouteRecord): Boolean {
+            val cursor = record.cursor
+            return cursor is PendingClassGates && ordinaryResourceClassGates(cursor.content.route.resourceClass) != null
+        }
+
+        fun nextPendingStyleCommitOrdinal(): Long? {
+            val staged = styleCommitStates.mapTo(mutableSetOf()) { it.ordinal }
+            val indexed = pendingClassGateRouteIndexes
+                .filter { index -> isStyleCommitReady(routeRecords[index], staged) }
+                .minOrNull()
+                ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+            if (crossCheckIndexes) {
+                val scanned = routeRecords.firstOrNull { isStyleCommitReady(it, staged) }?.let {
+                    (it.cursor as PendingClassGates).ordinal
+                }
+                check(indexed == scanned) { "pending style-commit index chose $indexed where the scan chooses $scanned" }
+            }
+            return indexed
+        }
+
+        private fun isStyleCommitReady(record: RouteRecord, staged: Set<Long>): Boolean {
+            val cursor = record.cursor
+            return cursor is PendingClassGates &&
+                cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
+                record.status == ResourceRouteStatus.RUNNING &&
+                cursor.ordinal in activeRouteOrdinals &&
+                cursor.ordinal !in staged
         }
 
         private fun trackPendingClassGates(index: Int, cursor: ResourceRouteCursor?) {
@@ -2180,14 +2232,16 @@ internal object ResourceOperationStateMachine {
 
         private fun startNotYetStartedRoutes() {
             val ceiling = startCeilingOrdinal
-            var position = 0
+            val expected = if (crossCheckIndexes) startableOrdinalsByScan() else null
+            val started = if (crossCheckIndexes) mutableListOf<Long>() else null
+            var position = eligibleHead
             while (position < eligibleOrdinals.size) {
                 if (activeRouteOrdinals.size >= initial.definition.maximumConcurrentRoutes) break
                 val ordinal = eligibleOrdinals[position]
                 val index = routeIndexByOrdinal[ordinal]
                 val record = index?.let(routeRecords::get)
                 if (record == null || record.status != ResourceRouteStatus.ELIGIBLE || record.ordinal != ordinal) {
-                    eligibleOrdinals.removeAt(position)
+                    position = consumeEligible(position)
                     continue
                 }
                 // Ascending, so nothing past the ceiling can start either.
@@ -2197,11 +2251,34 @@ internal object ResourceOperationStateMachine {
                     position += 1
                     continue
                 }
-                eligibleOrdinals.removeAt(position)
+                position = consumeEligible(position)
                 updateRouteRecord(index, status = ResourceRouteStatus.RUNNING)
                 activeRouteOrdinals += ordinal
                 actions += StartRoute(ordinal, record.registration)
+                started?.add(ordinal)
             }
+            if (expected != null) {
+                check(started == expected) { "eligible-route queue started $started where the scan starts $expected" }
+            }
+        }
+
+        /** What the filter-and-sort [startNotYetStartedRoutes] replaced would start now; cross-checks only. */
+        private fun startableOrdinalsByScan(): List<Long> {
+            val ceiling = startCeilingOrdinal
+            val capacity = initial.definition.maximumConcurrentRoutes - activeRouteOrdinals.size
+            if (capacity <= 0) return emptyList()
+            return routeRecords
+                .filter { record ->
+                    val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
+                    record.status == ResourceRouteStatus.ELIGIBLE &&
+                        record.ordinal != null &&
+                        claimIndex != null &&
+                        privateRentileKeyClaims[claimIndex].usable &&
+                        (ceiling == null || record.ordinal < ceiling)
+                }
+                .mapNotNull(RouteRecord::ordinal)
+                .sorted()
+                .take(capacity)
         }
 
         private fun bufferRouteOutcome(
@@ -2480,6 +2557,44 @@ internal object ResourceOperationStateMachine {
                 styleCommitStates = styleCommitStates,
                 visibleResourcesByOwner = deriveVisibleResourcesByOwner(),
             )
+    }
+
+    /**
+     * Whether [a] and [b] are the same state field by field: the shadow check's comparison of a session
+     * snapshot with the pure path's state. [ResourceOperationState.Running], [RouteRecord] and
+     * [DiscoveryFrontier] have no value equality of their own, so they are compared here; every other part
+     * already compares by value. The definition is the one object both were started from.
+     */
+    internal fun sameState(a: ResourceOperationState.Running, b: ResourceOperationState.Running): Boolean {
+        fun sameRecord(x: RouteRecord, y: RouteRecord) =
+            x.registration == y.registration && x.joinedOccurrenceIds == y.joinedOccurrenceIds &&
+                x.ordinal == y.ordinal && x.cursor == y.cursor && x.status == y.status && x.lookup == y.lookup &&
+                x.storeWriteAcknowledged == y.storeWriteAcknowledged && x.visibilityInstalled == y.visibilityInstalled
+        fun sameFrontier(x: DiscoveryFrontier, y: DiscoveryFrontier) =
+            x.parentOccurrenceId == y.parentOccurrenceId && x.childOccurrenceIds == y.childOccurrenceIds &&
+                x.withheldContinuation == y.withheldContinuation
+        fun <T> sameList(x: List<T>, y: List<T>, same: (T, T) -> Boolean) =
+            x.size == y.size && x.indices.all { same(x[it], y[it]) }
+        return a.definition === b.definition &&
+            a.occurrences == b.occurrences &&
+            sameList(a.routeRecords, b.routeRecords, ::sameRecord) &&
+            a.privateRentileKeyClaims == b.privateRentileKeyClaims &&
+            a.identityRecords == b.identityRecords &&
+            a.transportLatches == b.transportLatches &&
+            a.nextActionId == b.nextActionId &&
+            a.traversal.eligibleFifo == b.traversal.eligibleFifo &&
+            a.traversal.staticContinuation == b.traversal.staticContinuation &&
+            sameList(a.traversal.frontierStack, b.traversal.frontierStack, ::sameFrontier) &&
+            a.nextRouteOrdinal == b.nextRouteOrdinal &&
+            a.activeRouteOrdinals == b.activeRouteOrdinals &&
+            a.nextRetirementOrdinal == b.nextRetirementOrdinal &&
+            a.bufferedRouteOutcomes == b.bufferedRouteOutcomes &&
+            a.startCeilingOrdinal == b.startCeilingOrdinal &&
+            a.terminalSelection == b.terminalSelection &&
+            a.spriteCommitStates == b.spriteCommitStates &&
+            a.parkedRoutes == b.parkedRoutes &&
+            a.styleCommitStates == b.styleCommitStates &&
+            a.visibleResourcesByOwner == b.visibleResourcesByOwner
     }
 
     private fun preregisteredRouteRecord(occurrence: ResourceOccurrence): RouteRecord = RouteRecord(

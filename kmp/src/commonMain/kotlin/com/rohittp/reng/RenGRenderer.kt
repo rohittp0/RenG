@@ -9,6 +9,7 @@ import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
 import com.rohittp.reng.internal.bloomUnavailableDiagnostic
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
+import com.rohittp.reng.internal.cache.ResidentGeneration
 import com.rohittp.reng.internal.cache.ResidentGenerationId
 import com.rohittp.reng.internal.driver.PreparationDriver
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -942,6 +943,11 @@ private class FrameAcquisition(
      * only stable thing to check the ground against; see `groundInstances`.
      */
     val residentAtSelection: Set<ResourceKey> = emptySet(),
+    /**
+     * The generation this frame holds a lease on, per resource key: what its images and models were
+     * decoded from and what their GPU identities name. See acquireFrameResources.
+     */
+    val leasedGenerations: Map<ResourceKey, ResidentGeneration> = emptyMap(),
 )
 
 private data class PreparationHistory(
@@ -2088,7 +2094,7 @@ internal class RenGRenderer(
             currentCoroutineContext().ensureActive()
             val decodedByKey = acquired.decodedImagesByKey
             fun generationIdFor(key: ResourceKey): ResidentGenerationId =
-                requireNotNull(residentCache.current(key)) {
+                requireNotNull(acquired.leasedGenerations[key] ?: residentCache.current(key)) {
                     "a successful resource operation must leave its generation resident"
                 }.id
 
@@ -2205,6 +2211,7 @@ internal class RenGRenderer(
                     modelTextureReferences[index],
                     decodedByKey,
                     cpuReservation,
+                    acquired.leasedGenerations,
                 )
             }
 
@@ -2815,9 +2822,11 @@ internal class RenGRenderer(
         textureReference: StaticResourceReference.External?,
         decodedByKey: Map<ResourceKey, DecodedImage>,
         preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation,
+        /** The frame's leased generation per key; see [FrameAcquisition.leasedGenerations]. */
+        leasedGenerations: Map<ResourceKey, ResidentGeneration>,
     ): PreparedModel {
         val glbKey = glbReference.resourceKey
-        val generation = residentCache.current(glbKey)
+        val generation = leasedGenerations[glbKey] ?: residentCache.current(glbKey)
             ?: error("a successful resource operation must leave its content resident")
         val decoded = generation.decodedModel ?: run {
             val generationBytesBeforeDecode = generation.byteSize
@@ -2890,7 +2899,9 @@ internal class RenGRenderer(
             overrideTexture = textureReference?.let { reference ->
                 PreparedGeometryTexture(
                     resourceKey = reference.resourceKey,
-                    generationId = requireNotNull(residentCache.current(reference.resourceKey)) {
+                    generationId = requireNotNull(
+                        leasedGenerations[reference.resourceKey] ?: residentCache.current(reference.resourceKey),
+                    ) {
                         "a successful resource operation must leave its generation resident"
                     }.id,
                     image = requireNotNull(decodedByKey[reference.resourceKey]) {
@@ -2979,6 +2990,11 @@ internal class RenGRenderer(
             accessMode = accessMode,
             leaseSink = leaseSink,
             leaseObserver = admitLease,
+            registration = buildResourceOperationDefinition(
+                traversalsByItem = listOf(references),
+                accessMode = accessMode,
+                maximumConcurrentRoutes = minOf(configuration.maximumConcurrentResourceOperations, references.size),
+            ),
         ).toSet()
         val drivenCount = listOfNotNull(styleReference).size + driven.size
         val definition = buildResourceOperationDefinition(
@@ -3085,10 +3101,18 @@ internal class RenGRenderer(
                 throw CancellationException("resource preparation observed a route cancellation")
         }
 
+        // The generation this frame actually holds a lease on, per key: what it decodes, attaches to and
+        // names, rather than whatever is current by then. They are the same unless something superseded or
+        // freed the key after the lease was taken -- possible for a reference the steady-state shortcut
+        // leased before the operation ran -- and then the leased generation is the one the frame pins.
+        val leasedGenerations = HashMap<ResourceKey, ResidentGeneration>(leaseSink.size)
+        leaseSink.forEach { lease -> leasedGenerations[lease.generation.key] = lease.generation }
+
         val decodedByKey = LinkedHashMap<ResourceKey, DecodedImage>(imageReferences.size)
         for (reference in imageReferences) {
             currentCoroutineContext().ensureActive()
-            val generation = residentCache.current(reference.resourceKey)
+            val generation = leasedGenerations[reference.resourceKey]
+                ?: residentCache.current(reference.resourceKey)
                 ?: error("a successful resource operation must leave its content resident")
             // Decoded once per generation, not once per frame (ADR 0059). The only consumer of these
             // pixels is `cachedTexture`'s upload lambda, which does not run once a texture is
@@ -3168,6 +3192,7 @@ internal class RenGRenderer(
             terrainExaggeration,
             styleManifest = observedManifest,
             residentAtSelection = residentAtSelection,
+            leasedGenerations = leasedGenerations,
         )
     }
 

@@ -15,12 +15,16 @@ import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.firewall.ProductionRentilePrivateKeyResolver
 import com.rohittp.reng.internal.firewall.basemapEngineHost
+import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.preparation.buildResourceOperationDefinition
+import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceClassGate
+import com.rohittp.reng.internal.resource.ResourceOperationDefinition
 import com.rohittp.reng.internal.resource.SuppliedValidationOutcome
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -93,6 +97,48 @@ class SteadyStateShortcutTest {
         assertTrue(fixture.sink.isEmpty())
     }
 
+    // An external reference's stable ID is its canonical identity's digest, so two externals cannot collide;
+    // the operation's identity check guards the other identities it registers (a geometry's shader program).
+    // Here the registration carries such a colliding record, and the shortcut must defer to the operation.
+    @Test
+    fun aRegistrationThatWouldFailBypassesNothingSoTheOperationReportsIt() {
+        val fixture = Fixture()
+        val sticker = fixture.resident(external(ResourceClass.STICKER_IMAGE, "k"))
+        val clean = buildResourceOperationDefinition(listOf(listOf(sticker)), ResourceAccessMode.NORMAL, 8)
+        val colliding = ResourceOperationDefinition(
+            maximumConcurrentRoutes = 8,
+            staticOccurrences = clean.staticOccurrences,
+            resourceIdentities = clean.resourceIdentities +
+                CanonicalIdentityRecord(sticker.resourceKey, CanonicalBytes("some-other-bytes".encodeToByteArray())),
+        )
+
+        assertEquals(listOf(sticker), fixture.shortcut(listOf(sticker), registration = colliding))
+        assertTrue(fixture.sink.isEmpty(), "nothing leased, so no admission refusal can stand in front of it")
+    }
+
+    @Test
+    fun aPrivateKeyClashWithTheStyleBypassesNothing() {
+        val fixture = Fixture()
+        val sticker = fixture.resident(external(ResourceClass.STICKER_IMAGE, "m"))
+        // The style is never a bypass candidate, but its claim is still part of the operation's registration.
+        val style = external(ResourceClass.BASEMAP_STYLE, "n").copy(privateRentileKey = sticker.privateRentileKey)
+
+        assertEquals(listOf(sticker), fixture.shortcut(listOf(sticker), alsoRegistered = listOf(style)))
+        assertTrue(fixture.sink.isEmpty())
+    }
+
+    @Test
+    fun freshnessIsSampledPerRouteSoOneExpiringPartWayThroughIsKept() {
+        var tick = 0L
+        val fixture = Fixture(clock = { now + tick++ })
+        val early = fixture.resident(external(ResourceClass.STICKER_IMAGE, "o"), freshUntil = now + 1L)
+        val late = fixture.resident(external(ResourceClass.STICKER_IMAGE, "p"), freshUntil = now + 1L)
+
+        // The first route samples `now` (fresh), the second `now + 1` (expired, since fresh means strictly later).
+        assertEquals(listOf(late), fixture.shortcut(listOf(early, late)))
+        assertEquals(early.resourceKey, fixture.sink.single().generation.key)
+    }
+
     @Test
     fun oneRouteNamedTwiceIsLeasedOnce() {
         val fixture = Fixture()
@@ -134,6 +180,7 @@ class SteadyStateShortcutTest {
     private inner class Fixture(
         remembersPasses: Boolean = true,
         passed: Set<ResourceClassGate> = ResourceClassGate.entries.toSet(),
+        clock: () -> Long = { now },
     ) {
         val cache = ResidentCache()
         val sink = mutableListOf<Lease>()
@@ -146,7 +193,7 @@ class SteadyStateShortcutTest {
             resourceLimits = ResourceLimits(),
             basemapEngineHost = basemapEngineHost(cache = cache),
             maximumConcurrentOperations = 8,
-            clock = { now },
+            clock = clock,
         )
 
         fun resident(
@@ -169,8 +216,14 @@ class SteadyStateShortcutTest {
             references: List<StaticResourceReference.External>,
             accessMode: ResourceAccessMode = ResourceAccessMode.NORMAL,
             observer: (Lease) -> Unit = {},
+            alsoRegistered: List<StaticResourceReference.External> = emptyList(),
+            registration: ResourceOperationDefinition = buildResourceOperationDefinition(
+                traversalsByItem = listOf(alsoRegistered + references),
+                accessMode = accessMode,
+                maximumConcurrentRoutes = 8,
+            ),
         ): List<StaticResourceReference.External> =
-            driver.leaseSteadyStateResident(references, accessMode, sink, observer)
+            driver.leaseSteadyStateResident(references, accessMode, sink, observer, registration)
     }
 }
 

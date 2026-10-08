@@ -151,10 +151,15 @@ internal class PreparationDriver(
      * **What it keeps.** The lease goes to [leaseSink] and then [leaseObserver], exactly as
      * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. One lease per
      * distinct route, as route joining gives. Never under `RELOAD`, which never selects resident content;
-     * never for a basemap style, which carries discovery and its commit barrier (ADR 0016). If two different
-     * routes in [references] share a private Rentile key, nothing is bypassed: the operation's own
-     * registration must see every claim to report the ambiguity. Identity collisions are the caller's to
-     * keep visible, by still registering the bypassed references' identities.
+     * never for a basemap style, which carries discovery and its commit barrier (ADR 0016).
+     *
+     * **Registration first.** [registration] is the operation every reference in [references] belongs to,
+     * style included. Its own registration ([ResourceOperationStateMachine.preRegister]) runs before
+     * anything is leased, and if it would fail -- an identity collision, two routes claiming one private
+     * Rentile key -- nothing is bypassed, so the operation reports that failure exactly as it always did
+     * and no admission refusal can stand in front of it. Styles discover no child routes any more (their
+     * validation announces a route manifest to the engine instead), so registration sees every claim
+     * there is. Freshness is sampled once per route, as the operation samples it.
      *
      * Not shadow-checked: a bypassed reference never reaches the session. It is covered by
      * PreparationDriverTest's shortcut cases instead.
@@ -164,18 +169,13 @@ internal class PreparationDriver(
         accessMode: ResourceAccessMode,
         leaseSink: MutableList<Lease>,
         leaseObserver: (Lease) -> Unit,
+        registration: ResourceOperationDefinition,
     ): List<StaticResourceReference.External> {
         if (accessMode == ResourceAccessMode.RELOAD || references.isEmpty()) return references
+        if (ResourceOperationStateMachine.preRegister(registration).outcome != null) return references
         // Same route key the definition builder derives, so "distinct route" means what joining means.
         fun routeOf(reference: StaticResourceReference.External) =
             Triple(reference.locator, reference.resourceClass, reference.maximumResponseBytes)
-        val routeByPrivateKey = HashMap<Any, Triple<*, *, *>>()
-        for (reference in references) {
-            val route = routeOf(reference)
-            val claimed = routeByPrivateKey.getOrPut(reference.privateRentileKey) { route }
-            if (claimed != route) return references
-        }
-        val sample = clock()
         val bypassedRoutes = HashSet<Triple<*, *, *>>()
         val decided = HashSet<Triple<*, *, *>>()
         for (reference in references) {
@@ -186,7 +186,7 @@ internal class PreparationDriver(
             val lease = cache.observeAndTakeLease(reference.resourceKey) ?: continue
             val stored = lease.generation.stored
             val fresh = accessMode == ResourceAccessMode.CACHE_ONLY ||
-                stored.metadata.freshUntilEpochMillis?.let { it > sample } == true
+                stored.metadata.freshUntilEpochMillis?.let { it > clock() } == true
             if (fresh && gates.all { classGateRunner.hasPassed(it, stored.contentDigest) }) {
                 // Recorded before observed, as the executor does, so an observer that refuses admission
                 // leaves the lease where the caller's rollback releases it.

@@ -9,6 +9,7 @@ import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
+import com.rohittp.reng.ResourceSelector
 import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
@@ -51,6 +52,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PreparationDriverTest {
@@ -167,40 +170,85 @@ class PreparationDriverTest {
     }
 
     // Guards against InstallVisibility ever again being (or silently becoming) the placeholder that
-    // unconditionally reported Succeeded: RESIDENT-provenance content whose generation the cache no
-    // longer tracks (a real race — a concurrent free()/close(), or a superseding install for the same
-    // key — see ResourceActionExecutor.installVisibility's own KDoc) must report a typed Failure rather
-    // than a bare "succeeded". Under the old placeholder this test would have observed Succeeded with no
-    // cache call at all.
+    // unconditionally reported Succeeded: RESIDENT-provenance content whose key the consumer freed
+    // between the lookup and this install must report a typed Failure, not a bare "succeeded", and must
+    // not be resurrected behind the consumer's back.
     @Test
-    fun theExecutorReportsAFailedInstallWhenAResidentGenerationHasAlreadyVanished() = runTest {
-        val executor = ResourceActionExecutor(
-            transport = CountingTransport(),
-            store = CountingStore(),
-            cache = ResidentCache(),
-            classGateRunner = RenGClassGateRunner(ResourceLimits()),
-            resourceLimits = ResourceLimits(),
-            basemapEngineHost = basemapEngineHost(),
-            clock = FixedClock,
-        )
-        val registration = registration("vanished")
-        val content = ResolvedResourceContent(
+    fun theExecutorReportsAFailedInstallWhenAResidentKeyWasFreedMeanwhile() = runTest {
+        val cache = ResidentCache()
+        val content = residentContent("freed", digest = "c")
+        cache.install(content.resourceKey, content.stored, decoded = null)
+        cache.free(ResourceSelector.ByKey(content.resourceKey))
+
+        val outcome = residentInstall(cache, content)
+
+        val failed = assertIs<SuppliedInstallOutcome.Failed>(outcome)
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failed.failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failed.failure.stage)
+        assertNull(cache.current(content.resourceKey), "a freed key must not be restored")
+    }
+
+    // A closed renderer's cache is empty exactly as an evicted key is; restoring into it would leak a
+    // generation nothing ever releases.
+    @Test
+    fun theExecutorReportsAFailedInstallWhenTheCacheClosedMeanwhile() = runTest {
+        val cache = ResidentCache()
+        val content = residentContent("closed", digest = "e")
+        cache.install(content.resourceKey, content.stored, decoded = null)
+        cache.closeAll()
+
+        val outcome = residentInstall(cache, content)
+
+        val failed = assertIs<SuppliedInstallOutcome.Failed>(outcome)
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failed.failure.code)
+        assertNull(cache.current(content.resourceKey), "a closed cache must stay empty")
+    }
+
+    // The race that failed 1080p exports with 16 stickers (STICKER_IMAGE) or 16 vehicles (MODEL_TEXTURE)
+    // on an OPPO CPH2629, 2026-10-08: the lookup saw the key resident without leasing it, the budget
+    // sweep evicted it during the class gates, and the install then failed though the route held every
+    // byte. An evicted key is restored from those bytes, leased, under a new generation.
+    @Test
+    fun anEvictedResidentKeyIsRestoredFromTheBytesTheRouteHolds() = runTest {
+        val cache = ResidentCache(residentByteBudget = 1L)
+        val content = residentContent("evicted", digest = "f")
+        cache.install(content.resourceKey, content.stored, decoded = null)
+        assertNull(cache.current(content.resourceKey), "precondition: the 1-byte budget evicts the unleased key")
+
+        val outcome = residentInstall(cache, content)
+
+        assertIs<SuppliedInstallOutcome.Succeeded>(outcome)
+        val restored = assertNotNull(cache.current(content.resourceKey), "the key is resident again")
+        assertEquals(content.stored.contentDigest, restored.stored.contentDigest)
+        assertEquals(1, restored.leaseCount, "restored and leased in one step, so the budget cannot take it")
+    }
+
+    private fun residentContent(name: String, digest: String): ResolvedResourceContent {
+        val registration = registration(name)
+        return ResolvedResourceContent(
             route = registration.route,
             resourceKey = registration.resourceKey,
             stored = StoredRawResource(
                 bytes = validStickerPng,
-                contentDigest = "c".repeat(64),
+                contentDigest = digest.repeat(64),
                 metadata = StoredRawResourceMetadata(storedAtEpochMillis = 0L),
             ),
             provenance = ContentProvenance.RESIDENT,
         )
+    }
 
+    private suspend fun residentInstall(cache: ResidentCache, content: ResolvedResourceContent): SuppliedInstallOutcome {
+        val executor = ResourceActionExecutor(
+            transport = CountingTransport(),
+            store = CountingStore(),
+            cache = cache,
+            classGateRunner = RenGClassGateRunner(ResourceLimits()),
+            resourceLimits = ResourceLimits(),
+            basemapEngineHost = basemapEngineHost(cache = cache),
+            clock = FixedClock,
+        )
         val event = executor.execute(InstallVisibility(ResourceActionId(1L), 0L, content))
-
-        val outcome = assertIs<VisibilityInstallCompleted>(event).outcome
-        val failed = assertIs<SuppliedInstallOutcome.Failed>(outcome)
-        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failed.failure.code)
-        assertEquals(PipelineStage.RESOURCE_LOOKUP, failed.failure.stage)
+        return assertIs<VisibilityInstallCompleted>(event).outcome
     }
 
     @Test

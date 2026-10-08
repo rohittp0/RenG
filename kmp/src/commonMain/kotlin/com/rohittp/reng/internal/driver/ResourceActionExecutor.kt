@@ -275,15 +275,16 @@ internal class ResourceActionExecutor(
      * relies on.
      *
      * A [ContentProvenance.RESIDENT] generation can genuinely vanish between when this route first
-     * observed it and when visibility is installed here — a consumer's own concurrent
-     * `free()`/`close()` call, or a competing route superseding the same key, are both real races this
-     * architecture allows (ADR 0019's renderer mutex guards the cache, not the whole operation). That is
-     * reported as a real, typed failure rather than a crash.
+     * observed it and when visibility is installed here. The common way is the cache's own budget
+     * evicting it (nothing leases it during the lookup's class gates): that is answered by installing the
+     * bytes this route already holds, see [ResidentCache.observeOrRestoreAndTakeLease]. A consumer's own
+     * concurrent `free()` or `close()` is not undone, and is reported as a real, typed failure rather than
+     * a crash (ADR 0019's renderer mutex guards the cache, not the whole operation).
      */
     private fun installVisibility(content: ResolvedResourceContent): SuppliedInstallOutcome =
         when (content.provenance) {
             ContentProvenance.RESIDENT -> {
-                val lease = cache.observeAndTakeLease(content.resourceKey)
+                val lease = cache.observeOrRestoreAndTakeLease(content.resourceKey, content.stored)
                 if (lease != null) {
                     recordLease(lease)
                     SuppliedInstallOutcome.Succeeded
@@ -335,8 +336,8 @@ internal class ResourceActionExecutor(
     }
 
     /**
-     * The resource this route selected as [ContentProvenance.RESIDENT] is no longer resident by the
-     * time visibility is installed. Reuses [RenGErrorCode.RESOURCE_UNAVAILABLE] at
+     * The resource this route selected as [ContentProvenance.RESIDENT] was freed by the consumer, or its
+     * renderer closed, by the time visibility is installed (an eviction is restored instead). Reuses [RenGErrorCode.RESOURCE_UNAVAILABLE] at
      * [PipelineStage.RESOURCE_LOOKUP] — the same (code, stage) pairing
      * [ResourceOperationStateMachine]'s own `resourceUnavailableFailure` uses for a `CACHE_ONLY` miss —
      * because both are the same fault: the resource this route needed is not available where it was

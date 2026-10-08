@@ -193,6 +193,13 @@ internal class ResidentCache(
     private var evictedKeyCount: Long = 0L
     private var evictedBytes: Long = 0L
 
+    /**
+     * True once [closeAll] has run. [closeAll] empties [entries] exactly as eviction empties a key, so
+     * absence alone cannot tell "this cache evicted it" from "this renderer is gone";
+     * [observeOrRestoreAndTakeLease] must restore the first and never repopulate the second.
+     */
+    private var closed: Boolean = false
+
     fun current(key: ResourceKey): ResidentGeneration? = locked {
         val generation = entries[key]?.current
         if (generation != null) touch(key)
@@ -307,6 +314,52 @@ internal class ResidentCache(
         Lease(generation)
     }
 
+    /**
+     * [observeAndTakeLease] for a route that selected [key] as resident earlier in its own lookup and holds
+     * the [stored] bytes it observed then: leases the current generation if there is one, and otherwise —
+     * when the key was **evicted** in between — installs [stored] as a new generation and leases it, in
+     * one locked step.
+     *
+     * **Why restoring is right.** A lookup observes residency without leasing it, then runs its class
+     * gates (a PNG decode, a GLB parse), and only then installs visibility; the budget sweep that runs on
+     * every install, attach and lease release may evict the key in that window, since nothing leased it.
+     * Measured on an OPPO CPH2629 (2026-10-08): a 1080p export with 16 image stickers failed at frame 44
+     * with `RESOURCE_UNAVAILABLE {STICKER_IMAGE}`, and one with 16 vehicles once with `{MODEL_TEXTURE}`,
+     * though the route held every byte it needed. An evicted key is one this cache forgot on its own
+     * (ADR 0047), and the bytes in hand are the exact bytes the class gates just validated, so installing
+     * them is the reload the next lookup would have made anyway (ADR 0059's same-key, same-digest content).
+     *
+     * **What it refuses**, answering `null` as [observeAndTakeLease] does:
+     * - a key the consumer **freed** (its entry is kept with no current generation): restoring would undo
+     *   the consumer's own `free()`;
+     * - a **closed** cache: [closeAll] empties [entries] too, and repopulating a closed renderer's cache
+     *   would leak a generation nothing will ever release.
+     *
+     * A key whose current generation was superseded by another route keeps today's behaviour: that
+     * generation is leased. It reached `current` through its own validated install.
+     */
+    fun observeOrRestoreAndTakeLease(key: ResourceKey, stored: StoredRawResource): Lease? = locked {
+        val entry = entries[key]
+        val current = entry?.current
+        if (current != null) {
+            current.addLease()
+            touch(key)
+            return@locked Lease(current)
+        }
+        // An entry with no current generation exists only after a free(): eviction removes the key.
+        if (closed || entry != null) return@locked null
+        val restored = KeyEntry()
+        entries[key] = restored
+        val generation = newGeneration(key = key, stored = stored, decoded = null)
+        generation.addLease()
+        restored.current = generation
+        residentBytes += generation.byteSize
+        touch(key)
+        // Safe here for the reason it is safe in installAndTakeLease: the new generation is leased.
+        evictOverBudget()
+        Lease(generation)
+    }
+
     fun releaseLease(lease: Lease): Unit = locked {
         lease.markReleased()
         val generation = lease.generation
@@ -392,6 +445,7 @@ internal class ResidentCache(
     }
 
     fun closeAll(): Unit = locked {
+        closed = true
         entries.clear()
         recency.clear()
         residentBytes = 0L

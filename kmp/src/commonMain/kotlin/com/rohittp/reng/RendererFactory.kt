@@ -125,6 +125,7 @@ internal fun createRenderer(
     val objectRegistry = GlObjectRegistry(
         residentTextureByteBudget = configuration.resourceLimits.maximumResidentGpuTextureBytes,
         residentBufferByteBudget = configuration.resourceLimits.maximumResidentGpuBufferBytes,
+        residentContentTextureByteBudget = configuration.resourceLimits.maximumResidentGpuContentTextureBytes,
     )
 
     val driver = GlLifecycleDriver(

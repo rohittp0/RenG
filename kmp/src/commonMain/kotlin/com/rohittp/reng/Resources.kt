@@ -226,6 +226,21 @@ public data class ResourceLimits(
      * Declared last to preserve positional source and binary compatibility.
      */
     public val maximumInFlightPreparedFrameCpuBytes: Long = 1024L * 1024L * 1024L,
+    /**
+     * A GPU texture budget of their own for **content** textures -- sticker images, model and
+     * geometry-consumer textures, label atlases -- or `null` (the default) for one pool shared with
+     * basemap tiles under [maximumResidentGpuTextureBytes], exactly as before this field existed.
+     *
+     * When set, [maximumResidentGpuTextureBytes] bounds basemap tiles (and DEMs) alone, and each pool
+     * evicts only for its own pressure. Why: content is drawn every frame, so under one shared LRU it is
+     * always the most recent and tiles take every eviction. Measured on an OPPO CPH2629 (2026-10-08,
+     * 1080p export, 128 MiB shared budget): 16 1024x768 stickers put 48 MiB of textures beside the
+     * tiles and the export re-rasterised 128 tiles in 120 frames, against about 11 without them, even
+     * with every CPU-side resource resident -- the tiles' working set no longer fit what was left.
+     *
+     * Declared last to preserve positional source and binary compatibility.
+     */
+    public val maximumResidentGpuContentTextureBytes: Long? = null,
 ) {
     init {
         val minimum = 1L
@@ -288,6 +303,9 @@ public data class ResourceLimits(
         }
         require(maximumInFlightPreparedFrameCpuBytes in minimum..maximum) {
             "maximumInFlightPreparedFrameCpuBytes must be within the supported range"
+        }
+        require(maximumResidentGpuContentTextureBytes == null || maximumResidentGpuContentTextureBytes in minimum..maximum) {
+            "maximumResidentGpuContentTextureBytes must be within the supported range"
         }
     }
 }

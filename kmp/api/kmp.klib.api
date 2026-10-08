@@ -901,7 +901,7 @@ final class com.rohittp.reng/ResourceKey { // com.rohittp.reng/ResourceKey|null[
 }
 
 final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits|null[0]
-    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long? = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long?){}[0]
 
     final val maximumBasemapGeoJsonBytes // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes|{}maximumBasemapGeoJsonBytes[0]
         final fun <get-maximumBasemapGeoJsonBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes.<get-maximumBasemapGeoJsonBytes>|<get-maximumBasemapGeoJsonBytes>(){}[0]
@@ -931,6 +931,8 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
         final fun <get-maximumResidentCpuResourceBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentCpuResourceBytes.<get-maximumResidentCpuResourceBytes>|<get-maximumResidentCpuResourceBytes>(){}[0]
     final val maximumResidentGpuBufferBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuBufferBytes|{}maximumResidentGpuBufferBytes[0]
         final fun <get-maximumResidentGpuBufferBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentGpuBufferBytes.<get-maximumResidentGpuBufferBytes>|<get-maximumResidentGpuBufferBytes>(){}[0]
+    final val maximumResidentGpuContentTextureBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuContentTextureBytes|{}maximumResidentGpuContentTextureBytes[0]
+        final fun <get-maximumResidentGpuContentTextureBytes>(): kotlin/Long? // com.rohittp.reng/ResourceLimits.maximumResidentGpuContentTextureBytes.<get-maximumResidentGpuContentTextureBytes>|<get-maximumResidentGpuContentTextureBytes>(){}[0]
     final val maximumResidentGpuTextureBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuTextureBytes|{}maximumResidentGpuTextureBytes[0]
         final fun <get-maximumResidentGpuTextureBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentGpuTextureBytes.<get-maximumResidentGpuTextureBytes>|<get-maximumResidentGpuTextureBytes>(){}[0]
     final val maximumStickerImageBytes // com.rohittp.reng/ResourceLimits.maximumStickerImageBytes|{}maximumStickerImageBytes[0]
@@ -947,6 +949,7 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
     final fun component15(): kotlin/Long // com.rohittp.reng/ResourceLimits.component15|component15(){}[0]
     final fun component16(): kotlin/Long // com.rohittp.reng/ResourceLimits.component16|component16(){}[0]
     final fun component17(): kotlin/Long // com.rohittp.reng/ResourceLimits.component17|component17(){}[0]
+    final fun component18(): kotlin/Long? // com.rohittp.reng/ResourceLimits.component18|component18(){}[0]
     final fun component2(): kotlin/Long // com.rohittp.reng/ResourceLimits.component2|component2(){}[0]
     final fun component3(): kotlin/Long // com.rohittp.reng/ResourceLimits.component3|component3(){}[0]
     final fun component4(): kotlin/Long // com.rohittp.reng/ResourceLimits.component4|component4(){}[0]
@@ -955,7 +958,7 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
     final fun component7(): kotlin/Long // com.rohittp.reng/ResourceLimits.component7|component7(){}[0]
     final fun component8(): kotlin/Long // com.rohittp.reng/ResourceLimits.component8|component8(){}[0]
     final fun component9(): kotlin/Long // com.rohittp.reng/ResourceLimits.component9|component9(){}[0]
-    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long? = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long?){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ResourceLimits.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/ResourceLimits.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/ResourceLimits.toString|toString(){}[0]

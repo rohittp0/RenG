@@ -512,6 +512,84 @@ class GlObjectRegistryTest {
         assertTrue(100 in binding.deletedNames)
     }
 
+    // The control for the two split-pool tests below: with one shared pool, two sticker textures arriving
+    // after a tile push the tile out, though it is the content that overflowed. This is the tile thrash
+    // a 16-sticker export showed (128 tiles re-rasterised in 120 frames, CPH2629, 2026-10-08).
+    @Test fun withOneSharedPoolContentEvictsTheOlderTile() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 2 * ONE_TILE_BYTES)
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+
+        registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        registerAndReleaseContent(registry, binding, generation = 2L, name = 102)
+
+        assertNull(registry.resident(tileKey(0)), "shared pool: the oldest entry goes, and it is the tile")
+    }
+
+    @Test fun withSplitPoolsContentPressureNeverEvictsATile() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = 2 * ONE_TILE_BYTES,
+            residentContentTextureByteBudget = ONE_TILE_BYTES,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+
+        val first = registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        val second = registerAndReleaseContent(registry, binding, generation = 2L, name = 102)
+
+        assertNotNull(registry.resident(tileKey(0)), "content over its own budget must not take a tile")
+        assertNull(registry.leaseAllocation(first), "the older content texture is the one evicted")
+        assertNotNull(registry.leaseAllocation(second))
+        assertTrue(101 in binding.deletedNames)
+    }
+
+    @Test fun withSplitPoolsTilePressureNeverEvictsContent() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = ONE_TILE_BYTES,
+            residentContentTextureByteBudget = 4 * ONE_TILE_BYTES,
+        )
+        val content = registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertNotNull(registry.leaseAllocation(content), "tiles over their budget must not take content")
+        assertNull(registry.resident(tileKey(0)), "the older tile is the one evicted")
+        assertNotNull(registry.resident(tileKey(1)))
+    }
+
+    private fun registerAndReleaseContent(
+        registry: GlObjectRegistry,
+        binding: RecordingGlBinding,
+        generation: Long,
+        name: Int,
+    ): GpuResourceIdentity {
+        val identity = gpuIdentity(stickerKey, generation)
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                identity,
+                listOf(GlObjectHandle(GlObjectType.TEXTURE, name)),
+                ONE_TILE_BYTES,
+                0L,
+                name,
+            ),
+            binding,
+        )
+        return identity
+    }
+
     @Test fun modelBufferBudgetDeletesAWholePrimitiveGroupExactlyOnce() {
         val binding = RecordingGlBinding()
         val registry = GlObjectRegistry(residentBufferByteBudget = 8L)

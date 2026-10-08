@@ -1,11 +1,15 @@
 package com.rohittp.reng.internal.driver
 
+import com.rohittp.reng.ResourceAccessMode
+import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
+import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.resource.ordinaryResourceClassGates
 import com.rohittp.reng.internal.resource.AdvancePendingClassGates
 import com.rohittp.reng.internal.resource.AdvancePendingStyleCommit
 import com.rohittp.reng.internal.resource.BasemapStyleCompilationCompleted
@@ -128,6 +132,75 @@ internal class PreparationDriver(
      * [leaseObserver], when supplied, runs immediately after that lease has been recorded for cleanup;
      * throwing from it aborts the operation while leaving the lease reachable by the caller's rollback.
      */
+    /**
+     * The steady-state shortcut: leases every reference in [references] that the operation would only
+     * re-confirm, and returns the ones it must still drive.
+     *
+     * **What qualifies.** A reference whose resource is resident, fresh at this clock sample (or any
+     * resident one under `CACHE_ONLY`), and whose every class gate is remembered as passed for exactly the
+     * resident bytes (ADR 0060). For such a reference the operation's whole route -- sample the clock,
+     * observe the resident generation, select it, re-run gates that answer at once from memory, install
+     * visibility by leasing it -- decides nothing new; it costs about six scheduler steps and four
+     * coroutine round-trips. Here it is one atomic [ResidentCache.observeAndTakeLease].
+     *
+     * **Why.** On an OPPO CPH2629 (2026-10-08, Geoanimator's ComplexityScalingBenchmarkTest, 1080p, RenG
+     * 0.6.0-local19) the scheduler and this driver were still 35% of RenG's time in a frame with 64 text
+     * labels (prepare 73 ms) and 24% with 16 vehicles, almost all of it for references that were resident
+     * and unchanged since the previous frame.
+     *
+     * **What it keeps.** The lease goes to [leaseSink] and then [leaseObserver], exactly as
+     * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. One lease per
+     * distinct route, as route joining gives. Never under `RELOAD`, which never selects resident content;
+     * never for a basemap style, which carries discovery and its commit barrier (ADR 0016). If two different
+     * routes in [references] share a private Rentile key, nothing is bypassed: the operation's own
+     * registration must see every claim to report the ambiguity. Identity collisions are the caller's to
+     * keep visible, by still registering the bypassed references' identities.
+     *
+     * Not shadow-checked: a bypassed reference never reaches the session. It is covered by
+     * PreparationDriverTest's shortcut cases instead.
+     */
+    fun leaseSteadyStateResident(
+        references: List<StaticResourceReference.External>,
+        accessMode: ResourceAccessMode,
+        leaseSink: MutableList<Lease>,
+        leaseObserver: (Lease) -> Unit,
+    ): List<StaticResourceReference.External> {
+        if (accessMode == ResourceAccessMode.RELOAD || references.isEmpty()) return references
+        // Same route key the definition builder derives, so "distinct route" means what joining means.
+        fun routeOf(reference: StaticResourceReference.External) =
+            Triple(reference.locator, reference.resourceClass, reference.maximumResponseBytes)
+        val routeByPrivateKey = HashMap<Any, Triple<*, *, *>>()
+        for (reference in references) {
+            val route = routeOf(reference)
+            val claimed = routeByPrivateKey.getOrPut(reference.privateRentileKey) { route }
+            if (claimed != route) return references
+        }
+        val sample = clock()
+        val bypassedRoutes = HashSet<Triple<*, *, *>>()
+        val decided = HashSet<Triple<*, *, *>>()
+        for (reference in references) {
+            val route = routeOf(reference)
+            if (!decided.add(route)) continue
+            if (reference.resourceClass == ResourceClass.BASEMAP_STYLE) continue
+            val gates = ordinaryResourceClassGates(reference.resourceClass) ?: continue
+            val lease = cache.observeAndTakeLease(reference.resourceKey) ?: continue
+            val stored = lease.generation.stored
+            val fresh = accessMode == ResourceAccessMode.CACHE_ONLY ||
+                stored.metadata.freshUntilEpochMillis?.let { it > sample } == true
+            if (fresh && gates.all { classGateRunner.hasPassed(it, stored.contentDigest) }) {
+                // Recorded before observed, as the executor does, so an observer that refuses admission
+                // leaves the lease where the caller's rollback releases it.
+                leaseSink += lease
+                leaseObserver(lease)
+                bypassedRoutes += route
+            } else {
+                cache.releaseLease(lease)
+            }
+        }
+        if (bypassedRoutes.isEmpty()) return references
+        return references.filter { routeOf(it) !in bypassedRoutes }
+    }
+
     suspend fun run(
         definition: ResourceOperationDefinition,
         leaseSink: MutableList<Lease>? = null,

@@ -14,6 +14,7 @@ import com.rohittp.reng.internal.image.decodePng
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceClassGate
 import com.rohittp.reng.internal.resource.SuppliedValidationOutcome
+import com.rohittp.reng.internal.thread.PlatformLock
 
 /**
  * Runs exactly one [ResourceClassGate] over already-resolved content and reports whether it is
@@ -26,6 +27,14 @@ import com.rohittp.reng.internal.resource.SuppliedValidationOutcome
  */
 internal fun interface ClassGateRunner {
     suspend fun run(gate: ResourceClassGate, content: ResolvedResourceContent): SuppliedValidationOutcome
+
+    /**
+     * Whether [gate] is already known to pass for the bytes with [contentDigest], without running it:
+     * what `PreparationDriver.leaseSteadyStateResident` asks before letting a resident reference skip the
+     * operation. False unless the runner remembers passes (ADR 0060), so a runner that does not is never
+     * bypassed.
+     */
+    fun hasPassed(gate: ResourceClassGate, contentDigest: String): Boolean = false
 }
 
 /**
@@ -68,12 +77,22 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
      */
     private val passedGates: MutableSet<String> = LinkedHashSet()
 
+    /**
+     * Guards [passedGates]. Gates run in parallel coroutines on the preparing caller's dispatcher, and the
+     * steady-state shortcut reads the set before the operation starts; a caller preparing on a
+     * multi-threaded dispatcher would otherwise mutate one LinkedHashSet from several threads.
+     */
+    private val passedGatesLock = PlatformLock()
+
+    override fun hasPassed(gate: ResourceClassGate, contentDigest: String): Boolean =
+        passedGatesLock.withLock { "$gate:$contentDigest" in passedGates }
+
     override suspend fun run(
         gate: ResourceClassGate,
         content: ResolvedResourceContent,
     ): SuppliedValidationOutcome {
         val identity = "$gate:${content.stored.contentDigest}"
-        if (identity in passedGates) return SuppliedValidationOutcome.Valid
+        if (passedGatesLock.withLock { identity in passedGates }) return SuppliedValidationOutcome.Valid
         val outcome = when (gate) {
             ResourceClassGate.DECODE_PNG -> runDecodePng(content)
             ResourceClassGate.PARSE_GLB -> runParseGlb(content)
@@ -95,7 +114,7 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
      * did for every resource on every frame — the worst case of this cache is the whole behaviour of
      * its absence, which is what makes the eviction policy uninteresting.
      */
-    private fun remember(identity: String) {
+    private fun remember(identity: String) = passedGatesLock.withLock {
         passedGates += identity
         val oldest = passedGates.iterator()
         while (passedGates.size > MAXIMUM_REMEMBERED_GATES) {

@@ -2968,13 +2968,27 @@ internal class RenGRenderer(
             return FrameAcquisition(emptyMap(), emptyList(), null, basemapStyleDigest = null)
         }
 
+        val admitLease: (Lease) -> Unit = { lease ->
+            requirePreparedFrameCpuAdmission(preparedFrameCpuReservation.tryAddGeneration(lease.generation))
+        }
+        // The steady-state shortcut: references resident, fresh and already validated are leased here and
+        // left out of the operation, which then drives only the style and whatever is new or changed. See
+        // PreparationDriver.leaseSteadyStateResident for what qualifies and why.
+        val driven = preparationDriver.leaseSteadyStateResident(
+            references = imageReferences + modelGlbReferences,
+            accessMode = accessMode,
+            leaseSink = leaseSink,
+            leaseObserver = admitLease,
+        ).toSet()
+        val drivenCount = listOfNotNull(styleReference).size + driven.size
         val definition = buildResourceOperationDefinition(
             traversalsByItem = listOf(references),
             accessMode = accessMode,
             maximumConcurrentRoutes = minOf(
                 configuration.maximumConcurrentResourceOperations,
-                references.size,
+                drivenCount.coerceAtLeast(1),
             ),
+            drives = { reference -> reference === styleReference || reference in driven },
         )
 
         var basemapTiles: List<RenderedBasemapTile> = emptyList()
@@ -2990,16 +3004,17 @@ internal class RenGRenderer(
         // frame's own style declared, and the only way an icon's `imageName` becomes atlas geometry.
         var spriteAtlas: SpriteAtlasManifest? = null
         val outcome = basemapEngineHost.withOperation(accessMode) {
-            val driven = preparationDriver.run(
-                definition = definition,
-                leaseSink = leaseSink,
-                leaseObserver = { lease ->
-                    requirePreparedFrameCpuAdmission(
-                        preparedFrameCpuReservation.tryAddGeneration(lease.generation),
-                    )
-                },
-            )
-            if (driven is ResourceOperationOutcome.Success) {
+            // Nothing left to drive when every reference was leased by the shortcut and there is no style.
+            val drivenOutcome = if (drivenCount == 0) {
+                ResourceOperationOutcome.Success(emptyList())
+            } else {
+                preparationDriver.run(
+                    definition = definition,
+                    leaseSink = leaseSink,
+                    leaseObserver = admitLease,
+                )
+            }
+            if (drivenOutcome is ResourceOperationOutcome.Success) {
                 // Read back rather than taken from the compile action: on a RESIDENT-provenance frame
                 // the pure core emits no CompileBasemapStyle at all, so there is no action to take it
                 // from. The host retains the compilation across invocations, so this is the one place
@@ -3061,7 +3076,7 @@ internal class RenGRenderer(
                     }
                 }
             }
-            driven
+            drivenOutcome
         }
         when (outcome) {
             is ResourceOperationOutcome.Success -> Unit

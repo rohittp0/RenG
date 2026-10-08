@@ -136,6 +136,78 @@ internal object ResourceOperationStateMachine {
         event: ResourceOperationEvent,
     ): ResourceOperationTransition {
         val work = SchedulerWork(state)
+        work.dispatch(event)
+        return work.toTransition()
+    }
+
+    /**
+     * Starts [definition] as a [Session]: [start]'s first step, without freezing the state it leaves into
+     * an immutable [ResourceOperationState.Running] the session would only copy straight back.
+     */
+    internal fun startSession(definition: ResourceOperationDefinition): Pair<Session?, Session.Step> {
+        val preRegistered = preRegister(definition)
+        if (preRegistered.outcome != null) {
+            return null to Session.Step(preRegistered.actions, preRegistered.outcome)
+        }
+        val work = SchedulerWork(requireNotNull(preRegistered.state))
+        work.setStaticContinuation(definition.staticOccurrences.map(ResourceOccurrence::id))
+        work.releaseKnownTraversal()
+        work.scheduleEligibleOccurrences()
+        val session = Session(work)
+        return session to session.drain()
+    }
+
+    /**
+     * One resource operation driven event by event through a single [SchedulerWork], instead of
+     * [transition]'s copy of the whole state into a fresh work and back into a fresh immutable
+     * [ResourceOperationState.Running] on every event.
+     *
+     * **Why.** That copy is O(routes + occurrences) per event and a frame raises several events per
+     * resource, so a frame's scheduling was O(n^2): on an OPPO CPH2629 (2026-10-08, Geoanimator's
+     * ComplexityScalingBenchmarkTest, 1080p) a frame with 64 text labels -- three texture references
+     * each -- spent 657 ms in `prepare` against 11 ms without them, and the reducer's copy, refreeze and
+     * re-validation were 30% of every sample in the process. The decisions are unchanged: the session
+     * runs the same [SchedulerWork] methods [transition] does, in the same order, on the same events.
+     *
+     * **What the pure core still guarantees.** Every decision is still a deterministic function of the
+     * definition and the events applied, actions are handed out as detached immutable lists, and
+     * [snapshot] builds the same validated [ResourceOperationState.Running] [transition] would have, so a
+     * test can check the session against the pure path step by step. What production no longer does is
+     * re-run the whole state's invariant checks on every event; those detect implementation bugs, not bad
+     * input, and the differential check is where they now run.
+     *
+     * Confined to one coroutine, as the driver that owns it already is.
+     */
+    internal class Session internal constructor(private val work: SchedulerWork) {
+        /** What one step produced: the actions to carry out, and the outcome once the operation has one. */
+        internal class Step(
+            val actions: List<ResourceOperationAction>,
+            val outcome: ResourceOperationOutcome?,
+        )
+
+        fun beginLookup(ordinal: Long): Step {
+            work.beginLookup(ordinal)
+            return drain()
+        }
+
+        fun apply(event: ResourceOperationEvent): Step {
+            work.dispatch(event)
+            return drain()
+        }
+
+        /** The ordinal of the first route, in route order, whose ordinary class gates are ready to advance. */
+        fun nextPendingClassGateOrdinal(): Long? = work.nextPendingClassGateOrdinal()
+
+        /** The ordinal of the first active basemap style route ready to stage its commit, in route order. */
+        fun nextPendingStyleCommitOrdinal(): Long? = work.nextPendingStyleCommitOrdinal()
+
+        /** The validated immutable state [transition] would hold after the same steps. O(state); tests only. */
+        fun snapshot(): ResourceOperationState.Running = work.snapshotState()
+
+        internal fun drain(): Step = Step(work.drainActions(), work.currentOutcome())
+    }
+
+    private fun dispatchEvent(work: SchedulerWork, event: ResourceOperationEvent) {
         when (event) {
             is ClockSampled -> work.clockSampled(event)
             is ResidentObserved -> work.residentObserved(event)
@@ -161,12 +233,89 @@ internal object ResourceOperationStateMachine {
             is ExternalCancellationRequested -> work.externalCancellationRequested(event)
             is CleanupCancellationObserved -> work.cleanupCancellationObserved(event)
         }
-        return work.toTransition()
     }
 
-    private class SchedulerWork(
+    internal class SchedulerWork(
         private val initial: ResourceOperationState.Running,
     ) {
+        /**
+         * Route indexes whose cursor is [PendingClassGates], maintained wherever a cursor changes
+         * ([addRouteRecord], [updateRouteRecord], init) so the driver's advance pumps need not scan every
+         * route record after every event. Searched for its smallest qualifying index, which is the first
+         * qualifying record in route order: the order the pumps' scan used, so the action sequence is
+         * unchanged.
+         */
+        private val pendingClassGateRouteIndexes: MutableSet<Int> = mutableSetOf()
+
+        /**
+         * Ordinals of routes whose status is [ResourceRouteStatus.ELIGIBLE], ascending, maintained wherever a
+         * status changes. [startNotYetStartedRoutes] used to filter and sort every route record on every
+         * route completion, O(routes log routes) per completion and so O(routes^2 log routes) per operation;
+         * it now walks this queue from the front, in the same ordinal order, under the same filters. Ordinals
+         * are assigned in increasing order as routes become eligible, so an insertion is almost always an
+         * append. An entry whose route has since left ELIGIBLE is dropped when the walk reaches it.
+         */
+        private val eligibleOrdinals: MutableList<Long> = ArrayList()
+
+        private fun trackEligible(previous: ResourceRouteStatus?, status: ResourceRouteStatus, ordinal: Long?) {
+            if (status != ResourceRouteStatus.ELIGIBLE || previous == ResourceRouteStatus.ELIGIBLE || ordinal == null) {
+                return
+            }
+            if (eligibleOrdinals.isEmpty() || eligibleOrdinals.last() < ordinal) {
+                eligibleOrdinals += ordinal
+            } else {
+                val insertionPoint = eligibleOrdinals.binarySearch(ordinal)
+                if (insertionPoint < 0) eligibleOrdinals.add(-insertionPoint - 1, ordinal)
+            }
+        }
+
+        fun dispatch(event: ResourceOperationEvent) = dispatchEvent(this, event)
+
+        /** The actions accumulated since the last drain, detached, leaving none behind. */
+        fun drainActions(): List<ResourceOperationAction> {
+            if (actions.isEmpty()) return emptyList()
+            val drained = actions.toList()
+            actions.clear()
+            return drained
+        }
+
+        fun currentOutcome(): ResourceOperationOutcome? = terminalOutcome()
+
+        fun snapshotState(): ResourceOperationState.Running = runningSnapshot()
+
+        fun nextPendingClassGateOrdinal(): Long? = pendingClassGateRouteIndexes
+            .filter { index ->
+                val cursor = routeRecords[index].cursor
+                cursor is PendingClassGates && ordinaryResourceClassGates(cursor.content.route.resourceClass) != null
+            }
+            .minOrNull()
+            ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+
+        fun nextPendingStyleCommitOrdinal(): Long? {
+            if (pendingClassGateRouteIndexes.isEmpty()) return null
+            val staged = styleCommitStates.mapTo(mutableSetOf()) { it.ordinal }
+            return pendingClassGateRouteIndexes
+                .filter { index ->
+                    val record = routeRecords[index]
+                    val cursor = record.cursor
+                    cursor is PendingClassGates &&
+                        cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
+                        record.status == ResourceRouteStatus.RUNNING &&
+                        cursor.ordinal in activeRouteOrdinals &&
+                        cursor.ordinal !in staged
+                }
+                .minOrNull()
+                ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+        }
+
+        private fun trackPendingClassGates(index: Int, cursor: ResourceRouteCursor?) {
+            if (cursor is PendingClassGates) {
+                pendingClassGateRouteIndexes += index
+            } else {
+                pendingClassGateRouteIndexes -= index
+            }
+        }
+
         private val occurrences: MutableList<ResourceOccurrence> = initial.occurrences.toMutableList()
         private val occurrenceById: MutableMap<ResourceOccurrenceId, ResourceOccurrence> = mutableMapOf()
         private val routeRecords: MutableList<RouteRecord> = initial.routeRecords.toMutableList()
@@ -233,6 +382,8 @@ internal object ResourceOperationStateMachine {
                 if (record.registration.route !in routeIndexByRoute) {
                     routeIndexByRoute[record.registration.route] = index
                 }
+                trackPendingClassGates(index, record.cursor)
+                trackEligible(null, record.status, record.ordinal)
                 val joinedIds = record.joinedOccurrenceIds.toMutableList()
                 val joinedIdSet = joinedIds.toMutableSet()
                 require(joinedIds.size == joinedIdSet.size) {
@@ -2029,20 +2180,24 @@ internal object ResourceOperationStateMachine {
 
         private fun startNotYetStartedRoutes() {
             val ceiling = startCeilingOrdinal
-            val candidates = routeRecords.withIndex()
-                .filter { (_, record) ->
-                    val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
-                    record.status == ResourceRouteStatus.ELIGIBLE &&
-                        record.ordinal != null &&
-                        claimIndex != null &&
-                        privateRentileKeyClaims[claimIndex].usable &&
-                        (ceiling == null || record.ordinal < ceiling)
-                }
-                .sortedBy { it.value.ordinal }
-
-            for ((index, record) in candidates) {
+            var position = 0
+            while (position < eligibleOrdinals.size) {
                 if (activeRouteOrdinals.size >= initial.definition.maximumConcurrentRoutes) break
-                val ordinal = requireNotNull(record.ordinal)
+                val ordinal = eligibleOrdinals[position]
+                val index = routeIndexByOrdinal[ordinal]
+                val record = index?.let(routeRecords::get)
+                if (record == null || record.status != ResourceRouteStatus.ELIGIBLE || record.ordinal != ordinal) {
+                    eligibleOrdinals.removeAt(position)
+                    continue
+                }
+                // Ascending, so nothing past the ceiling can start either.
+                if (ceiling != null && ordinal >= ceiling) break
+                val claimIndex = claimIndexByPrivateKey[record.registration.privateRentileKey]
+                if (claimIndex == null || !privateRentileKeyClaims[claimIndex].usable) {
+                    position += 1
+                    continue
+                }
+                eligibleOrdinals.removeAt(position)
                 updateRouteRecord(index, status = ResourceRouteStatus.RUNNING)
                 activeRouteOrdinals += ordinal
                 actions += StartRoute(ordinal, record.registration)
@@ -2168,22 +2323,21 @@ internal object ResourceOperationStateMachine {
         private fun deriveVisibleResourcesByOwner(): List<OwnerResourceSet> {
             val visibleByRoute = visibleResourcesByRoute()
             if (visibleByRoute.isEmpty()) return emptyList()
-            val ownerOrder = mutableListOf<ResourceOwnerId>()
-            val resourcesByOwner = mutableMapOf<ResourceOwnerId, MutableList<VisibleResource>>()
+            // Insertion-ordered sets, so the order is exactly the list's was; a list's `!in` made this
+            // O(occurrences x resources) for the one owner every reference of a prepare shares.
+            val resourcesByOwner = LinkedHashMap<ResourceOwnerId, LinkedHashSet<VisibleResource>>()
             occurrences.forEach { occurrence ->
                 val visible = visibleByRoute[occurrence.registration.route] ?: return@forEach
-                val owned = resourcesByOwner.getOrPut(occurrence.ownerId) {
-                    ownerOrder += occurrence.ownerId
-                    mutableListOf()
-                }
-                if (visible !in owned) owned += visible
+                resourcesByOwner.getOrPut(occurrence.ownerId) { LinkedHashSet() } += visible
             }
-            return ownerOrder.map { ownerId -> OwnerResourceSet(ownerId, resourcesByOwner.getValue(ownerId)) }
+            return resourcesByOwner.map { (ownerId, owned) -> OwnerResourceSet(ownerId, owned.toList()) }
         }
 
         private fun addRouteRecord(record: RouteRecord): Int {
             val index = routeRecords.size
             routeRecords += record
+            trackPendingClassGates(index, record.cursor)
+            trackEligible(null, record.status, record.ordinal)
             val joinedIds = record.joinedOccurrenceIds.toMutableList()
             joinedOccurrenceIdsByRouteIndex += joinedIds
             joinedOccurrenceIdSetsByRouteIndex += joinedIds.toMutableSet()
@@ -2241,6 +2395,8 @@ internal object ResourceOperationStateMachine {
                 storeWriteAcknowledged = storeWriteAcknowledged,
                 visibilityInstalled = visibilityInstalled,
             )
+            trackPendingClassGates(index, cursor)
+            trackEligible(previous.status, status, ordinal)
         }
 
         private fun takeNextActionId(): ResourceActionId {
@@ -2295,7 +2451,12 @@ internal object ResourceOperationStateMachine {
             claimIndexByPrivateKey[privateKey] ?: -1
 
         fun toTransition(): ResourceOperationTransition = ResourceOperationTransition(
-            state = runningState(
+            state = runningSnapshot(),
+            actions = actions,
+            outcome = terminalOutcome(),
+        )
+
+        private fun runningSnapshot(): ResourceOperationState.Running = runningState(
                 definition = initial.definition,
                 occurrences = occurrences,
                 routeRecords = freezeRouteRecords(routeRecords, joinedOccurrenceIdsByRouteIndex),
@@ -2318,10 +2479,7 @@ internal object ResourceOperationStateMachine {
                 parkedRoutes = parkedRoutes,
                 styleCommitStates = styleCommitStates,
                 visibleResourcesByOwner = deriveVisibleResourcesByOwner(),
-            ),
-            actions = actions,
-            outcome = terminalOutcome(),
-        )
+            )
     }
 
     private fun preregisteredRouteRecord(occurrence: ResourceOccurrence): RouteRecord = RouteRecord(

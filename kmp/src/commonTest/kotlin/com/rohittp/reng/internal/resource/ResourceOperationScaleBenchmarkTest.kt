@@ -125,6 +125,67 @@ class ResourceOperationScaleBenchmarkTest {
         )
     }
 
+    /**
+     * The same distinct-route operation driven through [ResourceOperationStateMachine.Session], the way
+     * `PreparationDriver` drives it in production: one scheduler work for the whole operation, pending
+     * class gates found through the session's own index rather than a route scan, and every occurrence
+     * under ONE owner, as every reference of a real `prepare()` is (the shape that made
+     * `deriveVisibleResourcesByOwner` quadratic on its own), eight routes at a time as production runs them
+     * (which is what makes every completion start the next route).
+     *
+     * Before the session, the pure path above measured ~4x per doubling. Measured 2026-10-08 on an Apple
+     * Silicon macOS host with the session: see the printed figures. The ceiling of 3.0x separates linear
+     * (~2x) from the quadratic shape this replaced with room for host noise.
+     */
+    @Test
+    fun aSessionDrivesManyDistinctRoutesUnderOneOwnerInNearLinearTime() {
+        val routeCounts = listOf(256, 512, 1024)
+        val elapsed = routeCounts.associateWith { driveDistinctRoutesThroughSession(it) }
+        println("session routes -> elapsedMillis: $elapsed")
+        val ratios = routeCounts.zipWithNext { smaller, larger ->
+            val smallerElapsed = elapsed.getValue(smaller).coerceAtLeast(1L)
+            elapsed.getValue(larger).toDouble() / smallerElapsed.toDouble()
+        }
+        println("session doubling ratios for route counts $routeCounts: $ratios")
+        assertTrue(
+            ratios.last() < 3.0,
+            "session scheduling is no longer near-linear: doubling routes from 512 to 1024 scaled elapsed " +
+                "time by ${ratios.last()}x (ceiling 3.0x; linear ~2x, quadratic ~4x); measurements: $elapsed",
+        )
+    }
+
+    private fun driveDistinctRoutesThroughSession(routeCount: Int): Long {
+        // Eight at a time, as a renderer's default `maximumConcurrentResourceOperations` runs them: the
+        // production shape, where routes queue for capacity and every completion starts the next.
+        val definition = definitionOfDistinctStickerRoutes(routeCount, sharedOwner = true, maximumConcurrentRoutes = 8)
+        val started = TimeSource.Monotonic.markNow()
+        val (session, first) = ResourceOperationStateMachine.startSession(definition)
+        requireNotNull(session) { "the definition must not fail registration" }
+        val pending = ArrayDeque<ResourceOperationAction>()
+        var outcome: ResourceOperationOutcome? = first.outcome
+        pending.addAll(first.actions)
+        fun advanceGates() {
+            while (outcome == null) {
+                val ordinal = session.nextPendingClassGateOrdinal() ?: return
+                val step = session.apply(AdvancePendingClassGates(ordinal))
+                pending.addAll(step.actions)
+                outcome = step.outcome
+            }
+        }
+        advanceGates()
+        while (outcome == null) {
+            val action = pending.removeFirstOrNull() ?: break
+            val step = if (action is StartRoute) session.beginLookup(action.ordinal) else session.apply(eventFor(action))
+            pending.addAll(step.actions)
+            outcome = step.outcome
+            advanceGates()
+        }
+        require(outcome is ResourceOperationOutcome.Success) {
+            "benchmark must drive every route to a successful completion, not merely register them"
+        }
+        return started.elapsedNow().inWholeMilliseconds
+    }
+
     private fun driveDistinctRoutesToCompletion(routeCount: Int): Long {
         val definition = definitionOfDistinctStickerRoutes(routeCount)
         val started = TimeSource.Monotonic.markNow()
@@ -234,10 +295,14 @@ class ResourceOperationScaleBenchmarkTest {
      * All routes are made concurrently eligible so the benchmark measures the reducer's per-event rebuild
      * cost against route/occurrence count, not an artificial concurrency-cap serialization.
      */
-    private fun definitionOfDistinctStickerRoutes(routeCount: Int): ResourceOperationDefinition {
-        val occurrences = (0 until routeCount).map { index -> stickerOccurrence(index) }
+    private fun definitionOfDistinctStickerRoutes(
+        routeCount: Int,
+        sharedOwner: Boolean = false,
+        maximumConcurrentRoutes: Int = routeCount,
+    ): ResourceOperationDefinition {
+        val occurrences = (0 until routeCount).map { index -> stickerOccurrence(index, sharedOwner) }
         return ResourceOperationDefinition(
-            maximumConcurrentRoutes = routeCount,
+            maximumConcurrentRoutes = maximumConcurrentRoutes,
             staticOccurrences = occurrences,
             resourceIdentities = occurrences.map {
                 CanonicalIdentityRecord(it.registration.resourceKey, it.registration.canonicalBytes)
@@ -245,11 +310,11 @@ class ResourceOperationScaleBenchmarkTest {
         )
     }
 
-    private fun stickerOccurrence(index: Int): ResourceOccurrence {
+    private fun stickerOccurrence(index: Int, sharedOwner: Boolean): ResourceOccurrence {
         val id = ResourceOccurrenceId((index + 1).toLong())
         return ResourceOccurrence(
             id = id,
-            ownerId = ResourceOwnerId((index + 1).toLong()),
+            ownerId = ResourceOwnerId(if (sharedOwner) 1L else (index + 1).toLong()),
             registration = stickerRegistration(index),
             discoveryRequired = false,
             commitBinding = ResourceCommitBinding.Single,

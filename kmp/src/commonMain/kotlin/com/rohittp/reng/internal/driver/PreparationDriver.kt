@@ -1,6 +1,5 @@
 package com.rohittp.reng.internal.driver
 
-import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
@@ -20,7 +19,6 @@ import com.rohittp.reng.internal.resource.CancellationSelection
 import com.rohittp.reng.internal.resource.CompileBasemapStyle
 import com.rohittp.reng.internal.resource.InstallBasemapStyleVisibility
 import com.rohittp.reng.internal.resource.InstallVisibility
-import com.rohittp.reng.internal.resource.PendingClassGates
 import com.rohittp.reng.internal.resource.ReadStore
 import com.rohittp.reng.internal.resource.ResourceActionId
 import com.rohittp.reng.internal.resource.ResourceClassValidationCompleted
@@ -31,7 +29,6 @@ import com.rohittp.reng.internal.resource.ResourceOperationOutcome
 import com.rohittp.reng.internal.resource.ResourceOperationState
 import com.rohittp.reng.internal.resource.ResourceOperationStateMachine
 import com.rohittp.reng.internal.resource.ResourceOperationTransition
-import com.rohittp.reng.internal.resource.ResourceRouteStatus
 import com.rohittp.reng.internal.resource.StartRoute
 import com.rohittp.reng.internal.resource.StoreReadCompleted
 import com.rohittp.reng.internal.resource.StoreWriteCompleted
@@ -43,7 +40,6 @@ import com.rohittp.reng.internal.resource.ValidateResourceClass
 import com.rohittp.reng.internal.resource.VisibilityInstallCompleted
 import com.rohittp.reng.internal.resource.WriteBasemapStyle
 import com.rohittp.reng.internal.resource.WriteStore
-import com.rohittp.reng.internal.resource.ordinaryResourceClassGates
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -115,6 +111,12 @@ internal class PreparationDriver(
     private val resourceLimits: ResourceLimits,
     private val maximumConcurrentOperations: Int,
     private val clock: () -> Long,
+    /**
+     * Also runs every step through the pure [ResourceOperationStateMachine.transition] path and fails if
+     * its actions, outcome or state ever differ from the session's. For tests: it restores the per-event
+     * copy the session exists to remove. See [ResourceOperationStateMachine.Session].
+     */
+    private val shadowCheck: Boolean = shadowCheckSessionsByDefault,
 ) {
 
     /**
@@ -145,19 +147,36 @@ internal class PreparationDriver(
             val semaphore = Semaphore(maximumConcurrentOperations)
             val events = Channel<ResourceOperationEvent>(Channel.UNLIMITED)
 
-            var state: ResourceOperationState.Running? = null
+            var session: ResourceOperationStateMachine.Session? = null
+            var shadow: ResourceOperationState.Running? = null
             var outcome: ResourceOperationOutcome? = null
             var pendingActionCount = 0
 
-            fun apply(transition: ResourceOperationTransition) {
-                transition.state?.let { state = it }
-                transition.outcome?.let { outcome = it }
-                transition.actions.forEach { action ->
+            // The pure path's result for the same step, compared with what the session produced. Only
+            // when [shadowCheck] is on; the session itself never needs [shadow]. Actions and outcome are
+            // everything state can affect, so equal ones at every step are equal behaviour; building the
+            // session's snapshot runs Running's whole invariant validation on the session's own state.
+            fun checkShadow(step: ResourceOperationStateMachine.Session.Step, pure: ResourceOperationTransition) {
+                check(pure.actions == step.actions) {
+                    "session actions diverged from the pure transition: ${step.actions} vs ${pure.actions}"
+                }
+                check(pure.outcome == step.outcome) { "session outcome diverged from the pure transition" }
+                requireNotNull(session).snapshot()
+                pure.state?.let { shadow = it }
+            }
+
+            fun apply(step: ResourceOperationStateMachine.Session.Step) {
+                step.outcome?.let { outcome = it }
+                step.actions.forEach { action ->
                     if (action is StartRoute) {
-                        // StartRoute performs no adapter call and feeds back no event through
-                        // `transition`: it is folded into the same loop as every other action by calling
-                        // beginLookup directly and recursively applying whatever it yields.
-                        apply(ResourceOperationStateMachine.beginLookup(requireNotNull(state), action.ordinal))
+                        // StartRoute performs no adapter call and feeds back no event: it is folded into the
+                        // same loop as every other action by beginning its lookup directly and recursively
+                        // applying whatever that yields, before the rest of this batch.
+                        val begun = requireNotNull(session).beginLookup(action.ordinal)
+                        if (shadowCheck) {
+                            checkShadow(begun, ResourceOperationStateMachine.beginLookup(requireNotNull(shadow), action.ordinal))
+                        }
+                        apply(begun)
                     } else {
                         pendingActionCount += 1
                         launch {
@@ -169,17 +188,17 @@ internal class PreparationDriver(
                 }
             }
 
+            fun applyEvent(event: ResourceOperationEvent) {
+                val step = requireNotNull(session).apply(event)
+                if (shadowCheck) checkShadow(step, ResourceOperationStateMachine.transition(requireNotNull(shadow), event))
+                apply(step)
+            }
+
             fun advancePendingClassGates(): Boolean {
                 var advanced = false
                 while (true) {
-                    val running = state ?: return advanced
-                    val record = running.routeRecords.firstOrNull { record ->
-                        val cursor = record.cursor
-                        cursor is PendingClassGates &&
-                            ordinaryResourceClassGates(cursor.content.route.resourceClass) != null
-                    } ?: return advanced
-                    val ordinal = (record.cursor as PendingClassGates).ordinal
-                    apply(ResourceOperationStateMachine.transition(running, AdvancePendingClassGates(ordinal)))
+                    val ordinal = session?.nextPendingClassGateOrdinal() ?: return advanced
+                    applyEvent(AdvancePendingClassGates(ordinal))
                     advanced = true
                 }
             }
@@ -192,19 +211,8 @@ internal class PreparationDriver(
             fun advancePendingStyleCommits(): Boolean {
                 var advanced = false
                 while (true) {
-                    val running = state ?: return advanced
-                    val staged = running.styleCommitStates.map { it.ordinal }.toSet()
-                    val active = running.activeRouteOrdinals.toSet()
-                    val record = running.routeRecords.firstOrNull { record ->
-                        val cursor = record.cursor
-                        cursor is PendingClassGates &&
-                            cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
-                            record.status == ResourceRouteStatus.RUNNING &&
-                            cursor.ordinal in active &&
-                            cursor.ordinal !in staged
-                    } ?: return advanced
-                    val ordinal = (record.cursor as PendingClassGates).ordinal
-                    apply(ResourceOperationStateMachine.transition(running, AdvancePendingStyleCommit(ordinal)))
+                    val ordinal = session?.nextPendingStyleCommitOrdinal() ?: return advanced
+                    applyEvent(AdvancePendingStyleCommit(ordinal))
                     advanced = true
                 }
             }
@@ -217,7 +225,17 @@ internal class PreparationDriver(
                 }
             }
 
-            apply(ResourceOperationStateMachine.start(definition))
+            val (started, firstStep) = ResourceOperationStateMachine.startSession(definition)
+            session = started
+            if (shadowCheck) {
+                val pure = ResourceOperationStateMachine.start(definition)
+                if (started != null) {
+                    checkShadow(firstStep, pure)
+                } else {
+                    check(pure.outcome == firstStep.outcome) { "session start outcome diverged from the pure start" }
+                }
+            }
+            apply(firstStep)
             advancePendingCursors()
 
             while (outcome == null) {
@@ -226,13 +244,20 @@ internal class PreparationDriver(
                 }
                 val event = events.receive()
                 pendingActionCount -= 1
-                apply(ResourceOperationStateMachine.transition(requireNotNull(state), event))
+                applyEvent(event)
                 advancePendingCursors()
             }
 
         requireNotNull(outcome)
     }
 }
+
+/**
+ * Whether a [PreparationDriver] built without an explicit `shadowCheck` checks its session against the pure
+ * transition path. False in production. A test run may set it to put every driven operation in the suite
+ * through the differential check.
+ */
+internal var shadowCheckSessionsByDefault: Boolean = false
 
 /**
  * Executes one action through [executor] and, if that throws a bare [CancellationException] rather than

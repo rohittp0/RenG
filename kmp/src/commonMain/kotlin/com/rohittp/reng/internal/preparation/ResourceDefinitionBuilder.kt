@@ -50,13 +50,6 @@ internal fun buildResourceOperationDefinition(
     traversalsByItem: List<List<StaticResourceReference>>,
     accessMode: ResourceAccessMode,
     maximumConcurrentRoutes: Int,
-    /**
-     * Which external references become occurrences the operation drives. Every reference still
-     * contributes its canonical identity record whatever this answers, so a reference the steady-state
-     * shortcut leased outside the operation (`PreparationDriver.leaseSteadyStateResident`) still collides
-     * with a conflicting identity exactly as it would have inside it.
-     */
-    drives: (StaticResourceReference.External) -> Boolean = { true },
 ): ResourceOperationDefinition {
     val occurrences = mutableListOf<ResourceOccurrence>()
     val identities = mutableListOf<CanonicalIdentityRecord>()
@@ -68,7 +61,7 @@ internal fun buildResourceOperationDefinition(
                 resourceKey = reference.resourceKey,
                 canonicalBytes = reference.canonicalIdentity.canonicalBytes,
             )
-            if (reference !is StaticResourceReference.External || !drives(reference)) {
+            if (reference !is StaticResourceReference.External) {
                 return@forEach
             }
             val style = reference.resourceClass == ResourceClass.BASEMAP_STYLE

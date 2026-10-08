@@ -228,17 +228,19 @@ public data class ResourceLimits(
     public val maximumInFlightPreparedFrameCpuBytes: Long = 1024L * 1024L * 1024L,
     /**
      * A GPU texture budget of their own for **content** textures -- sticker images, model and
-     * geometry-consumer textures, label atlases -- or `null` (the default) for one pool shared with
-     * basemap tiles under [maximumResidentGpuTextureBytes], exactly as before this field existed.
+     * geometry-consumer textures, label text textures -- or `null` (the default) for one pool shared
+     * with basemap tiles under [maximumResidentGpuTextureBytes], exactly as before this field existed.
      *
-     * When set, [maximumResidentGpuTextureBytes] bounds basemap tiles (and DEMs) alone, and each pool
-     * evicts only for its own pressure. Why: content is drawn every frame, so under one shared LRU it is
+     * When set, [maximumResidentGpuTextureBytes] bounds the key-registered textures alone -- basemap
+     * tiles, DEMs, and the basemap's glyph and sprite atlases -- and each pool evicts only for its own
+     * pressure. Why: content is drawn every frame, so under one shared LRU it is
      * always the most recent and tiles take every eviction. Measured on an OPPO CPH2629 (2026-10-08,
      * 1080p export, 128 MiB shared budget): 16 1024x768 stickers put 48 MiB of textures beside the
      * tiles and the export re-rasterised 128 tiles in 120 frames, against about 11 without them, even
      * with every CPU-side resource resident -- the tiles' working set no longer fit what was left.
      *
-     * Declared last to preserve positional source and binary compatibility.
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
      */
     public val maximumResidentGpuContentTextureBytes: Long? = null,
 ) {

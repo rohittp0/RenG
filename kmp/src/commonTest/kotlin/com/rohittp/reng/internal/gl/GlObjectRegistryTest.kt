@@ -570,6 +570,51 @@ class GlObjectRegistryTest {
         assertNotNull(registry.resident(tileKey(1)))
     }
 
+    // With split pools, leased tiles over the tile budget are over budget though the two budgets together
+    // would hold them: comparing the total against the sum would silence RESIDENT_GPU_TEXTURES_OVER_BUDGET.
+    @Test fun withSplitPoolsATilePoolOverItsOwnBudgetIsReportedOverBudget() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = ONE_TILE_BYTES,
+            residentContentTextureByteBudget = 4 * ONE_TILE_BYTES,
+        )
+        registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
+
+        val residency = registry.releaseLease(
+            registry.registerTexture(tileKey(2), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertTrue(residency.overBudget, "two leased tiles exceed a one-tile pool whatever the content pool holds")
+        assertEquals(ONE_TILE_BYTES, residency.budgetBytes, "reported against the tile pool's own budget")
+    }
+
+    // Buffers a live frame leases keep the buffer pool over budget with nothing evictable there; that must
+    // not stop unleased tiles being evicted for the texture pool's own pressure.
+    @Test fun leasedModelBuffersDoNotBlockTextureEviction() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = ONE_TILE_BYTES, residentBufferByteBudget = 1L)
+        registry.registerAllocation(
+            gpuPrimitiveIdentity(glbKey, generation = 1L, primitive = 0),
+            listOf(GlObjectHandle(GlObjectType.BUFFER, 90)),
+            0L,
+            8L,
+            "leased buffer",
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertNull(registry.resident(tileKey(0)), "the older unleased tile is evicted despite buffer pressure")
+        assertNotNull(registry.resident(tileKey(1)))
+    }
+
     private fun registerAndReleaseContent(
         registry: GlObjectRegistry,
         binding: RecordingGlBinding,

@@ -134,8 +134,9 @@ internal class GlObjectRegistry(
     private val residentBufferByteBudget: Long = 512L * 1024L * 1024L,
     /**
      * A separate pool for [registerAllocation]'s textures (stickers, model and geometry-consumer
-     * textures, label atlases), or `null` for one pool shared with [registerTexture]'s (basemap tiles,
-     * DEMs) -- the behaviour before [ResourceLimits.maximumResidentGpuContentTextureBytes] existed.
+     * textures, label text textures), or `null` for one pool shared with [registerTexture]'s (basemap
+     * tiles, DEMs, the basemap's glyph and sprite atlases) -- the behaviour before
+     * [ResourceLimits.maximumResidentGpuContentTextureBytes] existed.
      *
      * With a pool of its own, content can no longer evict tiles and tiles can no longer evict content:
      * [residentTextureByteBudget] then bounds [registerTexture]'s textures alone. See that field's KDoc
@@ -637,10 +638,28 @@ internal class GlObjectRegistry(
      * from GL-side bookkeeping and a sink belongs to the operation the consumer invoked.
      */
     /** This registry's budget-tracked residency as it stands, evicting nothing. */
-    private fun residencyLocked(): GpuTextureResidency = GpuTextureResidency(
-        residentBytes = textureByteSizes.values.sum() + allocations.values.sumOf { it.textureBytes },
-        budgetBytes = totalTextureByteBudget,
-    )
+    private fun residencyLocked(): GpuTextureResidency {
+        val (bytes, budget) = textureResidencyLocked()
+        return GpuTextureResidency(residentBytes = bytes, budgetBytes = budget)
+    }
+
+    /**
+     * Texture bytes and the budget they are measured against: with one shared pool, everything against
+     * [residentTextureByteBudget]; with split pools, whichever pool is over its own budget (tiles first),
+     * or the combined figure when neither is. Comparing the total against the sum of both budgets would
+     * hide one pool being irreducibly over while the other has room, and silence the over-budget report.
+     */
+    private fun textureResidencyLocked(): Pair<Long, Long> {
+        val tileBytes = textureByteSizes.values.sum()
+        val contentBytes = allocations.values.sumOf { it.textureBytes }
+        val contentBudget = residentContentTextureByteBudget
+        return when {
+            contentBudget == null -> (tileBytes + contentBytes) to residentTextureByteBudget
+            tileBytes > residentTextureByteBudget -> tileBytes to residentTextureByteBudget
+            contentBytes > contentBudget -> contentBytes to contentBudget
+            else -> (tileBytes + contentBytes) to totalTextureByteBudget
+        }
+    }
 
     private data class ReleaseResult(
         val residency: GpuTextureResidency,
@@ -653,28 +672,39 @@ internal class GlObjectRegistry(
         var bufferBytes = allocations.values.sumOf { it.bufferBytes }
         val contentBudget = residentContentTextureByteBudget
         val handlesToDelete = mutableListOf<GlObjectHandle>()
+        fun evictAllocation(identity: GpuResourceIdentity) {
+            allocationUnleasedOrder.remove(identity)
+            val victim = allocations.remove(identity) ?: return
+            contentTextureBytes -= victim.textureBytes
+            bufferBytes -= victim.bufferBytes
+            handlesToDelete += victim.handles
+        }
         while (true) {
-            val bufferPressure = bufferBytes > residentBufferByteBudget
+            // Buffers first, but only while an unleased buffer can go: buffers a live frame leases must
+            // not stop textures from being evicted for their own pools' pressure.
+            val bufferCandidate = if (bufferBytes > residentBufferByteBudget) {
+                allocationUnleasedOrder.keys.firstOrNull { (allocations[it]?.bufferBytes ?: 0L) > 0L }
+            } else {
+                null
+            }
+            if (bufferCandidate != null) {
+                evictAllocation(bufferCandidate)
+                continue
+            }
             // Shared pool (no content budget): one texture total against one budget, oldest first
             // across both kinds. Split pools: each kind is evicted only for its own pool's pressure.
             val sharedPressure = contentBudget == null &&
                 tileTextureBytes + contentTextureBytes > residentTextureByteBudget
             val tilePressure = contentBudget != null && tileTextureBytes > residentTextureByteBudget
             val contentPressure = contentBudget != null && contentTextureBytes > contentBudget
-            if (!bufferPressure && !sharedPressure && !tilePressure && !contentPressure) break
-            val allocationCandidate = if (bufferPressure || sharedPressure || contentPressure) {
+            val allocationCandidate = if (sharedPressure || contentPressure) {
                 allocationUnleasedOrder.entries.firstOrNull { (identity) ->
-                    val candidate = allocations[identity] ?: return@firstOrNull false
-                    if (bufferPressure) candidate.bufferBytes > 0L else candidate.textureBytes > 0L
+                    (allocations[identity]?.textureBytes ?: 0L) > 0L
                 }
             } else {
                 null
             }
-            val legacyCandidate = if (!bufferPressure && (sharedPressure || tilePressure)) {
-                unleasedOrder.entries.firstOrNull()
-            } else {
-                null
-            }
+            val legacyCandidate = if (sharedPressure || tilePressure) unleasedOrder.entries.firstOrNull() else null
             if (
                 legacyCandidate != null &&
                 (allocationCandidate == null || legacyCandidate.value <= allocationCandidate.value)
@@ -685,23 +715,21 @@ internal class GlObjectRegistry(
                 textureLeaseCounts.remove(key)
                 handlesToDelete += live.remove(key).orEmpty()
             } else {
-                val identity = allocationCandidate?.key ?: break
-                allocationUnleasedOrder.remove(identity)
-                val victim = allocations.remove(identity) ?: continue
-                contentTextureBytes -= victim.textureBytes
-                bufferBytes -= victim.bufferBytes
-                handlesToDelete += victim.handles
+                evictAllocation(allocationCandidate?.key ?: break)
             }
         }
         return handlesToDelete
     }
 
-    private fun allocationResidencyLocked(): GpuResourceResidency = GpuResourceResidency(
-        textureBytes = textureByteSizes.values.sum() + allocations.values.sumOf { it.textureBytes },
-        textureBudgetBytes = totalTextureByteBudget,
-        bufferBytes = allocations.values.sumOf { it.bufferBytes },
-        bufferBudgetBytes = residentBufferByteBudget,
-    )
+    private fun allocationResidencyLocked(): GpuResourceResidency {
+        val (textureBytes, textureBudget) = textureResidencyLocked()
+        return GpuResourceResidency(
+            textureBytes = textureBytes,
+            textureBudgetBytes = textureBudget,
+            bufferBytes = allocations.values.sumOf { it.bufferBytes },
+            bufferBudgetBytes = residentBufferByteBudget,
+        )
+    }
 
     private data class AllocationReleaseResult(
         val residency: GpuResourceResidency,

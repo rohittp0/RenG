@@ -204,6 +204,19 @@ class PreparationDriverTest {
         assertNull(cache.current(content.resourceKey), "a closed cache must stay empty")
     }
 
+    // Even a generation some other path installed after close is not handed out by a RESIDENT install.
+    @Test
+    fun aResidentInstallAfterCloseRefusesAGenerationInstalledLate() = runTest {
+        val cache = ResidentCache()
+        val content = residentContent("late", digest = "a")
+        cache.closeAll()
+        cache.install(content.resourceKey, content.stored, decoded = null)
+
+        val outcome = residentInstall(cache, content)
+
+        assertIs<SuppliedInstallOutcome.Failed>(outcome)
+    }
+
     // The race that failed 1080p exports with 16 stickers (STICKER_IMAGE) or 16 vehicles (MODEL_TEXTURE)
     // on an OPPO CPH2629, 2026-10-08: the lookup saw the key resident without leasing it, the budget
     // sweep evicted it during the class gates, and the install then failed though the route held every

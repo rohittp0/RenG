@@ -339,6 +339,9 @@ internal class ResidentCache(
      * generation is leased. It reached `current` through its own validated install.
      */
     fun observeOrRestoreAndTakeLease(key: ResourceKey, stored: StoredRawResource): Lease? = locked {
+        // First, before any lease: a generation installed after close by another path must not be
+        // handed out either.
+        if (closed) return@locked null
         val entry = entries[key]
         val current = entry?.current
         if (current != null) {
@@ -347,7 +350,7 @@ internal class ResidentCache(
             return@locked Lease(current)
         }
         // An entry with no current generation exists only after a free(): eviction removes the key.
-        if (closed || entry != null) return@locked null
+        if (entry != null) return@locked null
         val restored = KeyEntry()
         entries[key] = restored
         val generation = newGeneration(key = key, stored = stored, decoded = null)

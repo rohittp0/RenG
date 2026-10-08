@@ -36,7 +36,7 @@ import kotlin.test.assertTrue
  * `PreparationDriver.leaseSteadyStateResident`, the steady-state shortcut. Every reference it bypasses
  * never reaches the scheduler session, so the driver's shadow check cannot see it; these cases are what
  * pin which references qualify and what a bypass leaves behind (a lease in the sink, observed after it is
- * recorded, once per route) -- and that anything the operation would decide differently is kept for it.
+ * recorded, once per key) -- and that anything the operation would decide differently is kept for it.
  */
 class SteadyStateShortcutTest {
     private val now = 1_700_000_000_000L
@@ -146,6 +146,23 @@ class SteadyStateShortcutTest {
 
         assertTrue(fixture.shortcut(listOf(sticker, sticker.copy())).isEmpty())
         assertEquals(1, fixture.sink.size, "route joining: one lease however many references name the route")
+    }
+
+    // The operation is handed whole keys, so a key the shortcut split between itself and the operation
+    // would be driven again and could leave the frame two generations of it. A key named on two routes
+    // (here two response limits) claims one private Rentile key twice, which registration refuses, so the
+    // shortcut bypasses nothing -- not even an unrelated resident key -- and the operation reports it. The
+    // shortcut's own per-key rule would keep the pair whole regardless.
+    @Test
+    fun aKeyNamedOnTwoRoutesIsNeverSplitBetweenTheShortcutAndTheOperation() {
+        val fixture = Fixture()
+        val sticker = fixture.resident(external(ResourceClass.STICKER_IMAGE, "q"))
+        val widerRoute = sticker.copy(maximumResponseBytes = sticker.maximumResponseBytes + 1)
+        val other = fixture.resident(external(ResourceClass.STICKER_IMAGE, "r"))
+
+        assertEquals(listOf(sticker, widerRoute, other), fixture.shortcut(listOf(sticker, widerRoute, other)))
+        assertTrue(fixture.sink.isEmpty())
+        assertEquals(0, fixture.cache.current(sticker.resourceKey)!!.leaseCount, "never trial-leased")
     }
 
     @Test

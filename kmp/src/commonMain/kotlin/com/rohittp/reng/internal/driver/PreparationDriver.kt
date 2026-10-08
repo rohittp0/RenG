@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.driver
 
 import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
@@ -149,8 +150,9 @@ internal class PreparationDriver(
      * and unchanged since the previous frame.
      *
      * **What it keeps.** The lease goes to [leaseSink] and then [leaseObserver], exactly as
-     * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. One lease per
-     * distinct route, as route joining gives. Never under `RELOAD`, which never selects resident content;
+     * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. Decided per
+     * resource key: a key is bypassed whole, with one lease, or left whole to the operation, and a key named
+     * on more than one route is always left to it. Never under `RELOAD`, which never selects resident content;
      * never for a basemap style, which carries discovery and its commit barrier (ADR 0016).
      *
      * **Registration first.** [registration] is the operation every reference in [references] belongs to,
@@ -173,14 +175,23 @@ internal class PreparationDriver(
     ): List<StaticResourceReference.External> {
         if (accessMode == ResourceAccessMode.RELOAD || references.isEmpty()) return references
         if (ResourceOperationStateMachine.preRegister(registration).outcome != null) return references
-        // Same route key the definition builder derives, so "distinct route" means what joining means.
+        // Decided per resource key, so a key is never split between the shortcut and the operation: the
+        // caller keeps or drops whole keys from the operation, and a frame must end up holding one lease,
+        // on one generation, per key. A key named by references on more than one route is left entirely
+        // to the operation -- registration already refuses one, since its routes claim one private Rentile
+        // key, so this only keeps that true by construction. Same route key the definition builder derives, so a key with one
+        // route is exactly the references route joining would have shared one lookup between.
         fun routeOf(reference: StaticResourceReference.External) =
             Triple(reference.locator, reference.resourceClass, reference.maximumResponseBytes)
-        val bypassedRoutes = HashSet<Triple<*, *, *>>()
-        val decided = HashSet<Triple<*, *, *>>()
+        val routesByKey = LinkedHashMap<ResourceKey, MutableSet<Triple<*, *, *>>>()
+        val firstByKey = LinkedHashMap<ResourceKey, StaticResourceReference.External>()
         for (reference in references) {
-            val route = routeOf(reference)
-            if (!decided.add(route)) continue
+            routesByKey.getOrPut(reference.resourceKey) { HashSet() } += routeOf(reference)
+            firstByKey.getOrPut(reference.resourceKey) { reference }
+        }
+        val bypassedKeys = HashSet<ResourceKey>()
+        for ((key, reference) in firstByKey) {
+            if (routesByKey.getValue(key).size != 1) continue
             if (reference.resourceClass == ResourceClass.BASEMAP_STYLE) continue
             val gates = ordinaryResourceClassGates(reference.resourceClass) ?: continue
             val lease = cache.observeAndTakeLease(reference.resourceKey) ?: continue
@@ -192,13 +203,13 @@ internal class PreparationDriver(
                 // leaves the lease where the caller's rollback releases it.
                 leaseSink += lease
                 leaseObserver(lease)
-                bypassedRoutes += route
+                bypassedKeys += key
             } else {
                 cache.releaseLease(lease)
             }
         }
-        if (bypassedRoutes.isEmpty()) return references
-        return references.filter { routeOf(it) !in bypassedRoutes }
+        if (bypassedKeys.isEmpty()) return references
+        return references.filter { it.resourceKey !in bypassedKeys }
     }
 
     suspend fun run(

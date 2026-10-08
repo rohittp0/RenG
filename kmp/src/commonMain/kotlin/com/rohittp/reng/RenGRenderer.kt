@@ -2999,7 +2999,8 @@ internal class RenGRenderer(
         val drivenKeys = driven.mapTo(HashSet()) { it.resourceKey }
         styleReference?.let { drivenKeys += it.resourceKey }
         // The operation drives the style and what the shortcut left, but registers every identity the full
-        // set carries, so a bypassed reference still takes part in collision checks.
+        // set carries, so a bypassed reference still takes part in collision checks. The shortcut bypasses
+        // whole keys, so keeping the occurrences of the keys it left drives exactly the references it left.
         val drivenOccurrences = if (driven.size == imageReferences.size + modelGlbReferences.size) {
             fullDefinition.staticOccurrences
         } else {
@@ -3115,12 +3116,10 @@ internal class RenGRenderer(
         // leased before the operation ran -- and then the leased generation is the one the frame pins.
         val leasedGenerations = HashMap<ResourceKey, ResidentGeneration>(leaseSink.size)
         leaseSink.forEach { lease ->
-            val previous = leasedGenerations.put(lease.generation.key, lease.generation)
-            // Routes join, so one key is leased once; two leases on it naming different generations would
-            // mean this frame pinned two versions of one resource and could not say which it drew.
-            check(previous == null || previous === lease.generation) {
-                "a frame must lease one generation per resource key"
-            }
+            // One generation per key, chosen explicitly rather than asserted: should a key ever be leased
+            // twice (registration refuses a key named on two routes today) and an install land between the
+            // leases, every lease stays held until the frame closes and the frame draws the first it took.
+            leasedGenerations.getOrPut(lease.generation.key) { lease.generation }
         }
 
         val decodedByKey = LinkedHashMap<ResourceKey, DecodedImage>(imageReferences.size)

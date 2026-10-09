@@ -32,16 +32,20 @@ private fun channelsFor(colourType: Int): Int = when (colourType) {
  * [InflateStream] (Task 3), undoes the five PNG row filters, and widens greyscale/palette pixels into
  * RGBA8, applying `tRNS` alpha for colour types 0, 2, and 3. `maximumDecodedBytes` gates the *declared*
  * raster size — `width * height * 4` from the header alone — before any array is allocated.
+ *
+ * [storedFastPath] exists for tests alone: `false` forces every input through [InflateStream], so a
+ * test can prove [decodeStoredRows] answers byte for byte what the general path does.
  */
 internal fun decodePng(
     bytes: ByteArray,
     maximumDecodedBytes: Long,
     maximumWorkingBytes: Long = Long.MAX_VALUE,
+    storedFastPath: Boolean = true,
 ): PngDecodeResult {
     return when (val scan = scanPng(bytes)) {
         is PngScan.Malformed -> PngDecodeResult.Malformed(scan.reason)
         is PngScan.Unsupported -> PngDecodeResult.Unsupported(scan.reason)
-        is PngScan.Admitted -> decodeAdmitted(bytes, scan, maximumDecodedBytes, maximumWorkingBytes)
+        is PngScan.Admitted -> decodeAdmitted(bytes, scan, maximumDecodedBytes, maximumWorkingBytes, storedFastPath)
     }
 }
 
@@ -62,6 +66,7 @@ private fun decodeAdmitted(
     scan: PngScan.Admitted,
     maximumDecodedBytes: Long,
     maximumWorkingBytes: Long,
+    storedFastPath: Boolean,
 ): PngDecodeResult {
     val header = scan.header
     val width = header.width
@@ -114,6 +119,12 @@ private fun decodeAdmitted(
     var currentRow = ByteArray(stride + 1)
     var previousRow = ByteArray(stride + 1)
     val rgba = ByteArray(rgbaSizeLong.toInt())
+    if (storedFastPath && decodeStoredRows(bytes, scan, bpp, channels, currentRow, previousRow, rgba)) {
+        return PngDecodeResult.Success(DecodedImage.takeOwnership(width, height, rgba))
+    }
+    // The fast path declined, possibly part-way through: start again from a zero row above the first,
+    // in the same buffers, so a declined attempt costs no working bytes beyond what was budgeted above.
+    previousRow.fill(0)
     val inflater = IdatInflater(bytes, scan.imageDataRanges)
     return try {
         for (row in 0 until height) {
@@ -217,25 +228,255 @@ private class IdatInflater(private val bytes: ByteArray, private val ranges: Lis
 }
 
 /**
+ * The whole image, when its zlib stream is nothing but *stored* deflate blocks (`BTYPE = 00`), copied
+ * row by row straight out of the `IDAT` ranges instead of through [InflateStream]; `false` when the
+ * stream is anything else, or anything about it is wrong, and the caller then decodes it the general
+ * way from the start.
+ *
+ * **Why.** The app writes its labels, glyph data and route and region bakes with a PNG writer that
+ * stores rather than compresses -- filter 0 on every row, RGBA8, stored blocks -- and on an OPPO
+ * CPH2629 export (2026-10-09) decoding about twenty newly published labels stalled one frame for
+ * about 320 ms, almost all of it the inflate seam, the row unfilter and the widen. A stored block's
+ * bytes *are* its output, so the inflate is a copy.
+ *
+ * **It answers only what the general path would.** ADR 0020 delegates inflate to the platform's zlib
+ * rather than writing one, and this does not reopen that: it decodes no Huffman code and repairs
+ * nothing. It returns `true` only for a stream zlib itself accepts and inflates to exactly these bytes
+ * -- a header zlib accepts (method 8, a window no larger than 32 KiB, a valid check, no preset
+ * dictionary), every block stored with `NLEN` the complement of `LEN`, a final block, exactly the
+ * declared raster, the Adler-32 zlib verifies, and nothing after it -- *and* only when every row then
+ * unfilters and widens cleanly. Every other outcome, including every failure, is left to the general
+ * path, so where a malformed stream fails, and which [PngReject] it names, stay exactly zlib's.
+ *
+ * [currentRow] and [previousRow] arrive as the general path allocates them, `previousRow` zero; this
+ * may leave anything in them, and in [rgba], when it declines.
+ */
+private fun decodeStoredRows(
+    bytes: ByteArray,
+    scan: PngScan.Admitted,
+    bpp: Int,
+    channels: Int,
+    currentRow: ByteArray,
+    previousRow: ByteArray,
+    rgba: ByteArray,
+): Boolean {
+    val header = scan.header
+    val stream = StoredIdatReader(bytes, scan.imageDataRanges)
+    val cmf = stream.readByte()
+    val flg = stream.readByte()
+    if (cmf < 0 || flg < 0) return false
+    // RFC 1950: method 8 (deflate), CINFO <= 7 (zlib's default 15-bit window refuses a larger one),
+    // FCHECK making CMF*256+FLG a multiple of 31, and no preset dictionary.
+    if (cmf and 0x0F != 8 || cmf ushr 4 > 7 || (cmf * 256 + flg) % 31 != 0 || flg and 0x20 != 0) return false
+
+    var current = currentRow
+    var previous = previousRow
+    val adler = Adler32()
+    for (row in 0 until header.height) {
+        if (!stream.fill(current)) return false
+        adler.update(current)
+        if (!unfilterRow(current, previous, bpp)) return false
+        if (!widenRowToRgba(
+                colourType = header.colourType,
+                row = current,
+                width = header.width,
+                channels = channels,
+                palette = scan.palette,
+                transparency = scan.transparency,
+                rgba = rgba,
+                rgbaOffset = row * header.width * 4,
+            )
+        ) {
+            return false
+        }
+        val swap = previous
+        previous = current
+        current = swap
+    }
+    return stream.finish() && stream.readBigEndianInt() == adler.value && stream.exhausted
+}
+
+/**
+ * Whether [decodeStoredRows] alone decodes [bytes], for tests that must know the fast path -- not the
+ * general one it falls back to -- is what produced an answer.
+ */
+internal fun storedFastPathDecodes(bytes: ByteArray): Boolean {
+    val scan = scanPng(bytes) as? PngScan.Admitted ?: return false
+    val channels = channelsFor(scan.header.colourType)
+    val stride = scan.header.width * channels
+    return decodeStoredRows(
+        bytes = bytes,
+        scan = scan,
+        bpp = channels,
+        channels = channels,
+        currentRow = ByteArray(stride + 1),
+        previousRow = ByteArray(stride + 1),
+        rgba = ByteArray(scan.header.width * scan.header.height * 4),
+    )
+}
+
+/**
+ * One zlib stream of stored deflate blocks, read straight out of the `IDAT` ranges with no copy of
+ * the compressed payload, for [decodeStoredRows]. Every method answers `false` or `-1` rather than
+ * throwing for a stream it cannot read, because declining is the caller's whole recovery.
+ */
+private class StoredIdatReader(private val bytes: ByteArray, private val ranges: List<IntRange>) {
+    private var rangeIndex = 0
+    private var position = ranges.firstOrNull()?.first ?: 0
+
+    /** Bytes still to copy from the current block, before the next block header. */
+    private var blockRemaining = 0
+    private var sawFinalBlock = false
+
+    private fun skipExhaustedRanges() {
+        while (rangeIndex < ranges.size && position > ranges[rangeIndex].last) {
+            rangeIndex += 1
+            position = ranges.getOrNull(rangeIndex)?.first ?: 0
+        }
+    }
+
+    val exhausted: Boolean
+        get() {
+            skipExhaustedRanges()
+            return rangeIndex >= ranges.size
+        }
+
+    fun readByte(): Int {
+        skipExhaustedRanges()
+        if (rangeIndex >= ranges.size) return -1
+        return bytes[position++].toInt() and 0xFF
+    }
+
+    /** The next stored block's header; `false` for any other block type, a bad `NLEN`, or no input. */
+    private fun readBlockHeader(): Boolean {
+        val type = readByte()
+        if (type < 0 || type and 0x06 != 0) return false
+        val len0 = readByte()
+        val len1 = readByte()
+        val nlen0 = readByte()
+        val nlen1 = readByte()
+        if (len0 < 0 || len1 < 0 || nlen0 < 0 || nlen1 < 0) return false
+        val length = len0 or (len1 shl 8)
+        if (length != (nlen0 or (nlen1 shl 8)).inv() and 0xFFFF) return false
+        // The header's five remaining bits are padding to the byte boundary, which zlib ignores too.
+        sawFinalBlock = type and 0x01 != 0
+        blockRemaining = length
+        return true
+    }
+
+    /** Copies exactly [target]'s size of decompressed bytes into it; `false` if the stream ends first. */
+    fun fill(target: ByteArray): Boolean {
+        var filled = 0
+        while (filled < target.size) {
+            if (blockRemaining == 0) {
+                if (sawFinalBlock || !readBlockHeader()) return false
+                continue
+            }
+            skipExhaustedRanges()
+            if (rangeIndex >= ranges.size) return false
+            val available = ranges[rangeIndex].last + 1 - position
+            val count = minOf(available, blockRemaining, target.size - filled)
+            bytes.copyInto(target, filled, position, position + count)
+            position += count
+            filled += count
+            blockRemaining -= count
+        }
+        return true
+    }
+
+    /**
+     * Reads past the end of the raster to the end of the final block: `true` only if no decompressed
+     * byte remains, which leaves just empty stored blocks to cross.
+     */
+    fun finish(): Boolean {
+        while (true) {
+            if (blockRemaining != 0) return false
+            if (sawFinalBlock) return true
+            if (!readBlockHeader()) return false
+        }
+    }
+
+    /** The four big-endian bytes of the Adler-32 trailer, or `-1L` if the stream ends first. */
+    fun readBigEndianInt(): Long {
+        var value = 0L
+        repeat(4) {
+            val next = readByte()
+            if (next < 0) return -1L
+            value = (value shl 8) or next.toLong()
+        }
+        return value
+    }
+}
+
+/** RFC 1950's Adler-32, the check zlib verifies at the end of every stream. */
+private class Adler32 {
+    private var s1 = 1
+    private var s2 = 0
+
+    fun update(data: ByteArray) {
+        var index = 0
+        while (index < data.size) {
+            // 5552 is the most bytes that cannot overflow an Int before the modulo (zlib's NMAX).
+            val end = minOf(data.size, index + 5552)
+            while (index < end) {
+                s1 += data[index].toInt() and 0xFF
+                s2 += s1
+                index += 1
+            }
+            s1 %= ADLER_MODULUS
+            s2 %= ADLER_MODULUS
+        }
+    }
+
+    val value: Long get() = (s2.toLong() shl 16) or s1.toLong()
+}
+
+private const val ADLER_MODULUS = 65521
+
+/**
  * Undoes one row's PNG filter into [current]. [previous] is the already reconstructed prior row.
+ *
+ * One loop per filter type rather than one `when` per byte: the filter is fixed for the whole row,
+ * and the per-byte branch, with left and upper-left read for every type that does not use them, was
+ * most of this function's time. A row's first [bpp] bytes have no left neighbour, so `a` and `c` are
+ * zero there: Sub leaves them as they are, Average adds `b / 2`, and Paeth's predictor is `b`, kept as
+ * a call to [paeth] so the tie order stays in one place. Byte addition wraps modulo 256, as `and 0xFF`
+ * did.
  */
 private fun unfilterRow(current: ByteArray, previous: ByteArray, bpp: Int): Boolean {
     val filterType = current[0].toInt() and 0xFF
-    if (filterType > 4) return false
-    for (i in 1 until current.size) {
-        val x = current[i].toInt() and 0xFF
-        val a = if (i > bpp) current[i - bpp].toInt() and 0xFF else 0
-        val b = previous[i].toInt() and 0xFF
-        val c = if (i > bpp) previous[i - bpp].toInt() and 0xFF else 0
-        val recon = when (filterType) {
-            0 -> x
-            1 -> x + a
-            2 -> x + b
-            3 -> x + ((a + b) / 2)
-            4 -> x + paeth(a, b, c)
-            else -> error("unreachable: filter type was validated")
+    val size = current.size
+    val firstWithLeft = minOf(bpp + 1, size)
+    when (filterType) {
+        0 -> Unit
+        1 -> for (i in firstWithLeft until size) {
+            current[i] = (current[i] + current[i - bpp]).toByte()
         }
-        current[i] = (recon and 0xFF).toByte()
+        2 -> for (i in 1 until size) {
+            current[i] = (current[i] + previous[i]).toByte()
+        }
+        3 -> {
+            for (i in 1 until firstWithLeft) {
+                current[i] = (current[i] + ((previous[i].toInt() and 0xFF) / 2)).toByte()
+            }
+            for (i in firstWithLeft until size) {
+                val a = current[i - bpp].toInt() and 0xFF
+                val b = previous[i].toInt() and 0xFF
+                current[i] = (current[i] + ((a + b) / 2)).toByte()
+            }
+        }
+        4 -> {
+            for (i in 1 until firstWithLeft) {
+                current[i] = (current[i] + paeth(0, previous[i].toInt() and 0xFF, 0)).toByte()
+            }
+            for (i in firstWithLeft until size) {
+                val a = current[i - bpp].toInt() and 0xFF
+                val b = previous[i].toInt() and 0xFF
+                val c = previous[i - bpp].toInt() and 0xFF
+                current[i] = (current[i] + paeth(a, b, c)).toByte()
+            }
+        }
+        else -> return false
     }
     return true
 }
@@ -271,6 +512,11 @@ private fun widenRowToRgba(
     rgba: ByteArray,
     rgbaOffset: Int,
 ): Boolean {
+    if (colourType == 6) {
+        // Truecolour with alpha is already RGBA8: the row past its filter byte is the output.
+        row.copyInto(rgba, rgbaOffset, 1, 1 + width * 4)
+        return true
+    }
     var out = rgbaOffset
     for (col in 0 until width) {
             val pixelStart = 1 + col * channels

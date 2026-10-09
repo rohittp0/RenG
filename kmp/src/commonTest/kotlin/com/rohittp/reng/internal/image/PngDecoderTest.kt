@@ -250,6 +250,35 @@ class PngDecoderTest {
         assertContentEquals(expectedMultiIdatSplitPixels, result.image.rgbaSnapshot())
     }
 
+    // Every fixture above is a compressed stream, so the stored-block fast path must decline each one
+    // and the decoder's answer must be exactly the general path's -- including every rejection.
+    @Test
+    fun compressedFixturesDecodeTheSameWithOrWithoutTheStoredFastPath() {
+        val fixtures = filterFixtures + listOf(
+            "grey8TwoPixels" to grey8TwoPixels,
+            "paletteWithTrns" to paletteWithTrns,
+            "filterByteFive" to filterByteFive,
+            "deflateShorterThanRaster" to deflateShorterThanRaster,
+            "deflateLongerThanRaster" to deflateLongerThanRaster,
+            "paletteIndexOutOfRange" to paletteIndexOutOfRange,
+            "greyTwoPixelsWithTrnsKey" to greyTwoPixelsWithTrnsKey,
+            "rgbTwoPixelsWithTrnsKey" to rgbTwoPixelsWithTrnsKey,
+            "paletteWithShortTrns" to paletteWithShortTrns,
+            "multiIdatSplitImage" to multiIdatSplitImage,
+            "rgb8Reference" to rgb8Reference,
+        )
+        for ((name, bytes) in fixtures) {
+            assertEquals(false, storedFastPathDecodes(bytes), name)
+            val fast = decodePng(bytes, 1L shl 20)
+            val general = decodePng(bytes, 1L shl 20, storedFastPath = false)
+            if (fast is PngDecodeResult.Success && general is PngDecodeResult.Success) {
+                assertContentEquals(general.image.rgbaSnapshot(), fast.image.rgbaSnapshot(), name)
+            } else {
+                assertEquals(general, fast, name)
+            }
+        }
+    }
+
     private val expectedFilterPixels: ByteArray = byteArrayOf(
         2, 5, 8, -1, 3, 12, 18, -1, 15, 22, 28, -1, 25, 32, 38, -1, 0, 42, 48, -1, 50, 52, 58, -1,
         45, 62, 68, -1, 55, 72, 78, -1, 65, 1, 25, -1, 75, 3, 35, -1, 85, 45, 45, -1, 95, 55, 55, -1,

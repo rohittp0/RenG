@@ -21,6 +21,7 @@ import com.rohittp.reng.internal.freshCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.PngScan
@@ -93,7 +94,12 @@ import kotlinx.coroutines.sync.withLock
  *
  * Everything else this class holds is immutable or stateless: `transport` and `store` are the
  * consumer's own objects, and `resourceKeyDeriver`, `privateKeyResolver` and `sha256` are pure
- * functions over their arguments with no fields that change.
+ * functions over their arguments with no fields that change. `redactedLocatorDigests`, and the memo a
+ * resolver may hold, remember pure functions of a route behind their own locks: they change how often a
+ * value is computed, never which value. Those locks are the one exception to the paragraph below --
+ * [preregister] takes them while holding [routeIndexMutex] -- and it cannot form a cycle, because a
+ * `RouteMemo` lock is held only around its own map's get and put, never around a derivation or any
+ * other lock.
  *
  * **The lock graph is a set of leaves, and stays one.** No lock in this file is ever acquired while
  * another is held, so no cycle can exist and the order of acquisition never matters. Three facts keep
@@ -108,6 +114,13 @@ internal class OperationRegistry(
     private val store: Store,
     private val privateKeyResolver: RentilePrivateKeyResolver,
     private val sha256: Sha256Function = AcceleratedSha256,
+    /**
+     * Where [preregister] remembers each route's redacted-url digest across registries (see
+     * [BasemapEngineHost]'s field of the same name); null derives it every time. A pure function of the
+     * url behind its own leaf lock, so it adds no state an answer path could observe and no lock that
+     * nests.
+     */
+    private val redactedLocatorDigests: RouteMemo<String>? = null,
 ) {
     private val resourceKeyDeriver = ResourceKeyDeriver(sha256)
 
@@ -328,6 +341,17 @@ internal class OperationRegistry(
      * partial application it replaces: a half-applied batch would let an engine call this registry has
      * already decided to refuse be answered for whichever routes happened to land first.
      *
+     * **A repeat costs a lookup, not a copy.** Every frame of a batch, and every style commit within
+     * one, declares mostly routes this registry already holds, and copying all five indices to publish
+     * an identical snapshot was a measurable share of a `prepare`. So the batch is first narrowed, under
+     * the lock, to the routes not already registered *identically*; when none remain nothing is copied
+     * or published. That narrowing cannot hide a collision: a route counts as registered only when
+     * [RouteIndex.byPrivateKey] maps its own private key to an *equal* route, and a route is only ever
+     * put there by a batch that also wrote every other index it reaches, all-or-nothing, with nothing
+     * ever removed -- so every index that route would write already maps to that same route, and
+     * writing it again would change nothing. A *different* route is never equal, so it stays in the
+     * batch and meets every collision check exactly as before.
+     *
      * `suspend` because the write must serialize against other writers, and [routeIndexMutex] is the
      * only lock in this file's discipline that can do that. Every caller is already suspending.
      */
@@ -335,14 +359,23 @@ internal class OperationRegistry(
         if (routes.isEmpty()) return
         routeIndexMutex.withLock {
             val current = routeIndex
+            // Each route's private key, resolved once: the narrowing needs it and so does the
+            // byPrivateKey index below. A renderer's resolver remembers it (RouteMemo), so a repeat is a
+            // map lookup rather than a SHA-256.
+            val unregistered = ArrayList<Pair<ResourceRouteKey, RentilePrivateKey>>(0)
+            for (route in routes) {
+                val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
+                if (current.byPrivateKey[privateKey] != route) unregistered += route to privateKey
+            }
+            if (unregistered.isEmpty()) return@withLock
+
             val byPrivateKey = current.byPrivateKey.toMutableMap()
             val transportRoutes = current.transportRoutes.toMutableMap()
             val storeRoutes = current.storeRoutes.toMutableMap()
             val byEngineDigest = current.byEngineDigest.toMutableMap()
             val spriteMemberRoutes = current.spriteMemberRoutes.toMutableMap()
 
-            for (route in routes) {
-                val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
+            for ((route, privateKey) in unregistered) {
                 requireNoCollision(byPrivateKey[privateKey], route)
                 byPrivateKey[privateKey] = route
 
@@ -358,7 +391,7 @@ internal class OperationRegistry(
                 // classes the engine never touches (sticker, GLB, model texture) -- a pure-Kotlin
                 // SHA-256 per route adds up across a 512-instance tile plan.
                 val expectedStableId = if (storeClass != null || transportClass != null) {
-                    redactedLocatorHex(route.locator.value)
+                    redactedLocatorHexOf(route)
                 } else {
                     null
                 }
@@ -846,6 +879,11 @@ internal class OperationRegistry(
         passesClassSpecificReadValidation(resourceClass, stored)
 
     private fun redactedLocatorHex(url: String): String = sha256Hex(redactAuthenticationQuery(url))
+
+    private fun redactedLocatorHexOf(route: ResourceRouteKey): String =
+        redactedLocatorDigests?.valueOf(route.resourceClass, route.locator) {
+            redactedLocatorHex(route.locator.value)
+        } ?: redactedLocatorHex(route.locator.value)
 
     private fun sha256Hex(value: String): String = sha256Hex(value.encodeToByteArray())
 

@@ -24,6 +24,7 @@ import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
@@ -107,7 +108,17 @@ internal class BasemapEngineHost(
     private val cache: ResidentCache,
     internal val tileOutputSizePixels: Int = RenderOptions.DEFAULT_OUTPUT_SIZE_PX,
     private val sha256: Sha256Function = AcceleratedSha256,
-    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(AcceleratedSha256),
+    /**
+     * Remembering, like the renderer's own resolver: every [OperationRegistry] this host opens resolves
+     * every route it preregisters, and the tile plan names the same few hundred routes on every frame.
+     * Without the memo each of them was redacted, hashed and spelled out in hex again per frame -- on
+     * an OPPO CPH2629 export (2026-10-09) that, with [redactedLocatorDigests]' derivation, was most of
+     * RenG's "resource keys" time. Bounded and exact for the reasons [RouteMemo] gives.
+     */
+    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(
+        sha256 = AcceleratedSha256,
+        privateKeys = RouteMemo(),
+    ),
     /**
      * Where the engine's counters go (ADR 0049). Defaulted to a fresh recorder nothing reads, so
      * every test constructing this host keeps working and no metric escapes into a shared one.
@@ -150,6 +161,16 @@ internal class BasemapEngineHost(
     private var derivedManifest: StyleManifestBinding? = null
 
     private val styleManifestMemo = StyleManifestMemo()
+
+    /**
+     * Each route's `sha256Hex(withRedactedAuthenticationQuery(url))` -- the stable id Rentile keys its
+     * raw store and its failures by -- remembered across the operations this host opens, which each
+     * derived it again for every route they preregistered. Renderer-lifetime, and that is not the
+     * response cache ADR 0016 forbids: it is a pure function of the url and holds no answer, latch or
+     * byte the consumer returned. Keyed by class as well as locator only because that is [RouteMemo]'s
+     * key; the value depends on the url alone.
+     */
+    private val redactedLocatorDigests = RouteMemo<String>()
 
     /**
      * The manifest of [stored], read once per distinct document and base URI rather than once per
@@ -254,6 +275,7 @@ internal class BasemapEngineHost(
             store = consumerStore,
             privateKeyResolver = privateKeyResolver,
             sha256 = sha256,
+            redactedLocatorDigests = redactedLocatorDigests,
         )
         activeOperation = FirewallOperation(accessMode, registry)
         return try {
@@ -287,6 +309,7 @@ internal class BasemapEngineHost(
                 store = consumerStore,
                 privateKeyResolver = privateKeyResolver,
                 sha256 = sha256,
+                redactedLocatorDigests = redactedLocatorDigests,
             ),
             shared = true,
         )
@@ -354,6 +377,7 @@ internal class BasemapEngineHost(
             store = consumerStore,
             privateKeyResolver = privateKeyResolver,
             sha256 = sha256,
+            redactedLocatorDigests = redactedLocatorDigests,
         )
         registry.preregister(routes)
         val operation = FirewallOperation(RenGResourceAccessMode.NORMAL, registry)

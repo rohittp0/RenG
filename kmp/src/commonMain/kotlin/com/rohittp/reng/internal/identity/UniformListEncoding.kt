@@ -16,9 +16,13 @@ import com.rohittp.reng.internal.canonicalDouble
  * written in a second, with no intermediate objects.
  *
  * **The bytes and the failures are the composed encoders'.** Names go through [CanonicalBinary.exactUtf8]
- * (validated once, then remembered in [names]); values through [canonicalDouble], in the same entry order,
- * name before value, so an invalid uniform fails with the message it always did.
- * `UniformListEncodingTest` holds this to the composed encoding over randomised maps.
+ * (validated once, then remembered in [names]), in the same entry order, so an invalid name fails with
+ * the message it always did. Values are written as [canonicalDouble] writes them -- negative zero as zero
+ * -- but not checked again: a [ShaderValue] is immutable and refuses a non-finite component at
+ * construction (every variant's `init`, and [ShaderValue] is sealed), so the finiteness check the
+ * composed encoders made could never fail here, and on an OPPO CPH2629 export (2026-10-09) it was about
+ * a sixth of plan identity encoding. `UniformListEncodingTest` holds this to the composed encoding over
+ * randomised maps.
  *
  * [names] belongs to one encoder, which only its own planning core calls, one `prepare` at a time.
  */
@@ -30,16 +34,14 @@ internal fun encodeUniformList(
     val count = sortedNames.size
     val encodedNames = arrayOfNulls<CanonicalBytes>(count)
     val values = arrayOfNulls<ShaderValue>(count)
-    // Every entry is validated before any size is checked, as the composed encoders encoded every
+    // Every name is validated before any size is checked, as the composed encoders encoded every
     // entry before `CanonicalBinary.list` summed them: an invalid name later in the map fails as an
     // invalid name, not as an oversized list.
     for (index in 0 until count) {
         val name = sortedNames[index]
         val encodedName = names[name] ?: CanonicalBinary.exactUtf8(name).also { rememberName(names, name, it) }
-        val value = uniforms.getValue(name)
-        validate(value)
         encodedNames[index] = encodedName
-        values[index] = value
+        values[index] = uniforms.getValue(name)
     }
     var size = U32.toLong()
     for (index in 0 until count) {
@@ -69,18 +71,6 @@ private fun rememberName(names: MutableMap<String, CanonicalBytes>, name: String
     // A consumer has a handful of uniform names; one that generated a name per frame must not grow this.
     if (names.size >= MAXIMUM_REMEMBERED_UNIFORM_NAMES) names.clear()
     names[name] = encoded
-}
-
-/** The checks [canonicalDouble] makes while encoding, made first, in the composed encoder's order. */
-private fun validate(value: ShaderValue) {
-    when (value) {
-        is ShaderValue.Scalar -> canonical(value.value)
-        is ShaderValue.Vec2 -> { canonical(value.x); canonical(value.y) }
-        is ShaderValue.Vec3 -> { canonical(value.x); canonical(value.y); canonical(value.z) }
-        is ShaderValue.Vec4 -> { canonical(value.x); canonical(value.y); canonical(value.z); canonical(value.w) }
-        is ShaderValue.Integer -> Unit
-        is ShaderValue.Mat4 -> value.elementsForCore().forEach { canonical(it) }
-    }
 }
 
 /**
@@ -161,7 +151,14 @@ private fun requireCanonicalSize(size: Long): Int {
     return size.toInt()
 }
 
-private fun canonical(value: Float): Double = canonicalDouble(value.toDouble(), "canonical binary64 value")
+/**
+ * [canonicalDouble] without its finiteness check, which a [ShaderValue] component always passes (see
+ * [encodeUniformList]): a finite `Float` widens to a finite `Double`, and negative zero becomes zero.
+ */
+private fun canonical(value: Float): Double {
+    val widened = value.toDouble()
+    return if (widened == 0.0) 0.0 else widened
+}
 
 private fun putBinary64(output: ByteArray, offset: Int, value: Float): Int = putLong(output, offset, canonical(value).toBits())
 

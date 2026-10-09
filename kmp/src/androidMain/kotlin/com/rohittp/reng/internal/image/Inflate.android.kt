@@ -60,6 +60,17 @@ internal actual class InflateStream actual constructor() {
     }
 }
 
+/** `java.util.zip.Adler32`, which is zlib's under ART. */
+internal actual class Adler32Stream actual constructor() {
+    private val digest = java.util.zip.Adler32()
+
+    actual fun update(bytes: ByteArray, offset: Int, length: Int) {
+        digest.update(bytes, offset, length)
+    }
+
+    actual val value: Long get() = digest.value
+}
+
 internal actual fun crc32(seed: UInt, bytes: ByteArray, offset: Int, length: Int): UInt {
     require(offset >= 0 && length >= 0 && offset + length <= bytes.size) { "crc range out of bounds" }
     val digest = CRC32()

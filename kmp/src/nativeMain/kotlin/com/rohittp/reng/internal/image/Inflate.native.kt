@@ -16,6 +16,7 @@ import platform.zlib.Z_NO_FLUSH
 import platform.zlib.Z_OK
 import platform.zlib.Z_STREAM_END
 import platform.zlib.ZLIB_VERSION
+import platform.zlib.adler32 as zlibAdler32
 import platform.zlib.crc32 as zlibCrc32
 import platform.zlib.inflate as zlibInflate
 import platform.zlib.inflateEnd
@@ -107,6 +108,22 @@ internal actual class InflateStream actual constructor() {
         nativeHeap.free(stream.rawPtr)
         nativeHeap.free(dummyOut.rawValue)
     }
+}
+
+/** `platform.zlib`'s adler32, chained through its running value; 1 is the check of no bytes. */
+@OptIn(ExperimentalForeignApi::class)
+internal actual class Adler32Stream actual constructor() {
+    private var running: Long = 1L
+
+    actual fun update(bytes: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0 && length >= 0 && offset + length <= bytes.size) { "adler range out of bounds" }
+        if (length == 0) return
+        running = bytes.usePinned { pinned ->
+            zlibAdler32(running.convert(), pinned.addressOf(offset).reinterpret(), length.convert()).convert()
+        }
+    }
+
+    actual val value: Long get() = running
 }
 
 @OptIn(ExperimentalForeignApi::class)

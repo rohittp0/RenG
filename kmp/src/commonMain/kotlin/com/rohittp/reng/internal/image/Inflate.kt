@@ -33,3 +33,15 @@ internal fun InflateStream.inflate(input: ByteArray, output: ByteArray, outputOf
     inflate(input, 0, input.size, output, outputOffset, output.size - outputOffset)
 
 internal expect fun crc32(seed: UInt, bytes: ByteArray, offset: Int, length: Int): UInt
+
+/**
+ * RFC 1950's Adler-32 over successive [update] ranges, from the platform's own zlib: the check the stored-
+ * block fast path in `decodePng` verifies itself, and the same one the platform inflater verifies on every
+ * other stream. A Kotlin byte loop was measured as the largest single cost of decoding one large stored
+ * texture on the preview's GL thread (83 of 199 samples, OPPO CPH2629, 2026-10-09), where zlib's is
+ * vectorised. [value] is the unsigned 32-bit check, held in a Long.
+ */
+internal expect class Adler32Stream() {
+    fun update(bytes: ByteArray, offset: Int, length: Int)
+    val value: Long
+}

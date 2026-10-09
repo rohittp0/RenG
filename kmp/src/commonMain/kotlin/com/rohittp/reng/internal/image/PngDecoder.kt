@@ -271,10 +271,10 @@ private fun decodeStoredRows(
 
     var current = currentRow
     var previous = previousRow
-    val adler = Adler32()
+    val adler = Adler32Stream()
     for (row in 0 until header.height) {
         if (!stream.fill(current)) return false
-        adler.update(current)
+        adler.update(current, 0, current.size)
         if (!unfilterRow(current, previous, bpp)) return false
         if (!widenRowToRgba(
                 colourType = header.colourType,
@@ -407,38 +407,6 @@ private class StoredIdatReader(private val bytes: ByteArray, private val ranges:
         return value
     }
 }
-
-/**
- * RFC 1950's Adler-32, the check zlib verifies at the end of every stream.
- *
- * `Long` sums, not `Int`: zlib's `NMAX = 5552` is the longest run whose sums cannot overflow an
- * *unsigned* 32-bit accumulator before the modulo, and Kotlin's `Int` is signed, so a wide row of high
- * bytes overflowed it and gave a wrong check -- one a crafted stream could then match, letting this path
- * accept what zlib rejects. A `Long` holds the same run with room to spare.
- */
-private class Adler32 {
-    private var s1 = 1L
-    private var s2 = 0L
-
-    fun update(data: ByteArray) {
-        var index = 0
-        while (index < data.size) {
-            // The step is bounded before it is added, so an index near Int.MAX_VALUE cannot wrap.
-            val end = index + minOf(5552, data.size - index)
-            while (index < end) {
-                s1 += data[index].toInt() and 0xFF
-                s2 += s1
-                index += 1
-            }
-            s1 %= ADLER_MODULUS
-            s2 %= ADLER_MODULUS
-        }
-    }
-
-    val value: Long get() = (s2 shl 16) or s1
-}
-
-private const val ADLER_MODULUS = 65521
 
 /**
  * Undoes one row's PNG filter into [current]. [previous] is the already reconstructed prior row.

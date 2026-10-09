@@ -30,7 +30,9 @@ internal fun encodeUniformList(
     val count = sortedNames.size
     val encodedNames = arrayOfNulls<CanonicalBytes>(count)
     val values = arrayOfNulls<ShaderValue>(count)
-    var size = U32.toLong()
+    // Every entry is validated before any size is checked, as the composed encoders encoded every
+    // entry before `CanonicalBinary.list` summed them: an invalid name later in the map fails as an
+    // invalid name, not as an oversized list.
     for (index in 0 until count) {
         val name = sortedNames[index]
         val encodedName = names[name] ?: CanonicalBinary.exactUtf8(name).also { rememberName(names, name, it) }
@@ -38,8 +40,11 @@ internal fun encodeUniformList(
         validate(value)
         encodedNames[index] = encodedName
         values[index] = value
-        size += U32 + entrySize(encodedName.size, value)
-        require(size <= Int.MAX_VALUE) { "Canonical encoding exceeds the supported size" }
+    }
+    var size = U32.toLong()
+    for (index in 0 until count) {
+        size += U32 + entrySize(encodedNames[index]!!.size, values[index]!!)
+        requireCanonicalSize(size)
     }
 
     val output = ByteArray(size.toInt())
@@ -47,13 +52,13 @@ internal fun encodeUniformList(
     for (index in 0 until count) {
         val encodedName = encodedNames[index]!!
         val value = values[index]!!
-        offset = putU32(output, offset, entrySize(encodedName.size, value))
+        offset = putU32(output, offset, entrySize(encodedName.size, value).toInt())
         offset = putU16(output, offset, 1)
         offset = putU32(output, offset, encodedName.size)
         encodedName.copyInto(output, offset)
         offset += encodedName.size
         offset = putU16(output, offset, 2)
-        offset = putU32(output, offset, valueSize(value))
+        offset = putU32(output, offset, valueSize(value).toInt())
         offset = writeValue(output, offset, value)
     }
     check(offset == output.size) { "uniform list sized ${output.size} bytes but wrote $offset" }
@@ -78,11 +83,17 @@ private fun validate(value: ShaderValue) {
     }
 }
 
-/** A `fields { 1: name, 2: value }` record: two field headers, the name, the value. */
-private fun entrySize(nameSize: Int, value: ShaderValue): Int = FIELD_HEADER + nameSize + FIELD_HEADER + valueSize(value)
+/**
+ * A `fields { 1: name, 2: value }` record: two field headers, the name, the value. In `Long`, and checked
+ * at each field as `CanonicalFieldWriter.field` checks it, so a name too large to encode fails as it did.
+ */
+private fun entrySize(nameSize: Int, value: ShaderValue): Long {
+    val withName = requireCanonicalSize(FIELD_HEADER.toLong() + nameSize)
+    return requireCanonicalSize(withName.toLong() + FIELD_HEADER + valueSize(value)).toLong()
+}
 
 /** A value record: the u16 kind field, then the payload field. */
-private fun valueSize(value: ShaderValue): Int = FIELD_HEADER + U16 + FIELD_HEADER + when (value) {
+private fun valueSize(value: ShaderValue): Long = FIELD_HEADER.toLong() + U16 + FIELD_HEADER + when (value) {
     is ShaderValue.Scalar -> U64
     is ShaderValue.Vec2 -> listSize(2)
     is ShaderValue.Vec3 -> listSize(3)
@@ -102,10 +113,30 @@ private fun writeValue(output: ByteArray, start: Int, value: ShaderValue): Int {
     return when (value) {
         is ShaderValue.Scalar -> putBinary64(output, putU32(output, offset, U64), value.value)
         is ShaderValue.Integer -> putLong(output, putU32(output, offset, U64), value.value.toLong() and 0xFFFFFFFFL)
-        is ShaderValue.Vec2 -> putList(output, offset, floatArrayOf(value.x, value.y))
-        is ShaderValue.Vec3 -> putList(output, offset, floatArrayOf(value.x, value.y, value.z))
-        is ShaderValue.Vec4 -> putList(output, offset, floatArrayOf(value.x, value.y, value.z, value.w))
-        is ShaderValue.Mat4 -> putList(output, offset, value.elementsForCore())
+        is ShaderValue.Vec2 -> {
+            var at = putListHeader(output, offset, 2)
+            at = putElement(output, at, value.x)
+            putElement(output, at, value.y)
+        }
+        is ShaderValue.Vec3 -> {
+            var at = putListHeader(output, offset, 3)
+            at = putElement(output, at, value.x)
+            at = putElement(output, at, value.y)
+            putElement(output, at, value.z)
+        }
+        is ShaderValue.Vec4 -> {
+            var at = putListHeader(output, offset, 4)
+            at = putElement(output, at, value.x)
+            at = putElement(output, at, value.y)
+            at = putElement(output, at, value.z)
+            putElement(output, at, value.w)
+        }
+        is ShaderValue.Mat4 -> {
+            val elements = value.elementsForCore()
+            var at = putListHeader(output, offset, elements.size)
+            elements.forEach { element -> at = putElement(output, at, element) }
+            at
+        }
     }
 }
 
@@ -118,14 +149,16 @@ private fun wireValueOf(value: ShaderValue): Int = when (value) {
     is ShaderValue.Mat4 -> SHADER_VALUE_MAT4_WIRE_VALUE
 }
 
-private fun putList(output: ByteArray, start: Int, elements: FloatArray): Int {
-    var offset = putU32(output, start, listSize(elements.size))
-    offset = putU32(output, offset, elements.size)
-    elements.forEach { element ->
-        offset = putU32(output, offset, U64)
-        offset = putBinary64(output, offset, element)
-    }
-    return offset
+/** A payload field's length, then the list's own element count. */
+private fun putListHeader(output: ByteArray, start: Int, count: Int): Int =
+    putU32(output, putU32(output, start, listSize(count)), count)
+
+/** One list element: its length, then its binary64. */
+private fun putElement(output: ByteArray, start: Int, value: Float): Int = putBinary64(output, putU32(output, start, U64), value)
+
+private fun requireCanonicalSize(size: Long): Int {
+    require(size in 0L..Int.MAX_VALUE.toLong()) { "Canonical encoding exceeds the supported size" }
+    return size.toInt()
 }
 
 private fun canonical(value: Float): Double = canonicalDouble(value.toDouble(), "canonical binary64 value")

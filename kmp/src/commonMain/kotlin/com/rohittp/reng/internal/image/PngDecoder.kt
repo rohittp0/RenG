@@ -423,7 +423,8 @@ private class Adler32 {
     fun update(data: ByteArray) {
         var index = 0
         while (index < data.size) {
-            val end = minOf(data.size, index + 5552)
+            // The step is bounded before it is added, so an index near Int.MAX_VALUE cannot wrap.
+            val end = index + minOf(5552, data.size - index)
             while (index < end) {
                 s1 += data[index].toInt() and 0xFF
                 s2 += s1

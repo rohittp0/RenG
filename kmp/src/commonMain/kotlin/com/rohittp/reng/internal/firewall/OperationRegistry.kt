@@ -101,10 +101,9 @@ import kotlinx.coroutines.sync.withLock
  * `RouteMemo` lock is held only around its own map's get and put, never around a derivation or any
  * other lock.
  *
- * **The lock graph is a set of leaves, and stays one.** Apart from the `RouteMemo` locks above, which
- * [preregister] takes under [routeIndexMutex] and which never take anything themselves, no lock in this
- * file is ever acquired while another is held, so no cycle can exist and the order of acquisition never
- * matters. Three facts keep
+ * **The lock graph is acyclic, and stays so.** Its one edge is [routeIndexMutex] -> a `RouteMemo` lock,
+ * taken by [preregister]; a `RouteMemo` lock is terminal, taking nothing while held. Every other lock in
+ * this file is a leaf, never acquired while another is held, so no cycle can exist. Three facts keep
  * that true: `SuspendJoin.run` releases its own mutex *before* running the block, so every lock taken
  * inside a block is taken with nothing held; every critical section here is pure bookkeeping, with
  * `complete`/`await` and every consumer call outside it; and the route indices are read with no lock

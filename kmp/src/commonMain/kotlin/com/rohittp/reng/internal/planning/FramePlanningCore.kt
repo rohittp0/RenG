@@ -3,10 +3,8 @@ package com.rohittp.reng.internal.planning
 import com.rohittp.reng.Backdrop
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
-import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.ProjectionMode
 import com.rohittp.reng.RawResourceKey
-import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
@@ -15,17 +13,14 @@ import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.geometriesForCore
-import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
 import com.rohittp.reng.internal.failure.FailureDescriptor
-import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.HashedCanonicalBytes
-import com.rohittp.reng.internal.identity.IdentityRegistration
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.resource.RentilePrivateKey
@@ -227,9 +222,8 @@ internal class FramePlanningCore(
 
         val encodedPlan = frameEncoder.encode(plan)
         val structuralDiff = FrameStructuralDiffer.diff(request.previousPlan, encodedPlan)
-        if (frameIdentityRegistry.register(encodedPlan.identity) is IdentityRegistration.Collision) {
-            return frameIdentityCollisionFailure()
-        }
+        // A repeated digest is the same frame (ADR 0081): registration records it and never fails.
+        frameIdentityRegistry.register(encodedPlan.identity)
 
         return FramePlanningOutcome.Success(
             PlannedFrameCore(
@@ -344,17 +338,6 @@ private val ResourceClass.isStaticDirect: Boolean
         ResourceClass.BASEMAP_GLYPH_RANGE,
         -> false
     }
-
-private fun frameIdentityCollisionFailure(): FramePlanningOutcome.Failure = FramePlanningOutcome.Failure(
-    FailureDescriptor(
-        code = RenGErrorCode.IDENTITY_COLLISION,
-        stage = PipelineStage.FRAME_PLANNING,
-        diagnostic = failureContextDiagnostic(
-            stage = PipelineStage.FRAME_PLANNING,
-            fieldName = DiagnosticField.FRAME_IDENTITY,
-        ),
-    ),
-)
 
 private const val MINIMUM_MERCATOR_LOD: Int = 0
 private const val MAXIMUM_MERCATOR_LOD: Int = 22

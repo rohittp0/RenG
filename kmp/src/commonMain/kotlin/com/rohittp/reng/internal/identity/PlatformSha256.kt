@@ -21,6 +21,6 @@ internal expect fun platformSha256(bytes: ByteArray): ByteArray?
 internal object AcceleratedSha256 : Sha256Function {
     override fun digest(bytes: CanonicalBytes): Sha256Digest {
         val platform = platformSha256(bytes.byteSnapshot)
-        return if (platform == null) PureKotlinSha256.digest(bytes) else Sha256Digest(platform)
+        return if (platform == null) PureKotlinSha256.digest(bytes) else Sha256Digest.adopting(platform)
     }
 }

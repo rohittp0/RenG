@@ -621,33 +621,26 @@ class FramePlanningCoreTest {
     }
 
     @Test
-    fun frameCanonicalCollisionFailsWithFrameIdentityOnlyAndKeepsTheFirstEntry() {
+    // ADR 0081 relaxes ADR 0018's frame collision check: a plan whose digest the registry has seen is the
+    // same frame, so it plans like any other, with its own resources, and nothing fails.
+    fun aFrameWhoseDigestRepeatsIsPlannedNotRefused() {
         val resolver = RecordingPrivateKeyResolver()
         val planningCore = planningCore(resolver, encoder = constantDigestEncoder())
         val established = framePlan(frameIndex = 1L, stickers = listOf(sticker("established-sticker")))
-        val colliding = framePlan(frameIndex = 2L, stickers = listOf(sticker("colliding-sticker")))
+        val sameDigest = framePlan(frameIndex = 2L, stickers = listOf(sticker("colliding-sticker")))
 
         val establishedOutcome = planSuccess(planningCore, request(plan = established))
-        val collisionOutcome = planningCore.plan(request(plan = colliding))
-        val callsAfterCollision = resolver.calls
-        val replannedEstablished = planningCore.plan(request(plan = established))
+        val sameDigestOutcome = planSuccess(planningCore, request(plan = sameDigest))
 
         assertEquals(
             listOf(expectedExternal("established-sticker", ResourceClass.STICKER_IMAGE)),
             establishedOutcome.staticResourceTraversal,
         )
-        val failure = assertFailure(collisionOutcome, RenGErrorCode.IDENTITY_COLLISION, "frameIdentity")
-        val diagnostic = assertNotNull(failure.failure.diagnostic)
-        assertNull(diagnostic.resourceClass)
-        assertNull(diagnostic.resourceKey)
-        assertNull(diagnostic.statusCode)
-        assertNull(diagnostic.limit)
-        assertNull(diagnostic.actual)
         assertEquals(
-            listOf(ResourceLocator("established-sticker") to ResourceClass.STICKER_IMAGE),
-            callsAfterCollision,
+            listOf(expectedExternal("colliding-sticker", ResourceClass.STICKER_IMAGE)),
+            sameDigestOutcome.staticResourceTraversal,
         )
-        assertIs<FramePlanningOutcome.Success>(replannedEstablished)
+        assertIs<FramePlanningOutcome.Success>(planningCore.plan(request(plan = established)))
     }
 
     @Test

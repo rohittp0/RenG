@@ -4,6 +4,7 @@ import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
@@ -59,10 +60,18 @@ import com.rohittp.rentile.ResourceClass as RentileResourceClass
  */
 internal class ProductionRentilePrivateKeyResolver(
     private val sha256: Sha256Function,
+    /** RenG's own key for the classes it keys itself; a renderer passes its key-remembering deriver. */
+    private val ownIdentityDeriver: ResourceKeyDeriver = ResourceKeyDeriver(sha256),
+    /** Where a route's private key is remembered (see [RouteMemo]); null resolves every time. */
+    private val privateKeys: RouteMemo<RentilePrivateKey>? = null,
 ) : RentilePrivateKeyResolver {
-    private val ownIdentityDeriver = ResourceKeyDeriver(sha256)
-
     override fun resolve(
+        locator: ResourceLocator,
+        resourceClass: ResourceClass,
+    ): RentilePrivateKey = privateKeys?.valueOf(resourceClass, locator) { derive(locator, resourceClass) }
+        ?: derive(locator, resourceClass)
+
+    private fun derive(
         locator: ResourceLocator,
         resourceClass: ResourceClass,
     ): RentilePrivateKey {

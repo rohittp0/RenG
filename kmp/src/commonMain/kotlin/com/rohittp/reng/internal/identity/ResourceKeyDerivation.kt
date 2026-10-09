@@ -24,8 +24,19 @@ internal class ResourceKeyDeriver(
      * owns so that every deriver and the frame encoder it builds share it; a bare deriver gets its own.
      */
     private val shaderPairs: ShaderPairMemo = ShaderPairMemo(),
+    /**
+     * Where an external route's key is remembered: a renderer passes the one it owns so every deriver it
+     * builds shares it (see [RouteMemo]); null derives every time, as a bare deriver always has.
+     */
+    private val externalKeys: RouteMemo<DerivedResourceKey>? = null,
 ) {
     internal fun external(
+        resourceClass: ResourceClass,
+        locator: ResourceLocator,
+    ): DerivedResourceKey = externalKeys?.valueOf(resourceClass, locator) { deriveExternal(resourceClass, locator) }
+        ?: deriveExternal(resourceClass, locator)
+
+    private fun deriveExternal(
         resourceClass: ResourceClass,
         locator: ResourceLocator,
     ): DerivedResourceKey {

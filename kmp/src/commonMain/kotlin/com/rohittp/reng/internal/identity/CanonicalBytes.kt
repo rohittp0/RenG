@@ -67,20 +67,40 @@ internal class CanonicalBytes private constructor(bytes: ByteArray, adopt: Boole
     override fun toString(): String = "CanonicalBytes(<redacted>)"
 }
 
-internal class Sha256Digest internal constructor(bytes: ByteArray) {
-    private val snapshot: ByteArray = bytes.copyOf()
+internal class Sha256Digest private constructor(bytes: ByteArray, adopt: Boolean) {
+    internal constructor(bytes: ByteArray) : this(bytes, adopt = false)
+
+    private val snapshot: ByteArray = if (adopt) bytes else bytes.copyOf()
 
     init {
         require(snapshot.size == SHA256_DIGEST_BYTES) { "SHA-256 digest must contain 32 bytes" }
     }
 
+    internal companion object {
+        /**
+         * Wraps a digest array a hash function has just returned and nothing else holds, without the
+         * copy the constructor takes -- [CanonicalBytes.adopting]'s contract, for the 32 bytes a
+         * `MessageDigest` or [PureKotlinSha256] hands back. Every frame plan and every external
+         * reference is hashed on every `prepare`, so the copy was paid tens of times a frame for
+         * nothing.
+         */
+        internal fun adopting(fresh: ByteArray): Sha256Digest = Sha256Digest(fresh, adopt = true)
+    }
+
     internal val bytes: ByteArray
         get() = snapshot.copyOf()
 
-    internal val lowercaseHex: String = buildString(SHA256_DIGEST_BYTES * 2) {
-        snapshot.forEach { byte ->
-            append(LOWERCASE_HEX[(byte.toInt() ushr 4) and 0x0f])
-            append(LOWERCASE_HEX[byte.toInt() and 0x0f])
+    /**
+     * Built on first read: a resource key needs it for its stable id, but a frame identity is only
+     * compared and registered by its bytes, and was spelling out 64 characters on every `prepare` for
+     * no reader.
+     */
+    internal val lowercaseHex: String by lazy {
+        buildString(SHA256_DIGEST_BYTES * 2) {
+            snapshot.forEach { byte ->
+                append(LOWERCASE_HEX[(byte.toInt() ushr 4) and 0x0f])
+                append(LOWERCASE_HEX[byte.toInt() and 0x0f])
+            }
         }
     }
 

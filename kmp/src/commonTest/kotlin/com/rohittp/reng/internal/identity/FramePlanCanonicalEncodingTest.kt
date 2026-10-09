@@ -37,7 +37,7 @@ class FramePlanCanonicalEncodingTest {
             encoded.identity.canonicalBytes.bytes,
         )
         assertEquals(
-            "reng-frame-v1:1c57383f67c3bd7df8d92388b93e642a96fd380db36384eae281c58b4c333e09",
+            "reng-frame-v1:42e78dd27ae55d9b38370c226615d5a4892bccd97a0f15b60c0d0090eb5b880e",
             encoded.frameIdentityText(),
         )
     }
@@ -79,11 +79,16 @@ class FramePlanCanonicalEncodingTest {
             modelField5Hex,
             modelHex.takeLast(modelField5Hex.length),
         )
-        // Geometry tag 8 contains MULTIPLY's stable u16 wire value 3.
+        // Geometry tag 8 contains MULTIPLY's stable u16 wire value 3, and is followed only by tag 9, the
+        // program's 64-character stable id (ADR 0081).
         val geometryField8Hex = "0008000000020003"
+        val geometryField9HeaderHex = "000900000040"
+        val field9Length = geometryField9HeaderHex.length + 64 * 2
+        val field9Hex = geometryHex.takeLast(field9Length)
+        assertEquals(geometryField9HeaderHex, field9Hex.take(geometryField9HeaderHex.length))
         assertEquals(
             geometryField8Hex,
-            geometryHex.takeLast(geometryField8Hex.length),
+            geometryHex.dropLast(field9Length).takeLast(geometryField8Hex.length),
         )
     }
 
@@ -124,12 +129,14 @@ class FramePlanCanonicalEncodingTest {
         // 1,478 before Cycle E-terrain, plus 48: six objects carrying an altitude mode -- four
         // Placements (two stickers, two models) and two Geometries -- each paying one 8-byte field.
         // Plus 14 for the two appended absent optionals (Backdrop and Bloom), and 16 for the
-        // default-false emissive field on two Geometries.
-        assertEquals(1_554, expectedBytes.size)
-        assertEquals(1_554, encoded.identity.canonicalBytes.size)
+        // default-false emissive field on two Geometries: 1,554. ADR 0081 then replaces each geometry's
+        // shader sources (tag 3: 174 and 70 bytes of payload) with its 64-character program stable id
+        // (tag 9): 1,438.
+        assertEquals(1_438, expectedBytes.size)
+        assertEquals(1_438, encoded.identity.canonicalBytes.size)
         assertContentEquals(expectedBytes, encoded.identity.canonicalBytes.bytes)
         assertEquals(
-            "reng-frame-v1:1c57383f67c3bd7df8d92388b93e642a96fd380db36384eae281c58b4c333e09",
+            "reng-frame-v1:42e78dd27ae55d9b38370c226615d5a4892bccd97a0f15b60c0d0090eb5b880e",
             encoded.frameIdentityText(),
         )
     }

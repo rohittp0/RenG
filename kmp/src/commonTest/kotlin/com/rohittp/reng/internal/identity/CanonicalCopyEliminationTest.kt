@@ -63,11 +63,9 @@ class CanonicalCopyEliminationTest {
         assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(identity("frame one")))
         assertEquals(IdentityRegistration.Registered, registry.register(identity("frame two")))
 
-        // A same-digest, different-bytes identity still collides, and reports the first bytes.
-        val colliding = HashedCanonicalBytes(first.digest, CanonicalBytes("not frame one".encodeToByteArray()))
-        val collision = assertIs<IdentityRegistration.Collision>(registry.register(colliding))
-        assertContentEquals("frame one".encodeToByteArray(), collision.established.canonicalBytes.bytes)
-        assertEquals(colliding, collision.attempted)
+        // A same-digest, different-bytes identity is the same frame (ADR 0081): the registry keeps digests.
+        val sameDigest = HashedCanonicalBytes(first.digest, CanonicalBytes("not frame one".encodeToByteArray()))
+        assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(sameDigest))
     }
 
     private fun identity(value: String): HashedCanonicalBytes {

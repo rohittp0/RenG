@@ -75,6 +75,11 @@ internal class FramePlanCanonicalEncoder(
     private val sha256: Sha256Function = AcceleratedSha256,
     /** Shared with the renderer's key derivers, so a shader pair's sources are encoded once in all. */
     private val shaderPairs: ShaderPairMemo = ShaderPairMemo(),
+    /**
+     * Where a geometry's program key comes from (ADR 0081): the renderer's own deriver, which remembers
+     * it in [shaderPairs], so encoding a geometry costs no hashing at all.
+     */
+    private val programKeys: ResourceKeyDeriver = ResourceKeyDeriver(sha256, shaderPairs),
 ) {
     internal fun encode(plan: FramePlan): EncodedFramePlan {
         val stickers = plan.stickersForCore()
@@ -214,10 +219,16 @@ internal class FramePlanCanonicalEncoder(
         }
     }
 
+    /**
+     * Tag 3, the shader pair's two sources, is retired (ADR 0081): the program is tag 9, its geometry
+     * program's stable id -- the SHA-256 of the same two sources and the shader profile, which RenG
+     * already derives and remembers to key the program itself. Every geometry carried both full sources
+     * into the frame's encoding, its structural diff and, until a history clear, the identity registry,
+     * on every `prepare`. A retired tag is never reused.
+     */
     private fun encodeGeometry(geometry: Geometry): CanonicalBytes = CanonicalBinary.fields {
         field(1, encodeVector(geometry.topLeft))
         field(2, encodeVector(geometry.bottomRight))
-        field(3, encodeShaderPair(geometry.shaderPair))
         field(4, encodeUniforms(geometry.uniforms))
         field(5, encodeTextures(geometry.textures))
         // Tag 6, the next free one: a Geometry carries no Placement, so its altitude mode is its own
@@ -227,6 +238,7 @@ internal class FramePlanCanonicalEncoder(
         if (geometry.blend != BlendMode.OVER) {
             field(8, CanonicalBinary.u16(geometry.blend.wireValue))
         }
+        field(9, CanonicalBinary.exactUtf8(programKeys.geometryProgram(geometry.shaderPair).key.stableId))
     }
 
     private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes =

@@ -1,11 +1,7 @@
 package com.rohittp.reng.internal.identity
 
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertIs
-import kotlin.test.assertNotSame
 
 class IdentityRegistryTest {
     @Test
@@ -20,33 +16,17 @@ class IdentityRegistryTest {
         assertEquals(first.hashCode(), equal.hashCode())
     }
 
+    // ADR 0081 relaxes ADR 0018's collision check for frames: the registry keeps digests, not bytes, so
+    // a second encoding with a digest it has seen is the same frame, never a collision.
     @Test
-    fun digestCollisionReturnsDefensiveValuesAndPreservesFirstBytes() {
+    fun aRepeatedDigestIsTheSameFrameWhateverItsBytes() {
         val registry = CanonicalIdentityRegistry()
         val established = fakeIdentity("first canonical bytes")
         val attempted = fakeIdentity("different canonical bytes")
 
         assertEquals(IdentityRegistration.Registered, registry.register(established))
-        val collision = assertIs<IdentityRegistration.Collision>(registry.register(attempted))
-
-        assertEquals(established, collision.established)
-        assertEquals(attempted, collision.attempted)
-        assertNotSame(established, collision.established)
-        assertNotSame(established.digest, collision.established.digest)
-        assertNotSame(established.canonicalBytes, collision.established.canonicalBytes)
-        assertNotSame(attempted, collision.attempted)
-
-        val returnedEstablishedBytes = collision.established.canonicalBytes.bytes
-        returnedEstablishedBytes.fill(0)
-
-        val repeatedCollision = assertIs<IdentityRegistration.Collision>(registry.register(attempted))
-        assertContentEquals(
-            "first canonical bytes".encodeToByteArray(),
-            repeatedCollision.established.canonicalBytes.bytes,
-        )
+        assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(attempted))
         assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(established))
-        assertFalse(collision.toString().contains("first canonical bytes"))
-        assertFalse(collision.toString().contains("different canonical bytes"))
     }
 
     private fun fakeIdentity(value: String): HashedCanonicalBytes {

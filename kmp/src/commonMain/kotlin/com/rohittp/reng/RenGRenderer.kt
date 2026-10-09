@@ -132,6 +132,9 @@ import com.rohittp.reng.internal.gl.windowWithin
 import com.rohittp.reng.internal.gl.withCapturedGlState
 import com.rohittp.reng.internal.groundPresentedProvisionallyDiagnostic
 import com.rohittp.reng.internal.identity.AcceleratedSha256
+import com.rohittp.reng.internal.resource.RentilePrivateKey
+import com.rohittp.reng.internal.identity.RouteMemo
+import com.rohittp.reng.internal.identity.DerivedResourceKey
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
@@ -1178,11 +1181,20 @@ internal class RenGRenderer(
      */
     private val shaderPairMemo = ShaderPairMemo()
 
+    /**
+     * Every external route's derived key and Rentile private key this renderer has met, shared by the
+     * planning, draw-side and resolver derivations that each derived them again on every `prepare`.
+     * Owned here rather than by a [FramePlanningCore], which `clearFrameHistory` rebuilds.
+     */
+    private val externalKeyMemo = RouteMemo<DerivedResourceKey>()
+    private val privateKeyMemo = RouteMemo<RentilePrivateKey>()
+
     // Every planSpatial this renderer runs -- prepare's, through each FramePlanningCore, and readAhead's
     // -- shares it, so a consumer's shader sources are scanned for their profile directive once rather
     // than once a frame. Locked, because readAhead may plan on another thread.
     private val shaderProfileMemo = ShaderProfileMemo()
-    private val geometryKeyDeriver: ResourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo)
+    private val geometryKeyDeriver: ResourceKeyDeriver =
+        ResourceKeyDeriver(shaderPairs = shaderPairMemo, externalKeys = externalKeyMemo)
 
     /**
      * Cycle C's task 20, reached at last: the frame's terrain descriptor and its DEM ring, acquired
@@ -1217,7 +1229,11 @@ internal class RenGRenderer(
      * not (basemap task 16). This is a pure, stateless function of `(locator, resourceClass)`, so one
      * shared instance is correct for every call this renderer makes across every frame preparation.
      */
-    private val rentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(AcceleratedSha256)
+    private val rentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(
+        sha256 = AcceleratedSha256,
+        ownIdentityDeriver = geometryKeyDeriver,
+        privateKeys = privateKeyMemo,
+    )
 
     private var offscreenSurface: OffscreenSurface? = initialGlState.offscreenSurface
     private var compositePipeline: CompositePipeline? = initialGlState.compositePipeline
@@ -1609,9 +1625,9 @@ internal class RenGRenderer(
     }
 
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
-        frameEncoder = FramePlanCanonicalEncoder(shaderPairs = shaderPairMemo),
+        frameEncoder = FramePlanCanonicalEncoder(shaderPairs = shaderPairMemo, programKeys = geometryKeyDeriver),
         frameIdentityRegistry = registry,
-        resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo),
+        resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo, externalKeys = externalKeyMemo),
         rentilePrivateKeyResolver = rentilePrivateKeyResolver,
         shaderProfileMemo = shaderProfileMemo,
     )

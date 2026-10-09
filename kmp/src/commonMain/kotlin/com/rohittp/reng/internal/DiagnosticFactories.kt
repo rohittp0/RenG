@@ -30,7 +30,6 @@ internal enum class DiagnosticField(internal val wireName: String) {
     BASEMAP_TILE_INSTANCES("basemapTileInstances"),
     RESPONSE_BODY_BYTES("responseBodyBytes"),
     RESOURCE("resource"),
-    FRAME_IDENTITY("frameIdentity"),
     ANIMATION_SELECTOR("animationSelector"),
     SHADER_PAIR("shaderPair"),
     RENDER_TARGET("renderTarget"),
@@ -285,7 +284,6 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
         DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
         DiagnosticField.GEOMETRY_ALTITUDE,
         DiagnosticField.BASEMAP_TILE_INSTANCES,
-        DiagnosticField.FRAME_IDENTITY,
         DiagnosticField.SHADER_PAIR,
     ),
     PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
@@ -649,8 +647,8 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             null
         }
 
+        // Resources only: a frame's identity never collides since ADR 0081 keeps frames by digest.
         RenGErrorCode.IDENTITY_COLLISION -> when (stage) {
-            PipelineStage.FRAME_PLANNING -> FailureRule.Context(setOf(DiagnosticField.FRAME_IDENTITY))
             PipelineStage.RESOURCE_LOOKUP -> establishedResourceRule
             else -> null
         }

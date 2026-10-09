@@ -101,8 +101,10 @@ import kotlinx.coroutines.sync.withLock
  * `RouteMemo` lock is held only around its own map's get and put, never around a derivation or any
  * other lock.
  *
- * **The lock graph is a set of leaves, and stays one.** No lock in this file is ever acquired while
- * another is held, so no cycle can exist and the order of acquisition never matters. Three facts keep
+ * **The lock graph is a set of leaves, and stays one.** Apart from the `RouteMemo` locks above, which
+ * [preregister] takes under [routeIndexMutex] and which never take anything themselves, no lock in this
+ * file is ever acquired while another is held, so no cycle can exist and the order of acquisition never
+ * matters. Three facts keep
  * that true: `SuspendJoin.run` releases its own mutex *before* running the block, so every lock taken
  * inside a block is taken with nothing held; every critical section here is pure bookkeeping, with
  * `complete`/`await` and every consumer call outside it; and the route indices are read with no lock
@@ -117,8 +119,8 @@ internal class OperationRegistry(
     /**
      * Where [preregister] remembers each route's redacted-url digest across registries (see
      * [BasemapEngineHost]'s field of the same name); null derives it every time. A pure function of the
-     * url behind its own leaf lock, so it adds no state an answer path could observe and no lock that
-     * nests.
+     * url behind its own leaf lock, so it adds no state an answer path could observe; that lock is taken
+     * under [routeIndexMutex] but never takes another, so it cannot close a cycle.
      */
     private val redactedLocatorDigests: RouteMemo<String>? = null,
 ) {

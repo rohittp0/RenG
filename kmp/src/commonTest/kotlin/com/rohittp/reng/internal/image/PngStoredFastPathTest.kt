@@ -33,6 +33,18 @@ class PngStoredFastPathTest {
     }
 
     @Test
+    fun aWideRowOfHighBytesKeepsTheAdlerCheckExact() {
+        // 2000 RGBA pixels of 0xFF: an 8001-byte row, longer than zlib's 5552-byte NMAX run, where the
+        // sums overflow a signed Int accumulator. With the check wrong the fast path would decline this
+        // valid stream -- and could accept a crafted one zlib rejects.
+        val width = 2000
+        val rows = List(3) { ByteArray(width * 4) { -1 } }
+        val png = storedPng(width = width, height = 3, colourType = 6, raw = filtered(rows, width, 4) { 0 }, blockSize = 65535)
+        assertTrue(storedFastPathDecodes(png))
+        assertSameAsGeneralPath(png)
+    }
+
+    @Test
     fun everyFilterTypeAndEveryColourTypeAgreeWithTheGeneralPath() {
         for ((colourType, channels) in listOf(0 to 1, 2 to 3, 4 to 2, 6 to 4)) {
             for (width in listOf(1, 2, 3, 5, 17)) {

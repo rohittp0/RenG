@@ -116,7 +116,7 @@ internal actual class Adler32Stream actual constructor() {
     private var running: Long = 1L
 
     actual fun update(bytes: ByteArray, offset: Int, length: Int) {
-        require(offset >= 0 && length >= 0 && offset + length <= bytes.size) { "adler range out of bounds" }
+        require(offset >= 0 && length >= 0 && offset <= bytes.size - length) { "adler range out of bounds" }
         if (length == 0) return
         running = bytes.usePinned { pinned ->
             zlibAdler32(running.convert(), pinned.addressOf(offset).reinterpret(), length.convert()).convert()

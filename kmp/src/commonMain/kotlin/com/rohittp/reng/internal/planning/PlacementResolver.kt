@@ -103,12 +103,10 @@ internal fun resolvePlacement(
         // of separation, 12 at 20, and 34 plus a 37% loss of drawn area at 40, the model tipping
         // while nothing else in the frame does. `GlobePlacementResolver` keeps the spherical form.
         AnchoringMode.MAP -> {
-            val viewBasis = DoubleMatrix3.fromRows(
-                listOf(
-                    listOf(camera.right.x, camera.right.y, camera.right.z),
-                    listOf(camera.cameraUp.x, camera.cameraUp.y, camera.cameraUp.z),
-                    listOf(camera.cameraBack.x, camera.cameraBack.y, camera.cameraBack.z),
-                ),
+            val viewBasis = DoubleMatrix3.rowMajor(
+                camera.right.x, camera.right.y, camera.right.z,
+                camera.cameraUp.x, camera.cameraUp.y, camera.cameraUp.z,
+                camera.cameraBack.x, camera.cameraBack.y, camera.cameraBack.z,
             )
             viewBasis * localRotation
         }

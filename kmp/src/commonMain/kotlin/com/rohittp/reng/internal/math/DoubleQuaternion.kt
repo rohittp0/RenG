@@ -47,12 +47,10 @@ internal data class DoubleQuaternion(val x: Double, val y: Double, val z: Double
         val wx = w * x
         val wy = w * y
         val wz = w * z
-        return DoubleMatrix3.fromRows(
-            listOf(
-                listOf(1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)),
-                listOf(2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)),
-                listOf(2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)),
-            ),
+        return DoubleMatrix3.rowMajor(
+            1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy),
+            2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx),
+            2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy),
         )
     }
 

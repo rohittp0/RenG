@@ -24,7 +24,11 @@ internal data class ResolvedMercatorCamera(
     override val viewMatrix: DoubleMatrix4,
     override val projectionMatrix: DoubleMatrix4,
     val geographicGroundAnchor: GeographicPosition,
-) : ResolvedFrameCamera
+) : ResolvedFrameCamera {
+    /** `projectionMatrix * viewMatrix`, once per camera; see [ResolvedFrameCamera.viewProjection]. A body
+     * `val`, so the generated `equals`, `hashCode`, `copy` and `componentN` are untouched. */
+    override val viewProjection: DoubleMatrix4 = projectionMatrix * viewMatrix
+}
 
 /**
  * A camera's orientation in the local east/north/up frame of the thing it is anchored to: `x` east,

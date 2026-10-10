@@ -635,13 +635,11 @@ internal val SOUTH_POLAR_CAP_UV_V: FloatArray = floatArrayOf(1.0f, 1.0f)
  */
 internal fun composeGlobeGroundUnitSphereToClip(camera: ResolvedGlobeCamera): FloatArray {
     val radius = camera.radiusLogicalPixels
-    val radialScale = DoubleMatrix4.fromRows(
-        listOf(
-            listOf(radius, 0.0, 0.0, 0.0),
-            listOf(0.0, radius, 0.0, 0.0),
-            listOf(0.0, 0.0, radius, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    val radialScale = DoubleMatrix4.rowMajor(
+        radius, 0.0, 0.0, 0.0,
+        0.0, radius, 0.0, 0.0,
+        0.0, 0.0, radius, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
     return (globeFixedViewProjection(camera) * radialScale).toColumnMajorFloatArray()
 }

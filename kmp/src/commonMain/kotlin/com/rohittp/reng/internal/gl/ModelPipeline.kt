@@ -772,12 +772,10 @@ private class ModelDrawState(
  * wrong picture reported as a correct one.
  */
 internal fun modelNormalMatrix(cameraSpaceModel: DoubleMatrix4): FloatArray? {
-    val linear = DoubleMatrix3.fromRows(
-        listOf(
-            listOf(cameraSpaceModel[0, 0], cameraSpaceModel[0, 1], cameraSpaceModel[0, 2]),
-            listOf(cameraSpaceModel[1, 0], cameraSpaceModel[1, 1], cameraSpaceModel[1, 2]),
-            listOf(cameraSpaceModel[2, 0], cameraSpaceModel[2, 1], cameraSpaceModel[2, 2]),
-        ),
+    val linear = DoubleMatrix3.rowMajor(
+        cameraSpaceModel[0, 0], cameraSpaceModel[0, 1], cameraSpaceModel[0, 2],
+        cameraSpaceModel[1, 0], cameraSpaceModel[1, 1], cameraSpaceModel[1, 2],
+        cameraSpaceModel[2, 0], cameraSpaceModel[2, 1], cameraSpaceModel[2, 2],
     )
     val inverseTranspose = (linear.inverse() ?: return null).transpose()
     val elements = FloatArray(16)
@@ -834,11 +832,7 @@ internal fun packJointMatrices(matrices: List<DoubleMatrix4>): FloatArray? {
     if (matrices.size > MAXIMUM_MODEL_JOINTS) return null
     val packed = FloatArray(matrices.size * 16)
     matrices.forEachIndexed { joint, matrix ->
-        for (column in 0 until 4) {
-            for (row in 0 until 4) {
-                packed[joint * 16 + column * 4 + row] = matrix[row, column].toFloat()
-            }
-        }
+        for (index in 0 until 16) packed[joint * 16 + index] = matrix.columnMajorElement(index).toFloat()
     }
     return packed
 }

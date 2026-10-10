@@ -1385,7 +1385,7 @@ private fun Geometry.boundsWestSouthEastNorth(): FloatArray = floatArrayOf(
  * globe too, because the nonlinearity was spent on the CPU before any vertex was handed over.
  */
 internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): FloatArray =
-    (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+    camera.viewProjection.toColumnMajorFloatArray()
 
 /**
  * The inverse of that same product, column-major, or `null` when the camera does not invert
@@ -1402,7 +1402,7 @@ internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): Floa
  * anchor -- see ADR 0072.
  */
 internal fun composeBackdropInverseViewProjection(camera: ResolvedFrameCamera): FloatArray? =
-    (camera.projectionMatrix * camera.viewMatrix).inverse()?.toColumnMajorFloatArray()
+    camera.viewProjection.inverse()?.toColumnMajorFloatArray()
 
 /**
  * The same matrix for a globe camera, and it is the same two factors in the same order.
@@ -1419,7 +1419,7 @@ internal fun composeBackdropInverseViewProjection(camera: ResolvedFrameCamera): 
  * mode and `FramePlanningCore` still refuses `GLOBE` — and closing that seam is task 10's.
  */
 internal fun composeGeometryViewProjection(camera: ResolvedGlobeCamera): FloatArray =
-    (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+    camera.viewProjection.toColumnMajorFloatArray()
 
 /**
  * Composes one ground tile's model-view-projection matrix.
@@ -1440,15 +1440,13 @@ internal fun composeGroundModelViewProjection(
     camera: ResolvedMercatorCamera,
     quad: BasemapTileQuad,
 ): FloatArray {
-    val mapSpaceModel = DoubleMatrix4.fromRows(
-        listOf(
-            listOf(quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels),
-            listOf(0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels),
-            listOf(0.0, 0.0, 1.0, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    val mapSpaceModel = DoubleMatrix4.rowMajor(
+        quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels,
+        0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
-    return (camera.projectionMatrix * camera.viewMatrix * mapSpaceModel).toColumnMajorFloatArray()
+    return (camera.viewProjection * mapSpaceModel).toColumnMajorFloatArray()
 }
 
 /**
@@ -1569,28 +1567,20 @@ private fun affineModelMatrix(
     scale: DoubleVector3,
     translation: DoubleVector3,
     rotationScaleRowSign: DoubleVector3 = DoubleVector3(1.0, 1.0, 1.0),
-): DoubleMatrix4 = DoubleMatrix4.fromRows(
-    listOf(
-        listOf(
-            rotationScaleRowSign.x * rotation[0, 0] * scale.x,
-            rotationScaleRowSign.x * rotation[0, 1] * scale.y,
-            rotationScaleRowSign.x * rotation[0, 2] * scale.z,
-            translation.x,
-        ),
-        listOf(
-            rotationScaleRowSign.y * rotation[1, 0] * scale.x,
-            rotationScaleRowSign.y * rotation[1, 1] * scale.y,
-            rotationScaleRowSign.y * rotation[1, 2] * scale.z,
-            translation.y,
-        ),
-        listOf(
-            rotationScaleRowSign.z * rotation[2, 0] * scale.x,
-            rotationScaleRowSign.z * rotation[2, 1] * scale.y,
-            rotationScaleRowSign.z * rotation[2, 2] * scale.z,
-            translation.z,
-        ),
-        listOf(0.0, 0.0, 0.0, 1.0),
-    ),
+): DoubleMatrix4 = DoubleMatrix4.rowMajor(
+    rotationScaleRowSign.x * rotation[0, 0] * scale.x,
+    rotationScaleRowSign.x * rotation[0, 1] * scale.y,
+    rotationScaleRowSign.x * rotation[0, 2] * scale.z,
+    translation.x,
+    rotationScaleRowSign.y * rotation[1, 0] * scale.x,
+    rotationScaleRowSign.y * rotation[1, 1] * scale.y,
+    rotationScaleRowSign.y * rotation[1, 2] * scale.z,
+    translation.y,
+    rotationScaleRowSign.z * rotation[2, 0] * scale.x,
+    rotationScaleRowSign.z * rotation[2, 1] * scale.y,
+    rotationScaleRowSign.z * rotation[2, 2] * scale.z,
+    translation.z,
+    0.0, 0.0, 0.0, 1.0,
 )
 
 /**
@@ -1602,13 +1592,11 @@ private fun affineModelMatrix(
 private fun screenOrthographicProjection(outputPixelSize: OutputPixelSize): DoubleMatrix4 {
     val width = outputPixelSize.width.toDouble()
     val height = outputPixelSize.height.toDouble()
-    return DoubleMatrix4.fromRows(
-        listOf(
-            listOf(2.0 / width, 0.0, 0.0, -1.0),
-            listOf(0.0, -2.0 / height, 0.0, 1.0),
-            listOf(0.0, 0.0, 0.0, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    return DoubleMatrix4.rowMajor(
+        2.0 / width, 0.0, 0.0, -1.0,
+        0.0, -2.0 / height, 0.0, 1.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
 }
 
@@ -1618,14 +1606,12 @@ private fun screenOrthographicProjection(outputPixelSize: OutputPixelSize): Doub
  * exactly `1` and never needs a perspective divide.
  */
 private fun DoubleMatrix4.transformAffinePoint(point: DoubleVector3): DoubleVector3 = DoubleVector3(
-    x = this[0, 0] * point.x + this[0, 1] * point.y + this[0, 2] * point.z + this[0, 3],
-    y = this[1, 0] * point.x + this[1, 1] * point.y + this[1, 2] * point.z + this[1, 3],
-    z = this[2, 0] * point.x + this[2, 1] * point.y + this[2, 2] * point.z + this[2, 3],
+    x = homogeneousRow(0, point),
+    y = homogeneousRow(1, point),
+    z = homogeneousRow(2, point),
 )
 
 /** This matrix's elements in the column-major order [GlBinding.uniformMatrix4fv] expects. */
 internal fun DoubleMatrix4.toColumnMajorFloatArray(): FloatArray = FloatArray(16) { index ->
-    val row = index % 4
-    val column = index / 4
-    this[row, column].toFloat()
+    columnMajorElement(index).toFloat()
 }

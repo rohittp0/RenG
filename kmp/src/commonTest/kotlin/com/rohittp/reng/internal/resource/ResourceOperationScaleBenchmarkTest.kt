@@ -166,6 +166,118 @@ class ResourceOperationScaleBenchmarkTest {
         driveDistinctRoutesThroughSession(routeCount = 300, crossCheckIndexes = true)
     }
 
+    /**
+     * The session again, now with a basemap style present: one style route joined by every owner, and many
+     * sticker routes spread over a few shared owners, eight at a time. While the style waits at its owner
+     * barrier, every completion asks whether each referencing owner's non-style work is done; answering
+     * that by scanning every occurrence made each completion O(occurrences) and the operation O(n^2).
+     * The ceiling of 3.0x separates linear (~2x) from quadratic (~4x), as the unstyled guard above does.
+     *
+     * Measured 2026-10-10 (Apple Silicon host), routes 1024/2048/4096: with the scans, macosArm64Test
+     * 549/1983/8099 ms (ratios 3.6, 4.1) and the JVM 48/96/457 ms; with the owner and child counts,
+     * macosArm64Test 118/232/490 ms (ratios 2.0, 2.1) and the JVM 42/46/79 ms.
+     */
+    @Test
+    fun aSessionWithAStyleDrivesManyRoutesUnderSharedOwnersInNearLinearTime() {
+        driveStyledRoutesThroughSession(routeCount = 512) // warm-up, so the smallest count is not timing a cold JIT
+        val routeCounts = listOf(1024, 2048, 4096)
+        val elapsed = routeCounts.associateWith { driveStyledRoutesThroughSession(it) }
+        println("styled session routes -> elapsedMillis: $elapsed")
+        val ratios = routeCounts.zipWithNext { smaller, larger ->
+            val smallerElapsed = elapsed.getValue(smaller).coerceAtLeast(1L)
+            elapsed.getValue(larger).toDouble() / smallerElapsed.toDouble()
+        }
+        println("styled session doubling ratios for route counts $routeCounts: $ratios")
+        assertTrue(
+            ratios.last() < 3.0,
+            "styled session scheduling is no longer near-linear: doubling routes from 2048 to 4096 scaled " +
+                "elapsed time by ${ratios.last()}x (ceiling 3.0x; linear ~2x, quadratic ~4x); measurements: $elapsed",
+        )
+    }
+
+    /** The styled operation with the session's indexes and owner counters checked against their scans. */
+    @Test
+    fun aStyledSessionsIndexesAgreeWithTheScansTheyReplace() {
+        driveStyledRoutesThroughSession(routeCount = 300, crossCheckIndexes = true)
+    }
+
+    private fun driveStyledRoutesThroughSession(
+        routeCount: Int,
+        ownerCount: Int = 4,
+        crossCheckIndexes: Boolean = false,
+    ): Long {
+        val definition = definitionOfStyledRoutes(routeCount, ownerCount)
+        val started = TimeSource.Monotonic.markNow()
+        val (session, first) = ResourceOperationStateMachine.startSession(definition, crossCheckIndexes)
+        requireNotNull(session) { "the definition must not fail registration" }
+        val pending = ArrayDeque<ResourceOperationAction>()
+        var outcome: ResourceOperationOutcome? = first.outcome
+        pending.addAll(first.actions)
+        fun advancePumps() {
+            while (outcome == null) {
+                val event = session.nextPendingClassGateOrdinal()?.let(::AdvancePendingClassGates)
+                    ?: session.nextPendingStyleCommitOrdinal()?.let(::AdvancePendingStyleCommit)
+                    ?: return
+                val step = session.apply(event)
+                pending.addAll(step.actions)
+                outcome = step.outcome
+            }
+        }
+        advancePumps()
+        while (outcome == null) {
+            val action = pending.removeFirstOrNull() ?: break
+            val step = if (action is StartRoute) session.beginLookup(action.ordinal) else session.apply(eventFor(action))
+            pending.addAll(step.actions)
+            outcome = step.outcome
+            advancePumps()
+        }
+        require(outcome is ResourceOperationOutcome.Success) {
+            "benchmark must drive every route, the style's included, to a successful completion: $outcome"
+        }
+        return started.elapsedNow().inWholeMilliseconds
+    }
+
+    /**
+     * One style route that every owner references (one occurrence per owner, joined onto the same route,
+     * first in traversal order so the style starts first and waits at its owner barrier) and [routeCount]
+     * distinct sticker routes dealt round-robin over [ownerCount] owners.
+     */
+    private fun definitionOfStyledRoutes(routeCount: Int, ownerCount: Int): ResourceOperationDefinition {
+        val styleRegistration = ResourceRouteRegistration(
+            route = ResourceRouteKey(
+                accessMode = ResourceAccessMode.NORMAL,
+                locator = ResourceLocator("scale-benchmark-style"),
+                resourceClass = ResourceClass.BASEMAP_STYLE,
+                maximumResponseBytes = 4096L,
+            ),
+            resourceKey = ResourceKey(ResourceKind.EXTERNAL, "e".repeat(64), ResourceClass.BASEMAP_STYLE),
+            rawKey = RawResourceKey("f".repeat(64), ResourceClass.BASEMAP_STYLE),
+            privateRentileKey = RentilePrivateKey("scale-benchmark-private-style"),
+            canonicalBytes = CanonicalBytes("scale-benchmark-canonical-style".encodeToByteArray()),
+        )
+        val styles = (0 until ownerCount).map { owner ->
+            ResourceOccurrence(
+                id = ResourceOccurrenceId((routeCount + owner + 1).toLong()),
+                ownerId = ResourceOwnerId((owner + 1).toLong()),
+                registration = styleRegistration,
+                discoveryRequired = false,
+                commitBinding = ResourceCommitBinding.BasemapStyle(StyleGroupId(1L)),
+            )
+        }
+        val stickers = (0 until routeCount).map { index ->
+            stickerOccurrence(index, sharedOwner = false)
+                .copy(ownerId = ResourceOwnerId((index % ownerCount + 1).toLong()))
+        }
+        val occurrences = styles + stickers
+        return ResourceOperationDefinition(
+            maximumConcurrentRoutes = 8,
+            staticOccurrences = occurrences,
+            resourceIdentities = occurrences
+                .map { CanonicalIdentityRecord(it.registration.resourceKey, it.registration.canonicalBytes) }
+                .distinctBy { it.resourceKey.stableId },
+        )
+    }
+
     private fun driveDistinctRoutesThroughSession(routeCount: Int, crossCheckIndexes: Boolean = false): Long {
         // Eight at a time, as a renderer's default `maximumConcurrentResourceOperations` runs them: the
         // production shape, where routes queue for capacity and every completion starts the next.
@@ -292,7 +404,15 @@ class ResourceOperationScaleBenchmarkTest {
         is WriteStore -> StoreWriteCompleted(action.actionId, SuppliedCallOutcome.Success(Unit))
         // SuppliedInstallOutcome's success case is `Succeeded`, a data object with no payload.
         is InstallVisibility -> VisibilityInstallCompleted(action.actionId, SuppliedInstallOutcome.Succeeded)
-        else -> error("the sticker-only definition emits no other action: $action")
+        is ValidateBasemapStyle ->
+            BasemapStyleValidationCompleted(action.actionId, BasemapStyleValidationOutcome.Valid(emptyList()))
+        is CompileBasemapStyle ->
+            BasemapStyleCompilationCompleted(action.actionId, BasemapStyleCompilationOutcome.Succeeded)
+        is WriteBasemapStyle ->
+            BasemapStyleWriteCompleted(action.actionId, action.groupId, SuppliedCallOutcome.Success(Unit))
+        is InstallBasemapStyleVisibility ->
+            BasemapStyleVisibilityInstallCompleted(action.actionId, action.groupId, SuppliedInstallOutcome.Succeeded)
+        else -> error("the sticker and style definitions emit no other action: $action")
     }
 
     private fun okResponse(): TransportResponse = TransportResponse(

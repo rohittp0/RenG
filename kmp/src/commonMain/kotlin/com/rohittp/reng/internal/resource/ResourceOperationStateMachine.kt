@@ -412,6 +412,25 @@ internal object ResourceOperationStateMachine {
         private var startCeilingOrdinal: Long? = initial.startCeilingOrdinal
         private var terminalSelection: ResourceTerminalSelection? = initial.terminalSelection
 
+        /**
+         * The style barriers' two questions -- has this owner's non-style work all installed its
+         * visibility ([ownerNonStyleWorkComplete]), and has every non-static occurrence's route resolved
+         * ([styleChildrenComplete]) -- kept as counts rather than answered by scanning every occurrence.
+         * Both are asked after every completion while a style waits, so the scans made each completion
+         * O(occurrences) and an operation with a style O(n^2).
+         *
+         * An occurrence's answer depends only on its route's **canonical** record (the first record for
+         * that route key, which `routeIndex` names), so the counts move in exactly two places: when an
+         * occurrence is registered ([trackOccurrence]), and when a canonical record's
+         * `visibilityInstalled` or resolved-with-an-ordinal state changes ([trackCanonicalRouteChange]),
+         * which [addRouteRecord] and [updateRouteRecord] report. Under [crossCheckIndexes] each answer
+         * is checked against the scan it replaced.
+         */
+        private val nonStyleOwnersByRoute: MutableMap<ResourceRouteKey, MutableList<ResourceOwnerId>> = mutableMapOf()
+        private val nonStaticOccurrenceCountByRoute: MutableMap<ResourceRouteKey, Int> = mutableMapOf()
+        private val outstandingNonStyleWorkByOwner: MutableMap<ResourceOwnerId, Int> = mutableMapOf()
+        private var unresolvedNonStaticOccurrences: Int = 0
+
         init {
             initial.traversal.eligibleFifo.forEach(eligibleFifo::addLast)
             occurrences.forEach { occurrence ->
@@ -504,6 +523,8 @@ internal object ResourceOperationStateMachine {
                     "style commit group IDs must be unique"
                 }
             }
+            // After the route index is complete, so each occurrence is counted against its canonical record.
+            occurrences.forEach(::trackOccurrence)
         }
 
         fun setStaticContinuation(ids: List<ResourceOccurrenceId>) {
@@ -1312,16 +1333,72 @@ internal object ResourceOperationStateMachine {
                 .map { occurrence(it).ownerId }
                 .distinct()
 
-        private fun ownerNonStyleWorkComplete(ownerId: ResourceOwnerId): Boolean =
-            occurrences.none { candidate ->
-                candidate.ownerId == ownerId &&
-                    candidate.commitBinding !is ResourceCommitBinding.BasemapStyle &&
-                    !visibilityInstalled(candidate)
+        /** Whether every non-style occurrence of [ownerId] has its route's visibility installed: O(1)
+         * from [outstandingNonStyleWorkByOwner]. */
+        private fun ownerNonStyleWorkComplete(ownerId: ResourceOwnerId): Boolean {
+            val counted = (outstandingNonStyleWorkByOwner[ownerId] ?: 0) == 0
+            if (crossCheckIndexes) {
+                val scanned = occurrences.none { candidate ->
+                    candidate.ownerId == ownerId &&
+                        candidate.commitBinding !is ResourceCommitBinding.BasemapStyle &&
+                        !routeVisibilityInstalled(candidate.registration.route)
+                }
+                check(counted == scanned) {
+                    "owner non-style work count says $counted for $ownerId where the scan says $scanned"
+                }
             }
+            return counted
+        }
 
-        private fun visibilityInstalled(occurrence: ResourceOccurrence): Boolean {
-            val routeIndex = routeIndex(occurrence.registration.route)
+        private fun routeVisibilityInstalled(route: ResourceRouteKey): Boolean {
+            val routeIndex = routeIndex(route)
             return routeIndex >= 0 && routeRecords[routeIndex].visibilityInstalled
+        }
+
+        private fun routeResolved(route: ResourceRouteKey): Boolean {
+            val routeIndex = routeIndex(route)
+            return routeIndex >= 0 && routeRecords[routeIndex].resolvedWithOrdinal()
+        }
+
+        private fun RouteRecord.resolvedWithOrdinal(): Boolean =
+            ordinal != null && status == ResourceRouteStatus.RESOLVED
+
+        /** Counts [occurrence] against its route's canonical record as it stands now. */
+        private fun trackOccurrence(occurrence: ResourceOccurrence) {
+            val route = occurrence.registration.route
+            if (occurrence.commitBinding !is ResourceCommitBinding.BasemapStyle) {
+                nonStyleOwnersByRoute.getOrPut(route) { mutableListOf() } += occurrence.ownerId
+                if (!routeVisibilityInstalled(route)) adjustOutstandingNonStyleWork(occurrence.ownerId, 1)
+            }
+            if (occurrence.id !in staticOccurrenceIds) {
+                nonStaticOccurrenceCountByRoute[route] = (nonStaticOccurrenceCountByRoute[route] ?: 0) + 1
+                if (!routeResolved(route)) unresolvedNonStaticOccurrences += 1
+            }
+        }
+
+        /**
+         * Moves the counts for every occurrence of [route] when its canonical record changes from
+         * [previous] (`null`: the route had none) to [current]. Only a change of `visibilityInstalled`, or
+         * of being resolved with an ordinal, moves anything.
+         */
+        private fun trackCanonicalRouteChange(route: ResourceRouteKey, previous: RouteRecord?, current: RouteRecord) {
+            val wasInstalled = previous?.visibilityInstalled == true
+            if (wasInstalled != current.visibilityInstalled) {
+                val delta = if (current.visibilityInstalled) -1 else 1
+                nonStyleOwnersByRoute[route]?.forEach { ownerId -> adjustOutstandingNonStyleWork(ownerId, delta) }
+            }
+            val wasResolved = previous?.resolvedWithOrdinal() == true
+            val isResolved = current.resolvedWithOrdinal()
+            if (wasResolved != isResolved) {
+                val count = nonStaticOccurrenceCountByRoute[route] ?: 0
+                unresolvedNonStaticOccurrences += if (isResolved) -count else count
+            }
+        }
+
+        private fun adjustOutstandingNonStyleWork(ownerId: ResourceOwnerId, delta: Int) {
+            val adjusted = (outstandingNonStyleWorkByOwner[ownerId] ?: 0) + delta
+            check(adjusted >= 0) { "an owner's outstanding non-style work cannot be negative" }
+            if (adjusted == 0) outstandingNonStyleWorkByOwner.remove(ownerId) else outstandingNonStyleWorkByOwner[ownerId] = adjusted
         }
 
         private fun styleOwnerBarrierComplete(style: StyleCommitState): Boolean =
@@ -1329,25 +1406,38 @@ internal object ResourceOperationStateMachine {
 
         private fun styleChildrenComplete(): Boolean {
             if (frontierStack.isNotEmpty() || eligibleFifo.isNotEmpty()) return false
-            return occurrences.all { candidate ->
-                if (candidate.id in staticOccurrenceIds) return@all true
-                val routeIndex = routeIndex(candidate.registration.route)
-                routeIndex >= 0 &&
-                    routeRecords[routeIndex].ordinal != null &&
-                    routeRecords[routeIndex].status == ResourceRouteStatus.RESOLVED
+            val counted = unresolvedNonStaticOccurrences == 0
+            if (crossCheckIndexes) {
+                val scanned = occurrences.all { candidate ->
+                    candidate.id in staticOccurrenceIds || routeResolved(candidate.registration.route)
+                }
+                check(counted == scanned) { "unresolved child count says $counted where the scan says $scanned" }
             }
+            return counted
         }
 
+        /**
+         * Re-derives each unfinished style's owner sets from its route's joined occurrences. O(styles x
+         * that style's joined occurrences) now that [ownerNonStyleWorkComplete] is O(1) -- independent of
+         * how many other routes the operation has -- and a style whose sets did not change keeps its
+         * (value-equal) state object rather than being rebuilt and revalidated.
+         */
         private fun refreshStyleCommitStates() {
             if (styleCommitStates.isEmpty()) return
             styleCommitStates.forEachIndexed { index, style ->
                 if (style.visible) return@forEachIndexed
                 val routeIndex = routeIndexByOrdinal[style.ordinal] ?: return@forEachIndexed
                 val referencingOwnerIds = styleReferencingOwnerIds(routeIndex)
+                val ownersWithCompletedNonStyleWork = referencingOwnerIds.filter(::ownerNonStyleWorkComplete)
+                if (
+                    referencingOwnerIds == style.referencingOwnerIds &&
+                    ownersWithCompletedNonStyleWork == style.ownersWithCompletedNonStyleWork
+                ) {
+                    return@forEachIndexed
+                }
                 styleCommitStates[index] = style.withOwners(
                     referencingOwnerIds = referencingOwnerIds,
-                    ownersWithCompletedNonStyleWork = referencingOwnerIds
-                        .filter(::ownerNonStyleWorkComplete),
+                    ownersWithCompletedNonStyleWork = ownersWithCompletedNonStyleWork,
                 )
             }
         }
@@ -2048,6 +2138,7 @@ internal object ResourceOperationStateMachine {
             children.forEach { child ->
                 occurrences += child.occurrence
                 occurrenceById[child.occurrence.id] = child.occurrence
+                trackOccurrence(child.occurrence)
             }
             frontierStack[frontierStack.lastIndex] = frontier.withChildren(
                 children.map { it.occurrence.id },
@@ -2428,6 +2519,7 @@ internal object ResourceOperationStateMachine {
             joinedOccurrenceIdSetsByRouteIndex += joinedIds.toMutableSet()
             if (record.registration.route !in routeIndexByRoute) {
                 routeIndexByRoute[record.registration.route] = index
+                trackCanonicalRouteChange(record.registration.route, previous = null, current = record)
             }
             record.ordinal?.let { ordinal ->
                 require(routeIndexByOrdinal.put(ordinal, index) == null) {
@@ -2470,7 +2562,7 @@ internal object ResourceOperationStateMachine {
                     "route cursor action IDs must be unique"
                 }
             }
-            routeRecords[index] = RouteRecord(
+            val updated = RouteRecord(
                 registration = previous.registration,
                 joinedOccurrenceIds = joinedOccurrenceIdsByRouteIndex[index],
                 ordinal = ordinal,
@@ -2480,6 +2572,10 @@ internal object ResourceOperationStateMachine {
                 storeWriteAcknowledged = storeWriteAcknowledged,
                 visibilityInstalled = visibilityInstalled,
             )
+            routeRecords[index] = updated
+            if (routeIndexByRoute[previous.registration.route] == index) {
+                trackCanonicalRouteChange(previous.registration.route, previous, updated)
+            }
             trackPendingClassGates(index, cursor)
             trackEligible(previous.status, status, ordinal)
         }

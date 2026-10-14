@@ -880,9 +880,35 @@ class SceneContentTest {
         assertTrue(compositeProgram < laterGeometry, "later Geometry must cover bloom: ${binding.log}")
         assertTrue(laterGeometry < mapSticker, "phase 2 must still precede phase 4: ${binding.log}")
         assertTrue(mapSticker < labelDraw, "phase 4 must still precede phase 5: ${binding.log}")
+        val compositeDraw = binding.log.indexOfFirstFrom(compositeProgram) { it.startsWith("drawArrays") }
+        val copy = resources.destinationCopy
+        val frameCopy = listOf(
+            "bindFramebuffer(${hex(GL_READ_FRAMEBUFFER)},55)",
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${copy.framebuffer})",
+            "blitFramebuffer(0,0,${OUTPUT_SIZE.width},${OUTPUT_SIZE.height}," +
+                "0,0,${OUTPUT_SIZE.width},${OUTPUT_SIZE.height},${hex(GL_COLOR_BUFFER_BIT)},${hex(GL_NEAREST)})",
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},55)",
+        )
+        val frameCopyAt = binding.log.indexOf(frameCopy.first())
+        assertEquals(
+            frameCopy,
+            binding.log.subList(frameCopyAt, frameCopyAt + frameCopy.size),
+            "the composite reads the frame through a copy blitted just before it: ${binding.log}",
+        )
+        assertTrue(frameCopyAt in emissionFramebuffer until compositeProgram, binding.log.toString())
+        assertEquals(
+            listOf("disable(${hex(GL_BLEND)})", "colorMask(true,true,true,false)"),
+            binding.log.subList(compositeDraw - 2, compositeDraw),
+            "the composite replaces RGB with blending off and leaves destination alpha alone",
+        )
+        assertEquals(
+            listOf("colorMask(true,true,true,true)", "activeTexture(${hex(GL_TEXTURE0)})"),
+            binding.log.subList(compositeDraw + 1, compositeDraw + 3),
+            "the colour mask reopens immediately after the composite",
+        )
         assertTrue(
-            binding.log.contains("blendFuncSeparate(0x1,0x1,0x0,0x1)"),
-            "the bloom composite adds RGB and preserves destination alpha: ${binding.log}",
+            binding.log.none { it.startsWith("blendFuncSeparate(0x1,0x1,") },
+            "the additive composite is gone: ${binding.log}",
         )
         assertEquals(
             listOf("uniform1i(60,0)", "uniform1i(60,1)", "uniform1i(60,0)", "uniform1i(60,0)"),
@@ -929,6 +955,8 @@ class SceneContentTest {
         val compositeDraw = binding.log.indexOfFirstFrom(compositeProgram) { it.startsWith("drawArrays") }
         assertTrue(compositeDraw >= 0, binding.log.toString())
         val expectedStateSequence = listOf(
+            "colorMask(true,true,true,true)",
+            "activeTexture(${hex(GL_TEXTURE0)})",
             "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},55)",
             "viewport(0,0,${OUTPUT_SIZE.width},${OUTPUT_SIZE.height})",
             "enable(${hex(GL_DEPTH_TEST)})",
@@ -957,6 +985,32 @@ class SceneContentTest {
             resumedBlend in (compositeDraw + 1 + expectedStateSequence.size) until resumedGeometry,
             "currentBlend must be cleared so even the same next blend rebinds before drawing",
         )
+    }
+
+    @Test
+    fun bloomResourcesAllocateAnOutputSizedFrameCopyAndFreeIt() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val copy = resources.destinationCopy
+
+        assertEquals(OUTPUT_SIZE.width, copy.width)
+        assertEquals(OUTPUT_SIZE.height, copy.height)
+        val copyBind = binding.log.indexOf("bindTexture(${hex(GL_TEXTURE_2D)},${copy.texture})")
+        assertEquals(
+            "texStorage2D(${hex(GL_TEXTURE_2D)},1,${hex(GL_RGBA8)},${OUTPUT_SIZE.width},${OUTPUT_SIZE.height})",
+            binding.log[copyBind + 1],
+            "the frame copy is an output-sized RGBA8 texture, the surface's own format: ${binding.log}",
+        )
+        val compositeSource = binding.shaderSources.values.single { it.contains("rengBloomDestination") }
+        assertTrue(compositeSource.contains("uniform sampler2D rengBloomDestination;"), compositeSource)
+        assertTrue(compositeSource.contains("float rengBloomKnee = max($BLOOM_SHOULDER_KNEE,"), compositeSource)
+        assertTrue(compositeSource.contains("exp(-(rengBloomPeak - rengBloomKnee) / rengBloomHeadroom)"), compositeSource)
+        assertTrue(compositeSource.contains("vec4(\n        clamp(rengBloomSum *"), compositeSource)
+
+        binding.deletedNames.clear()
+        deleteBloomResources(binding, GlProgramCache(), resources)
+        assertTrue(copy.framebuffer in binding.deletedNames, binding.deletedNames.toString())
+        assertTrue(copy.texture in binding.deletedNames, binding.deletedNames.toString())
     }
 
     /**

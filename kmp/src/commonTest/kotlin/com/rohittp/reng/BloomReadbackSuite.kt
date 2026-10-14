@@ -113,6 +113,14 @@ internal fun runBloomReadbackSuite(
             binding, renderer, renderTarget, target.framebuffer,
             partlyOccludedEmitterPlan(frameIndex = 13L, bloom = Bloom(insideSuppression = 1f)),
         )
+        val brightGroundWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 14L, bloom = null, emissive = true, ground = ORANGE_FRAGMENT_SOURCE),
+        )
+        val brightGroundWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 15L, bloom = Bloom(), emissive = true, ground = ORANGE_FRAGMENT_SOURCE),
+        )
 
         failures.run("bloom null ignores emissive") {
             val differentBytes = differingBytes(nullBloomEmissive, nullBloomOrdinary)
@@ -238,6 +246,23 @@ internal fun runBloomReadbackSuite(
                 "emission collected before model depth exists must still feed halo outside the silhouette",
             )
         }
+        failures.run("bloom over a bright fill rolls off with its hue instead of clipping") {
+            val ground = brightGroundWithoutBloom.pixel(EDGE_X, OUTSIDE_Y)
+            val lit = brightGroundWithBloom.pixel(EDGE_X, OUTSIDE_Y)
+            val far = brightGroundWithBloom.pixel(FAR_X, FAR_Y)
+            // The ground's channels are equally spaced, and so is any sum of it with grey light;
+            // a channel clipping at 255 is what would break the spacing.
+            val spacingSkew = abs((lit[0] - lit[1]) - (lit[1] - lit[2]))
+            println(
+                "RenG bloom readback case 10: dialect=$dialect ground=${ground.describe()} " +
+                    "lit=${lit.describe()} far=${far.describe()} spacingSkew=$spacingSkew",
+            )
+            assertTrue(maxChannelDelta(ORANGE_GROUND_COLOUR, ground) <= 2, "the ground must be the orange fill")
+            assertTrue(lit[0] > ground[0] + 8, "light must still brighten the brightest channel")
+            assertTrue(lit[0] < 255, "the brightest channel must roll off below full scale, not clip")
+            assertTrue(spacingSkew <= 3, "the shoulder must scale every channel alike, skew was $spacingSkew")
+            assertTrue(maxChannelDelta(ground, far) <= 2, "far from the emitter the fill must be untouched")
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target.framebuffer))
@@ -254,6 +279,7 @@ private fun bloomPlan(
     laterGeometry: Boolean = false,
     mapSticker: Boolean = false,
     model: Boolean = false,
+    ground: String = GREY_FRAGMENT_SOURCE,
 ): FramePlan = FramePlan(
     frameIndex = frameIndex,
     camera = Camera(0.0, 0.0, BLOOM_ZOOM, 0.0, 0.0),
@@ -263,7 +289,7 @@ private fun bloomPlan(
             Geometry(
                 topLeft = geoAtPixel(FULL_LEFT, FULL_TOP, altitude = 0.0),
                 bottomRight = geoAtPixel(FULL_RIGHT, FULL_BOTTOM, altitude = 0.0),
-                shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, GREY_FRAGMENT_SOURCE),
+                shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, ground),
             ),
         )
         add(
@@ -489,6 +515,7 @@ private const val SQUARE_TOP: Int = 104
 private const val SQUARE_CENTRE_X: Int = 32
 private const val SQUARE_CENTRE_Y: Int = 96
 private const val OUTSIDE_X: Int = 46
+private const val EDGE_X: Int = 42
 private const val OUTSIDE_Y: Int = 96
 private const val COVER_LEFT: Int = 42
 private const val COVER_RIGHT: Int = 50
@@ -511,6 +538,7 @@ private const val BLOOM_MODEL_URL: String = "https://models.example/bloom-cover.
 
 private val LATER_GEOMETRY_COLOUR: IntArray = intArrayOf(32, 96, 160, 255)
 private val MAP_STICKER_COLOUR: IntArray = intArrayOf(255, 128, 0, 255)
+private val ORANGE_GROUND_COLOUR: IntArray = intArrayOf(204, 140, 76, 255)
 
 /** A 2x2 opaque orange PNG, shared with the basemap suite's independently stated fixture colour. */
 private val BLOOM_STICKER_PNG: ByteArray = Base64.decode(
@@ -530,6 +558,12 @@ private const val GREY_FRAGMENT_SOURCE: String =
         "precision highp float;\n" +
         "out vec4 rengGeometryColour;\n" +
         "void main() { rengGeometryColour = vec4(0.25, 0.25, 0.25, 1.0); }\n"
+
+private const val ORANGE_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(204.0 / 255.0, 140.0 / 255.0, 76.0 / 255.0, 1.0); }\n"
 
 private const val WHITE_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +

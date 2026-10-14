@@ -379,7 +379,7 @@ drawn-thing type and has no effect in a Frame Plan without Bloom.
 _Avoid_: Glow, halo, light source, post-effect, bloom flag
 
 **Bloom**:
-The optional frame-wide screen-space spread and additive composite of colour emitted by **Emissive**
+The optional frame-wide screen-space spread and soft-shouldered composite of colour emitted by **Emissive**
 Geometry. It controls intensity, the contribution of each resolution level, suppression inside opaque
 emission and whitening. It is composited immediately after the last Emissive Geometry in the Frame
 Plan's Geometry order: later Geometry, Models, Map Stickers, Map Labels and screen-anchored content

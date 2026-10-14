@@ -19,8 +19,24 @@ private const val BLOOM_LEVEL_WEIGHT_UNIFORM: String = "rengBloomLevelWeight"
 private const val BLOOM_INTENSITY_UNIFORM: String = "rengBloomIntensity"
 private const val BLOOM_INSIDE_SUPPRESSION_UNIFORM: String = "rengBloomInsideSuppression"
 private const val BLOOM_WHITENESS_UNIFORM: String = "rengBloomWhiteness"
+private const val BLOOM_DESTINATION_UNIFORM: String = "rengBloomDestination"
 
 internal const val BLOOM_TARGET_LEVEL_COUNT: Int = 7
+
+/**
+ * Where the composite's soft shoulder starts, as a fraction of full scale. Below the knee the
+ * composite is the plain sum of frame and bloom; above it the brightest channel of that sum rolls
+ * off exponentially towards 1 and the other channels are scaled by the same factor, so a bright
+ * coloured fill keeps its hue instead of clipping channel by channel to white. The knee is raised
+ * to the frame's own brightest channel at each pixel, so the frame itself is never compressed:
+ * bloom can only brighten a pixel, never darken what was already drawn there.
+ *
+ * A constant rather than a [com.rohittp.reng.Bloom] field: nothing needs to tune it yet. 0.8 was
+ * chosen by measurement in Travel Animator: under a white 6 px route glowing at 60% over a lime
+ * region, the band of clipped pixels beyond the stroke went from 5 px with the additive composite
+ * to 0 (29 to 0 at 12 px and 100%), while the light added on a dark ground stayed within 1% of it.
+ */
+internal const val BLOOM_SHOULDER_KNEE: String = "0.8"
 
 private const val BLOOM_VERTEX_SOURCE: String =
     "#version 300 es\n" +
@@ -83,6 +99,7 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "uniform float rengBloomIntensity;\n" +
         "uniform float rengBloomInsideSuppression;\n" +
         "uniform float rengBloomWhiteness;\n" +
+        "uniform sampler2D rengBloomDestination;\n" +
         "in vec2 rengBloomUv;\n" +
         "layout(location = 0) out vec4 rengBloomColour;\n" +
         "void main() {\n" +
@@ -92,7 +109,17 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "    float rengBloomInside = smoothstep(0.02, 0.30, texture(rengBloomEmission, rengBloomUv).a);\n" +
         "    rengBloomC *= rengBloomIntensity *\n" +
         "        (1.0 - rengBloomInsideSuppression * rengBloomInside);\n" +
-        "    rengBloomColour = vec4(rengBloomC, 0.0);\n" +
+        "    vec3 rengBloomD = texture(rengBloomDestination, rengBloomUv).rgb;\n" +
+        "    vec3 rengBloomSum = rengBloomD + rengBloomC;\n" +
+        "    float rengBloomPeak = max(rengBloomSum.r, max(rengBloomSum.g, rengBloomSum.b));\n" +
+        "    float rengBloomKnee = max($BLOOM_SHOULDER_KNEE,\n" +
+        "        max(rengBloomD.r, max(rengBloomD.g, rengBloomD.b)));\n" +
+        "    float rengBloomHeadroom = max(1.0 - rengBloomKnee, 1e-4);\n" +
+        "    float rengBloomMapped = rengBloomPeak <= rengBloomKnee ? rengBloomPeak :\n" +
+        "        rengBloomKnee + rengBloomHeadroom *\n" +
+        "            (1.0 - exp(-(rengBloomPeak - rengBloomKnee) / rengBloomHeadroom));\n" +
+        "    rengBloomColour = vec4(\n" +
+        "        clamp(rengBloomSum * (rengBloomMapped / max(rengBloomPeak, 1e-6)), 0.0, 1.0), 0.0);\n" +
         "}\n"
 
 private val BLOOM_DOWNSAMPLE_SHADER_PAIR =
@@ -134,10 +161,12 @@ internal class BloomCompositeProgram(
     val intensityLocation: Int,
     val insideSuppressionLocation: Int,
     val whitenessLocation: Int,
+    val destinationLocation: Int,
 )
 
 internal class BloomResources internal constructor(
     internal val emission: BloomTarget,
+    internal val destinationCopy: BloomTarget,
     internal val downsampleLevels: List<BloomTarget>,
     internal val upsampleLevels: List<BloomTarget>,
     internal val sharedDepthRenderbuffer: Int,
@@ -214,6 +243,10 @@ internal fun createBloomResources(
         binding, outputSize.width, outputSize.height, GL_RGBA8, sharedDepthRenderbuffer,
     ) ?: return fail()
     allocated += emission
+    val destinationCopy = createBloomTarget(
+        binding, outputSize.width, outputSize.height, GL_RGBA8, null,
+    ) ?: return fail()
+    allocated += destinationCopy
 
     val levelSizes = ArrayList<Pair<Int, Int>>(BLOOM_TARGET_LEVEL_COUNT + 1)
     var width = outputSize.width
@@ -247,6 +280,7 @@ internal fun createBloomResources(
     return BloomResourcesResult.Created(
         BloomResources(
             emission = emission,
+            destinationCopy = destinationCopy,
             downsampleLevels = downsampleLevels,
             upsampleLevels = upsampleLevels,
             sharedDepthRenderbuffer = sharedDepthRenderbuffer,
@@ -275,6 +309,7 @@ internal fun createBloomResources(
                 binding.getUniformLocation(compositeProgram, BLOOM_INTENSITY_UNIFORM),
                 binding.getUniformLocation(compositeProgram, BLOOM_INSIDE_SUPPRESSION_UNIFORM),
                 binding.getUniformLocation(compositeProgram, BLOOM_WHITENESS_UNIFORM),
+                binding.getUniformLocation(compositeProgram, BLOOM_DESTINATION_UNIFORM),
             ),
         ),
     )
@@ -338,7 +373,7 @@ internal fun deleteBloomResources(
     cache: GlProgramCache,
     resources: BloomResources,
 ) {
-    (listOf(resources.emission) + resources.downsampleLevels + resources.upsampleLevels)
+    (listOf(resources.emission, resources.destinationCopy) + resources.downsampleLevels + resources.upsampleLevels)
         .forEach { deleteBloomTarget(binding, it) }
     binding.deleteVertexArrays(1, intArrayOf(resources.vertexArray))
     binding.deleteBuffers(1, intArrayOf(resources.vertexBuffer))
@@ -356,7 +391,17 @@ private fun deleteBloomProgram(binding: GlBinding, cache: GlProgramCache, key: R
     cache.remove(key)?.let(binding::deleteProgram)
 }
 
-/** Runs the dual-Kawase chain and adds its result into [surfaceFramebuffer] without changing alpha. */
+/**
+ * Runs the dual-Kawase chain and composites its result into [surfaceFramebuffer] without changing
+ * alpha.
+ *
+ * The composite is not a fixed-function add: it reads the frame through a copy blitted into
+ * [BloomResources.destinationCopy] (a texture cannot be sampled while it is the bound colour
+ * attachment), sums frame and bloom, and soft-shoulders the brightest channel above
+ * [BLOOM_SHOULDER_KNEE]. It is drawn with blending off and alpha writes masked, then the colour
+ * mask is reopened, so the caller sees the same state the additive composite left except for the
+ * read framebuffer binding, which is in the Restore Set.
+ */
 internal fun drawBloom(
     binding: GlBinding,
     resources: BloomResources,
@@ -424,6 +469,11 @@ internal fun drawBloom(
     }
 
     val composite = resources.composite
+    val width = resources.emission.width
+    val height = resources.emission.height
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, surfaceFramebuffer)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.destinationCopy.framebuffer)
+    binding.blitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, surfaceFramebuffer)
     binding.viewport(0, 0, resources.emission.width, resources.emission.height)
     binding.useProgram(composite.program)
@@ -434,13 +484,18 @@ internal fun drawBloom(
     binding.activeTexture(GL_TEXTURE0 + 1)
     binding.bindTexture(GL_TEXTURE_2D, resources.emission.texture)
     bindSamplerUniform(binding, composite.emissionLocation, 1)
+    binding.activeTexture(GL_TEXTURE0 + 2)
+    binding.bindSampler(2, 0)
+    binding.bindTexture(GL_TEXTURE_2D, resources.destinationCopy.texture)
+    bindSamplerUniform(binding, composite.destinationLocation, 2)
     bindFloat(binding, composite.intensityLocation, bloom.intensity)
     bindFloat(binding, composite.insideSuppressionLocation, bloom.insideSuppression)
     bindFloat(binding, composite.whitenessLocation, bloom.whiteness)
-    binding.enable(GL_BLEND)
-    binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-    binding.blendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE)
+    binding.disable(GL_BLEND)
+    binding.colorMask(true, true, true, false)
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+    binding.colorMask(true, true, true, true)
+    binding.activeTexture(GL_TEXTURE0)
 }
 
 private fun drawBloomUpsample(

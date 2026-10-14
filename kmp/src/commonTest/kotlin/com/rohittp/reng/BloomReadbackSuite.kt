@@ -20,6 +20,11 @@ import com.rohittp.reng.internal.identity.PureKotlinSha256
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan
+import kotlin.math.atan2
+import kotlin.math.cbrt
+import kotlin.math.hypot
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sinh
 import kotlin.io.encoding.Base64
 import kotlin.test.assertContentEquals
@@ -120,6 +125,34 @@ internal fun runBloomReadbackSuite(
         val brightGroundWithBloom = clearDrawAndReadBloom(
             binding, renderer, renderTarget, target.framebuffer,
             bloomPlan(frameIndex = 15L, bloom = Bloom(), emissive = true, ground = ORANGE_FRAGMENT_SOURCE),
+        )
+        val redOverTealWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 16L, bloom = null, emissive = true,
+                ground = TEAL_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverTealWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 17L, bloom = Bloom(intensity = RED_HALO_INTENSITY), emissive = true,
+                ground = TEAL_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverLimeWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 18L, bloom = null, emissive = true,
+                ground = LIME_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverLimeWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 19L, bloom = Bloom(intensity = RED_HALO_INTENSITY), emissive = true,
+                ground = LIME_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
         )
 
         failures.run("bloom null ignores emissive") {
@@ -246,22 +279,54 @@ internal fun runBloomReadbackSuite(
                 "emission collected before model depth exists must still feed halo outside the silhouette",
             )
         }
-        failures.run("bloom over a bright fill rolls off with its hue instead of clipping") {
+        // ADR 0082 asserted that white light over orange kept the fill's channel spacing (an orange
+        // halo). Since ADR 0083 strong light carries its own hue, so a white emitter's halo over
+        // orange is brighter and whiter than the fill: lightness up, chroma down, nothing clipped.
+        failures.run("white bloom over a bright fill brightens towards white without clipping") {
             val ground = brightGroundWithoutBloom.pixel(EDGE_X, OUTSIDE_Y)
             val lit = brightGroundWithBloom.pixel(EDGE_X, OUTSIDE_Y)
             val far = brightGroundWithBloom.pixel(FAR_X, FAR_Y)
-            // The ground's channels are equally spaced, and so is any sum of it with grey light;
-            // a channel clipping at 255 is what would break the spacing.
-            val spacingSkew = abs((lit[0] - lit[1]) - (lit[1] - lit[2]))
+            val groundLab = ground.oklab()
+            val litLab = lit.oklab()
             println(
                 "RenG bloom readback case 10: dialect=$dialect ground=${ground.describe()} " +
-                    "lit=${lit.describe()} far=${far.describe()} spacingSkew=$spacingSkew",
+                    "lit=${lit.describe()} far=${far.describe()} " +
+                    "groundLch=${groundLab.describeLch()} litLch=${litLab.describeLch()}",
             )
             assertTrue(maxChannelDelta(ORANGE_GROUND_COLOUR, ground) <= 2, "the ground must be the orange fill")
-            assertTrue(lit[0] > ground[0] + 8, "light must still brighten the brightest channel")
-            assertTrue(lit[0] < 255, "the brightest channel must roll off below full scale, not clip")
-            assertTrue(spacingSkew <= 3, "the shoulder must scale every channel alike, skew was $spacingSkew")
+            assertTrue(litLab[0] > groundLab[0] + 0.02, "light must still brighten the fill")
+            assertTrue(lit.take(3).all { it < 255 }, "no channel may clip to full scale")
+            assertTrue(
+                litLab.chroma() < groundLab.chroma() - 0.02,
+                "strong white light must read whiter than the fill, not a deeper orange",
+            )
             assertTrue(maxChannelDelta(ground, far) <= 2, "far from the emitter the fill must be untouched")
+        }
+        failures.run("a red emitter's halo keeps the emitter's hue over teal and over lime") {
+            val emitterHue = RED_EMITTER_COLOUR.oklab().hueDegrees()
+            val grounds = listOf(
+                Triple("teal", redOverTealWithoutBloom, redOverTealWithBloom),
+                Triple("lime", redOverLimeWithoutBloom, redOverLimeWithBloom),
+            )
+            for ((name, without, with) in grounds) {
+                val ground = without.pixel(EDGE_X, OUTSIDE_Y)
+                val near = with.pixel(EDGE_X, OUTSIDE_Y)
+                val far = with.pixel(FAR_X, FAR_Y)
+                val nearLab = near.oklab()
+                val hueError = hueDistance(nearLab.hueDegrees(), emitterHue)
+                println(
+                    "RenG bloom readback case 11 ($name): dialect=$dialect ground=${ground.describe()} " +
+                        "near=${near.describe()} far=${far.describe()} " +
+                        "nearLch=${nearLab.describeLch()} hueError=$hueError",
+                )
+                assertTrue(maxChannelDelta(ground, far) <= 2, "far from the emitter the $name fill must be untouched")
+                assertTrue(nearLab.chroma() > RED_HALO_MINIMUM_CHROMA, "the $name halo must be coloured, not grey")
+                assertTrue(
+                    hueError <= RED_HALO_HUE_TOLERANCE_DEGREES,
+                    "the $name halo two pixels out must read as the emitter's red, hue error was $hueError",
+                )
+                assertTrue(maxChannelDelta(ground, near) > 8, "the $name halo must visibly change the fill")
+            }
         }
     } finally {
         renderer.close()
@@ -280,6 +345,7 @@ private fun bloomPlan(
     mapSticker: Boolean = false,
     model: Boolean = false,
     ground: String = GREY_FRAGMENT_SOURCE,
+    emitter: String = WHITE_FRAGMENT_SOURCE,
 ): FramePlan = FramePlan(
     frameIndex = frameIndex,
     camera = Camera(0.0, 0.0, BLOOM_ZOOM, 0.0, 0.0),
@@ -298,7 +364,7 @@ private fun bloomPlan(
                 bottomRight = geoAtPixel(SQUARE_RIGHT, SQUARE_BOTTOM, altitude = 1.0),
                 shaderPair = ShaderPair(
                     BLOOM_VERTEX_SOURCE,
-                    if (emissionAwareShader) EMISSION_AWARE_WHITE_FRAGMENT_SOURCE else WHITE_FRAGMENT_SOURCE,
+                    if (emissionAwareShader) EMISSION_AWARE_WHITE_FRAGMENT_SOURCE else emitter,
                 ),
                 emissive = emissive,
             ),
@@ -485,6 +551,39 @@ private class BloomCollectedFailures {
 
 private fun IntArray.describe(): String = joinToString(prefix = "(", postfix = ")")
 
+/** This 8-bit sRGB pixel's Oklab (L, a, b). */
+private fun IntArray.oklab(): DoubleArray {
+    fun linear(channel: Int): Double {
+        val c = channel / 255.0
+        return if (c <= 0.04045) c / 12.92 else ((c + 0.055) / 1.055).pow(2.4)
+    }
+    val r = linear(this[0])
+    val g = linear(this[1])
+    val b = linear(this[2])
+    val l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    val m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    val s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return doubleArrayOf(
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+private fun DoubleArray.chroma(): Double = hypot(this[1], this[2])
+
+private fun DoubleArray.hueDegrees(): Double = atan2(this[2], this[1]) * 180.0 / PI
+
+private fun hueDistance(first: Double, second: Double): Double {
+    val difference = abs(first - second) % 360.0
+    return if (difference > 180.0) 360.0 - difference else difference
+}
+
+private fun DoubleArray.describeLch(): String {
+    fun Double.rounded(): Double = (this * 1000.0).roundToInt() / 1000.0
+    return "(L=${this[0].rounded()} C=${chroma().rounded()} h=${hueDegrees().roundToInt()})"
+}
+
 private fun ByteArray.sha256(): String =
     PureKotlinSha256.digest(CanonicalBytes(this)).lowercaseHex
 
@@ -540,6 +639,13 @@ private val LATER_GEOMETRY_COLOUR: IntArray = intArrayOf(32, 96, 160, 255)
 private val MAP_STICKER_COLOUR: IntArray = intArrayOf(255, 128, 0, 255)
 private val ORANGE_GROUND_COLOUR: IntArray = intArrayOf(204, 140, 76, 255)
 
+/** Travel Animator's red glow (#FF3B30); case 11 lays it over its sea (56, 101, 117) and lime (#E3FC55). */
+private val RED_EMITTER_COLOUR: IntArray = intArrayOf(255, 59, 48, 255)
+/** Travel Animator's glow at full alpha as bloom intensity, so the halo is light, not the emitter's own colour. */
+private const val RED_HALO_INTENSITY: Float = 0.6f
+private const val RED_HALO_HUE_TOLERANCE_DEGREES: Double = 6.0
+private const val RED_HALO_MINIMUM_CHROMA: Double = 0.08
+
 /** A 2x2 opaque orange PNG, shared with the basemap suite's independently stated fixture colour. */
 private val BLOOM_STICKER_PNG: ByteArray = Base64.decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR42mP438DwH4QZYAwAWsoJ+ZJB9b8AAAAASUVORK5CYII=",
@@ -564,6 +670,24 @@ private const val ORANGE_FRAGMENT_SOURCE: String =
         "precision highp float;\n" +
         "out vec4 rengGeometryColour;\n" +
         "void main() { rengGeometryColour = vec4(204.0 / 255.0, 140.0 / 255.0, 76.0 / 255.0, 1.0); }\n"
+
+private const val TEAL_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(56.0 / 255.0, 101.0 / 255.0, 117.0 / 255.0, 1.0); }\n"
+
+private const val LIME_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(227.0 / 255.0, 252.0 / 255.0, 85.0 / 255.0, 1.0); }\n"
+
+private const val RED_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(1.0, 59.0 / 255.0, 48.0 / 255.0, 1.0); }\n"
 
 private const val WHITE_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +

@@ -380,7 +380,8 @@ _Avoid_: Glow, halo, light source, post-effect, bloom flag
 
 **Bloom**:
 The optional frame-wide screen-space spread and soft-shouldered composite of colour emitted by **Emissive**
-Geometry. It controls intensity, the contribution of each resolution level, suppression inside opaque
+Geometry. Where the light is strong its halo takes the light's own hue on any ground, at the lightness
+the shoulder gives; its faint outer tail is plain added light. It controls intensity, the contribution of each resolution level, suppression inside opaque
 emission and whitening. It is composited immediately after the last Emissive Geometry in the Frame
 Plan's Geometry order: later Geometry, Models, Map Stickers, Map Labels and screen-anchored content
 cover it, while content already drawn receives it. A non-emissive Geometry between two emitters is

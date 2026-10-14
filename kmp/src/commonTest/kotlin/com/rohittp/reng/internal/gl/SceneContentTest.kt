@@ -1005,7 +1005,17 @@ class SceneContentTest {
         assertTrue(compositeSource.contains("uniform sampler2D rengBloomDestination;"), compositeSource)
         assertTrue(compositeSource.contains("float rengBloomKnee = max($BLOOM_SHOULDER_KNEE,"), compositeSource)
         assertTrue(compositeSource.contains("exp(-(rengBloomPeak - rengBloomKnee) / rengBloomHeadroom)"), compositeSource)
-        assertTrue(compositeSource.contains("vec4(\n        clamp(rengBloomSum *"), compositeSource)
+        assertTrue(compositeSource.contains("clamp(rengBloomSum * (rengBloomMapped /"), compositeSource)
+        assertTrue(
+            compositeSource.contains(
+                "smoothstep($BLOOM_HUE_STEER_START, $BLOOM_HUE_STEER_FULL, rengBloomStrength)",
+            ),
+            compositeSource,
+        )
+        assertTrue(compositeSource.contains("vec3(rengBloomLab.x, mix(rengBloomLab.yz,"), compositeSource)
+        assertTrue(compositeSource.contains("dot(rengBloomLinear, rengBloomLuma)"), compositeSource)
+        assertTrue(compositeSource.contains("if (rengBloomStrength > $BLOOM_HUE_STEER_START) {"), compositeSource)
+        assertTrue(compositeSource.contains("rengBloomColour = vec4(clamp(rengBloomOut, 0.0, 1.0), 0.0);"), compositeSource)
 
         binding.deletedNames.clear()
         deleteBloomResources(binding, GlProgramCache(), resources)

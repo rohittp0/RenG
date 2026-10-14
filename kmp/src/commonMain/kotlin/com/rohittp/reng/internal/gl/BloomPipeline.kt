@@ -28,8 +28,9 @@ internal const val BLOOM_TARGET_LEVEL_COUNT: Int = 7
  * composite is the plain sum of frame and bloom; above it the brightest channel of that sum rolls
  * off exponentially towards 1 and the other channels are scaled by the same factor, so a bright
  * coloured fill keeps its hue instead of clipping channel by channel to white. The knee is raised
- * to the frame's own brightest channel at each pixel, so the frame itself is never compressed:
- * bloom can only brighten a pixel, never darken what was already drawn there.
+ * to the frame's own brightest channel at each pixel, so the shoulder itself never compresses the
+ * frame. The hue steer that follows it ([BLOOM_HUE_STEER_START], ADR 0083) keeps the shoulder's
+ * linear luminance but can lower the brightest channel of a bright fill under strong light.
  *
  * A constant rather than a [com.rohittp.reng.Bloom] field: nothing needs to tune it yet. 0.8 was
  * chosen by measurement in Travel Animator: under a white 6 px route glowing at 60% over a lime
@@ -37,6 +38,29 @@ internal const val BLOOM_TARGET_LEVEL_COUNT: Int = 7
  * to 0 (29 to 0 at 12 px and 100%), while the light added on a dark ground stayed within 1% of it.
  */
 internal const val BLOOM_SHOULDER_KNEE: String = "0.8"
+
+/**
+ * The bloom strength (the brightest channel of the bloom light at a pixel, after intensity and
+ * inside suppression) below which the composite keeps the soft shoulder's colour unchanged. Between
+ * this and [BLOOM_HUE_STEER_FULL] the shouldered colour's Oklab chroma is steered, along a
+ * smoothstep, towards the bloom light's own hue; lightness and linear luminance stay the
+ * shoulder's. At or below it the steer, whose weight would be zero there, is skipped: the bloom's
+ * long faint tail stays plain light added to the ground, so it does not desaturate the ground far
+ * from the emitter, and most of the frame skips the Oklab round trip (the composite's extra cost on
+ * the CPH2629 fell from ~2.0 to ~1.0 ms per 1080x1920 frame).
+ *
+ * Measured in Travel Animator (ADR 0083): with a red #FF3B30 glow at alpha 0x8B, 6 px, the halo 4 px
+ * past the stroke is 2 degrees off the glow's Oklab hue on the teal sea and 0 off on a lime region
+ * (91 and 65 with the shoulder alone), while the light added on a dark ground stays 0.96-1.01x it.
+ */
+internal const val BLOOM_HUE_STEER_START: String = "0.03"
+
+/**
+ * The bloom strength at and above which the composite's chroma is the bloom light's own hue in
+ * full (scaled to the pixel's lightness, never above the light's own chroma). See
+ * [BLOOM_HUE_STEER_START].
+ */
+internal const val BLOOM_HUE_STEER_FULL: String = "0.30"
 
 private const val BLOOM_VERTEX_SOURCE: String =
     "#version 300 es\n" +
@@ -102,6 +126,32 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "uniform sampler2D rengBloomDestination;\n" +
         "in vec2 rengBloomUv;\n" +
         "layout(location = 0) out vec4 rengBloomColour;\n" +
+        "vec3 rengBloomToLinear(vec3 c) {\n" +
+        "    c = clamp(c, 0.0, 1.0);\n" +
+        "    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));\n" +
+        "}\n" +
+        "vec3 rengBloomToSrgb(vec3 c) {\n" +
+        "    c = clamp(c, 0.0, 1.0);\n" +
+        "    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));\n" +
+        "}\n" +
+        "vec3 rengBloomLinearToOklab(vec3 c) {\n" +
+        "    vec3 lms = mat3(0.4122214708, 0.2119034982, 0.0883024619,\n" +
+        "        0.5363325363, 0.6806995451, 0.2817188376,\n" +
+        "        0.0514459929, 0.1073969566, 0.6299787005) * c;\n" +
+        "    lms = pow(max(lms, 0.0), vec3(1.0 / 3.0));\n" +
+        "    return mat3(0.2104542553, 1.9779984951, 0.0259040371,\n" +
+        "        0.7936177850, -2.4285922050, 0.7827717662,\n" +
+        "        -0.0040720468, 0.4505937099, -0.8086757660) * lms;\n" +
+        "}\n" +
+        "vec3 rengBloomOklabToLinear(vec3 lab) {\n" +
+        "    vec3 lms = mat3(1.0, 1.0, 1.0,\n" +
+        "        0.3963377774, -0.1055613458, -0.0894841775,\n" +
+        "        0.2158037573, -0.0638541728, -1.2914855480) * lab;\n" +
+        "    lms = lms * lms * lms;\n" +
+        "    return mat3(4.0767416621, -1.2684380046, -0.0041960863,\n" +
+        "        -3.3077115913, 2.6097574011, -0.7034186147,\n" +
+        "        0.2309699292, -0.3413193965, 1.7076147010) * lms;\n" +
+        "}\n" +
         "void main() {\n" +
         "    vec3 rengBloomC = texture(rengBloomSource, rengBloomUv).rgb;\n" +
         "    float rengBloomMaximum = max(rengBloomC.r, max(rengBloomC.g, rengBloomC.b));\n" +
@@ -118,8 +168,30 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "    float rengBloomMapped = rengBloomPeak <= rengBloomKnee ? rengBloomPeak :\n" +
         "        rengBloomKnee + rengBloomHeadroom *\n" +
         "            (1.0 - exp(-(rengBloomPeak - rengBloomKnee) / rengBloomHeadroom));\n" +
-        "    rengBloomColour = vec4(\n" +
-        "        clamp(rengBloomSum * (rengBloomMapped / max(rengBloomPeak, 1e-6)), 0.0, 1.0), 0.0);\n" +
+        "    vec3 rengBloomShouldered =\n" +
+        "        clamp(rengBloomSum * (rengBloomMapped / max(rengBloomPeak, 1e-6)), 0.0, 1.0);\n" +
+        "    float rengBloomStrength = max(rengBloomC.r, max(rengBloomC.g, rengBloomC.b));\n" +
+        "    vec3 rengBloomOut = rengBloomShouldered;\n" +
+        "    if (rengBloomStrength > $BLOOM_HUE_STEER_START) {\n" +
+        "        vec3 rengBloomLinear = rengBloomToLinear(rengBloomShouldered);\n" +
+        "        vec3 rengBloomLab = rengBloomLinearToOklab(rengBloomLinear);\n" +
+        "        vec3 rengBloomHue =\n" +
+        "            rengBloomLinearToOklab(rengBloomToLinear(rengBloomC / rengBloomStrength));\n" +
+        "        vec2 rengBloomTarget =\n" +
+        "            rengBloomHue.yz * min(1.0, rengBloomLab.x / max(rengBloomHue.x, 1e-4));\n" +
+        "        float rengBloomSteer =\n" +
+        "            smoothstep($BLOOM_HUE_STEER_START, $BLOOM_HUE_STEER_FULL, rengBloomStrength);\n" +
+        "        vec3 rengBloomSteered = rengBloomOklabToLinear(\n" +
+        "            vec3(rengBloomLab.x, mix(rengBloomLab.yz, rengBloomTarget, rengBloomSteer)));\n" +
+        "        const vec3 rengBloomLuma = vec3(0.2126, 0.7152, 0.0722);\n" +
+        "        rengBloomSteered = max(rengBloomSteered *\n" +
+        "            (dot(rengBloomLinear, rengBloomLuma) / max(dot(rengBloomSteered, rengBloomLuma), 1e-6)),\n" +
+        "            0.0);\n" +
+        "        rengBloomSteered /= max(max(rengBloomSteered.r,\n" +
+        "            max(rengBloomSteered.g, rengBloomSteered.b)), 1.0);\n" +
+        "        rengBloomOut = rengBloomToSrgb(rengBloomSteered);\n" +
+        "    }\n" +
+        "    rengBloomColour = vec4(clamp(rengBloomOut, 0.0, 1.0), 0.0);\n" +
         "}\n"
 
 private val BLOOM_DOWNSAMPLE_SHADER_PAIR =

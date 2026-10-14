@@ -40,3 +40,10 @@ been, which is the point.
 
 This amends ADR 0074's composite only; its chain, targets, suppression and placement (as amended by
 ADR 0080) are unchanged.
+
+## Extended, 2026-10-14: ADR 0083 steers the shoulder's output to the light's hue
+
+The shoulder still runs as above, but its output is no longer the final colour: where the bloom is
+strong, its Oklab chroma is steered to the light's own hue at the shoulder's luminance, so a red glow
+reads red over teal and lime instead of mauve and orange. A white emitter's halo over a bright fill is
+now whiter, not a brighter tint of the fill, and the frame can no longer only get brighter.

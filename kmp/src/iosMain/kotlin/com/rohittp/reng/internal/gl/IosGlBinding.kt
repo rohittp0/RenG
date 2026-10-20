@@ -45,6 +45,7 @@ import platform.gles3.glClearColor
 import platform.gles3.glClearDepthf
 import platform.gles3.glColorMask
 import platform.gles3.glCompileShader
+import platform.gles3.glCompressedTexImage2D
 import platform.gles3.glCreateProgram
 import platform.gles3.glCreateShader
 import platform.gles3.glCullFace
@@ -278,6 +279,21 @@ internal object IosGlBinding : GlBinding {
             glTexSubImage2D(
                 target.toUInt(), level, xOffset, yOffset, width, height,
                 format.toUInt(), type.toUInt(), pinned.addressOf(0),
+            )
+        }
+    }
+
+    override fun compressedTexImage2D(
+        target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+        border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+    ) {
+        require(imageSize > 0 && dataOffset >= 0 && dataOffset <= data.size - imageSize) {
+            "a compressed image must lie inside its array"
+        }
+        data.usePinned { pinned ->
+            glCompressedTexImage2D(
+                target.toUInt(), level, internalFormat.toUInt(), width, height,
+                border, imageSize, pinned.addressOf(dataOffset),
             )
         }
     }

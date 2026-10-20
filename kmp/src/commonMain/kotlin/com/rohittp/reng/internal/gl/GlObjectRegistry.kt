@@ -29,9 +29,16 @@ internal sealed interface GpuSubresource {
     data class ModelPrimitive(val meshIndex: Int, val primitiveIndex: Int) : GpuSubresource
 }
 
+/**
+ * How a texture's texels are stored on the GPU. An ETC2 sticker is [ETC2] where the context samples
+ * it and [RGBA8] where RenG decoded it (ADR 0084), so the two uploads are never mistaken for each other.
+ */
+internal enum class TextureStorage { RGBA8, ETC2 }
+
 internal data class GpuUploadVariant(
     val content: TextureContent,
     val sampler: TextureSamplerState,
+    val storage: TextureStorage = TextureStorage.RGBA8,
 )
 
 /** Exact identity of reusable GPU content; a locator-derived key alone is intentionally insufficient. */

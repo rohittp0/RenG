@@ -10,7 +10,7 @@ import platform.posix.dlsym
 private const val EGL_DISPATCH_LIBRARY: String = "libEGL.so.1"
 
 /**
- * Resolves all ninety-two roster entries against the running system's EGL dispatch library.
+ * Resolves all ninety-three roster entries against the running system's EGL dispatch library.
  *
  * Resolution is eager and total: every name must resolve or the whole binding is
  * [GlBindingResult.Unsupported]. This turns a partially resolvable driver into a setup-time
@@ -45,7 +45,7 @@ private fun Boolean.toGlBoolean(): UByte = if (this) 1u.toUByte() else 0u.toUByt
 private fun UByte.toKotlinBoolean(): Boolean = this.toInt() != 0
 
 /**
- * The ninety-two-entry [GlBinding] over a fully resolved function-pointer table.
+ * The ninety-three-entry [GlBinding] over a fully resolved function-pointer table.
  *
  * [table] is indexed by [GlEntryPoint.ordinal]; each property below reinterprets exactly one
  * slot to the C signature Kotlin/Native needs to call it, using the standard width mapping:
@@ -119,6 +119,9 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
     private val texSubImage2DFn: CPointer<CFunction<
         (UInt, Int, Int, Int, Int, Int, UInt, UInt, COpaquePointer?) -> Unit>> =
         table[GlEntryPoint.TEX_SUB_IMAGE_2D.ordinal].reinterpret()
+    private val compressedTexImage2DFn: CPointer<CFunction<
+        (UInt, Int, UInt, Int, Int, Int, Int, COpaquePointer?) -> Unit>> =
+        table[GlEntryPoint.COMPRESSED_TEX_IMAGE_2D.ordinal].reinterpret()
     private val texStorage2DFn: CPointer<CFunction<(UInt, Int, UInt, Int, Int) -> Unit>> =
         table[GlEntryPoint.TEX_STORAGE_2D.ordinal].reinterpret()
     private val texParameteriFn: CPointer<CFunction<(UInt, UInt, Int) -> Unit>> =
@@ -400,6 +403,21 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
             texSubImage2DFn(
                 target.toUInt(), level, xOffset, yOffset, width, height,
                 format.toUInt(), type.toUInt(), pinned.addressOf(0),
+            )
+        }
+    }
+
+    override fun compressedTexImage2D(
+        target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+        border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+    ) {
+        require(imageSize > 0 && dataOffset >= 0 && dataOffset <= data.size - imageSize) {
+            "a compressed image must lie inside its array"
+        }
+        data.usePinned { pinned ->
+            compressedTexImage2DFn(
+                target.toUInt(), level, internalFormat.toUInt(), width, height,
+                border, imageSize, pinned.addressOf(dataOffset),
             )
         }
     }

@@ -41,10 +41,14 @@ internal const val GL_TEXTURE_WRAP_T: Int = 0x2803
 internal const val GL_NEAREST: Int = 0x2600
 internal const val GL_LINEAR: Int = 0x2601
 internal const val GL_CLAMP_TO_EDGE: Int = 0x812F
+internal const val GL_TEXTURE_MAX_LEVEL: Int = 0x813D
 
 internal const val GL_RGBA: Int = 0x1908
 internal const val GL_RGBA8: Int = 0x8058
 internal const val GL_RGBA16F: Int = 0x881A
+internal const val GL_COMPRESSED_RGB8_ETC2: Int = 0x9274
+internal const val GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: Int = 0x9276
+internal const val GL_COMPRESSED_RGBA8_ETC2_EAC: Int = 0x9278
 internal const val GL_DEPTH_COMPONENT24: Int = 0x81A6
 internal const val GL_UNSIGNED_BYTE: Int = 0x1401
 internal const val GL_UNSIGNED_SHORT: Int = 0x1403

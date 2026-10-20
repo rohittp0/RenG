@@ -2875,7 +2875,9 @@ internal object ResourceOperationStateMachine {
                 RenGErrorCode.RESOURCE_PARSE_FAILED,
                 PipelineStage.RESOURCE_PARSING,
             )
-            ResourceClassGate.DECODE_PNG -> resourceFormatFailure(
+            ResourceClassGate.DECODE_PNG,
+            ResourceClassGate.DECODE_STICKER_IMAGE,
+            -> resourceFormatFailure(
                 content,
                 RenGErrorCode.RESOURCE_DECODE_FAILED,
                 PipelineStage.RESOURCE_DECODING,

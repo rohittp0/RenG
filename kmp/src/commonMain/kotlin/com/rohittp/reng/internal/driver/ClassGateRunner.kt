@@ -9,8 +9,11 @@ import com.rohittp.reng.internal.glb.parseGltf
 import com.rohittp.reng.internal.glb.scanGlb
 import com.rohittp.reng.internal.glb.validateGltfFeatures
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.Etc2ContainerResult
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.decodePng
+import com.rohittp.reng.internal.image.isEtc2Container
+import com.rohittp.reng.internal.image.parseEtc2Container
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceClassGate
 import com.rohittp.reng.internal.resource.SuppliedValidationOutcome
@@ -38,15 +41,17 @@ internal fun interface ClassGateRunner {
 }
 
 /**
- * RenG's own class gates, and only those. `DECODE_PNG` genuinely decodes a sticker or model-texture PNG
- * through [decodePng], gated by [limits]'s decoded-byte ceiling; `PARSE_GLB`/`VALIDATE_GLB_FEATURES`
- * genuinely scan and parse a GLB container's JSON chunk into a
+ * RenG's own class gates, and only those. `DECODE_PNG` genuinely decodes a backdrop or model-texture PNG
+ * through [decodePng], gated by [limits]'s decoded-byte ceiling; `DECODE_STICKER_IMAGE` does the same
+ * for a sticker's PNG and validates a sticker's ETC2 container instead (ADR 0084);
+ * `PARSE_GLB`/`VALIDATE_GLB_FEATURES` genuinely scan and parse a GLB container's JSON chunk into a
  * [com.rohittp.reng.internal.glb.GltfDocument] via the canonical
  * [scanGlb]/[parseGltf]/[validateGltfFeatures] (ADR 0021's complete supported subset).
  *
  * The gate's identity alone selects the check, with no second discrimination on the content's resource
  * class, because [com.rohittp.reng.internal.resource.ordinaryResourceClassGates] is what pairs the two:
- * it names `DECODE_PNG` for exactly `STICKER_IMAGE` and `MODEL_TEXTURE`, and
+ * it names `DECODE_PNG` for exactly `BACKDROP_IMAGE` and `MODEL_TEXTURE`, `DECODE_STICKER_IMAGE` for
+ * `STICKER_IMAGE`, and
  * [com.rohittp.reng.internal.resource.AwaitingClassGate]'s own `init` refuses any cursor whose gate is
  * not that class's gate at that index. Nothing engine-keyed reaches here: the Rentile engine acquires and
  * validates its own seven classes through RenG's firewall, so RenG's driver never routes one.
@@ -95,6 +100,7 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
         if (passedGatesLock.withLock { identity in passedGates }) return SuppliedValidationOutcome.Valid
         val outcome = when (gate) {
             ResourceClassGate.DECODE_PNG -> runDecodePng(content)
+            ResourceClassGate.DECODE_STICKER_IMAGE -> runDecodeStickerImage(content)
             ResourceClassGate.PARSE_GLB -> runParseGlb(content)
             ResourceClassGate.VALIDATE_GLB_FEATURES -> runValidateGlbFeatures(content)
         }
@@ -136,6 +142,21 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
             PngDecodeResult.TooLarge,
             -> SuppliedValidationOutcome.Failed
         }
+
+    /**
+     * A PNG decodes as [runDecodePng] does; an ETC2 container (ADR 0084) is validated in full, framing
+     * and decoded-image ceiling, which is all there is to validate -- every block decodes.
+     */
+    private fun runDecodeStickerImage(content: ResolvedResourceContent): SuppliedValidationOutcome {
+        if (!isEtc2Container(content.stored.byteSnapshot)) return runDecodePng(content)
+        return when (parseEtc2Container(content.stored.byteSnapshot, limits.maximumDecodedImageBytes)) {
+            is Etc2ContainerResult.Admitted -> SuppliedValidationOutcome.Valid
+            Etc2ContainerResult.Malformed,
+            Etc2ContainerResult.Unsupported,
+            Etc2ContainerResult.TooLarge,
+            -> SuppliedValidationOutcome.Failed
+        }
+    }
 
     private fun runParseGlb(content: ResolvedResourceContent): SuppliedValidationOutcome =
         when (parseGlbDocument(content.stored.bytes)) {

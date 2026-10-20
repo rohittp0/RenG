@@ -8,6 +8,7 @@ import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
+import com.rohittp.reng.internal.image.etc2Header
 import com.rohittp.reng.internal.resource.ContentProvenance
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceClassGate
@@ -157,6 +158,49 @@ class ClassGateRunnerTest {
         )
     }
 
+    // ---- ADR 0084: a sticker image is a PNG or an ETC2 container, told apart by magic --------------
+
+    @Test
+    fun aStickerImageGateAdmitsAPngAndAnEtc2ContainerAndOnlyThoseToAPng() = runTest {
+        val sticker = ResourceClassGate.DECODE_STICKER_IMAGE
+        // A digest of its own for each, so no answer can come from the ADR 0060 memo.
+        suspend fun check(gate: ResourceClassGate, bytes: ByteArray, digest: Char) =
+            run(gate, stickerContent(bytes, digest.toString().repeat(64)))
+        assertEquals(SuppliedValidationOutcome.Valid, check(sticker, validPng, '1'))
+        assertEquals(SuppliedValidationOutcome.Valid, check(sticker, validEtc2, '2'))
+        assertIs<SuppliedValidationOutcome.Failed>(check(sticker, corruptPng, '3'))
+        assertIs<SuppliedValidationOutcome.Failed>(check(sticker, validEtc2.copyOf(validEtc2.size - 1), '4'))
+        assertIs<SuppliedValidationOutcome.Failed>(check(sticker, validGlb, '5'))
+        // The PNG-only gate, which a backdrop and a model texture keep, refuses the container.
+        assertIs<SuppliedValidationOutcome.Failed>(check(ResourceClassGate.DECODE_PNG, validEtc2, '6'))
+    }
+
+    @Test
+    fun aStickerContainersCeilingIsItsRgbaProjection() = runTest {
+        // 4x4, one level: 64 RGBA bytes, from 8 bytes of blocks.
+        assertIs<SuppliedValidationOutcome.Failed>(
+            RenGClassGateRunner(ResourceLimits(maximumDecodedImageBytes = 63L))
+                .run(ResourceClassGate.DECODE_STICKER_IMAGE, stickerContent(validEtc2)),
+        )
+        assertEquals(
+            SuppliedValidationOutcome.Valid,
+            RenGClassGateRunner(ResourceLimits(maximumDecodedImageBytes = 64L))
+                .run(ResourceClassGate.DECODE_STICKER_IMAGE, stickerContent(validEtc2)),
+        )
+    }
+
+    @Test
+    fun aStickerImagePassIsRememberedUnderItsOwnGate() = runTest {
+        val runner = RenGClassGateRunner(ResourceLimits())
+        val digest = "9".repeat(64)
+        assertEquals(
+            SuppliedValidationOutcome.Valid,
+            runner.run(ResourceClassGate.DECODE_STICKER_IMAGE, stickerContent(validEtc2, digest)),
+        )
+        assertTrue(runner.hasPassed(ResourceClassGate.DECODE_STICKER_IMAGE, digest))
+        assertFalse(runner.hasPassed(ResourceClassGate.DECODE_PNG, digest), "a container is not a PNG")
+    }
+
     // Every gate this runner can be handed is one RenG genuinely owns. There is no engine-validated
     // arm any more -- not a loud `error`, and (the anti-pattern that error existed to prevent) not a
     // silent `Valid` either -- because ResourceClassGate has no member for a check the Rentile engine
@@ -170,12 +214,13 @@ class ClassGateRunnerTest {
                 ResourceClassGate.DECODE_PNG,
                 ResourceClassGate.PARSE_GLB,
                 ResourceClassGate.VALIDATE_GLB_FEATURES,
+                ResourceClassGate.DECODE_STICKER_IMAGE,
             ),
             ResourceClassGate.entries.toSet(),
         )
         ResourceClassGate.entries.forEach { gate ->
             val content = when (gate) {
-                ResourceClassGate.DECODE_PNG -> stickerContent(validPng)
+                ResourceClassGate.DECODE_PNG, ResourceClassGate.DECODE_STICKER_IMAGE -> stickerContent(validPng)
                 ResourceClassGate.PARSE_GLB, ResourceClassGate.VALIDATE_GLB_FEATURES -> modelContent(validGlb)
             }
             assertEquals(SuppliedValidationOutcome.Valid, run(gate, content), gate.name)
@@ -285,6 +330,9 @@ private val interlacedPng: ByteArray = Base64.decode(
 private val large4096Png: ByteArray = Base64.decode(
     "iVBORw0KGgoAAAANSUhEUgAAEAAAABAACAIAAAB9wbNAAAAAAElFTkSuQmCC",
 )
+
+// A 4x4 single-level ETC2 RGB8 container (ADR 0084): the 16-byte header, then one all-zero block.
+private val validEtc2: ByteArray = etc2Header(formatCode = 1, levelCount = 1, width = 4, height = 4) + ByteArray(8)
 
 // Two ordinary RGB (colour type 2) images. Mapbox Terrain-RGB and Terrarium are mathematically
 // indistinguishable from decoded pixel bytes alone -- both are three eight-bit channels a caller-side

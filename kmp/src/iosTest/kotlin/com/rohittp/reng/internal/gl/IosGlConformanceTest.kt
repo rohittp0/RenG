@@ -94,7 +94,7 @@ class IosGlConformanceTest {
         val fixture = EaglOffscreenContext.create()
         try {
             val binding = bindOrFail()
-            assertEquals(92, GlEntryPoint.entries.size)
+            assertEquals(93, GlEntryPoint.entries.size)
 
             val profile = when (val adoption = adoptRenderContext(binding)) {
                 is RenderContextAdoption.Adopted -> adoption.profile
@@ -158,7 +158,7 @@ class IosGlConformanceTest {
             val report = runGlConformanceSuite(binding, fixture.probe, ShaderDialect.GLES)
             println("RenG iOS conformance renderer: ${report.rendererName} / ${report.versionText}")
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
             assertTrue(report.versionText.startsWith("OpenGL ES 3"))
         } finally {

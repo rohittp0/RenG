@@ -68,9 +68,10 @@ public enum class ResourceClass {
      * wire value or report-order entry moves, and both of the latter are explicit tables a
      * reordering would silently renumber.
      *
-     * It carries a sticker image's byte ceiling, accept value and `DECODE_PNG` gate, because it is
-     * the same kind of bytes. What it deliberately does not share is `STICKER_IMAGE`'s *list*:
-     * `RenGRenderer` pairs that class's references with `FramePlan.stickers` by index, and a
+     * It carries a sticker image's byte ceiling, because it is the same kind of bytes, but only the PNG
+     * half of a sticker image's form: the `DECODE_PNG` gate and a PNG accept value, never the ETC2
+     * container (ADR 0084). Nor does it share `STICKER_IMAGE`'s *list*: `RenGRenderer` pairs that
+     * class's references with `FramePlan.stickers` by index, and a
      * backdrop among them is an off-by-one in every sticker's texture.
      */
     BACKDROP_IMAGE,

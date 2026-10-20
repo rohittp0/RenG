@@ -162,7 +162,8 @@ sprite JSON) `4 MiB`; basemap vector/raster/DEM tile `32 MiB`; basemap sprite im
 `64 MiB`; sticker image `32 MiB`; model GLB `256 MiB`; and model texture `32 MiB`. A request carries its
 selected ceiling and oversize resident, stored, or transported content fails before decode or use. Two
 further ceilings bound work an encoded ceiling cannot: a decoded-image ceiling, decided from the declared
-image dimensions before any pixel buffer is allocated rather than after decompression; an image-decode
+image dimensions before any pixel buffer is allocated rather than after decompression -- for an **ETC2
+Container**, from every level's RGBA8 size, which bounds the CPU decode a context without ETC2 needs; an image-decode
 working-set ceiling, projected before allocation from the final RGBA image, two streaming scanlines, and the
 bounded premultiplication upload chunk; and a model JSON-chunk ceiling bounding a GLB's JSON chunk independently
 of the whole-GLB ceiling, because a parsed value tree costs far more than its text. Structural depth bounds —
@@ -291,8 +292,8 @@ _Avoid_: Quaternion, orientation matrix, intrinsic XYZ, moving-axis rotation
 
 **Scale**:
 A finite non-negative scalar converting asset-local units. Map-anchored scale is metres per local unit;
-screen-anchored scale is output pixels per local unit. Sticker local dimensions are encoded-image pixels,
-and Model local dimensions are GLB coordinates. Zero scale is valid. Planning requires the final converted
+screen-anchored scale is output pixels per local unit. Sticker local dimensions are encoded-image pixels --
+an **ETC2 Container**'s declared level-zero width and height, never its block-padded size -- and Model local dimensions are GLB coordinates. Zero scale is valid. Planning requires the final converted
 scale to remain finite as a GPU-bound Float and reports `fieldName=placement.scale` otherwise.
 _Avoid_: Size, zoom, density-independent scale
 
@@ -337,9 +338,20 @@ _Avoid_: Layer, pass, stage
 ### Drawn things
 
 **Sticker**:
-A **Placement** paired with one PNG image identified by a **Resource Locator**, drawn as a centred local XY
-quad whose width and height are the image's pixel dimensions, with +x right, +y up, and +z normal.
+A **Placement** paired with one image identified by a **Resource Locator** -- a PNG or an **ETC2 Container**,
+told apart by magic bytes -- drawn as a centred local XY quad whose width and height are the image's level-zero
+pixel dimensions, with +x right, +y up, and +z normal.
 _Avoid_: Marker, pin, decal, sprite
+
+**ETC2 Container**:
+The one compressed form a **Sticker** image may take (ADR 0084): the little-endian header `RET2`, version 1,
+a format (ETC2 RGB8, RGB8 punch-through alpha, or RGBA8 EAC), a level count, a zero byte and a `u32` width
+and height, then exactly that mip chain's blocks. Its texels are sRGB-encoded and already premultiplied, so
+nothing premultiplies them again. A context that samples ETC2 receives the blocks and the chain as they
+are; one that cannot -- Apple's desktop GL -- receives RGBA8 decoded per level by RenG, which is a
+capability of the context, chosen before the upload, and never a recovery from one that failed.
+No mip level is ever generated for it. Backdrop and model-texture images stay PNG-only.
+_Avoid_: KTX, texture file, GIF frame, compressed PNG
 
 **Model**:
 A **Placement** paired with one GLB mesh locator, an optional base-colour texture override, and its
@@ -677,7 +689,9 @@ and for the ones it proxies to Rentile. Requests carry the exact **Resource Loca
 selected **Resource Limits** byte ceiling, and only optional `ifNoneMatch`, `ifModifiedSince`, and `accept`
 metadata; their textual representation redacts the locator and all metadata values. A conditional `NORMAL`
 request sends exactly one validator, preferring a nonblank ETag over a nonblank last-modified value. Accept is
-fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract. Responses
+fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract, except that a
+sticker image accepts `image/x-reng-etc2, image/png` (ADR 0084). The response's content type never decides an
+image's form; its magic bytes do. Responses
 carry status, defensively copied bytes, and optional `contentType`, `etag`, `lastModified`, and
 `freshUntilEpochMillis`. Consumer response constructors snapshot and redact but deliberately admit malformed
 values; operation validation, not adapter-side construction, reports invalid status, bytes, metadata, or epochs

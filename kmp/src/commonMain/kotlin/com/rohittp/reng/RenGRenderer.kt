@@ -86,6 +86,7 @@ import com.rohittp.reng.internal.gl.StickerPipelineResult
 import com.rohittp.reng.internal.gl.TextureContent
 import com.rohittp.reng.internal.gl.TextureLease
 import com.rohittp.reng.internal.gl.TextureSamplerState
+import com.rohittp.reng.internal.gl.TextureStorage
 import com.rohittp.reng.internal.gl.UploadedPrimitive
 import com.rohittp.reng.internal.gl.allModelShaderVariants
 import com.rohittp.reng.internal.gl.ancestorOf
@@ -121,6 +122,8 @@ import com.rohittp.reng.internal.gl.offscreenSurfaceDescriptorFor
 import com.rohittp.reng.internal.gl.requireResolvedAtDrawTime
 import com.rohittp.reng.internal.gl.resolvedBackdropFor
 import com.rohittp.reng.internal.gl.composeBackdropInverseViewProjection
+import com.rohittp.reng.internal.gl.compressedSamplerState
+import com.rohittp.reng.internal.gl.uploadCompressedTexture
 import com.rohittp.reng.internal.gl.uploadDemTexture
 import com.rohittp.reng.internal.gl.uploadGlyphAtlas
 import com.rohittp.reng.internal.gl.uploadModelPrimitive
@@ -140,9 +143,14 @@ import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.ShaderPairMemo
+import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.Etc2ContainerResult
 import com.rohittp.reng.internal.image.PngDecodeResult
+import com.rohittp.reng.internal.image.TextureImage
 import com.rohittp.reng.internal.image.decodePng
+import com.rohittp.reng.internal.image.isEtc2Container
+import com.rohittp.reng.internal.image.parseEtc2Container
 import com.rohittp.reng.internal.image.projectedPngRgbaBytes
 import com.rohittp.reng.internal.label.FadedLabel
 import com.rohittp.reng.internal.label.LabelFadeState
@@ -229,7 +237,8 @@ import kotlinx.coroutines.sync.Mutex
 // `internal` visibility regardless -- none of it appears in the ABI dump.
 
 /**
- * One [Sticker]'s [Placement] paired with its decoded, not-yet-uploaded image and the [ResourceKey]
+ * One [Sticker]'s [Placement] paired with its not-yet-uploaded image -- a decoded PNG, or an ETC2 chain
+ * admitted without decoding (ADR 0084) -- and the [ResourceKey]
  * [FramePlanningCore]'s static traversal already derived for it — the same key
  * [RenGRenderer.performDraw]'s texture cache uses so a repeated draw of an unchanged sticker image
  * reuses its GL texture (Task 9b item 1) instead of re-uploading it every frame.
@@ -238,7 +247,7 @@ internal class PreparedSticker(
     internal val placement: Placement,
     internal val resourceKey: ResourceKey,
     internal val generationId: ResidentGenerationId,
-    internal val image: DecodedImage,
+    internal val image: TextureImage,
     internal val opacity: Float = 1f,
     internal val blend: BlendMode = BlendMode.OVER,
 )
@@ -886,6 +895,8 @@ private const val MATRIX4_PAYLOAD_BYTES: Long = 16L * 8L
  */
 private class FrameAcquisition(
     val decodedImagesByKey: Map<ResourceKey, DecodedImage>,
+    /** The sticker images that arrived as ETC2 containers, which are admitted rather than decoded (ADR 0084). */
+    val compressedImagesByKey: Map<ResourceKey, CompressedImage>,
     val basemapTiles: List<RenderedBasemapTile>,
     val preparedStyle: PreparedStyle?,
     /**
@@ -2186,9 +2197,10 @@ internal class RenGRenderer(
                     placement = sticker.placement,
                     resourceKey = reference.resourceKey,
                     generationId = generationIdFor(reference.resourceKey),
-                    image = requireNotNull(decodedByKey[reference.resourceKey]) {
-                        "a successful sticker acquisition must decode every traversed image"
-                    },
+                    image = acquired.compressedImagesByKey[reference.resourceKey]
+                        ?: requireNotNull(decodedByKey[reference.resourceKey]) {
+                            "a successful sticker acquisition must decode or admit every traversed image"
+                        },
                     opacity = sticker.opacity,
                     blend = sticker.blend,
                 )
@@ -2991,7 +3003,7 @@ internal class RenGRenderer(
     ): FrameAcquisition {
         val references = listOfNotNull(styleReference) + imageReferences + modelGlbReferences
         if (references.isEmpty()) {
-            return FrameAcquisition(emptyMap(), emptyList(), null, basemapStyleDigest = null)
+            return FrameAcquisition(emptyMap(), emptyMap(), emptyList(), null, basemapStyleDigest = null)
         }
 
         val admitLease: (Lease) -> Unit = { lease ->
@@ -3139,10 +3151,22 @@ internal class RenGRenderer(
         }
 
         val decodedByKey = LinkedHashMap<ResourceKey, DecodedImage>(imageReferences.size)
+        val compressedByKey = HashMap<ResourceKey, CompressedImage>()
         for (reference in imageReferences) {
             currentCoroutineContext().ensureActive()
             val generation = leasedGenerations[reference.resourceKey]
                 ?: error("a successful resource operation must leave this frame a lease on its content")
+            // ADR 0084. Told by magic bytes alone, as the class gate told it, and only for the one class
+            // whose gate admits it: any other class's container falls through to the PNG decode below and
+            // fails there. Nothing is decoded and nothing is attached -- the image is a view of the bytes
+            // this frame's lease already charged, and reading its header again is cheaper than a memo.
+            if (
+                reference.resourceClass == ResourceClass.STICKER_IMAGE &&
+                isEtc2Container(generation.stored.byteSnapshot)
+            ) {
+                compressedByKey[reference.resourceKey] = admitEtc2Sticker(generation, reference)
+                continue
+            }
             // Decoded once per generation, not once per frame (ADR 0059). The only consumer of these
             // pixels is `cachedTexture`'s upload lambda, which does not run once a texture is
             // registered -- so before this, every frame after a sticker's first decoded its PNG and
@@ -3175,18 +3199,7 @@ internal class RenGRenderer(
                 )
             ) {
                 is PngDecodeResult.Success -> decoded.image
-                else -> throw RenGException(
-                    code = RenGErrorCode.RESOURCE_DECODE_FAILED,
-                    stage = PipelineStage.RESOURCE_DECODING,
-                    diagnostics = listOf(
-                        failureContextDiagnostic(
-                            stage = PipelineStage.RESOURCE_DECODING,
-                            fieldName = DiagnosticField.RESOURCE,
-                            resourceClass = reference.resourceClass,
-                            resourceKey = reference.resourceKey,
-                        ),
-                    ),
-                )
+                else -> throw imageDecodeFailure(reference)
             }
             // Decode is synchronous and may dominate an image-heavy frame. Observe cancellation
             // before retaining its result or starting another image.
@@ -3212,6 +3225,7 @@ internal class RenGRenderer(
         }
         return FrameAcquisition(
             decodedByKey,
+            compressedByKey,
             basemapTiles,
             observedStyle,
             basemapStyleDigest,
@@ -3224,6 +3238,36 @@ internal class RenGRenderer(
             leasedGenerations = leasedGenerations,
         )
     }
+
+    /**
+     * Admits [generation]'s ETC2 container as the sticker image it names (ADR 0084), under the same
+     * decoded-image ceiling and failure its class gate applied.
+     */
+    private fun admitEtc2Sticker(
+        generation: ResidentGeneration,
+        reference: StaticResourceReference.External,
+    ): CompressedImage = when (
+        val admitted = parseEtc2Container(
+            generation.stored.byteSnapshot,
+            configuration.resourceLimits.maximumDecodedImageBytes,
+        )
+    ) {
+        is Etc2ContainerResult.Admitted -> admitted.image
+        else -> throw imageDecodeFailure(reference)
+    }
+
+    private fun imageDecodeFailure(reference: StaticResourceReference.External): RenGException = RenGException(
+        code = RenGErrorCode.RESOURCE_DECODE_FAILED,
+        stage = PipelineStage.RESOURCE_DECODING,
+        diagnostics = listOf(
+            failureContextDiagnostic(
+                stage = PipelineStage.RESOURCE_DECODING,
+                fieldName = DiagnosticField.RESOURCE,
+                resourceClass = reference.resourceClass,
+                resourceKey = reference.resourceKey,
+            ),
+        ),
+    )
 
     /**
      * This frame's style, read as the route-composition manifest both the ground and the labels need.
@@ -4108,14 +4152,24 @@ internal class RenGRenderer(
         binding: GlBinding,
     ): FailureDescriptor? {
         val sceneStickers = frame.stickers.map { preparedSticker ->
-            val texture = cachedTexture(
-                key = preparedSticker.resourceKey,
-                generationId = preparedSticker.generationId,
-                image = preparedSticker.image,
-                content = TextureContent.IMAGE,
-                leases = gpuAllocationLeases,
-                binding = binding,
-            )
+            val texture = when (val image = preparedSticker.image) {
+                is DecodedImage -> cachedTexture(
+                    key = preparedSticker.resourceKey,
+                    generationId = preparedSticker.generationId,
+                    image = image,
+                    content = TextureContent.IMAGE,
+                    leases = gpuAllocationLeases,
+                    binding = binding,
+                )
+                is CompressedImage -> cachedCompressedTexture(
+                    key = preparedSticker.resourceKey,
+                    generationId = preparedSticker.generationId,
+                    image = image,
+                    native = profile.supportsEtc2,
+                    leases = gpuAllocationLeases,
+                    binding = binding,
+                )
+            }
             SceneSticker(
                 placement = preparedSticker.placement,
                 texture = texture,
@@ -4753,22 +4807,62 @@ internal class RenGRenderer(
         binding: GlBinding,
         sampler: TextureSamplerState = defaultSamplerStateFor(content),
         subresource: GpuSubresource = GpuSubresource.Texture,
-    ): Int {
-        val identity = GpuResourceIdentity(
+    ): Int = leaseOrUploadTexture(
+        identity = GpuResourceIdentity(
             ownerKey = key,
             generationId = generationId,
             subresource = subresource,
             uploadVariant = GpuUploadVariant(content, sampler),
-        )
+        ),
+        leases = leases,
+        textureBytes = { textureAllocationBytes(image.width, image.height, sampler) },
+        upload = { uploadTexture(binding, image, content, sampler) },
+    )
+
+    /**
+     * [cachedTexture] for an ETC2 sticker (ADR 0084). Whether the context samples ETC2 is read from the
+     * profile at draw and is part of the upload's identity, so a texture decoded for one context is
+     * never handed to a draw that expected blocks, or the reverse. Its cost is what the GPU holds: the
+     * blocks themselves, or the RGBA8 they decoded to.
+     */
+    private fun cachedCompressedTexture(
+        key: ResourceKey,
+        generationId: ResidentGenerationId,
+        image: CompressedImage,
+        native: Boolean,
+        leases: MutableList<GpuAllocationLease>,
+        binding: GlBinding,
+    ): Int = leaseOrUploadTexture(
+        identity = GpuResourceIdentity(
+            ownerKey = key,
+            generationId = generationId,
+            subresource = GpuSubresource.Texture,
+            uploadVariant = GpuUploadVariant(
+                content = TextureContent.IMAGE,
+                sampler = compressedSamplerState(image),
+                storage = if (native) TextureStorage.ETC2 else TextureStorage.RGBA8,
+            ),
+        ),
+        leases = leases,
+        textureBytes = { if (native) image.payloadByteCount else image.rgbaByteCount },
+        upload = { uploadCompressedTexture(binding, image, native) },
+    )
+
+    private fun leaseOrUploadTexture(
+        identity: GpuResourceIdentity,
+        leases: MutableList<GpuAllocationLease>,
+        textureBytes: () -> Long,
+        upload: () -> Int,
+    ): Int {
         glObjectRegistry.leaseAllocation(identity)?.let { resident ->
             leases += resident.lease
             return resident.payload as Int
         }
-        val name = uploadTexture(binding, image, content, sampler)
+        val name = upload()
         leases += glObjectRegistry.registerAllocation(
             identity = identity,
             handles = listOf(GlObjectHandle(GlObjectType.TEXTURE, name)),
-            textureBytes = textureAllocationBytes(image.width, image.height, sampler),
+            textureBytes = textureBytes(),
             bufferBytes = 0L,
             payload = name,
         )

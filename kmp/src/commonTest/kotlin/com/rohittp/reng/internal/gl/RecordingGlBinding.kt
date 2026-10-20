@@ -8,7 +8,8 @@ package com.rohittp.reng.internal.gl
  * matrices, shader source) are omitted from the log line itself since they carry no stable
  * string form, but every one of them is still recoverable from a dedicated backing field
  * ([deletedNames], [lastDrawBuffers], [bufferDataPayloads], [bufferSubDataPayloads],
- * [uniformMatrix4fvValues], [shaderSources], [pixels], [lastTexImageBytes]) so a test can assert on
+ * [uniformMatrix4fvValues], [shaderSources], [pixels], [lastTexImageBytes],
+ * [compressedTexImage2DPayloads]) so a test can assert on
  * exactly what was passed, not merely that something of a given size was passed. Query results are driven
  * by the public mutable fields below, which tests set up before exercising a binding
  * consumer. This class lives only in `commonTest` and is never part of production source.
@@ -63,6 +64,7 @@ internal class RecordingGlBinding : GlBinding {
     private var lastTexImage2DWidth: Int = 0
     private var lastTexImage2DHeight: Int = 0
     val texSubImage2DPayloads: MutableList<ByteArray> = mutableListOf()
+    val compressedTexImage2DPayloads: MutableList<ByteArray> = mutableListOf()
 
     private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
 
@@ -219,6 +221,14 @@ internal class RecordingGlBinding : GlBinding {
 
     /** The reconstructed level-zero bytes after the most recent image and sub-image upload calls. */
     fun lastTexImageBytes(): List<Byte> = lastTexImage2DPixels?.toList().orEmpty()
+
+    override fun compressedTexImage2D(
+        target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+        border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+    ) {
+        log += "compressedTexImage2D(${hex(target)},$level,${hex(internalFormat)},$width,$height,$border,$imageSize)"
+        compressedTexImage2DPayloads += data.copyOfRange(dataOffset, dataOffset + imageSize)
+    }
 
     override fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int) {
         log += "texStorage2D(${hex(target)},$levels,${hex(internalFormat)},$width,$height)"

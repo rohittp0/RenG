@@ -610,7 +610,7 @@ class ResourceOperationOrdinaryCommitTest {
             singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.TRANSPORT_200),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
-        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "acknowledged write")
+        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_STICKER_IMAGE), "acknowledged write")
         val write = assertIs<WriteStore>(driver.actions.single())
         val writeState = driver.state
         val writeRecord = writeState.routeRecords.single()
@@ -652,7 +652,7 @@ class ResourceOperationOrdinaryCommitTest {
                     routeRecords = listOf(
                         routeRecord(
                             acknowledged,
-                            AwaitingClassGate(install.actionId, 0L, content, 0, ResourceClassGate.DECODE_PNG),
+                            AwaitingClassGate(install.actionId, 0L, content, 0, ResourceClassGate.DECODE_STICKER_IMAGE),
                         ),
                     ),
                 )
@@ -670,7 +670,7 @@ class ResourceOperationOrdinaryCommitTest {
         residentDriver.driveToPendingClassGates(0L, ContentProvenance.RESIDENT)
         val residentContent = residentDriver.passGates(
             0L,
-            listOf(ResourceClassGate.DECODE_PNG),
+            listOf(ResourceClassGate.DECODE_STICKER_IMAGE),
             "resident install",
         )
         val residentInstall = assertIs<InstallVisibility>(residentDriver.actions.single())
@@ -807,7 +807,7 @@ class ResourceOperationOrdinaryCommitTest {
             singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.TRANSPORT_200),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
-        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "write copy")
+        val content = driver.passGates(0L, listOf(ResourceClassGate.DECODE_STICKER_IMAGE), "write copy")
         val write = assertIs<WriteStore>(driver.actions.single())
 
         assertEquals(content.stored, write.resource)
@@ -851,7 +851,7 @@ class ResourceOperationOrdinaryCommitTest {
             singleRouteDefinition(ResourceClass.STICKER_IMAGE, ContentProvenance.RESIDENT),
         )
         driver.driveToPendingClassGates(0L, ContentProvenance.RESIDENT)
-        driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "success guards")
+        driver.passGates(0L, listOf(ResourceClassGate.DECODE_STICKER_IMAGE), "success guards")
         val install = assertIs<InstallVisibility>(driver.actions.single())
         val installState = driver.state
         val record = installState.routeRecords.single()
@@ -914,14 +914,14 @@ class ResourceOperationOrdinaryCommitTest {
     fun ownerResourceSetsKeepEveryDistinctVisibleResourceOfOneKey() {
         val driver = CommitDriver(sharedIdentityDefinition())
         driver.driveToPendingClassGates(0L, ContentProvenance.TRANSPORT_200)
-        val transported = driver.passGates(0L, listOf(ResourceClassGate.DECODE_PNG), "transported")
+        val transported = driver.passGates(0L, listOf(ResourceClassGate.DECODE_STICKER_IMAGE), "transported")
         val write = assertIs<WriteStore>(driver.actions.single())
         driver.event(StoreWriteCompleted(write.actionId, SuppliedCallOutcome.Success(Unit)))
         val transportedInstall = assertIs<InstallVisibility>(driver.actions.single())
         driver.event(VisibilityInstallCompleted(transportedInstall.actionId, SuppliedInstallOutcome.Succeeded))
 
         driver.driveToPendingClassGates(1L, ContentProvenance.RESIDENT)
-        val resident = driver.passGates(1L, listOf(ResourceClassGate.DECODE_PNG), "resident")
+        val resident = driver.passGates(1L, listOf(ResourceClassGate.DECODE_STICKER_IMAGE), "resident")
         val residentInstall = assertIs<InstallVisibility>(driver.actions.single())
         driver.event(VisibilityInstallCompleted(residentInstall.actionId, SuppliedInstallOutcome.Succeeded))
 
@@ -999,7 +999,7 @@ private val UNGATED_CLASSES: Set<ResourceClass> = setOf(
 )
 
 private val ORDINARY_CLASS_GATES: Map<ResourceClass, List<ResourceClassGate>> = mapOf(
-    ResourceClass.STICKER_IMAGE to listOf(ResourceClassGate.DECODE_PNG),
+    ResourceClass.STICKER_IMAGE to listOf(ResourceClassGate.DECODE_STICKER_IMAGE),
     ResourceClass.BACKDROP_IMAGE to listOf(ResourceClassGate.DECODE_PNG),
     ResourceClass.MODEL_GLB to listOf(
         ResourceClassGate.PARSE_GLB,
@@ -1010,7 +1010,9 @@ private val ORDINARY_CLASS_GATES: Map<ResourceClass, List<ResourceClassGate>> = 
 
 private fun expectedGateFailure(gate: ResourceClassGate): Pair<RenGErrorCode, PipelineStage> = when (gate) {
     ResourceClassGate.PARSE_GLB -> RenGErrorCode.RESOURCE_PARSE_FAILED to PipelineStage.RESOURCE_PARSING
-    ResourceClassGate.DECODE_PNG -> RenGErrorCode.RESOURCE_DECODE_FAILED to PipelineStage.RESOURCE_DECODING
+    ResourceClassGate.DECODE_PNG,
+    ResourceClassGate.DECODE_STICKER_IMAGE,
+    -> RenGErrorCode.RESOURCE_DECODE_FAILED to PipelineStage.RESOURCE_DECODING
     ResourceClassGate.VALIDATE_GLB_FEATURES ->
         RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE to PipelineStage.RESOURCE_PARSING
 }

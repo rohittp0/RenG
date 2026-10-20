@@ -8,11 +8,11 @@ import com.rohittp.reng.internal.freshCopy
  * terrain and upload code consume the immutable storage without first duplicating the whole raster.
  */
 internal class DecodedImage private constructor(
-    val width: Int,
-    val height: Int,
+    override val width: Int,
+    override val height: Int,
     rgba: ByteArray,
     takeOwnership: Boolean,
-) {
+) : TextureImage {
     constructor(width: Int, height: Int, rgba: ByteArray) : this(width, height, rgba, takeOwnership = false)
 
     private val bytes: ByteArray = if (takeOwnership) rgba else rgba.freshCopy()

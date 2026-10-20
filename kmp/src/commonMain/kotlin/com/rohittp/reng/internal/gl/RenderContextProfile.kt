@@ -92,7 +92,14 @@ internal data class RenderContextProfile(
     val maxColorAttachments: Int,
     val maxCombinedTextureImageUnits: Int,
     val supportsHalfFloatColourBuffer: Boolean = false,
-)
+) {
+    /**
+     * Whether this context samples ETC2 and EAC textures itself (ADR 0084): every ES 3.0 context must,
+     * and a desktop one does when it advertises [ES3_COMPATIBILITY_EXTENSION]. Apple's GL 4.1 does not,
+     * so on macOS a compressed sticker is decoded on the CPU instead.
+     */
+    val supportsEtc2: Boolean get() = dialect == ShaderDialect.GLES || supportsEs3Compatibility
+}
 
 internal sealed interface RenderContextAdoption {
     data class Adopted(val profile: RenderContextProfile) : RenderContextAdoption

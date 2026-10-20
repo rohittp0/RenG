@@ -105,4 +105,6 @@ internal enum class GlEntryPoint(internal val cName: String) {
     GET_INTEGERI_V("glGetIntegeri_v"),
     // Appended so every existing Linux function-table ordinal remains stable.
     TEX_SUB_IMAGE_2D("glTexSubImage2D"),
+    // ADR 0084's compressed stickers. Appended for the same ordinal stability.
+    COMPRESSED_TEX_IMAGE_2D("glCompressedTexImage2D"),
 }

@@ -291,7 +291,7 @@ class CycleBPureCoreContractTest {
 
         assertEquals(
             listOf(
-                ResourceClassGate.DECODE_PNG,
+                ResourceClassGate.DECODE_STICKER_IMAGE,
                 ResourceClassGate.PARSE_GLB,
                 ResourceClassGate.VALIDATE_GLB_FEATURES,
                 ResourceClassGate.DECODE_PNG,
@@ -692,7 +692,7 @@ class CycleBPureCoreContractTest {
         ordinary.driveToPendingContent(0L, ContentProvenance.STORE)
         ordinary.event(AdvancePendingClassGates(0L))
         val ordinaryGate = assertIs<ValidateResourceClass>(ordinary.actions.single())
-        assertEquals(ResourceClassGate.DECODE_PNG, ordinaryGate.gate)
+        assertEquals(ResourceClassGate.DECODE_STICKER_IMAGE, ordinaryGate.gate)
         val ordinaryContent = ordinary.candidate(0L)
         ordinary.event(
             ResourceClassValidationCompleted(ordinaryGate.actionId, SuppliedValidationOutcome.Failed),

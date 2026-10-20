@@ -615,6 +615,12 @@ internal enum class ResourceClassGate {
     DECODE_PNG,
     PARSE_GLB,
     VALIDATE_GLB_FEATURES,
+
+    /**
+     * A sticker image is a PNG or a RenG ETC2 container, told apart by magic bytes alone so the verdict
+     * stays a pure function of the content digest the pass memo keys it by (ADR 0084).
+     */
+    DECODE_STICKER_IMAGE,
 }
 
 /**
@@ -640,7 +646,7 @@ internal enum class ResourceClassGate {
  */
 internal fun ordinaryResourceClassGates(resourceClass: ResourceClass): List<ResourceClassGate>? =
     when (resourceClass) {
-        ResourceClass.STICKER_IMAGE -> listOf(ResourceClassGate.DECODE_PNG)
+        ResourceClass.STICKER_IMAGE -> listOf(ResourceClassGate.DECODE_STICKER_IMAGE)
         ResourceClass.BACKDROP_IMAGE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_TEXTURE -> listOf(ResourceClassGate.DECODE_PNG)
         ResourceClass.MODEL_GLB -> listOf(

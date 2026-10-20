@@ -97,6 +97,8 @@ internal fun runGlConformanceSuite(
     checks += "offscreen-composite"
     assertLifecycleUnderARealContext(binding, probe, profile)
     checks += "lifecycle"
+    assertEtc2DecodesAsTheDriverDoes(binding, profile)
+    checks += "etc2-decode"
 
     return GlConformanceReport(
         dialect = profile.dialect,
@@ -123,7 +125,7 @@ private fun assertContextAdoption(
 }
 
 private fun assertEntryPointInventory(binding: GlBinding) {
-    assertEquals(92, GlEntryPoint.entries.size)
+    assertEquals(93, GlEntryPoint.entries.size)
     assertTrue(binding.getString(GL_VENDOR)?.isNotBlank() == true)
 
     val names = IntArray(1)

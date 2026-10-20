@@ -156,15 +156,15 @@ class ResourcesTest {
             ResourceClass.BASEMAP_SPRITE_JSON to Pair(4L * mib, "application/json"),
             ResourceClass.BASEMAP_SPRITE_IMAGE to Pair(32L * mib, "image/png"),
             ResourceClass.BASEMAP_GEO_JSON to Pair(64L * mib, "application/json"),
-            ResourceClass.STICKER_IMAGE to Pair(32L * mib, "image/png"),
+            ResourceClass.STICKER_IMAGE to Pair(32L * mib, "image/x-reng-etc2, image/png"),
             ResourceClass.MODEL_GLB to Pair(256L * mib, "model/gltf-binary"),
             ResourceClass.MODEL_TEXTURE to Pair(32L * mib, "image/png"),
             // The one class whose ceiling is an internal constant rather than a ResourceLimits field:
             // GLYPH_RANGE_ROUTE_CEILING_BYTES, sized above the engine's own 1 MiB maxGlyphRangeBytes so
             // that Rentile's refusal is the operative one. A twelfth public limit was declined.
             ResourceClass.BASEMAP_GLYPH_RANGE to Pair(4L * mib, "application/x-protobuf"),
-            // ADR 0068. A sticker image's ceiling and accept value, because it is the same kind of
-            // bytes; what it does not share is that class's positionally-paired traversal list.
+            // ADR 0068. A sticker image's ceiling, because it is the same kind of bytes; what it does not
+            // share is that class's positionally-paired traversal list, nor its ETC2 form (ADR 0084).
             ResourceClass.BACKDROP_IMAGE to Pair(32L * mib, "image/png"),
         )
 

@@ -87,7 +87,7 @@ class AndroidGlConformanceTest {
      * as a silent wrong answer somewhere later.
      */
     @Test fun everyRosterEntryPointResolvesOnThisDriver() {
-        assertEquals(92, GlEntryPoint.entries.size)
+        assertEquals(93, GlEntryPoint.entries.size)
         withCurrentContext { binding ->
             val adoption = adoptRenderContext(binding)
             val adopted = adoption as? RenderContextAdoption.Adopted
@@ -115,7 +115,7 @@ class AndroidGlConformanceTest {
                     "sl=${report.shadingLanguageVersionText} checks=${report.checks}",
             )
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
         } finally {
             fixture.destroy()

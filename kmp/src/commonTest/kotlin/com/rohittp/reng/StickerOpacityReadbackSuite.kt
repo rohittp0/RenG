@@ -64,6 +64,28 @@ internal fun runStickerOpacityReadbackSuite(
                 BlendMode.ADDITIVE,
                 AnchoringMode.MAP,
             ),
+            // ADR 0084. Decoded on the CPU where the context cannot sample ETC2 (macOS), uploaded as
+            // blocks everywhere else. Its texels arrive premultiplied, so a second multiply would
+            // darken the colour this reads.
+            StickerOpacityReadbackCase(
+                "etc2 premultiplied over",
+                1f,
+                BlendMode.OVER,
+                AnchoringMode.SCREEN,
+                url = ETC2_PREMULTIPLIED_URL,
+                texel = ETC2_PREMULTIPLIED_TEXEL,
+            ),
+            // Sixteen texels drawn across 3.2 pixels minify to level 2 and below, which the container
+            // paints a colour of its own; sampling level 0, or a generated chain, would read red.
+            StickerOpacityReadbackCase(
+                "etc2 mip chain minified",
+                1f,
+                BlendMode.OVER,
+                AnchoringMode.SCREEN,
+                url = ETC2_MIP_URL,
+                texel = ETC2_SMALL_LEVEL_TEXEL,
+                scale = 0.2,
+            ),
         ).forEachIndexed { frameIndex, case ->
             failures.run(case.name) {
                 val actual = clearDrawAndReadSticker(
@@ -76,9 +98,11 @@ internal fun runStickerOpacityReadbackSuite(
                         case.opacity,
                         case.blend,
                         case.positionMode,
+                        case.url,
+                        case.scale,
                     ),
                 )
-                val expected = expectedStickerPixel(case.opacity, case.blend)
+                val expected = expectedStickerPixel(case.texel, case.opacity, case.blend)
                 println(
                     "RenG sticker opacity readback: dialect=$dialect case=${case.name} " +
                         "actual=${actual.contentToString()} expected=${expected.contentToString()}",
@@ -102,6 +126,8 @@ private fun stickerOpacityFramePlan(
     opacity: Float,
     blend: BlendMode,
     positionMode: AnchoringMode,
+    url: String,
+    scale: Double,
 ): FramePlan = FramePlan(
     frameIndex = frameIndex,
     camera = Camera(-55.0, -135.0, 4.0, 0.0, 0.0),
@@ -118,9 +144,9 @@ private fun stickerOpacityFramePlan(
                 rotationMode = AnchoringMode.SCREEN,
                 rotation = Vector3(0.0, 0.0, 0.0),
                 scaleMode = AnchoringMode.SCREEN,
-                scale = 4.0,
+                scale = scale,
             ),
-            image = ResourceLocator(STICKER_OPACITY_URL),
+            image = ResourceLocator(url),
             opacity = opacity,
             blend = blend,
         ),
@@ -134,17 +160,21 @@ private fun stickerOpacityFramePlan(
     ),
 )
 
-private data class StickerOpacityReadbackCase(
+private class StickerOpacityReadbackCase(
     val name: String,
     val opacity: Float,
     val blend: BlendMode,
     val positionMode: AnchoringMode,
+    val url: String = STICKER_OPACITY_URL,
+    /** The premultiplied texel the sticker samples at the read pixel. */
+    val texel: IntArray = STICKER_SOURCE,
+    val scale: Double = 4.0,
 )
 
-private fun expectedStickerPixel(opacity: Float, blend: BlendMode): IntArray {
-    val sourceAlpha = opacity.toDouble()
-    val rgb = STICKER_SOURCE.take(3).mapIndexed { channel, byte ->
-        val source = byte / 255.0 * sourceAlpha
+private fun expectedStickerPixel(texel: IntArray, opacity: Float, blend: BlendMode): IntArray {
+    val sourceAlpha = texel[3] / 255.0 * opacity
+    val rgb = texel.take(3).mapIndexed { channel, byte ->
+        val source = byte / 255.0 * opacity
         val destination = STICKER_BACKGROUND[channel] / 255.0
         val result = when (blend) {
             BlendMode.OVER -> source + destination * (1.0 - sourceAlpha)
@@ -219,14 +249,52 @@ private fun createStickerOpacityReadbackTarget(binding: GlBinding): Int {
 
 private class StickerOpacityTransport : Transport {
     override suspend fun execute(request: TransportRequest): TransportResponse {
-        check(request.locator.value == STICKER_OPACITY_URL)
+        val (body, contentType) = when (request.locator.value) {
+            STICKER_OPACITY_URL -> STICKER_OPACITY_PNG to "image/png"
+            ETC2_PREMULTIPLIED_URL -> ETC2_PREMULTIPLIED to "image/x-reng-etc2"
+            ETC2_MIP_URL -> ETC2_MIP_CHAIN to "image/x-reng-etc2"
+            else -> error("unexpected sticker locator")
+        }
         return TransportResponse(
             statusCode = 200,
-            body = STICKER_OPACITY_PNG,
-            metadata = TransportResponseMetadata(contentType = "image/png"),
+            body = body,
+            metadata = TransportResponseMetadata(contentType = contentType),
         )
     }
 }
+
+/**
+ * One flat individual-mode ETC2 colour block (ADR 0084): both halves the 4-bit colour
+ * `(red, green, blue)`, codeword 0 and every index 0, so every texel is `nibble * 17 + 2`, clamped.
+ * Bit 63 is the first byte's top bit; the differential bit 33 and everything below it stay zero.
+ */
+private fun flatEtc2Block(red: Int, green: Int, blue: Int): ByteArray =
+    byteArrayOf((red shl 4 or red).toByte(), (green shl 4 or green).toByte(), (blue shl 4 or blue).toByte(), 0, 0, 0, 0, 0)
+
+/** The 16-byte container header for a one-format container of [levels] levels, little-endian. */
+private fun etc2Header(format: Int, levels: Int, width: Int, height: Int): ByteArray =
+    "RET2".encodeToByteArray() + byteArrayOf(1, format.toByte(), levels.toByte(), 0) +
+        byteArrayOf(width.toByte(), 0, 0, 0, height.toByte(), 0, 0, 0)
+
+// 4x4, RGBA8 EAC: an EAC block of base 128 and multiplier 0 (alpha 128 everywhere) before a flat
+// (2, 4, 6) colour block, which reads (36, 70, 104) -- already premultiplied by 128 / 255.
+private const val ETC2_PREMULTIPLIED_URL: String = "https://stickers.example/premultiplied.reng-etc2"
+private val ETC2_PREMULTIPLIED: ByteArray =
+    etc2Header(format = 3, levels = 1, width = 4, height = 4) + byteArrayOf(-128, 0, 0, 0, 0, 0, 0, 0) +
+        flatEtc2Block(2, 4, 6)
+private val ETC2_PREMULTIPLIED_TEXEL: IntArray = intArrayOf(36, 70, 104, 128)
+
+// 16x16 RGB8, all five levels: 16x16 and 8x8 flat red (255, 2, 2); 4x4, 2x2 and 1x1 flat green (2, 255, 2).
+private const val ETC2_MIP_URL: String = "https://stickers.example/mip-chain.reng-etc2"
+private val ETC2_MIP_CHAIN: ByteArray = run {
+    var bytes = etc2Header(format = 1, levels = 5, width = 16, height = 16)
+    listOf(16, 4, 1, 1, 1).forEachIndexed { level, blocks ->
+        val block = if (level < 2) flatEtc2Block(15, 0, 0) else flatEtc2Block(0, 15, 0)
+        repeat(blocks) { bytes += block }
+    }
+    bytes
+}
+private val ETC2_SMALL_LEVEL_TEXEL: IntArray = intArrayOf(2, 255, 2, 255)
 
 private class StickerOpacityCollectedFailures {
     private val failures = ArrayList<String>()

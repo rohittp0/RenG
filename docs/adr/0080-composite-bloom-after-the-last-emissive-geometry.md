@@ -44,3 +44,17 @@ cover an earlier emitter must place it after the final emitter.
 
 This amends ADR 0074's phase placement. ADRs 0024, 0025, 0027, 0030, 0034 and 0073 keep their draw
 order and state contracts.
+
+## Amendment, 2026-10-21: the restored uniforms are the normal pass's whole history
+
+"The last consumer values its normal pass bound" restored only that draw's own uniforms. A uniform it
+omitted kept whatever an emission redraw had set: with emitters E1 (`v = 1`) and E2 (`u = 2`, the last
+emitter) sharing a program with an ordinary Geometry N (`v = 9`) between them, the normal pass leaves
+`v` at 9, the emission redraw leaves it at 1, and restoring only E2's values let the next Geometry on
+that program that omits `v` draw with 1. RenG now merges, per program, every uniform each normal draw
+set, in draw order, up to the bloom phase, and rebinds that merged set on each program a redraw
+touched, so the program holds what the normal pass would have left had Bloom not run. Texture units
+and sampler uniforms are still rebound from the last normal draw on the program. A uniform the frame
+had not set on the program before the bloom phase, but a redraw did, cannot be restored: RenG does
+not query what the program held before the frame. The history is kept only on frames with an
+emitter; a frame without one does nothing new. ADR 0085's far redraw starts from the same history.

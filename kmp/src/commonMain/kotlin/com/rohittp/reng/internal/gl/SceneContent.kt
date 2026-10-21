@@ -601,11 +601,11 @@ internal class SceneContent(
             } else {
                 null
             }
-            // ADR 0085: what each program's consumer uniforms hold when the bloom phase starts, as far
-            // as this frame set them, kept only when a far band may redraw an emitter.
-            val normalUniformsByProgram = if (lastEmissiveGeometryIndex >= 0 &&
-                scene.geometries.any { it.geometry.emissive && it.geometry.bloomReach > 0f }
-            ) {
+            // ADR 0080 (2026-10-21 amendment) and ADR 0085: what each program's consumer uniforms hold
+            // when the bloom phase starts, as far as this frame set them, every normal draw's merged
+            // over the earlier ones. Kept only on a frame with a bloom phase, which restores it after
+            // its redraws and starts its far band from it.
+            val normalUniformsByProgram = if (lastEmissiveGeometryIndex >= 0) {
                 HashMap<Int, HashMap<String, ShaderValue>>()
             } else {
                 null
@@ -657,7 +657,7 @@ internal class SceneContent(
                         binding,
                         sceneGeometry.geometry.blend,
                         checkNotNull(lastNormalGeometryByProgram),
-                        normalUniformsByProgram.orEmpty(),
+                        checkNotNull(normalUniformsByProgram),
                     )
                     currentBlend = null
                 }
@@ -806,8 +806,13 @@ internal class SceneContent(
         applyPremultipliedBlendMode(binding, geometryBlend)
 
         // Consumer locations belong to a shared program and omitted values deliberately retain that
-        // program's previous value. Emission redraws disturb that history, so reconstruct the normal
-        // pass's last consumer bind for each program the redraw touched before the loop continues.
+        // program's previous value. Emission and far redraws disturb that history, so before the loop
+        // continues every program they touched gets back every uniform the normal pass had set on it
+        // (ADR 0080's 2026-10-21 amendment): the merged history, not only the last normal draw's own
+        // values, which would leave a uniform that draw omitted at a redraw's value. Texture units and
+        // sampler uniforms are rebound from the last normal draw on the program, as before. A uniform
+        // the frame had not set on the program before the bloom phase cannot be restored: RenG does
+        // not query what the program held before the frame.
         for (normalGeometry in scene.geometries) {
             val program = normalGeometry.pipeline.program
             if (lastNormalGeometryByProgram[program] !== normalGeometry) continue
@@ -816,7 +821,7 @@ internal class SceneContent(
             bindConsumerValues(
                 binding = binding,
                 locate = { name -> normalGeometry.pipeline.consumerLocation(binding, name) },
-                uniforms = normalGeometry.consumerUniforms,
+                uniforms = normalUniformsByProgram[program] ?: normalGeometry.consumerUniforms,
                 textures = normalGeometry.consumerTextures,
             )
         }

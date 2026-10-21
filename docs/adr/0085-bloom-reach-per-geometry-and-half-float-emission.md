@@ -43,7 +43,8 @@ ordinary emission redraw:
    so the consumer's own value is restored when the draw returns.
 
    "Consumer values" includes the ones an emitter omits and so inherits from its program (ADR 0008).
-   RenG tracks, per program, every uniform the frame's normal pass set before the emission redraw,
+   RenG tracks, per program, every uniform the frame's normal pass set before the emission redraw
+   (the same history ADR 0080's amended restore rebinds after the bloom phase),
    then walks the emitters in the emission redraw's order merging each drawn one's uniforms over it,
    and draws each reaching emitter with that merged set: the values its emission redraw saw. The one
    uniform that can still differ is one nothing earlier in the frame set but a later emitter does:
@@ -158,4 +159,5 @@ Cost and the phone GPU are measured in Travel Animator, not here.
 - Half-float costs bandwidth on every bloom target it touches; it is opt-in for that reason.
 
 This extends ADRs 0074 and 0080 (a second redraw inside the bloom phase, which leaves the same restored
-state and reconstructs the same consumer-uniform history) and leaves 0082 and 0083's composite as it was.
+state; after both redraws each touched program gets back the normal pass's merged uniform history, per
+ADR 0080's 2026-10-21 amendment) and leaves 0082 and 0083's composite as it was.

@@ -1311,6 +1311,70 @@ class SceneContentTest {
     }
 
     /**
+     * ADR 0080's 2026-10-21 amendment: after the bloom phase a program holds every uniform the normal
+     * pass had set on it, not only the last normal draw's own. E1 sets `v` 1, N sets it 9, E2 (the
+     * last emitter, and so the last normal draw on P) sets only `u`. The emission redraw leaves `v`
+     * at E1's 1; restoring only E2's values would leave it there, and G, which omits `v`, would draw
+     * with 1 instead of the normal pass's 9.
+     */
+    @Test
+    fun bloomRestoresEveryUniformTheNormalPassHadSetOnARedrawnProgram() {
+        val uLocation = 61
+        val vLocation = 62
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "u" to uLocation,
+            "v" to vLocation,
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(emissive: Boolean, vararg values: Pair<String, Float>) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipelineP,
+            consumerUniforms = values.associate { (name, value) -> name to ShaderValue.Scalar(value) },
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                geometry(emissive = true, "v" to 1f),
+                geometry(emissive = false, "v" to 9f),
+                geometry(emissive = true, "u" to 2f),
+                geometry(emissive = false),
+            ),
+        )
+        binding.log.clear()
+        SceneContent(
+            camera = topDownCamera(),
+            scene = scene,
+            stickerPipeline = newStickerPipeline(),
+            groundPipeline = newGroundPipeline(),
+            bloom = Bloom(),
+            bloomResources = resources,
+            surfaceFramebuffer = 55,
+            surfaceDepthRenderbuffer = 77,
+        ).draw(binding)
+
+        var program = 0
+        var u: Float? = null
+        var v: Float? = null
+        val drawn = ArrayList<Pair<Float?, Float?>>()
+        for (call in binding.log) {
+            when {
+                call.startsWith("useProgram(") -> program = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+                program != pipelineP.program -> Unit
+                call.startsWith("uniform1f($uLocation,") -> u = call.substringAfter(",").removeSuffix(")").toFloat()
+                call.startsWith("uniform1f($vLocation,") -> v = call.substringAfter(",").removeSuffix(")").toFloat()
+                call.startsWith("drawElements") -> drawn += u to v
+            }
+        }
+        // Normal E1, N, E2; emission redraws E1, E2; then G.
+        assertEquals(6, drawn.size, drawn.toString())
+        assertEquals(listOf<Pair<Float?, Float?>>(null to 1f, null to 9f, 2f to 9f), drawn.take(3), "the normal pass")
+        assertEquals(2f to 9f, drawn.last(), "G must inherit the normal pass's u and v, not the redraw's v: $drawn")
+    }
+
+    /**
      * Consumer programs are shared by shader pair, and a Geometry is allowed to omit a uniform so
      * it inherits that program's previous value. The emission redraw must not replace the normal
      * pass's program history: here G must inherit X's 5, not E1's redrawn 1.

@@ -56,6 +56,14 @@ public enum class DiagnosticCode {
 
     /** Bloom GPU resources could not be created, so the frame drew without bloom. */
     BLOOM_UNAVAILABLE,
+
+    /**
+     * The frame asked for `Bloom.highPrecisionEmission` but its bloom used the RGBA8 emission chain,
+     * because the context cannot render to half-float colour or refused a half-float target (ADR
+     * 0085), so emitted light above one was clipped. A frame that did get the half-float chain
+     * reports nothing. Appended last, so no existing constant's ordinal moves.
+     */
+    BLOOM_EMISSION_PRECISION_REDUCED,
 }
 
 @ConsistentCopyVisibility
@@ -231,6 +239,19 @@ public data class Diagnostic internal constructor(
                     fieldName == null && resourceClass == null && resourceKey == null &&
                         statusCode == null && limit == null,
                 ) { "bloom-unavailable diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "bloom-emission-precision diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "bloom emission precision is decided during draw"
+                }
+                require(
+                    fieldName == null && resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "bloom-emission-precision diagnostics carry no further context" }
             }
         }
     }

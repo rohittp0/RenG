@@ -171,6 +171,49 @@ class FramePlanCanonicalEncodingTest {
     }
 
     /**
+     * ADR 0085: the new Bloom and Geometry fields are encoded only away from their defaults, so a
+     * frame that leaves them alone keeps the identity it had before they existed -- the bytes of a
+     * default-valued field are absent, not merely equal -- while each non-default value moves the
+     * identity on its own.
+     */
+    @Test
+    fun bloomReachAndPrecisionFieldsMoveTheIdentityOnlyAwayFromTheirDefaults() {
+        val base = encoder.encode(representativeFieldsPlan(bloom = Bloom()))
+        val explicitDefaults = encoder.encode(
+            representativeFieldsPlan(
+                bloom = Bloom(highPrecisionEmission = false, reachLevel = 3, reachGain = 1f),
+                geometries = listOf(geometry("vertex-a").copy(bloomReach = 0f)),
+            ),
+        )
+        assertEquals(base.identity, explicitDefaults.identity)
+        // The pre-ADR-0085 Bloom payload: four fields, tags 1 to 4, nothing after.
+        val bloomIndex = allSegments.indexOf(FramePlanSegment.BLOOM)
+        assertEquals(
+            encoder.encode(representativeFieldsPlan(bloom = Bloom(intensity = 1f))).segmentPayloads[bloomIndex],
+            base.segmentPayloads[bloomIndex],
+        )
+
+        val variants = listOf(
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(highPrecisionEmission = true)),
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(reachLevel = 4)),
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(reachGain = 0.5f)),
+            FramePlanSegment.GEOMETRIES to representativeFieldsPlan(
+                bloom = Bloom(),
+                geometries = listOf(geometry("vertex-a").copy(bloomReach = 0.25f)),
+            ),
+        )
+        val identities = variants.map { (expectedChanged, variant) ->
+            val encoded = encoder.encode(variant)
+            val changed = allSegments.filterIndexed { index, _ ->
+                base.segmentPayloads[index] != encoded.segmentPayloads[index]
+            }
+            assertEquals(listOf(expectedChanged), changed)
+            encoded.identity
+        }
+        assertEquals(identities.size, identities.distinct().size)
+    }
+
+    /**
      * The shape that actually discriminates. A plan carrying `drawLabels = false` round-trips through
      * this encoder whether or not the encoder reads the field at all, because the other seven segments
      * encode either way — so this asserts the **difference** instead: all four `drawBasemap` ×

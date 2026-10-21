@@ -488,6 +488,7 @@ internal class SceneContent(
     private val bloomResources: BloomResources? = null,
     private val surfaceFramebuffer: Int? = null,
     private val surfaceDepthRenderbuffer: Int? = null,
+    private val bloomFarBandStrategy: BloomFarBandStrategy = BloomFarBandStrategy.REACH_IMAGE,
 ) : GlFrameContent {
 
     /**
@@ -600,6 +601,15 @@ internal class SceneContent(
             } else {
                 null
             }
+            // ADR 0085: what each program's consumer uniforms hold when the bloom phase starts, as far
+            // as this frame set them, kept only when a far band may redraw an emitter.
+            val normalUniformsByProgram = if (lastEmissiveGeometryIndex >= 0 &&
+                scene.geometries.any { it.geometry.emissive && it.geometry.bloomReach > 0f }
+            ) {
+                HashMap<Int, HashMap<String, ShaderValue>>()
+            } else {
+                null
+            }
             for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
                 if (sceneGeometry.geometry.blend != currentBlend) {
                     applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
@@ -634,6 +644,9 @@ internal class SceneContent(
                 )
                 if (grid.triangleIndices.isNotEmpty()) {
                     lastNormalGeometryByProgram?.set(sceneGeometry.pipeline.program, sceneGeometry)
+                    normalUniformsByProgram
+                        ?.getOrPut(sceneGeometry.pipeline.program) { HashMap() }
+                        ?.putAll(sceneGeometry.consumerUniforms)
                 }
                 if (geometryIndex == lastEmissiveGeometryIndex) {
                     // ADR 0080: compositing here makes the rest of the existing phase order an
@@ -644,6 +657,7 @@ internal class SceneContent(
                         binding,
                         sceneGeometry.geometry.blend,
                         checkNotNull(lastNormalGeometryByProgram),
+                        normalUniformsByProgram.orEmpty(),
                     )
                     currentBlend = null
                 }
@@ -711,6 +725,7 @@ internal class SceneContent(
         binding: GlBinding,
         geometryBlend: BlendMode,
         lastNormalGeometryByProgram: Map<Int, SceneGeometry>,
+        normalUniformsByProgram: Map<Int, Map<String, ShaderValue>>,
     ) {
         val bloom = bloom ?: return
         val resources = bloomResources ?: return
@@ -742,6 +757,9 @@ internal class SceneContent(
             is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
             is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
         }
+        // Resolved once and kept for the far band, which redraws a subset of these with the same
+        // grid, drape, view-projection and consumer values.
+        val emissionGrids = ArrayList<GeometryGrid>(emissiveGeometries.size)
         for (sceneGeometry in emissiveGeometries) {
             val drape = groundDrapeFor(sceneGeometry.geometry)
             val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
@@ -752,23 +770,26 @@ internal class SceneContent(
                 is ResolvedGlobeCamera ->
                     geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
             }.requireResolvedAtDrawTime()
-            drawGeometry(
-                binding = binding,
-                pipeline = sceneGeometry.pipeline,
-                grid = grid,
-                modelViewProjection = geometryViewProjection,
-                resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
-                resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
-                boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
-                frameIndex = scene.frameIndex,
-                consumerUniforms = sceneGeometry.consumerUniforms,
-                consumerTextures = sceneGeometry.consumerTextures,
-                emissionPass = 1,
-            )
-            endGeometryEmissionPass(binding, sceneGeometry.pipeline)
+            emissionGrids += grid
+            drawEmissionRedraw(binding, sceneGeometry, grid, geometryViewProjection)
         }
 
-        drawBloom(binding, resources, bloom, framebuffer)
+        // ADR 0085's far band, only when some emitter asks for it with a weight that adds anything:
+        // with every bloomReach at zero (or a zero reachGain) no extra draw happens and the frame is
+        // the one ADR 0083 drew.
+        val farBandLevel = bloomFarBandLevel(bloom)
+        val farBand = if (farBandLevel != null && bloomHasFarBand(bloom, emissiveGeometries.map { it.geometry })) {
+            BloomFarBand(farBandLevel, bloomFarBandStrategy) {
+                drawBloomFarBand(
+                    binding, bloom, emissiveGeometries, emissionGrids, geometryViewProjection,
+                    normalUniformsByProgram,
+                )
+            }
+        } else {
+            null
+        }
+
+        drawBloom(binding, resources, bloom, framebuffer, farBand)
 
         // Every value here is owned by this loop; asking the driver what the just-run chain changed
         // would add synchronous glGet* calls and native allocations to every bloom frame. Programs,
@@ -799,6 +820,105 @@ internal class SceneContent(
                 textures = normalGeometry.consumerTextures,
             )
         }
+    }
+
+    /** One emitter drawn with `rengGeometryEmissionPass` at one, into whatever target is bound. */
+    private fun drawEmissionRedraw(
+        binding: GlBinding,
+        sceneGeometry: SceneGeometry,
+        grid: GeometryGrid,
+        geometryViewProjection: FloatArray,
+        consumerUniforms: Map<String, ShaderValue> = sceneGeometry.consumerUniforms,
+    ) {
+        drawGeometry(
+            binding = binding,
+            pipeline = sceneGeometry.pipeline,
+            grid = grid,
+            modelViewProjection = geometryViewProjection,
+            resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+            resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+            boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
+            frameIndex = scene.frameIndex,
+            consumerUniforms = consumerUniforms,
+            consumerTextures = sceneGeometry.consumerTextures,
+            emissionPass = 1,
+        )
+        endGeometryEmissionPass(binding, sceneGeometry.pipeline)
+    }
+
+    /**
+     * ADR 0085: every emitter with a positive [com.rohittp.reng.Geometry.bloomReach], drawn again into
+     * the target [drawBloom] has bound, with the grid, view-projection and consumer values of its
+     * emission redraw and `rengGeometryEmissionPass` at one.
+     *
+     * Under [BloomFarBandStrategy.REACH_IMAGE] the target is the full-resolution reach image, which
+     * shares the main depth renderbuffer, so the depth state is the emission redraw's. Each emitter's
+     * premultiplied light is scaled by its reach through the blend constant's alpha and composited
+     * over the reach image as the emission redraw composites (`CONSTANT_ALPHA, ONE_MINUS_SRC_ALPHA`;
+     * alpha `ONE, ONE_MINUS_SRC_ALPHA`, unscaled). `reachGain` is applied later, unclamped, where the
+     * reach image's level is added to the chain.
+     *
+     * A consumer uniform an emitter omits inherits its program's previous value, so a far redraw
+     * must see the program history its emission redraw saw, not whatever the last emission redraw on
+     * that program left. [normalUniformsByProgram] is every uniform this frame's normal pass had set
+     * on each program when the emission redraw started; walking the emitters in the emission
+     * redraw's order and merging each drawn one's uniforms over it rebuilds the values every emitter
+     * saw there, and each reaching emitter is drawn with that whole merged set. Only a uniform no
+     * earlier draw of this frame set, but a later emitter does, can differ: the emission redraw saw
+     * whatever the program held before the frame, which RenG does not query. The blend colour is
+     * returned to GL's default afterwards; it is a member of the Restore Set, so the consumer's own
+     * value comes back when the draw returns either way.
+     *
+     * Under the internal [BloomFarBandStrategy.COARSE_REDRAW] the target is the chain's level itself,
+     * smaller than the depth renderbuffer and without a depth attachment, so the depth test is off;
+     * the light is added scaled by `min(1, reach * reachGain)` (`CONSTANT_ALPHA, ONE`) and the level's
+     * alpha kept (`ZERO, ONE`). ES 3.0 clamps a blend constant to one, which is why it is clamped here.
+     */
+    private fun drawBloomFarBand(
+        binding: GlBinding,
+        bloom: Bloom,
+        emissiveGeometries: List<SceneGeometry>,
+        emissionGrids: List<GeometryGrid>,
+        geometryViewProjection: FloatArray,
+        normalUniformsByProgram: Map<Int, Map<String, ShaderValue>>,
+    ) {
+        val coarse = bloomFarBandStrategy == BloomFarBandStrategy.COARSE_REDRAW
+        if (coarse) {
+            binding.disable(GL_DEPTH_TEST)
+        } else {
+            binding.enable(GL_DEPTH_TEST)
+            binding.depthFunc(GL_GEQUAL)
+        }
+        binding.depthMask(false)
+        binding.disable(GL_CULL_FACE)
+        binding.enable(GL_BLEND)
+        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+        if (coarse) {
+            binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE, GL_ZERO, GL_ONE)
+        } else {
+            binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        }
+        val uniformsByProgram = HashMap<Int, HashMap<String, ShaderValue>>()
+        for (sceneGeometry in emissiveGeometries) {
+            if (sceneGeometry.geometry.bloomReach <= 0f) continue
+            val program = sceneGeometry.pipeline.program
+            uniformsByProgram.getOrPut(program) { HashMap(normalUniformsByProgram[program].orEmpty()) }
+        }
+        for ((index, sceneGeometry) in emissiveGeometries.withIndex()) {
+            // An emitter with an empty grid bound nothing in the emission redraw, and draws nothing here.
+            if (emissionGrids[index].triangleIndices.isEmpty()) continue
+            val uniforms = uniformsByProgram[sceneGeometry.pipeline.program] ?: continue
+            uniforms.putAll(sceneGeometry.consumerUniforms)
+            val reach = sceneGeometry.geometry.bloomReach
+            if (reach <= 0f) continue
+            val weight = if (coarse) minOf(1f, reach * bloom.reachGain) else reach
+            binding.blendColor(0f, 0f, 0f, weight)
+            drawEmissionRedraw(
+                binding, sceneGeometry, emissionGrids[index], geometryViewProjection,
+                consumerUniforms = uniforms,
+            )
+        }
+        binding.blendColor(0f, 0f, 0f, 0f)
     }
 
     /**

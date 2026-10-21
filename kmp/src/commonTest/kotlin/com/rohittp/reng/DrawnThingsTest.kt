@@ -6,6 +6,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
+import kotlin.test.assertTrue
 
 class DrawnThingsTest {
     @Test
@@ -288,6 +289,53 @@ class BloomTest {
             assertFailsWith<IllegalArgumentException> { Bloom(insideSuppression = value) }
             assertFailsWith<IllegalArgumentException> { Bloom(whiteness = value) }
         }
+        listOf(0, -1, 8).forEach { level ->
+            assertFailsWith<IllegalArgumentException> { Bloom(reachLevel = level) }
+        }
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.1f).forEach { value ->
+            assertFailsWith<IllegalArgumentException> { Bloom(reachGain = value) }
+        }
+    }
+
+    /** ADR 0085's fields: defaults, range, equality, and a reach level independent of levelWeights. */
+    @Test
+    fun bloomReachAndPrecisionFieldsDefaultValidateAndCompare() {
+        val bloom = Bloom()
+        assertEquals(false, bloom.highPrecisionEmission)
+        assertEquals(Bloom.DEFAULT_REACH_LEVEL, bloom.reachLevel)
+        assertEquals(3, bloom.reachLevel)
+        assertEquals(1f, bloom.reachGain)
+        assertEquals(bloom, Bloom(highPrecisionEmission = false, reachLevel = 3, reachGain = 1f))
+        // A default reach level deeper than a short chain is legal: the far band then lands in the
+        // deepest level the chain has, so existing short-chain blooms keep constructing.
+        Bloom(levelWeights = listOf(1f, 1f), reachLevel = 3)
+        Bloom(reachLevel = Bloom.MAXIMUM_REACH_LEVEL, reachGain = 0f)
+        listOf(
+            Bloom(highPrecisionEmission = true),
+            Bloom(reachLevel = 4),
+            Bloom(reachGain = 2f),
+        ).forEach { different ->
+            assertNotEquals(bloom, different)
+            assertNotEquals(bloom.hashCode(), different.hashCode())
+        }
+        assertTrue(1f / Bloom(reachGain = -0f).reachGain > 0f, "a negative-zero gain is canonicalised to zero")
+        assertTrue("reachGain=2.0" in Bloom(reachGain = 2f).toString())
+    }
+
+    @Test
+    fun geometryBloomReachDefaultsToZeroAndIsBoundedFiniteAndNotNegativeZero() {
+        val geometry = Geometry(
+            Vector3(1.0, 2.0, 3.0),
+            Vector3(0.0, 3.0, 4.0),
+            ShaderPair("vertex", "fragment"),
+        )
+        assertEquals(0f, geometry.bloomReach)
+        assertEquals(0.5f, geometry.copy(bloomReach = 0.5f).component9())
+        assertNotEquals(geometry, geometry.copy(bloomReach = 0.5f))
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.1f, 1.1f, -0f).forEach { value ->
+            assertFailsWith<IllegalArgumentException> { geometry.copy(bloomReach = value) }
+        }
+        assertTrue("bloomReach=1.0" in geometry.copy(bloomReach = 1f).toString())
     }
 }
 

@@ -110,6 +110,20 @@ private fun isReservedBackdropShaderName(name: String): Boolean =
  * level, where index zero is full resolution and index `k` is the output size divided by `2^k`.
  * [insideSuppression] removes bloom from opaque emission interiors, and [whiteness] moves bloom
  * colour toward its brightest channel.
+ *
+ * [highPrecisionEmission] asks for a half-float emission image and downsample chain, so an emitter's
+ * light can exceed one (ADR 0085). It is honoured only where the context can render to half-float
+ * colour; elsewhere the frame draws with the eight-bit chain and reports
+ * [DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED].
+ *
+ * [reachLevel] and [reachGain] shape the far band a [Geometry.bloomReach] adds: every emitter with a
+ * positive reach is drawn a second time, scaled by its reach, into a full-resolution reach image that
+ * is downsampled through the same kernel and added into downsample level [reachLevel] at
+ * [reachGain], so it adds light that only the levels at and below [reachLevel] carry. Over a uniform
+ * field the far band's gain is `reachGain * intensity * sum(levelWeights[reachLevel..])` (1.7 for the
+ * default weights at level 3, against 3.4 for the whole chain); it is not normalised. A [reachLevel]
+ * beyond [levelWeights]' last index adds into the deepest level the frame computes; with a single
+ * level weight there is no chain and no far band.
  */
 @kotlinx.serialization.Serializable(with = BloomSerializer::class)
 public class Bloom(
@@ -117,11 +131,17 @@ public class Bloom(
     levelWeights: List<Float> = DEFAULT_LEVEL_WEIGHTS,
     insideSuppression: Float = 0f,
     whiteness: Float = 0f,
+    highPrecisionEmission: Boolean = false,
+    reachLevel: Int = DEFAULT_REACH_LEVEL,
+    reachGain: Float = 1f,
 ) {
     public val intensity: Float
     private val levelWeightSnapshot: ArrayList<Float>
     public val insideSuppression: Float
     public val whiteness: Float
+    public val highPrecisionEmission: Boolean
+    public val reachLevel: Int
+    public val reachGain: Float
 
     public val levelWeights: List<Float>
         get() = freshListCopy(levelWeightSnapshot)
@@ -140,6 +160,10 @@ public class Bloom(
         }
         require(insideSuppression in 0f..1f) { "insideSuppression must be between zero and one" }
         require(whiteness in 0f..1f) { "whiteness must be between zero and one" }
+        require(reachLevel in 1..MAXIMUM_REACH_LEVEL) {
+            "reachLevel must be between one and $MAXIMUM_REACH_LEVEL"
+        }
+        require(requireFiniteFloat(reachGain, "reachGain") >= 0f) { "reachGain must be non-negative" }
 
         this.intensity = canonicalFloat(intensity, "intensity")
         levelWeightSnapshot = ArrayList(
@@ -149,6 +173,9 @@ public class Bloom(
         )
         this.insideSuppression = canonicalFloat(insideSuppression, "insideSuppression")
         this.whiteness = canonicalFloat(whiteness, "whiteness")
+        this.highPrecisionEmission = highPrecisionEmission
+        this.reachLevel = reachLevel
+        this.reachGain = canonicalFloat(reachGain, "reachGain")
     }
 
     override fun equals(other: Any?): Boolean =
@@ -156,23 +183,36 @@ public class Bloom(
             intensity == other.intensity &&
             levelWeightSnapshot == other.levelWeightSnapshot &&
             insideSuppression == other.insideSuppression &&
-            whiteness == other.whiteness
+            whiteness == other.whiteness &&
+            highPrecisionEmission == other.highPrecisionEmission &&
+            reachLevel == other.reachLevel &&
+            reachGain == other.reachGain
 
     override fun hashCode(): Int {
         var result = intensity.hashCode()
         result = 31 * result + levelWeightSnapshot.hashCode()
         result = 31 * result + insideSuppression.hashCode()
         result = 31 * result + whiteness.hashCode()
+        result = 31 * result + highPrecisionEmission.hashCode()
+        result = 31 * result + reachLevel
+        result = 31 * result + reachGain.hashCode()
         return result
     }
 
     override fun toString(): String =
         "Bloom(intensity=$intensity, levelWeights=$levelWeightSnapshot, " +
-            "insideSuppression=$insideSuppression, whiteness=$whiteness)"
+            "insideSuppression=$insideSuppression, whiteness=$whiteness, " +
+            "highPrecisionEmission=$highPrecisionEmission, reachLevel=$reachLevel, reachGain=$reachGain)"
 
     public companion object {
         public val DEFAULT_LEVEL_WEIGHTS: List<Float>
             get() = listOf(0f, 0.9f, 0.8f, 0.6f, 0.45f, 0.35f, 0.3f)
+
+        /** The downsample level a [Geometry.bloomReach] far band is injected into by default. */
+        public const val DEFAULT_REACH_LEVEL: Int = 3
+
+        /** The deepest downsample level: [levelWeights] holds at most eight values. */
+        public const val MAXIMUM_REACH_LEVEL: Int = 7
     }
 }
 
@@ -503,8 +543,30 @@ public data class Geometry(
      * existing component.
      */
     public val blend: BlendMode = BlendMode.OVER,
+    /**
+     * How much of a wide-only far band this Geometry adds to the frame's [Bloom], between zero and
+     * one (ADR 0085).
+     *
+     * A positive reach draws an [emissive] Geometry a second time, scaled by its reach, into a
+     * full-resolution reach image whose downsample is added into the bloom's level
+     * [Bloom.reachLevel] at [Bloom.reachGain]; the ordinary emission redraw is unchanged, so zero (the
+     * default) adds nothing and draws nothing. It has no effect on a Geometry that is not [emissive]
+     * or in a frame without a [Bloom]. The second draw is exactly the emission redraw's --
+     * `rengGeometryEmissionPass` at one, the output resolution, the same depth test -- so a shader
+     * needs no change for it.
+     *
+     * Declared last so the append-only data-class ABI gives it `component9` without moving any
+     * existing component.
+     */
+    public val bloomReach: Float = 0f,
 ) {
     init {
+        require(requireFiniteFloat(bloomReach, "bloomReach") in 0f..1f) {
+            "bloomReach must be between zero and one"
+        }
+        require(!(bloomReach == 0f && 1f / bloomReach < 0f)) {
+            "bloomReach must not be negative zero"
+        }
         require(topLeft.x in -90.0..90.0) { "topLeft latitude must be within the supported range" }
         require(bottomRight.x in -90.0..90.0) { "bottomRight latitude must be within the supported range" }
         require(topLeft.x > bottomRight.x) { "topLeft latitude must be north of bottomRight latitude" }
@@ -524,7 +586,7 @@ public data class Geometry(
     override fun toString(): String =
             "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
             "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive, " +
-            "blend=$blend)"
+            "blend=$blend, bloomReach=$bloomReach)"
 }
 
 private fun isReservedGeometryShaderName(name: String): Boolean =

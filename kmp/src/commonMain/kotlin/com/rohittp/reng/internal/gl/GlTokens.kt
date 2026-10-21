@@ -99,6 +99,7 @@ internal const val GL_DST_COLOR: Int = 0x0306
 internal const val GL_ONE_MINUS_SRC_COLOR: Int = 0x0301
 internal const val GL_ONE_MINUS_SRC_ALPHA: Int = 0x0303
 internal const val GL_FUNC_ADD: Int = 0x8006
+internal const val GL_CONSTANT_ALPHA: Int = 0x8003
 
 internal const val GL_DEPTH_TEST: Int = 0x0B71
 internal const val GL_DEPTH_FUNC: Int = 0x0B74

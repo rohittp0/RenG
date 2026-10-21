@@ -212,6 +212,9 @@ private class BloomSurrogate(
     @SerialName("levelWeights") val levelWeights: List<Float> = Bloom.DEFAULT_LEVEL_WEIGHTS,
     @SerialName("insideSuppression") val insideSuppression: Float = 0f,
     @SerialName("whiteness") val whiteness: Float = 0f,
+    @SerialName("highPrecisionEmission") val highPrecisionEmission: Boolean = false,
+    @SerialName("reachLevel") val reachLevel: Int = Bloom.DEFAULT_REACH_LEVEL,
+    @SerialName("reachGain") val reachGain: Float = 1f,
 )
 
 internal object BloomSerializer : KSerializer<Bloom> {
@@ -222,12 +225,16 @@ internal object BloomSerializer : KSerializer<Bloom> {
             delegate,
             BloomSurrogate(
                 value.intensity, value.levelWeights, value.insideSuppression, value.whiteness,
+                value.highPrecisionEmission, value.reachLevel, value.reachGain,
             ),
         )
     }
     override fun deserialize(decoder: Decoder): Bloom {
         val it = decoder.decodeSerializableValue(delegate)
-        return Bloom(it.intensity, it.levelWeights, it.insideSuppression, it.whiteness)
+        return Bloom(
+            it.intensity, it.levelWeights, it.insideSuppression, it.whiteness,
+            it.highPrecisionEmission, it.reachLevel, it.reachGain,
+        )
     }
 }
 
@@ -501,6 +508,7 @@ private class GeometrySurrogate(
     @SerialName("altitudeMode") val altitudeMode: AltitudeMode = AltitudeMode.ABSOLUTE,
     @SerialName("emissive") val emissive: Boolean = false,
     @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
+    @SerialName("bloomReach") val bloomReach: Float = 0f,
 )
 
 internal object GeometrySerializer : KSerializer<Geometry> {
@@ -512,6 +520,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
             GeometrySurrogate(
                 value.topLeft, value.bottomRight, value.shaderPair,
                 value.uniforms, value.textures, value.altitudeMode, value.emissive, value.blend,
+                value.bloomReach,
             ),
         )
     }
@@ -519,7 +528,7 @@ internal object GeometrySerializer : KSerializer<Geometry> {
         val it = decoder.decodeSerializableValue(delegate)
         return Geometry(
             it.topLeft, it.bottomRight, it.shaderPair, it.uniforms, it.textures, it.altitudeMode,
-            it.emissive, it.blend,
+            it.emissive, it.blend, it.bloomReach,
         )
     }
 }

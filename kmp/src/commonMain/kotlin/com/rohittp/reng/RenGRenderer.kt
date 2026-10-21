@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
+import com.rohittp.reng.internal.bloomEmissionPrecisionReducedDiagnostic
 import com.rohittp.reng.internal.bloomUnavailableDiagnostic
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
@@ -92,6 +93,10 @@ import com.rohittp.reng.internal.gl.allModelShaderVariants
 import com.rohittp.reng.internal.gl.ancestorOf
 import com.rohittp.reng.internal.gl.createBackdropPipeline
 import com.rohittp.reng.internal.gl.createBloomResources
+import com.rohittp.reng.internal.gl.BloomFarBandStrategy
+import com.rohittp.reng.internal.gl.bloomHasFarBand
+import com.rohittp.reng.internal.gl.bloomUsesHighPrecisionEmission
+import com.rohittp.reng.internal.gl.ensureBloomReachTargets
 import com.rohittp.reng.internal.gl.createCompositePipeline
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
 import com.rohittp.reng.internal.gl.createGeometryPipeline
@@ -1282,6 +1287,20 @@ internal class RenGRenderer(
 
     /** ADR 0074's fixed-size targets and three programs, allocated on the first active bloom. */
     private var bloomResources: BloomResources? = null
+
+    /**
+     * Set when this context reported half-float colour rendering but refused a half-float emission
+     * target as a format (ADR 0085: an incomplete framebuffer, not a failed link or memory running
+     * out), so later frames asking for one go straight to the RGBA8 chain rather than retrying the
+     * allocation every frame. Forgotten with the context.
+     */
+    private var bloomHalfFloatRefused: Boolean = false
+
+    /**
+     * How a far band reaches its level (ADR 0085). Internal: [BloomFarBandStrategy.COARSE_REDRAW]
+     * exists only so RenG's own tests can measure what the reach image buys.
+     */
+    internal var bloomFarBandStrategy: BloomFarBandStrategy = BloomFarBandStrategy.REACH_IMAGE
 
     private var identityRegistry: CanonicalIdentityRegistry = CanonicalIdentityRegistry()
     private var framePlanningCore: FramePlanningCore = newFramePlanningCore(identityRegistry)
@@ -3892,6 +3911,66 @@ internal class RenGRenderer(
     }
 
     /** Runs inside [GlLifecycleDriver]'s operation gate; declared loss never issues a GL delete. */
+    /**
+     * This frame's bloom targets: the ones already allocated when their emission precision is the
+     * one this frame gets, otherwise a fresh set (ADR 0085), plus the reach targets when the frame
+     * has a far band to draw through them. `null`, with `BLOOM_UNAVAILABLE` staged, when the
+     * context refuses them; a chain whose half-float targets the context refuses as a format falls
+     * back to RGBA8 for the context's life and stages `BLOOM_EMISSION_PRECISION_REDUCED`, as does a
+     * context that cannot render half-float at all. Any other failure is `BLOOM_UNAVAILABLE`.
+     */
+    private fun resolveBloomResources(
+        bloom: Bloom,
+        emitters: List<Geometry>,
+        profile: RenderContextProfile,
+        depthRenderbuffer: Int,
+        stagedDiagnostics: MutableList<Diagnostic>,
+    ): BloomResources? {
+        val wantsHighPrecision = bloomUsesHighPrecisionEmission(bloom, profile) && !bloomHalfFloatRefused
+        if (bloom.highPrecisionEmission && !wantsHighPrecision) {
+            stagedDiagnostics += bloomEmissionPrecisionReducedDiagnostic()
+        }
+        bloomResources?.let { existing ->
+            if (existing.highPrecisionEmission != wantsHighPrecision) {
+                deleteBloomResources(binding, programs, existing)
+                bloomResources = null
+            }
+        }
+        fun create(highPrecision: Boolean): BloomResourcesResult = createBloomResources(
+            binding = binding,
+            profile = profile,
+            cache = programs,
+            outputSize = configuration.outputPixelSize,
+            sharedDepthRenderbuffer = depthRenderbuffer,
+            highPrecisionEmission = highPrecision,
+        )
+        val resources = bloomResources ?: run {
+            var result = create(wantsHighPrecision)
+            // Only a refused half-float target is a precision refusal; a program that fails to link
+            // or memory running out is BLOOM_UNAVAILABLE, as it is for an RGBA8 chain, and the next
+            // frame asking for half-float tries again.
+            if (result is BloomResourcesResult.Failed && result.halfFloatTargetRefused) {
+                bloomHalfFloatRefused = true
+                result = create(false)
+                if (result is BloomResourcesResult.Created) {
+                    stagedDiagnostics += bloomEmissionPrecisionReducedDiagnostic()
+                }
+            }
+            (result as? BloomResourcesResult.Created)?.resources?.also { bloomResources = it }
+        }
+        if (resources == null) {
+            stagedDiagnostics += bloomUnavailableDiagnostic()
+            return null
+        }
+        if (bloomFarBandStrategy == BloomFarBandStrategy.REACH_IMAGE && bloomHasFarBand(bloom, emitters) &&
+            ensureBloomReachTargets(binding, resources) == null
+        ) {
+            stagedDiagnostics += bloomUnavailableDiagnostic()
+            return null
+        }
+        return resources
+    }
+
     private fun forgetRendererGpuObjects() {
         offscreenSurface = null
         compositePipeline = null
@@ -3902,6 +3981,7 @@ internal class RenGRenderer(
         iconPipeline = null
         globeGroundPipeline = null
         bloomResources = null
+        bloomHalfFloatRefused = false
         consumerPipelines.forgetAll()
         modelPipelines.clear()
     }
@@ -3931,6 +4011,7 @@ internal class RenGRenderer(
                         labelPipeline = recreated.state.labelPipeline
                         iconPipeline = recreated.state.iconPipeline
                         bloomResources = null
+                        bloomHalfFloatRefused = false
                         // The lifecycle adoption establishes the context first, while this call
                         // establishes that the replacement context now owns deletable objects. Both
                         // happen under the outer operation gate, so free/close can observe neither
@@ -4244,21 +4325,13 @@ internal class RenGRenderer(
         val resolvedBloomResources = if (
             frameBloom != null && sceneGeometries.any { it.geometry.emissive }
         ) {
-            bloomResources ?: when (
-                val result = createBloomResources(
-                    binding = binding,
-                    profile = profile,
-                    cache = programs,
-                    outputSize = configuration.outputPixelSize,
-                    sharedDepthRenderbuffer = surface.depthRenderbuffer,
-                )
-            ) {
-                is BloomResourcesResult.Created -> result.resources.also { bloomResources = it }
-                is BloomResourcesResult.Failed -> {
-                    stagedDiagnostics += bloomUnavailableDiagnostic()
-                    null
-                }
-            }
+            resolveBloomResources(
+                bloom = frameBloom,
+                emitters = sceneGeometries.map { it.geometry },
+                profile = profile,
+                depthRenderbuffer = surface.depthRenderbuffer,
+                stagedDiagnostics = stagedDiagnostics,
+            )
         } else {
             null
         }
@@ -4351,6 +4424,7 @@ internal class RenGRenderer(
             bloomResources = resolvedBloomResources,
             surfaceFramebuffer = surface.framebuffer,
             surfaceDepthRenderbuffer = surface.depthRenderbuffer,
+            bloomFarBandStrategy = bloomFarBandStrategy,
         )
 
         return drawFrame(

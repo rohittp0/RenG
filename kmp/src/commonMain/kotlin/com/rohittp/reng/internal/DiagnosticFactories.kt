@@ -100,6 +100,18 @@ internal fun bloomUnavailableDiagnostic(): Diagnostic =
     )
 
 /**
+ * A frame asked for [com.rohittp.reng.Bloom.highPrecisionEmission] and drew its bloom with the
+ * RGBA8 emission chain instead, because the context cannot render to half-float colour or refused a
+ * half-float target (ADR 0085). Light an emitter wrote above one was clipped to one.
+ */
+internal fun bloomEmissionPrecisionReducedDiagnostic(): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+    )
+
+/**
  * A draw ended with more budget-tracked texture bytes resident than
  * [com.rohittp.reng.ResourceLimits.maximumResidentGpuTextureBytes] allows, and eviction could do
  * nothing about it: every remaining byte belonged to a texture the frame itself was holding. The

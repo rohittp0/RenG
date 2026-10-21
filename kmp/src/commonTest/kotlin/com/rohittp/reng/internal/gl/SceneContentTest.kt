@@ -46,6 +46,8 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SceneContentTest {
@@ -1021,6 +1023,291 @@ class SceneContentTest {
         deleteBloomResources(binding, GlProgramCache(), resources)
         assertTrue(copy.framebuffer in binding.deletedNames, binding.deletedNames.toString())
         assertTrue(copy.texture in binding.deletedNames, binding.deletedNames.toString())
+    }
+
+    /** ADR 0085: with every bloomReach at zero the new Bloom fields draw exactly ADR 0083's frame. */
+    @Test
+    fun zeroReachDrawsNoFarBandWhateverTheReachFieldsSay() {
+        fun drawLog(bloom: Bloom): Pair<List<String>, BloomResources> {
+            val binding = RecordingGlBinding().withDeclaredNames(UNIFORM_GEOMETRY_EMISSION_PASS to 60)
+            val pipeline = newGeometryPipeline(binding)
+            val resources = newBloomResources(binding, depthRenderbuffer = 77)
+            val scene = Scene(
+                outputPixelSize = OUTPUT_SIZE,
+                frameIndex = 0L,
+                geometries = listOf(
+                    SceneGeometry(testGeometry().copy(emissive = true), pipeline, consumerUniforms = emptyMap()),
+                    // Reach on a non-emissive geometry means nothing.
+                    SceneGeometry(testGeometry().copy(bloomReach = 1f), pipeline, consumerUniforms = emptyMap()),
+                ),
+            )
+            binding.log.clear()
+            SceneContent(
+                camera = topDownCamera(),
+                scene = scene,
+                stickerPipeline = newStickerPipeline(),
+                groundPipeline = newGroundPipeline(),
+                bloom = bloom,
+                bloomResources = resources,
+                surfaceFramebuffer = 55,
+                surfaceDepthRenderbuffer = 77,
+            ).draw(binding)
+            return binding.log.toList() to resources
+        }
+
+        val (baseline, baselineResources) = drawLog(Bloom())
+        val (reachFields, reachResources) = drawLog(Bloom(reachLevel = 5, reachGain = 3f))
+        assertEquals(baseline, reachFields, "reach fields without a reaching emitter must not change one GL call")
+        assertTrue(baseline.none { it.startsWith("blendColor") }, baseline.toString())
+        assertEquals(null, baselineResources.reach)
+        assertEquals(null, reachResources.reach)
+    }
+
+    /**
+     * ADR 0085's reach image: the reaching emitter is redrawn into a cleared, full-resolution image
+     * under the emission redraw's depth state, scaled by its reach through the blend constant; the
+     * image is downsampled to reachLevel and added into the main chain's level there at reachGain,
+     * keeping the level's alpha; and the loop boundary afterwards is the one ADR 0080 pins.
+     */
+    @Test
+    fun aReachingEmitterIsRedrawnIntoTheReachImageAndAddedAtItsLevel() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "rengBloomLevelWeight" to 70,
+        )
+        val emitter = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
+        assertTrue(ensureBloomReachTargets(binding, resources) === reach, "allocated once")
+        assertEquals(OUTPUT_SIZE.width, reach.image.width)
+        assertEquals(OUTPUT_SIZE.height, reach.image.height)
+        assertEquals(resources.downsampleLevels.map { it.width to it.height }, reach.levels.map { it.width to it.height })
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(
+                    testGeometry().copy(emissive = true, bloomReach = 0.5f),
+                    emitter,
+                    consumerUniforms = emptyMap(),
+                ),
+                SceneGeometry(testGeometry().copy(emissive = true), emitter, consumerUniforms = emptyMap()),
+            ),
+        )
+        binding.log.clear()
+        SceneContent(
+            camera = topDownCamera(),
+            scene = scene,
+            stickerPipeline = newStickerPipeline(),
+            groundPipeline = newGroundPipeline(),
+            bloom = Bloom(reachGain = 3f),
+            bloomResources = resources,
+            surfaceFramebuffer = 55,
+            surfaceDepthRenderbuffer = 77,
+        ).draw(binding)
+        val log = binding.log
+
+        val reachBind = log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${reach.image.framebuffer})")
+        assertTrue(reachBind >= 0, log.toString())
+        assertEquals(
+            listOf(
+                "viewport(0,0,${OUTPUT_SIZE.width},${OUTPUT_SIZE.height})",
+                "clearColor(0.0,0.0,0.0,0.0)",
+                "clear(${hex(GL_COLOR_BUFFER_BIT)})",
+                "enable(${hex(GL_DEPTH_TEST)})",
+                "depthFunc(${hex(GL_GEQUAL)})",
+                "depthMask(false)",
+                "disable(${hex(GL_CULL_FACE)})",
+                "enable(${hex(GL_BLEND)})",
+                "blendEquationSeparate(${hex(GL_FUNC_ADD)},${hex(GL_FUNC_ADD)})",
+                "blendFuncSeparate(${hex(GL_CONSTANT_ALPHA)},${hex(GL_ONE_MINUS_SRC_ALPHA)}," +
+                    "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)})",
+                "blendColor(0.0,0.0,0.0,0.5)",
+            ),
+            log.subList(reachBind + 1, reachBind + 12),
+        )
+        // Exactly one emitter reaches, so exactly one draw lands in the reach image.
+        val reachEnd = log.indexOfFirstFrom(reachBind) { it == "useProgram(${resources.downsample.program})" }
+        assertEquals(1, log.subList(reachBind, reachEnd).count { it.startsWith("drawElements") })
+        assertTrue(log.subList(reachBind, reachEnd).contains("uniform1i(60,1)"), "the far redraw is an emission pass")
+        val lastReachDraw = log.subList(0, reachEnd).indexOfLast { it.startsWith("drawElements") }
+        assertTrue(
+            log.subList(lastReachDraw, reachEnd).contains("blendColor(0.0,0.0,0.0,0.0)"),
+            "the blend constant goes back to GL's default once the far redraw is done: $log",
+        )
+
+        // Downsampled through reachLevel (3) and no further, then added into the main level 3.
+        val reachLevelBinds = reach.levels.map { log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${it.framebuffer})") }
+        assertTrue(reachLevelBinds.take(3).all { it > reachBind }, reachLevelBinds.toString())
+        assertTrue(reachLevelBinds.drop(3).all { it < 0 }, "the reach chain stops at reachLevel: $reachLevelBinds")
+        val mainLevel3 = resources.downsampleLevels[2].framebuffer
+        val mainLevel3Downsample = log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},$mainLevel3)")
+        val add = log.indexOfFirstFrom(mainLevel3Downsample) {
+            it == "blendFuncSeparate(${hex(GL_ONE)},${hex(GL_ONE)},${hex(GL_ZERO)},${hex(GL_ONE)})"
+        }
+        val mainLevel4 = log.indexOf(
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.downsampleLevels[3].framebuffer})",
+        )
+        assertTrue(add in mainLevel3Downsample until mainLevel4, "the add lands between levels 3 and 4: $log")
+        assertTrue(log.subList(add, mainLevel4).contains("uniform1f(70,3.0)"), "reachGain is the add's weight, unclamped")
+        assertTrue(log.subList(add, mainLevel4).contains("disable(${hex(GL_BLEND)})"))
+    }
+
+    /**
+     * ADR 0085: a far redraw sees the consumer values its emission redraw saw. E1 and E3 reach and
+     * omit `u`, so each inherits program P's previous value: the emission redraw starts where the
+     * normal pass left P (E4's 7), so E1 sees 7 and E3 inherits E2's 2. Drawing each emitter with only
+     * its own values would hand E3 the 7 the emission redraw's last bind left on P.
+     */
+    @Test
+    fun aFarRedrawSeesTheConsumerValuesItsEmissionRedrawSaw() {
+        val uniformLocation = 61
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "u" to uniformLocation,
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
+        fun emitter(reach: Float, u: Float?) = SceneGeometry(
+            testGeometry().copy(emissive = true, bloomReach = reach),
+            pipelineP,
+            consumerUniforms = u?.let { mapOf("u" to ShaderValue.Scalar(it)) } ?: emptyMap(),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                SceneGeometry(testGeometry(), pipelineP, consumerUniforms = mapOf("u" to ShaderValue.Scalar(5f))),
+                emitter(reach = 1f, u = null),
+                emitter(reach = 0f, u = 2f),
+                emitter(reach = 0.5f, u = null),
+                emitter(reach = 0f, u = 7f),
+            ),
+        )
+        binding.log.clear()
+        SceneContent(
+            camera = topDownCamera(),
+            scene = scene,
+            stickerPipeline = newStickerPipeline(),
+            groundPipeline = newGroundPipeline(),
+            bloom = Bloom(),
+            bloomResources = resources,
+            surfaceFramebuffer = 55,
+            surfaceDepthRenderbuffer = 77,
+        ).draw(binding)
+        val log = binding.log
+
+        fun drawnValues(from: Int, until: Int): List<Float?> {
+            // Uniform state is per program; the log replays it from the frame's start so a value P
+            // inherited from before [from] still counts.
+            var program = 0
+            var current: Float? = null
+            val values = ArrayList<Float?>()
+            for ((index, call) in log.subList(0, until).withIndex()) {
+                when {
+                    call.startsWith("useProgram(") -> program = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+                    program != pipelineP.program -> Unit
+                    call.startsWith("uniform1f($uniformLocation,") ->
+                        current = call.substringAfter(",").removeSuffix(")").toFloat()
+                    call.startsWith("drawElements") && index >= from -> values += current
+                }
+            }
+            return values
+        }
+        val emissionBind = log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})")
+        val reachBind = log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${reach.image.framebuffer})")
+        val reachEnd = log.indexOfFirstFrom(reachBind) { it == "useProgram(${resources.downsample.program})" }
+        assertEquals(listOf<Float?>(5f, 5f, 2f, 2f, 7f), drawnValues(0, emissionBind), "the normal pass")
+        val emissionValues = drawnValues(emissionBind, reachBind)
+        assertEquals(listOf<Float?>(7f, 2f, 2f, 7f), emissionValues, "the emission redraw inherits P's history")
+        assertEquals(
+            listOf(emissionValues[0], emissionValues[2]),
+            drawnValues(reachBind, reachEnd),
+            "each far redraw must see its emission redraw's consumer values",
+        )
+    }
+
+    @Test
+    fun halfFloatEmissionAllocatesEveryEmissionAndDownsampleTargetAsRgba16fAndBoundsTheChain() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val resources = newBloomResources(binding, depthRenderbuffer = 77, highPrecisionEmission = true)
+        assertTrue(resources.highPrecisionEmission)
+        val formats = (listOf(resources.emission) + resources.downsampleLevels).map { target ->
+            val bind = binding.log.indexOf("bindTexture(${hex(GL_TEXTURE_2D)},${target.texture})")
+            binding.log[bind + 1].split(",")[2]
+        }
+        assertEquals(List(formats.size) { hex(GL_RGBA16F) }, formats)
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
+        val reachFormat = binding.log[binding.log.indexOf("bindTexture(${hex(GL_TEXTURE_2D)},${reach.image.texture})") + 1]
+        assertTrue(reachFormat.contains(hex(GL_RGBA16F)), reachFormat)
+
+        val downsample = binding.shaderSources.values.single { it.contains("rengBloomSourceTexel") }
+        assertTrue(downsample.contains("clamp(c, 0.0, $BLOOM_LIGHT_CEILING)"), downsample)
+        val boundedTaps = Regex("rengBloomLight\\(texture\\(").findAll(downsample).count()
+        assertEquals(5, boundedTaps, "every downsample tap is bounded: $downsample")
+        val upsample = binding.shaderSources.values.single { it.contains("rengBloomLevelWeight") }
+        assertTrue(upsample.contains("clamp(c, 0.0, $BLOOM_LIGHT_CEILING)"), upsample)
+        assertTrue(
+            upsample.contains("rengBloomLevelWeight * rengBloomLight(texture(rengBloomLevel, rengBloomUv))"),
+            "the level sample, which may be the unclamped emission image, is bounded: $upsample",
+        )
+        assertTrue(
+            upsample.contains("if (rengBloomAccumulationWeight != 0.0) {"),
+            "a zero-weighted tent is skipped, so 0 * Inf cannot occur: $upsample",
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            createBloomResources(
+                binding = binding,
+                profile = bloomTestProfile(supportsHalfFloat = false),
+                cache = GlProgramCache(),
+                outputSize = OUTPUT_SIZE,
+                sharedDepthRenderbuffer = 77,
+                highPrecisionEmission = true,
+            )
+        }
+        assertTrue(bloomUsesHighPrecisionEmission(Bloom(highPrecisionEmission = true), bloomTestProfile(true)))
+        assertFalse(bloomUsesHighPrecisionEmission(Bloom(highPrecisionEmission = true), bloomTestProfile(false)))
+        assertFalse(bloomUsesHighPrecisionEmission(Bloom(), bloomTestProfile(true)))
+    }
+
+    /**
+     * ADR 0085: only a half-float emission target the context refuses as a format is a precision
+     * refusal, which the renderer answers with RGBA8 for the context's life. A failed link, or an
+     * RGBA8 chain's incomplete target, is not: the renderer reports BLOOM_UNAVAILABLE for those.
+     */
+    @Test
+    fun onlyARefusedHalfFloatTargetIsAPrecisionRefusal() {
+        fun failure(highPrecision: Boolean, configure: RecordingGlBinding.() -> Unit): BloomResourcesResult.Failed {
+            val binding = RecordingGlBinding().withNoDeclaredNames().apply(configure)
+            return assertIs<BloomResourcesResult.Failed>(
+                createBloomResources(
+                    binding = binding,
+                    profile = bloomTestProfile(supportsHalfFloat = true),
+                    cache = GlProgramCache(),
+                    outputSize = OUTPUT_SIZE,
+                    sharedDepthRenderbuffer = 77,
+                    highPrecisionEmission = highPrecision,
+                ),
+            )
+        }
+        val incomplete: RecordingGlBinding.() -> Unit = { framebufferStatus = INCOMPLETE_FRAMEBUFFER_STATUS }
+        assertTrue(failure(highPrecision = true, incomplete).halfFloatTargetRefused)
+        assertFalse(failure(highPrecision = false, incomplete).halfFloatTargetRefused)
+        assertFalse(failure(highPrecision = true) { linkStatus = 0 }.halfFloatTargetRefused)
+    }
+
+    @Test
+    fun theFarBandLevelIsReachLevelBoundedByTheChain() {
+        assertEquals(3, bloomFarBandLevel(Bloom()))
+        assertEquals(2, bloomFarBandLevel(Bloom(levelWeights = listOf(0f, 1f, 1f))))
+        assertEquals(null, bloomFarBandLevel(Bloom(levelWeights = listOf(1f))))
+        val reaching = testGeometry().copy(emissive = true, bloomReach = 0.25f)
+        assertTrue(bloomHasFarBand(Bloom(), listOf(reaching)))
+        assertFalse(bloomHasFarBand(Bloom(reachGain = 0f), listOf(reaching)))
+        assertFalse(bloomHasFarBand(Bloom(), listOf(reaching.copy(emissive = false))))
+        assertFalse(bloomHasFarBand(Bloom(levelWeights = listOf(1f)), listOf(reaching)))
     }
 
     /**
@@ -2460,27 +2747,35 @@ class SceneContentTest {
             as GlobeGroundPipelineResult.Created
         ).pipeline
 
-    private fun newBloomResources(binding: RecordingGlBinding, depthRenderbuffer: Int): BloomResources =
+    private fun newBloomResources(
+        binding: RecordingGlBinding,
+        depthRenderbuffer: Int,
+        highPrecisionEmission: Boolean = false,
+    ): BloomResources =
         (
             createBloomResources(
                 binding = binding,
-                profile = RenderContextProfile(
-                    dialect = ShaderDialect.GLES,
-                    version = GlVersion(3, 0),
-                    vendorName = "test",
-                    rendererName = "test",
-                    shadingLanguageVersionText = "OpenGL ES GLSL ES 3.00",
-                    supportsEs3Compatibility = false,
-                    supportsSrgbWriteControl = false,
-                    maxTextureSize = 16384,
-                    maxColorAttachments = 8,
-                    maxCombinedTextureImageUnits = 16,
-                ),
+                profile = bloomTestProfile(supportsHalfFloat = highPrecisionEmission),
                 cache = GlProgramCache(),
                 outputSize = OUTPUT_SIZE,
                 sharedDepthRenderbuffer = depthRenderbuffer,
+                highPrecisionEmission = highPrecisionEmission,
             ) as BloomResourcesResult.Created
             ).resources
+
+    private fun bloomTestProfile(supportsHalfFloat: Boolean): RenderContextProfile = RenderContextProfile(
+        dialect = ShaderDialect.GLES,
+        version = GlVersion(3, 0),
+        vendorName = "test",
+        rendererName = "test",
+        shadingLanguageVersionText = "OpenGL ES GLSL ES 3.00",
+        supportsEs3Compatibility = false,
+        supportsSrgbWriteControl = false,
+        maxTextureSize = 16384,
+        maxColorAttachments = 8,
+        maxCombinedTextureImageUnits = 16,
+        supportsHalfFloatColourBuffer = supportsHalfFloat,
+    )
 
     /**
      * A [RecordingGlBinding] a model pipeline can actually be built on. [createModelPipeline] reads
@@ -2772,3 +3067,6 @@ private fun minimalShaderPair(): ShaderPair = ShaderPair(
     vertexSource = "#version 300 es\nvoid main() {\n    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n",
     fragmentSource = "#version 300 es\nprecision highp float;\nout vec4 rengOut;\nvoid main() {\n    rengOut = vec4(1.0);\n}\n",
 )
+
+/** GL_FRAMEBUFFER_UNSUPPORTED, the status a context gives a colour format it cannot render to. */
+private const val INCOMPLETE_FRAMEBUFFER_STATUS: Int = 0x8CDD

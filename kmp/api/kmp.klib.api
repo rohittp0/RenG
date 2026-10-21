@@ -58,6 +58,7 @@ final enum class com.rohittp.reng/BlendMode : kotlin/Enum<com.rohittp.reng/Blend
 
 final enum class com.rohittp.reng/DiagnosticCode : kotlin/Enum<com.rohittp.reng/DiagnosticCode> { // com.rohittp.reng/DiagnosticCode|null[0]
     enum entry BASEMAP_NOT_CONFIGURED // com.rohittp.reng/DiagnosticCode.BASEMAP_NOT_CONFIGURED|null[0]
+    enum entry BLOOM_EMISSION_PRECISION_REDUCED // com.rohittp.reng/DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED|null[0]
     enum entry BLOOM_UNAVAILABLE // com.rohittp.reng/DiagnosticCode.BLOOM_UNAVAILABLE|null[0]
     enum entry FAILURE_CONTEXT // com.rohittp.reng/DiagnosticCode.FAILURE_CONTEXT|null[0]
     enum entry GROUND_PRESENTED_PROVISIONALLY // com.rohittp.reng/DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY|null[0]
@@ -580,14 +581,20 @@ final class com.rohittp.reng/AnimationTrack { // com.rohittp.reng/AnimationTrack
 }
 
 final class com.rohittp.reng/Bloom { // com.rohittp.reng/Bloom|null[0]
-    constructor <init>(kotlin/Float = ..., kotlin.collections/List<kotlin/Float> = ..., kotlin/Float = ..., kotlin/Float = ...) // com.rohittp.reng/Bloom.<init>|<init>(kotlin.Float;kotlin.collections.List<kotlin.Float>;kotlin.Float;kotlin.Float){}[0]
+    constructor <init>(kotlin/Float = ..., kotlin.collections/List<kotlin/Float> = ..., kotlin/Float = ..., kotlin/Float = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Float = ...) // com.rohittp.reng/Bloom.<init>|<init>(kotlin.Float;kotlin.collections.List<kotlin.Float>;kotlin.Float;kotlin.Float;kotlin.Boolean;kotlin.Int;kotlin.Float){}[0]
 
+    final val highPrecisionEmission // com.rohittp.reng/Bloom.highPrecisionEmission|{}highPrecisionEmission[0]
+        final fun <get-highPrecisionEmission>(): kotlin/Boolean // com.rohittp.reng/Bloom.highPrecisionEmission.<get-highPrecisionEmission>|<get-highPrecisionEmission>(){}[0]
     final val insideSuppression // com.rohittp.reng/Bloom.insideSuppression|{}insideSuppression[0]
         final fun <get-insideSuppression>(): kotlin/Float // com.rohittp.reng/Bloom.insideSuppression.<get-insideSuppression>|<get-insideSuppression>(){}[0]
     final val intensity // com.rohittp.reng/Bloom.intensity|{}intensity[0]
         final fun <get-intensity>(): kotlin/Float // com.rohittp.reng/Bloom.intensity.<get-intensity>|<get-intensity>(){}[0]
     final val levelWeights // com.rohittp.reng/Bloom.levelWeights|{}levelWeights[0]
         final fun <get-levelWeights>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.levelWeights.<get-levelWeights>|<get-levelWeights>(){}[0]
+    final val reachGain // com.rohittp.reng/Bloom.reachGain|{}reachGain[0]
+        final fun <get-reachGain>(): kotlin/Float // com.rohittp.reng/Bloom.reachGain.<get-reachGain>|<get-reachGain>(){}[0]
+    final val reachLevel // com.rohittp.reng/Bloom.reachLevel|{}reachLevel[0]
+        final fun <get-reachLevel>(): kotlin/Int // com.rohittp.reng/Bloom.reachLevel.<get-reachLevel>|<get-reachLevel>(){}[0]
     final val whiteness // com.rohittp.reng/Bloom.whiteness|{}whiteness[0]
         final fun <get-whiteness>(): kotlin/Float // com.rohittp.reng/Bloom.whiteness.<get-whiteness>|<get-whiteness>(){}[0]
 
@@ -596,6 +603,11 @@ final class com.rohittp.reng/Bloom { // com.rohittp.reng/Bloom|null[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Bloom.toString|toString(){}[0]
 
     final object Companion { // com.rohittp.reng/Bloom.Companion|null[0]
+        final const val DEFAULT_REACH_LEVEL // com.rohittp.reng/Bloom.Companion.DEFAULT_REACH_LEVEL|{}DEFAULT_REACH_LEVEL[0]
+            final fun <get-DEFAULT_REACH_LEVEL>(): kotlin/Int // com.rohittp.reng/Bloom.Companion.DEFAULT_REACH_LEVEL.<get-DEFAULT_REACH_LEVEL>|<get-DEFAULT_REACH_LEVEL>(){}[0]
+        final const val MAXIMUM_REACH_LEVEL // com.rohittp.reng/Bloom.Companion.MAXIMUM_REACH_LEVEL|{}MAXIMUM_REACH_LEVEL[0]
+            final fun <get-MAXIMUM_REACH_LEVEL>(): kotlin/Int // com.rohittp.reng/Bloom.Companion.MAXIMUM_REACH_LEVEL.<get-MAXIMUM_REACH_LEVEL>|<get-MAXIMUM_REACH_LEVEL>(){}[0]
+
         final val DEFAULT_LEVEL_WEIGHTS // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS|{}DEFAULT_LEVEL_WEIGHTS[0]
             final fun <get-DEFAULT_LEVEL_WEIGHTS>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS.<get-DEFAULT_LEVEL_WEIGHTS>|<get-DEFAULT_LEVEL_WEIGHTS>(){}[0]
 
@@ -696,12 +708,14 @@ final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
 }
 
 final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
-    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode){}[0]
+    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ..., kotlin/Float = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode;kotlin.Float){}[0]
 
     final val altitudeMode // com.rohittp.reng/Geometry.altitudeMode|{}altitudeMode[0]
         final fun <get-altitudeMode>(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.altitudeMode.<get-altitudeMode>|<get-altitudeMode>(){}[0]
     final val blend // com.rohittp.reng/Geometry.blend|{}blend[0]
         final fun <get-blend>(): com.rohittp.reng/BlendMode // com.rohittp.reng/Geometry.blend.<get-blend>|<get-blend>(){}[0]
+    final val bloomReach // com.rohittp.reng/Geometry.bloomReach|{}bloomReach[0]
+        final fun <get-bloomReach>(): kotlin/Float // com.rohittp.reng/Geometry.bloomReach.<get-bloomReach>|<get-bloomReach>(){}[0]
     final val bottomRight // com.rohittp.reng/Geometry.bottomRight|{}bottomRight[0]
         final fun <get-bottomRight>(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.bottomRight.<get-bottomRight>|<get-bottomRight>(){}[0]
     final val emissive // com.rohittp.reng/Geometry.emissive|{}emissive[0]
@@ -723,7 +737,8 @@ final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
     final fun component6(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.component6|component6(){}[0]
     final fun component7(): kotlin/Boolean // com.rohittp.reng/Geometry.component7|component7(){}[0]
     final fun component8(): com.rohittp.reng/BlendMode // com.rohittp.reng/Geometry.component8|component8(){}[0]
-    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode){}[0]
+    final fun component9(): kotlin/Float // com.rohittp.reng/Geometry.component9|component9(){}[0]
+    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ..., kotlin/Float = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode;kotlin.Float){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Geometry.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Geometry.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Geometry.toString|toString(){}[0]

@@ -175,6 +175,17 @@ internal class FramePlanCanonicalEncoder(
         )
         field(3, CanonicalBinary.binary64(bloom.insideSuppression.toDouble()))
         field(4, CanonicalBinary.binary64(bloom.whiteness.toDouble()))
+        // ADR 0085's three fields, each encoded only when it differs from its default, so every
+        // frame identity computed before they existed is unchanged.
+        if (bloom.highPrecisionEmission) {
+            field(5, CanonicalBinary.boolean(true))
+        }
+        if (bloom.reachLevel != Bloom.DEFAULT_REACH_LEVEL) {
+            field(6, CanonicalBinary.u16(bloom.reachLevel))
+        }
+        if (bloom.reachGain != 1f) {
+            field(7, CanonicalBinary.binary64(bloom.reachGain.toDouble()))
+        }
     }
 
     private fun encodeSticker(sticker: Sticker): CanonicalBytes = CanonicalBinary.fields {
@@ -242,6 +253,11 @@ internal class FramePlanCanonicalEncoder(
             field(8, CanonicalBinary.u16(geometry.blend.wireValue))
         }
         field(9, CanonicalBinary.exactUtf8(programKeys.geometryProgram(geometry.shaderPair).key.stableId))
+        // ADR 0085, after the program's tag because tags must increase; absent at the default so no
+        // existing frame identity moves.
+        if (geometry.bloomReach != 0f) {
+            field(10, CanonicalBinary.binary64(geometry.bloomReach.toDouble()))
+        }
     }
 
     private fun encodeShaderPair(shaderPair: ShaderPair): CanonicalBytes =

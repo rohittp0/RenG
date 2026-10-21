@@ -9,6 +9,7 @@ import com.rohittp.reng.internal.residentGpuTexturesOverBudgetDiagnostic
 import com.rohittp.reng.internal.resourceReloadedAfterFreeDiagnostic
 import com.rohittp.reng.internal.terrainCoverageIncompleteDiagnostic
 import com.rohittp.reng.internal.terrainUnavailableDiagnostic
+import com.rohittp.reng.internal.bloomEmissionPrecisionReducedDiagnostic
 import com.rohittp.reng.internal.unroutableLabelSourceFailure
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -60,6 +61,7 @@ class DiagnosticsAndFailuresTest {
                 // Appended, never inserted: declaration order is ordinal order (ADR 0057).
                 "GROUND_PRESENTED_PROVISIONALLY",
                 "BLOOM_UNAVAILABLE",
+                "BLOOM_EMISSION_PRECISION_REDUCED",
             ),
             DiagnosticCode.entries.map { it.name },
         )
@@ -385,6 +387,30 @@ class DiagnosticsAndFailuresTest {
                 code = DiagnosticCode.TERRAIN_COVERAGE_INCOMPLETE,
                 severity = DiagnosticSeverity.WARNING,
                 stage = PipelineStage.BASEMAP_RENDER,
+            )
+        }
+    }
+
+    @Test
+    fun bloomEmissionPrecisionReducedIsADrawWarningWithNoContext() {
+        val diagnostic = bloomEmissionPrecisionReducedDiagnostic()
+        assertEquals(DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED, diagnostic.code)
+        assertEquals(DiagnosticSeverity.WARNING, diagnostic.severity)
+        assertEquals(PipelineStage.DRAW, diagnostic.stage)
+        assertFailsWith<IllegalArgumentException> {
+            Diagnostic(
+                code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+                severity = DiagnosticSeverity.ERROR,
+                stage = PipelineStage.DRAW,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Diagnostic(
+                code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+                severity = DiagnosticSeverity.WARNING,
+                stage = PipelineStage.DRAW,
+                limit = 0L,
+                actual = 1L,
             )
         }
     }

@@ -24,6 +24,22 @@ private const val BLOOM_DESTINATION_UNIFORM: String = "rengBloomDestination"
 internal const val BLOOM_TARGET_LEVEL_COUNT: Int = 7
 
 /**
+ * The largest value the chain reads as light from any channel (ADR 0085). A half-float emission
+ * image holds whatever an emitter writes, up to half-float's 65504 or an infinity, or below zero,
+ * and the composite's soft shoulder divides by the light's peak. Every sample the downsample takes,
+ * and the level sample the upsample adds, is clamped to `0..`this ([BLOOM_LIGHT_GLSL]), so the
+ * emission image, the reach image and a coarse redraw's level, none of which the chain wrote, are
+ * bounded wherever they are read as light, and negative light adds nothing instead of darkening.
+ * Light from an RGBA8 image is already in `0..1`, so for it the clamp is a no-op and the chain
+ * unchanged.
+ */
+internal const val BLOOM_LIGHT_CEILING: String = "64.0"
+
+/** The GLSL helper both chain programs read light through; see [BLOOM_LIGHT_CEILING]. */
+internal const val BLOOM_LIGHT_GLSL: String =
+    "vec4 rengBloomLight(vec4 c) { return clamp(c, 0.0, $BLOOM_LIGHT_CEILING); }\n"
+
+/**
  * Where the composite's soft shoulder starts, as a fraction of full scale. Below the knee the
  * composite is the plain sum of frame and bloom; above it the brightest channel of that sum rolls
  * off exponentially towards 1 and the other channels are scaled by the same factor, so a bright
@@ -79,13 +95,14 @@ private const val BLOOM_DOWNSAMPLE_FRAGMENT_SOURCE: String =
         "uniform vec2 rengBloomSourceTexel;\n" +
         "in vec2 rengBloomUv;\n" +
         "layout(location = 0) out vec4 rengBloomColour;\n" +
+        BLOOM_LIGHT_GLSL +
         "void main() {\n" +
-        "    vec4 rengBloomCentre = texture(rengBloomSource, rengBloomUv);\n" +
+        "    vec4 rengBloomCentre = rengBloomLight(texture(rengBloomSource, rengBloomUv));\n" +
         "    vec4 rengBloomCorners =\n" +
-        "        texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2(-1.0, -1.0)) +\n" +
-        "        texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2( 1.0, -1.0)) +\n" +
-        "        texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2(-1.0,  1.0)) +\n" +
-        "        texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2( 1.0,  1.0));\n" +
+        "        rengBloomLight(texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2(-1.0, -1.0))) +\n" +
+        "        rengBloomLight(texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2( 1.0, -1.0))) +\n" +
+        "        rengBloomLight(texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2(-1.0,  1.0))) +\n" +
+        "        rengBloomLight(texture(rengBloomSource, rengBloomUv + rengBloomSourceTexel * vec2( 1.0,  1.0)));\n" +
         "    rengBloomColour = (4.0 * rengBloomCentre + rengBloomCorners) / 8.0;\n" +
         "}\n"
 
@@ -99,7 +116,12 @@ private const val BLOOM_UPSAMPLE_FRAGMENT_SOURCE: String =
         "uniform float rengBloomLevelWeight;\n" +
         "in vec2 rengBloomUv;\n" +
         "layout(location = 0) out vec4 rengBloomColour;\n" +
+        BLOOM_LIGHT_GLSL +
         "void main() {\n" +
+        // A zero accumulation weight skips the tent, so a source the chain never wrote (the
+        // emission image, in a one-level chain) cannot turn `0 * Inf` into NaN.
+        "    vec4 rengBloomTent = vec4(0.0);\n" +
+        "    if (rengBloomAccumulationWeight != 0.0) {\n" +
         "    vec4 rengBloomEdges =\n" +
         "        texture(rengBloomSource, rengBloomUv + rengBloomTargetTexel * vec2(-1.0,  0.0)) +\n" +
         "        texture(rengBloomSource, rengBloomUv + rengBloomTargetTexel * vec2( 1.0,  0.0)) +\n" +
@@ -110,9 +132,10 @@ private const val BLOOM_UPSAMPLE_FRAGMENT_SOURCE: String =
         "        texture(rengBloomSource, rengBloomUv + rengBloomTargetTexel * vec2( 1.0, -1.0)) +\n" +
         "        texture(rengBloomSource, rengBloomUv + rengBloomTargetTexel * vec2(-1.0,  1.0)) +\n" +
         "        texture(rengBloomSource, rengBloomUv + rengBloomTargetTexel * vec2( 1.0,  1.0));\n" +
-        "    vec4 rengBloomTent = (rengBloomEdges + 2.0 * rengBloomDiagonals) / 12.0;\n" +
+        "    rengBloomTent = (rengBloomEdges + 2.0 * rengBloomDiagonals) / 12.0;\n" +
+        "    }\n" +
         "    rengBloomColour = rengBloomAccumulationWeight * rengBloomTent +\n" +
-        "        rengBloomLevelWeight * texture(rengBloomLevel, rengBloomUv);\n" +
+        "        rengBloomLevelWeight * rengBloomLight(texture(rengBloomLevel, rengBloomUv));\n" +
         "}\n"
 
 private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
@@ -237,6 +260,11 @@ internal class BloomCompositeProgram(
 )
 
 internal class BloomResources internal constructor(
+    /**
+     * Whether [emission] and [downsampleLevels] are half-float (ADR 0085) rather than RGBA8. Fixed
+     * at creation: a frame asking for the other precision gets a new set of resources.
+     */
+    internal val highPrecisionEmission: Boolean,
     internal val emission: BloomTarget,
     internal val destinationCopy: BloomTarget,
     internal val downsampleLevels: List<BloomTarget>,
@@ -247,11 +275,64 @@ internal class BloomResources internal constructor(
     internal val downsample: BloomDownsampleProgram,
     internal val upsample: BloomUpsampleProgram,
     internal val composite: BloomCompositeProgram,
+) {
+    /**
+     * ADR 0085's reach image and its own downsample levels, allocated on the first frame with a
+     * positive `bloomReach` and freed with everything else here; `null` until then.
+     */
+    internal var reach: BloomReachTargets? = null
+}
+
+/**
+ * ADR 0085's full-resolution reach image, sharing the main depth renderbuffer exactly as the emission
+ * image does, in the emission image's format, and its downsample levels `1..`[BLOOM_TARGET_LEVEL_COUNT]
+ * at the main chain's sizes.
+ */
+internal class BloomReachTargets(
+    val image: BloomTarget,
+    val levels: List<BloomTarget>,
 )
+
+/**
+ * Allocates [resources]' reach targets if they are not allocated yet, and returns them, or `null`
+ * when the context refused one (every target allocated by this call is deleted again).
+ */
+internal fun ensureBloomReachTargets(binding: GlBinding, resources: BloomResources): BloomReachTargets? {
+    resources.reach?.let { return it }
+    val format = if (resources.highPrecisionEmission) GL_RGBA16F else GL_RGBA8
+    val allocated = ArrayList<BloomTarget>(1 + BLOOM_TARGET_LEVEL_COUNT)
+    fun fail(): BloomReachTargets? {
+        allocated.forEach { deleteBloomTarget(binding, it) }
+        return null
+    }
+    val image = createBloomTarget(
+        binding, resources.emission.width, resources.emission.height, format,
+        resources.sharedDepthRenderbuffer,
+    ) ?: return fail()
+    allocated += image
+    val levels = ArrayList<BloomTarget>(BLOOM_TARGET_LEVEL_COUNT)
+    for (mainLevel in resources.downsampleLevels) {
+        val level = createBloomTarget(binding, mainLevel.width, mainLevel.height, format, null)
+            ?: return fail()
+        allocated += level
+        levels += level
+    }
+    return BloomReachTargets(image, levels).also { resources.reach = it }
+}
 
 internal sealed interface BloomResourcesResult {
     data class Created(val resources: BloomResources) : BloomResourcesResult
-    data class Failed(val failure: FailureDescriptor) : BloomResourcesResult
+    /**
+     * [halfFloatTargetRefused] is true only when a half-float emission target (the emission image or
+     * a downsample level of a [createBloomResources] call with `highPrecisionEmission`) was refused as
+     * a format: an incomplete framebuffer or a GL error other than `GL_OUT_OF_MEMORY` (ADR 0085). A
+     * program that fails to link, memory running out, or any RGBA8 or upsample target failing leaves
+     * it false, since an RGBA8 chain would fail the same way.
+     */
+    data class Failed(
+        val failure: FailureDescriptor,
+        val halfFloatTargetRefused: Boolean = false,
+    ) : BloomResourcesResult
 }
 
 internal fun createBloomResources(
@@ -261,7 +342,12 @@ internal fun createBloomResources(
     outputSize: OutputPixelSize,
     sharedDepthRenderbuffer: Int,
     deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
+    highPrecisionEmission: Boolean = false,
 ): BloomResourcesResult {
+    require(!highPrecisionEmission || profile.supportsHalfFloatColourBuffer) {
+        "a half-float emission chain requires a context that renders to half-float colour"
+    }
+    val emissionFormat = if (highPrecisionEmission) GL_RGBA16F else GL_RGBA8
     val downKey = deriver
         .internalPipeline(InternalPipelineRole.BLOOM_DOWNSAMPLE, BLOOM_DOWNSAMPLE_SHADER_PAIR).key
     val upKey = deriver
@@ -301,6 +387,10 @@ internal fun createBloomResources(
     binding.vertexAttribPointer(1, 2, GL_FLOAT, false, BLOOM_QUAD_STRIDE_BYTES, BLOOM_QUAD_UV_OFFSET_BYTES)
 
     val allocated = ArrayList<BloomTarget>(1 + BLOOM_TARGET_LEVEL_COUNT * 2)
+    var halfFloatTargetRefused = false
+    val onEmissionTargetRefused: (Boolean) -> Unit = { formatRefused ->
+        halfFloatTargetRefused = highPrecisionEmission && formatRefused
+    }
     fun fail(): BloomResourcesResult.Failed {
         allocated.forEach { deleteBloomTarget(binding, it) }
         binding.deleteVertexArrays(1, intArrayOf(vertexArray))
@@ -308,11 +398,15 @@ internal fun createBloomResources(
         deleteBloomProgram(binding, cache, downKey)
         deleteBloomProgram(binding, cache, upKey)
         deleteBloomProgram(binding, cache, compositeKey)
-        return BloomResourcesResult.Failed(glOperationFailure(PipelineStage.GPU_RESOURCE, downKey))
+        return BloomResourcesResult.Failed(
+            glOperationFailure(PipelineStage.GPU_RESOURCE, downKey),
+            halfFloatTargetRefused = halfFloatTargetRefused,
+        )
     }
 
     val emission = createBloomTarget(
-        binding, outputSize.width, outputSize.height, GL_RGBA8, sharedDepthRenderbuffer,
+        binding, outputSize.width, outputSize.height, emissionFormat, sharedDepthRenderbuffer,
+        onEmissionTargetRefused,
     ) ?: return fail()
     allocated += emission
     val destinationCopy = createBloomTarget(
@@ -333,8 +427,9 @@ internal fun createBloomResources(
     val downsampleLevels = ArrayList<BloomTarget>(BLOOM_TARGET_LEVEL_COUNT)
     for (level in 1..BLOOM_TARGET_LEVEL_COUNT) {
         val size = levelSizes[level]
-        val target = createBloomTarget(binding, size.first, size.second, GL_RGBA8, null)
-            ?: return fail()
+        val target = createBloomTarget(
+            binding, size.first, size.second, emissionFormat, null, onEmissionTargetRefused,
+        ) ?: return fail()
         allocated += target
         downsampleLevels += target
     }
@@ -351,6 +446,7 @@ internal fun createBloomResources(
 
     return BloomResourcesResult.Created(
         BloomResources(
+            highPrecisionEmission = highPrecisionEmission,
             emission = emission,
             destinationCopy = destinationCopy,
             downsampleLevels = downsampleLevels,
@@ -408,6 +504,11 @@ private fun createBloomTarget(
     height: Int,
     internalFormat: Int,
     depthRenderbuffer: Int?,
+    /**
+     * Told, on a refusal, whether it looked like a refused format (an incomplete framebuffer or a GL
+     * error other than `GL_OUT_OF_MEMORY`) rather than memory running out.
+     */
+    onRefused: (formatRefused: Boolean) -> Unit = {},
 ): BloomTarget? {
     GlErrorQueue.drainOnEntry(binding)
     val names = IntArray(1)
@@ -435,6 +536,7 @@ private fun createBloomTarget(
     if (status != GL_FRAMEBUFFER_COMPLETE || error != GL_NO_ERROR) {
         binding.deleteFramebuffers(1, intArrayOf(framebuffer))
         binding.deleteTextures(1, intArrayOf(texture))
+        onRefused(status != GL_FRAMEBUFFER_COMPLETE || error != GL_OUT_OF_MEMORY)
         return null
     }
     return BloomTarget(framebuffer, texture, width, height)
@@ -447,6 +549,10 @@ internal fun deleteBloomResources(
 ) {
     (listOf(resources.emission, resources.destinationCopy) + resources.downsampleLevels + resources.upsampleLevels)
         .forEach { deleteBloomTarget(binding, it) }
+    resources.reach?.let { reach ->
+        (listOf(reach.image) + reach.levels).forEach { deleteBloomTarget(binding, it) }
+    }
+    resources.reach = null
     binding.deleteVertexArrays(1, intArrayOf(resources.vertexArray))
     binding.deleteBuffers(1, intArrayOf(resources.vertexBuffer))
     deleteBloomProgram(binding, cache, resources.downsample.key)
@@ -464,6 +570,67 @@ private fun deleteBloomProgram(binding: GlBinding, cache: GlProgramCache, key: R
 }
 
 /**
+ * Whether a frame with [bloom] gets ADR 0085's half-float emission chain on a context with [profile]:
+ * only when it asks for one and the context can render to half-float colour. A frame that asks and
+ * cannot draws with the RGBA8 chain and reports `BLOOM_EMISSION_PRECISION_REDUCED`.
+ */
+internal fun bloomUsesHighPrecisionEmission(bloom: Bloom, profile: RenderContextProfile): Boolean =
+    bloom.highPrecisionEmission && profile.supportsHalfFloatColourBuffer
+
+/**
+ * The downsample level a frame's far band is drawn into (ADR 0085): [Bloom.reachLevel], or the
+ * deepest level [Bloom.levelWeights] computes when that is shallower, or `null` when the chain has no
+ * downsample level at all.
+ */
+internal fun bloomFarBandLevel(bloom: Bloom): Int? {
+    val lastLevel = bloom.levelWeights.lastIndex
+    return if (lastLevel < 1) null else minOf(bloom.reachLevel, lastLevel)
+}
+
+/**
+ * Whether a frame with [bloom] whose emissive geometries are [emitters] draws a far band at all
+ * (ADR 0085): some emitter must have a positive reach, `reachGain` must be positive, and the chain
+ * must have a downsample level to add it to. Otherwise nothing is drawn or allocated for it.
+ */
+internal fun bloomHasFarBand(bloom: Bloom, emitters: List<com.rohittp.reng.Geometry>): Boolean =
+    bloomFarBandLevel(bloom) != null &&
+        bloom.reachGain > 0f &&
+        emitters.any { it.emissive && it.bloomReach > 0f }
+
+/**
+ * How a frame's far band reaches downsample level [BloomFarBand.level] (ADR 0085).
+ *
+ * [REACH_IMAGE] is the only strategy a consumer can get. [COARSE_REDRAW] is internal and exists to
+ * measure what the reach image buys: it rasterises the emitters straight into the level, at its
+ * resolution, with the depth test off, so a line thinner than the level's pixel drops out between
+ * sample centres and shimmers as the camera moves.
+ */
+internal enum class BloomFarBandStrategy {
+    /**
+     * Every reaching emitter is redrawn, scaled by its reach and depth-tested like the emission
+     * redraw, into a full-resolution reach image; the identical downsample kernel takes that image
+     * down to the level, where it is added scaled by `reachGain`.
+     */
+    REACH_IMAGE,
+
+    /** Every reaching emitter is drawn straight into the level, scaled by `reach * reachGain`. */
+    COARSE_REDRAW,
+}
+
+/**
+ * ADR 0085's far band. [draw] draws every reaching emitter into the target it is handed, which is
+ * bound with its viewport set: the cleared reach image under [BloomFarBandStrategy.REACH_IMAGE], or
+ * the main chain's level [level] after the chain has written it under
+ * [BloomFarBandStrategy.COARSE_REDRAW]. It owns its own depth and blend state; [drawBloom]
+ * re-establishes its own afterwards.
+ */
+internal class BloomFarBand(
+    val level: Int,
+    val strategy: BloomFarBandStrategy,
+    val draw: (BloomTarget) -> Unit,
+)
+
+/**
  * Runs the dual-Kawase chain and composites its result into [surfaceFramebuffer] without changing
  * alpha.
  *
@@ -479,6 +646,7 @@ internal fun drawBloom(
     resources: BloomResources,
     bloom: Bloom,
     surfaceFramebuffer: Int,
+    farBand: BloomFarBand? = null,
 ) {
     val weights = bloom.levelWeights
     val lastLevel = weights.lastIndex
@@ -489,22 +657,57 @@ internal fun drawBloom(
     binding.bindSampler(0, 0)
     binding.bindSampler(1, 0)
 
+    val reach = if (farBand?.strategy == BloomFarBandStrategy.REACH_IMAGE) {
+        val targets = requireNotNull(resources.reach) { "a reach-image far band requires the reach targets" }
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targets.image.framebuffer)
+        binding.viewport(0, 0, targets.image.width, targets.image.height)
+        binding.clearColor(0f, 0f, 0f, 0f)
+        binding.clear(GL_COLOR_BUFFER_BIT)
+        farBand.draw(targets.image)
+        restoreBloomChainState(binding, resources)
+        var reachSource = targets.image
+        for (level in 1..farBand.level) {
+            val target = targets.levels[level - 1]
+            drawBloomDownsample(binding, resources, reachSource, target)
+            reachSource = target
+        }
+        targets
+    } else {
+        null
+    }
+
     var source = resources.emission
     for (level in 1..lastLevel) {
         val target = resources.downsampleLevels[level - 1]
-        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, target.framebuffer)
-        binding.viewport(0, 0, target.width, target.height)
-        binding.useProgram(resources.downsample.program)
-        binding.activeTexture(GL_TEXTURE0)
-        binding.bindTexture(GL_TEXTURE_2D, source.texture)
-        bindSamplerUniform(binding, resources.downsample.sourceLocation, 0)
-        bindVec2(
-            binding,
-            resources.downsample.sourceTexelLocation,
-            1f / source.width.toFloat(),
-            1f / source.height.toFloat(),
-        )
-        binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        drawBloomDownsample(binding, resources, source, target)
+        if (farBand != null && farBand.level == level) {
+            when (farBand.strategy) {
+                BloomFarBandStrategy.REACH_IMAGE -> {
+                    // The reach image's level, the same size as this one, added at reachGain with the
+                    // level's alpha kept. The upsample program with no accumulation is exactly
+                    // `reachGain * texture(level)`: both its samplers read the reach level, so the
+                    // zero-weighted tent reads nothing undefined.
+                    val reachLevel = checkNotNull(reach).levels[level - 1]
+                    binding.enable(GL_BLEND)
+                    binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+                    binding.blendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE)
+                    drawBloomUpsample(
+                        binding = binding,
+                        resources = resources,
+                        target = target,
+                        accumulation = reachLevel,
+                        accumulationWeight = 0f,
+                        level = reachLevel,
+                        levelWeight = bloom.reachGain,
+                    )
+                    binding.disable(GL_BLEND)
+                }
+                BloomFarBandStrategy.COARSE_REDRAW -> {
+                    farBand.draw(target)
+                    restoreBloomChainState(binding, resources)
+                }
+            }
+        }
         source = target
     }
 
@@ -568,6 +771,37 @@ internal fun drawBloom(
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
     binding.colorMask(true, true, true, true)
     binding.activeTexture(GL_TEXTURE0)
+}
+
+private fun drawBloomDownsample(
+    binding: GlBinding,
+    resources: BloomResources,
+    source: BloomTarget,
+    target: BloomTarget,
+) {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, target.framebuffer)
+    binding.viewport(0, 0, target.width, target.height)
+    binding.useProgram(resources.downsample.program)
+    binding.activeTexture(GL_TEXTURE0)
+    binding.bindTexture(GL_TEXTURE_2D, source.texture)
+    bindSamplerUniform(binding, resources.downsample.sourceLocation, 0)
+    bindVec2(
+        binding,
+        resources.downsample.sourceTexelLocation,
+        1f / source.width.toFloat(),
+        1f / source.height.toFloat(),
+    )
+    binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+}
+
+/** The state [drawBloom] sets on entry, re-established after a far band's geometry draws. */
+private fun restoreBloomChainState(binding: GlBinding, resources: BloomResources) {
+    binding.disable(GL_DEPTH_TEST)
+    binding.depthMask(false)
+    binding.disable(GL_BLEND)
+    binding.bindVertexArray(resources.vertexArray)
+    binding.bindSampler(0, 0)
+    binding.bindSampler(1, 0)
 }
 
 private fun drawBloomUpsample(

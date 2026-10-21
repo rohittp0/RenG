@@ -390,11 +390,21 @@ Geometry remains ordinary scene content and keeps the scene's depth occlusion; i
 drawn-thing type and has no effect in a Frame Plan without Bloom.
 _Avoid_: Glow, halo, light source, post-effect, bloom flag
 
+**Bloom Reach**:
+A property of an **Emissive** **Geometry**, between zero and one, adding a wide-only far band to its
+**Bloom**: the emitter is drawn again, scaled by its reach and depth-tested like its emission redraw,
+into a full-resolution reach image whose downsample is added into the Bloom's chain at the Bloom's reach
+level, scaled by its reach gain. Only the levels at and below the reach level carry it, so it widens one
+emitter's halo without brightening the others'. Zero, the default, draws nothing extra.
+_Avoid_: Glow radius, spread, blur radius
+
 **Bloom**:
 The optional frame-wide screen-space spread and soft-shouldered composite of colour emitted by **Emissive**
 Geometry. Where the light is strong its halo takes the light's own hue on any ground, at the lightness
 the shoulder gives; its faint outer tail is plain added light. It controls intensity, the contribution of each resolution level, suppression inside opaque
-emission and whitening. It is composited immediately after the last Emissive Geometry in the Frame
+emission and whitening, the downsample level and gain that **Bloom Reach** is added at, and whether the
+emission chain is half-float, so emitted light can exceed one (where the context cannot render half-float
+colour the frame uses the eight-bit chain and reports `BLOOM_EMISSION_PRECISION_REDUCED`). It is composited immediately after the last Emissive Geometry in the Frame
 Plan's Geometry order: later Geometry, Models, Map Stickers, Map Labels and screen-anchored content
 cover it, while content already drawn receives it. A non-emissive Geometry between two emitters is
 therefore below the final emitter's Bloom boundary and receives the composite. The emission redraw
@@ -792,6 +802,7 @@ _Avoid_: Log message, arbitrary metadata, exception cause
 - One **Prepared Frame** draws into any number of **Render Target**s, and drawing does not consume it
 - One **Frame Plan** holds ordered lists of **Sticker**s, **Model**s, and **Geometry**s
 - One **Frame Plan** carries at most one **Bloom**, and each **Geometry** independently may be **Emissive**
+- Each **Emissive** **Geometry** carries its own **Bloom Reach**
 - List order is frame content, and each repeated equal value is a distinct drawn thing
 - Each **Sticker** and **Model** carries exactly one **Placement**
 - A **Geometry** carries no **Placement**; its geographic bounds establish its map-space footprint

@@ -20,6 +20,8 @@ import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
 import com.rohittp.reng.runGeometryBlendReadbackSuite
 import com.rohittp.reng.BLOOM_READBACK_PIXELS
 import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
 import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
 import com.rohittp.reng.runStickerOpacityReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
@@ -239,6 +241,23 @@ class LinuxGlConformanceTest {
             binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
             binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
             runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = SurfacelessEglContext.create(ShaderDialect.GLES)
+        try {
+            val binding = when (val result = openPlatformGlBinding()) {
+                is GlBindingResult.Bound -> result.binding
+                is GlBindingResult.Unsupported ->
+                    throw AssertionError("every roster entry point must resolve on this driver")
+            }
+            binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
         } finally {
             fixture.destroy()
         }

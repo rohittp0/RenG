@@ -86,6 +86,7 @@ class FramePlanSerializationTest {
                         altitudeMode = AltitudeMode.GROUND_RELATIVE,
                         emissive = true,
                         blend = BlendMode.MULTIPLY,
+                        bloomReach = 0.5f,
                     ),
                 ),
                 bloom = Bloom(
@@ -93,6 +94,9 @@ class FramePlanSerializationTest {
                     levelWeights = listOf(0.25f, 0.75f),
                     insideSuppression = 0.5f,
                     whiteness = 0.25f,
+                    highPrecisionEmission = true,
+                    reachLevel = 1,
+                    reachGain = 2f,
                 ),
             )
         }
@@ -140,8 +144,10 @@ class FramePlanSerializationTest {
             "animation", "timeSeconds", "value",
             // Geometry
             "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive", "blend",
+            "bloomReach",
             // Bloom
             "intensity", "levelWeights", "insideSuppression", "whiteness",
+            "highPrecisionEmission", "reachLevel", "reachGain",
             // ShaderPair
             "vertexSource", "fragmentSource",
             // ShaderValue

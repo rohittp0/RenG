@@ -294,39 +294,63 @@ internal class BloomResources internal constructor(
 
 /**
  * ADR 0085's full-resolution reach image, sharing the main depth renderbuffer exactly as the emission
- * image does, in the emission image's format, and its downsample levels `1..`[BLOOM_TARGET_LEVEL_COUNT]
- * at the main chain's sizes.
+ * image does, in the emission image's format, and its downsample levels `1..levels.size` at the main
+ * chain's sizes. Only the levels a far band has needed so far exist -- a far band at level `n` reads
+ * levels `1..n` and nothing deeper -- and [ensureBloomReachTargets] adds deeper ones when a frame first
+ * asks for them.
  */
 internal class BloomReachTargets(
     val image: BloomTarget,
-    val levels: List<BloomTarget>,
-)
+    levels: List<BloomTarget>,
+) {
+    private val allocatedLevels: MutableList<BloomTarget> = ArrayList(levels)
+
+    val levels: List<BloomTarget> get() = allocatedLevels
+
+    internal fun addLevel(level: BloomTarget) {
+        allocatedLevels += level
+    }
+}
 
 /**
- * Allocates [resources]' reach targets if they are not allocated yet, and returns them, or `null`
- * when the context refused one (every target allocated by this call is deleted again).
+ * Allocates [resources]' reach image and its downsample levels `1..`[throughLevel] where they are not
+ * allocated yet, and returns the reach targets, or `null` when the context refused one (every target
+ * allocated by this call is deleted again, and what an earlier call allocated is kept).
  */
-internal fun ensureBloomReachTargets(binding: GlBinding, resources: BloomResources): BloomReachTargets? {
-    resources.reach?.let { return it }
+internal fun ensureBloomReachTargets(
+    binding: GlBinding,
+    resources: BloomResources,
+    throughLevel: Int,
+): BloomReachTargets? {
+    require(throughLevel in 1..resources.downsampleLevels.size) {
+        "a reach level must name one of the main chain's downsample levels"
+    }
     val format = if (resources.highPrecisionEmission) GL_RGBA16F else GL_RGBA8
-    val allocated = ArrayList<BloomTarget>(1 + BLOOM_TARGET_LEVEL_COUNT)
+    val existing = resources.reach
+    if (existing != null && existing.levels.size >= throughLevel) return existing
+    val allocated = ArrayList<BloomTarget>(1 + throughLevel)
     fun fail(): BloomReachTargets? {
         allocated.forEach { deleteBloomTarget(binding, it) }
         return null
     }
-    val image = createBloomTarget(
-        binding, resources.emission.width, resources.emission.height, format,
-        resources.sharedDepthRenderbuffer,
-    ) ?: return fail()
-    allocated += image
-    val levels = ArrayList<BloomTarget>(BLOOM_TARGET_LEVEL_COUNT)
-    for (mainLevel in resources.downsampleLevels) {
+    val image = existing?.image ?: (
+        createBloomTarget(
+            binding, resources.emission.width, resources.emission.height, format,
+            resources.sharedDepthRenderbuffer,
+        ) ?: return fail()
+    ).also { allocated += it }
+    val levels = ArrayList<BloomTarget>(throughLevel)
+    existing?.levels?.let { levels += it }
+    while (levels.size < throughLevel) {
+        val mainLevel = resources.downsampleLevels[levels.size]
         val level = createBloomTarget(binding, mainLevel.width, mainLevel.height, format, null)
             ?: return fail()
         allocated += level
         levels += level
     }
-    return BloomReachTargets(image, levels).also { resources.reach = it }
+    if (existing == null) return BloomReachTargets(image, levels).also { resources.reach = it }
+    for (index in existing.levels.size until levels.size) existing.addLevel(levels[index])
+    return existing
 }
 
 internal sealed interface BloomResourcesResult {
@@ -615,9 +639,11 @@ internal fun bloomFarBandLevel(bloom: Bloom): Int? {
  * must have a downsample level to add it to. Otherwise nothing is drawn or allocated for it.
  */
 internal fun bloomHasFarBand(bloom: Bloom, emitters: List<com.rohittp.reng.Geometry>): Boolean =
-    bloomFarBandLevel(bloom) != null &&
-        bloom.reachGain > 0f &&
-        emitters.any { it.emissive && it.bloomReach > 0f }
+    bloomHasFarBand(bloom, emitters.any { it.emissive && it.bloomReach > 0f })
+
+/** [bloomHasFarBand] for a caller that already knows whether [someEmitterReaches] with a positive reach. */
+internal fun bloomHasFarBand(bloom: Bloom, someEmitterReaches: Boolean): Boolean =
+    bloomFarBandLevel(bloom) != null && bloom.reachGain > 0f && someEmitterReaches
 
 /**
  * How a frame's far band reaches downsample level [BloomFarBand.level] (ADR 0085).
@@ -681,6 +707,7 @@ internal fun drawBloom(
 
     val reach = if (farBand?.strategy == BloomFarBandStrategy.REACH_IMAGE) {
         val targets = requireNotNull(resources.reach) { "a reach-image far band requires the reach targets" }
+        check(targets.levels.size >= farBand.level) { "the reach targets must reach the far band's level" }
         binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targets.image.framebuffer)
         binding.viewport(0, 0, targets.image.width, targets.image.height)
         binding.clearColor(0f, 0f, 0f, 0f)

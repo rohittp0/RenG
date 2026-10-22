@@ -13,4 +13,12 @@ internal actual class PlatformLock {
             lock.unlock()
         }
     }
+
+    internal actual fun lock() {
+        lock.lock()
+    }
+
+    internal actual fun unlock() {
+        lock.unlock()
+    }
 }

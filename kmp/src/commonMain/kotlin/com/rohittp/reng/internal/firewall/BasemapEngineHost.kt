@@ -18,6 +18,7 @@ import com.rohittp.reng.internal.basemap.parseBasemapTileJson
 import com.rohittp.reng.internal.basemap.StyleManifestMemo
 import com.rohittp.reng.internal.basemap.VerifiedStoredResource
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
+import com.rohittp.reng.internal.cache.BoundedMemo
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -204,10 +205,11 @@ internal class BasemapEngineHost(
         styleManifestMemo.manifestFor(VerifiedStoredResource.of(content), baseUri)
 
     /**
-     * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069). A `LinkedHashMap` because
-     * the bound is spent oldest-first.
+     * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069), bounded by second
+     * chance ([BoundedMemo]).
      */
-    private val rememberedTileKeys: MutableMap<RememberedTileKeyIdentity, ResourceKey> = LinkedHashMap()
+    private val rememberedTileKeys: BoundedMemo<RememberedTileKeyIdentity, ResourceKey> =
+        BoundedMemo(MAXIMUM_REMEMBERED_TILE_KEYS)
 
     /**
      * Guards [rememberedTileKeys], which drawing and preparation both reach: CONTEXT.md lets a draw
@@ -1247,27 +1249,17 @@ internal class BasemapEngineHost(
      * LOD history -- a still camera with every tile resident paid all of it every frame.
      *
      * The answer is a pure function of `(styleDigest, tile)`: [tileOutputSize] and [sha256] are fixed
-     * for this host's lifetime. Bounded at [MAXIMUM_REMEMBERED_TILE_KEYS], oldest first, in the shape
-     * `ClassGateRunner.remember` already established rather than a second one.
+     * for this host's lifetime. Bounded at [MAXIMUM_REMEMBERED_TILE_KEYS], by second chance.
      */
     private fun rememberedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey {
         val identity = RememberedTileKeyIdentity(styleDigest, tile)
-        rememberedKeysLock.withLock { rememberedTileKeys[identity] }?.let { return it }
+        rememberedKeysLock.withLock { rememberedTileKeys.get(identity) }?.let { return it }
 
         // Derived outside the lock: the SHA-256 is the cost this memo exists to avoid repeating, and
         // holding a lock across it would serialise drawing behind preparation for nothing. Two threads
         // that both miss derive the same key, and the insert below keeps whichever arrived first.
         val derived = basemapTileKey(styleDigest, tile, tileOutputSize, sha256)
-        return rememberedKeysLock.withLock {
-            rememberedTileKeys[identity]?.let { return@withLock it }
-            rememberedTileKeys[identity] = derived
-            val oldest = rememberedTileKeys.iterator()
-            while (rememberedTileKeys.size > MAXIMUM_REMEMBERED_TILE_KEYS) {
-                oldest.next()
-                oldest.remove()
-            }
-            derived
-        }
+        return rememberedKeysLock.withLock { rememberedTileKeys.putIfAbsent(identity, derived) }
     }
 
     /**

@@ -127,6 +127,12 @@ private class KeyEntry {
     var current: ResidentGeneration? = null
     val retired: MutableList<ResidentGeneration> = mutableListOf()
     var freed: Boolean = false
+
+    /** When this key was last touched, from [ResidentCache]'s recency clock; larger is more recent. */
+    var recencyStamp: Long = 0L
+
+    /** An eviction candidate: a current generation that no lease holds. */
+    val evictable: Boolean get() = current?.let { it.leaseCount == 0 } == true
 }
 
 /**
@@ -164,15 +170,21 @@ internal class ResidentCache(
     private val lock = PlatformLock()
     private val entries: MutableMap<ResourceKey, KeyEntry> = mutableMapOf()
 
+    /** Stamps [KeyEntry.recencyStamp] on every touch, so stamp order is least-recently-touched first. */
+    private var recencyClock: Long = 0L
+
     /**
-     * Least-recently-used first, holding exactly the keys [entries] holds.
+     * The eviction candidates, least recently touched first: only keys whose current generation no lease
+     * holds, so a sweep never steps past a leased key.
      *
-     * A `LinkedHashMap` used as an ordered set, the shape `GlObjectRegistry.unleasedOrder` already
-     * uses for GPU textures. Recency is bumped by removing and re-inserting — that is what moves a
-     * key to the end, and it is why [entries] cannot carry this order itself: `getOrPut` on a plain
-     * map does not reorder on a hit.
+     * Ordered by stamp rather than by insertion because a key becomes a candidate on its last lease
+     * release, which does not touch it: it must sort among the candidates by when it was last touched.
+     * Kept lazily: a key is pushed with its stamp whenever it becomes a candidate or is touched as one,
+     * and an entry whose key has since been touched again, leased, evicted, superseded or dropped is
+     * discarded when it surfaces. So the invariant is one-directional -- every candidate has an entry
+     * under its current stamp -- and [evictableKeys] checks it against [entries] for tests.
      */
-    private val recency: LinkedHashMap<ResourceKey, Unit> = LinkedHashMap()
+    private val evictionQueue = EvictionQueue()
 
     /**
      * Bytes of every generation [entries] holds, maintained on install and eviction rather than
@@ -370,6 +382,10 @@ internal class ResidentCache(
         generation.removeLease()
         if (generation.leaseCount == 0) {
             val entry = entries[generation.key]
+            // The last lease on a current generation makes its key a candidate, at its last touch.
+            if (entry != null && entry.current === generation) {
+                enqueueCandidate(generation.key, entry)
+            }
             val removed = entry?.retired?.remove(generation) == true
             if (removed) residentBytes -= generation.byteSize
             // An entry whose current generation was evicted while this one was leased has nothing left.
@@ -454,7 +470,7 @@ internal class ResidentCache(
     fun closeAll(): Unit = locked {
         closed = true
         entries.clear()
-        recency.clear()
+        evictionQueue.clear()
         residentBytes = 0L
         // The cumulative counters go with it. They are "since this renderer was created" (ADR 0048)
         // and a closed renderer answers `emptyResourceReport()` regardless, so keeping a history
@@ -491,14 +507,26 @@ internal class ResidentCache(
         }
     }
 
-    /**
-     * Moves [key] to the most-recently-used end of [recency], and holds the invariant that [recency]
-     * never names a key [entries] has dropped: a key with no entry is not re-inserted.
-     */
+    /** Makes [key] the most recently touched; a key with no entry has no recency to bump. */
     private fun touch(key: ResourceKey) {
-        if (!entries.containsKey(key)) return
-        recency.remove(key)
-        recency[key] = Unit
+        val entry = entries[key] ?: return
+        check(recencyClock != Long.MAX_VALUE) { "resident cache recency space exhausted" }
+        recencyClock += 1L
+        entry.recencyStamp = recencyClock
+        if (entry.evictable) enqueueCandidate(key, entry)
+    }
+
+    private fun enqueueCandidate(key: ResourceKey, entry: KeyEntry) {
+        // Stale entries are discarded only when they surface; rebuild once they outnumber the keys.
+        if (evictionQueue.size >= 2 * entries.size + EVICTION_QUEUE_SLACK) {
+            evictionQueue.clear()
+            // Every current candidate, [key] among them, under its current stamp.
+            entries.forEach { (candidate, candidateEntry) ->
+                if (candidateEntry.evictable) evictionQueue.push(candidateEntry.recencyStamp, candidate)
+            }
+            return
+        }
+        evictionQueue.push(entry.recencyStamp, key)
     }
 
     /**
@@ -518,27 +546,43 @@ internal class ResidentCache(
      * current generation, so every lookup treats it as not resident and the next install reloads it.
      */
     private fun evictOverBudget() {
-        if (residentBytes <= residentByteBudget) return
-        val candidates = recency.keys.toList()
-        for (key in candidates) {
-            if (residentBytes <= residentByteBudget) return
+        while (residentBytes > residentByteBudget && evictionQueue.size > 0) {
+            val stamp = evictionQueue.minimumStamp()
+            val key = evictionQueue.popMinimum()
             val entry = entries[key] ?: continue
-            val generation = entry.current
-            if (generation == null || generation.leaseCount > 0) continue
+            // Stale: touched again since (a newer entry stands for it), or no longer a candidate.
+            if (entry.recencyStamp != stamp || !entry.evictable) continue
+            val generation = checkNotNull(entry.current)
             residentBytes -= generation.byteSize
             evictedKeyCount += 1L
             evictedBytes += generation.byteSize
             entry.current = null
-            removeIfEmptyAndUnfreed(key, entry)
+            if (isEmptyAndUnfreed(entry)) entries.remove(key)
         }
+    }
+
+    /** The eviction candidates as the queue holds them, least recently touched first; for tests. */
+    internal fun evictableKeys(): List<ResourceKey> = locked {
+        evictionQueue.entries()
+            .filter { (stamp, key) -> entries[key]?.let { it.recencyStamp == stamp && it.evictable } == true }
+            .sortedBy { it.first }
+            .map { it.second }
+            .distinct()
+    }
+
+    /** The eviction candidates recomputed from every entry, least recently touched first; for tests. */
+    internal fun recountEvictableKeys(): List<ResourceKey> = locked {
+        entries.filterValues { it.evictable }.entries.sortedBy { it.value.recencyStamp }.map { it.key }
     }
 
     /** Forgets an entry eviction emptied: no current, no retired, and no consumer free to remember. */
     private fun removeIfEmptyAndUnfreed(key: ResourceKey, entry: KeyEntry) {
-        if (entry.current != null || entry.retired.isNotEmpty() || entry.freed) return
+        if (!isEmptyAndUnfreed(entry)) return
         entries.remove(key)
-        recency.remove(key)
     }
+
+    private fun isEmptyAndUnfreed(entry: KeyEntry): Boolean =
+        entry.current == null && entry.retired.isEmpty() && !entry.freed
 
     private fun ResourceKey.matches(selector: ResourceSelector): Boolean = when (selector) {
         is ResourceSelector.All -> true
@@ -589,4 +633,70 @@ internal class ResidentCache(
      * starve it indefinitely. [free] and [releaseLease] still linearize at this exact boundary.
      */
     private fun <T> locked(block: () -> T): T = lock.withLock(block)
+}
+
+private const val EVICTION_QUEUE_SLACK: Int = 64
+
+/** A binary min-heap of (recency stamp, key), smallest stamp first. Confined to [ResidentCache]'s lock. */
+private class EvictionQueue {
+    private var stamps = LongArray(16)
+    private var keys = arrayOfNulls<ResourceKey>(16)
+
+    var size: Int = 0
+        private set
+
+    fun clear() {
+        keys.fill(null, 0, size)
+        size = 0
+    }
+
+    fun push(stamp: Long, key: ResourceKey) {
+        if (size == stamps.size) {
+            stamps = stamps.copyOf(size * 2)
+            keys = keys.copyOf(size * 2)
+        }
+        var index = size
+        size += 1
+        while (index > 0) {
+            val parent = (index - 1) / 2
+            if (stamps[parent] <= stamp) break
+            stamps[index] = stamps[parent]
+            keys[index] = keys[parent]
+            index = parent
+        }
+        stamps[index] = stamp
+        keys[index] = key
+    }
+
+    fun minimumStamp(): Long {
+        check(size > 0) { "the eviction queue is empty" }
+        return stamps[0]
+    }
+
+    fun popMinimum(): ResourceKey {
+        check(size > 0) { "the eviction queue is empty" }
+        val minimum = checkNotNull(keys[0])
+        size -= 1
+        val lastStamp = stamps[size]
+        val lastKey = keys[size]
+        keys[size] = null
+        if (size > 0) {
+            var index = 0
+            while (true) {
+                val left = 2 * index + 1
+                if (left >= size) break
+                val right = left + 1
+                val child = if (right < size && stamps[right] < stamps[left]) right else left
+                if (stamps[child] >= lastStamp) break
+                stamps[index] = stamps[child]
+                keys[index] = keys[child]
+                index = child
+            }
+            stamps[index] = lastStamp
+            keys[index] = lastKey
+        }
+        return minimum
+    }
+
+    fun entries(): List<Pair<Long, ResourceKey>> = List(size) { stamps[it] to checkNotNull(keys[it]) }
 }

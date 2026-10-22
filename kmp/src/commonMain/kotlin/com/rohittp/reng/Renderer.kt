@@ -37,7 +37,7 @@ public class RendererConfiguration(
     diagnosticSink: DiagnosticSink = DiagnosticSink.None,
     terrainShading: Boolean = false,
     maximumCachedConsumerPipelines: Int = 64,
-    maximumConsumerPipelinesPerFrame: Int = 256,
+    maximumConsumerPipelinesPerFrame: Int = DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME,
     maximumConcurrentTileRasterisations: Int = 1,
     maximumReadAheadRasterisedTileBytes: Long = 0L,
     presentFailedTilesProvisionally: Boolean = false,
@@ -346,3 +346,6 @@ public sealed interface Renderer : AutoCloseable {
      */
     override fun close(): Unit
 }
+
+/** [RendererConfiguration.maximumConsumerPipelinesPerFrame]'s default. */
+internal const val DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME: Int = 256

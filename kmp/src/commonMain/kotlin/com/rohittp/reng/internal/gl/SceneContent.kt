@@ -635,18 +635,14 @@ internal class SceneContent(
                 )
                 if (consumerHistory != null) {
                     if (grid.triangleIndices.isNotEmpty()) consumerHistory.record(sceneGeometry)
-                    if (sceneGeometry.geometry.emissive) consumerHistory.snapshotEmitter(sceneGeometry)
+                    if (sceneGeometry.geometry.emissive) consumerHistory.snapshotEmitter(sceneGeometry, grid)
                 }
                 if (geometryIndex == lastEmissiveGeometryIndex) {
                     // ADR 0080: compositing here makes the rest of the existing phase order an
-                    // occluder in painter's order. The phase explicitly re-establishes this loop's
-                    // known state; clearing currentBlend then makes even an equal next blend bind
-                    // itself instead of relying on the interstitial work to preserve it.
-                    drawBloomPhase(
-                        binding,
-                        sceneGeometry.geometry.blend,
-                        checkNotNull(consumerHistory),
-                    )
+                    // occluder in painter's order. The phase re-establishes this loop's known state
+                    // except the blend function, which it leaves as the chain left it; clearing
+                    // currentBlend is what makes the next geometry, whatever its blend, bind its own.
+                    drawBloomPhase(binding, checkNotNull(consumerHistory))
                     currentBlend = null
                 }
             }
@@ -709,15 +705,11 @@ internal class SceneContent(
      * This happens in the middle of that pass; the next ordinary [drawGeometry] call re-uploads its
      * own vertex and index bytes before drawing.
      */
-    private fun drawBloomPhase(
-        binding: GlBinding,
-        geometryBlend: BlendMode,
-        consumerHistory: ConsumerValueHistory,
-    ) {
+    private fun drawBloomPhase(binding: GlBinding, consumerHistory: ConsumerValueHistory) {
         val bloom = bloom ?: return
         val resources = bloomResources ?: return
-        val emissiveGeometries = scene.geometries.filter { it.geometry.emissive }
-        if (emissiveGeometries.isEmpty()) return
+        val emitters = consumerHistory.emitters
+        if (emitters.isEmpty()) return
         val framebuffer = requireNotNull(surfaceFramebuffer) {
             "bloom requires the main offscreen framebuffer"
         }
@@ -744,35 +736,19 @@ internal class SceneContent(
             is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
             is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
         }
-        // Resolved once and kept for the far band, which redraws a subset of these with the same
-        // grid, drape, view-projection and consumer values.
-        val emissionGrids = ArrayList<GeometryGrid>(emissiveGeometries.size)
-        val emitterValues = consumerHistory.emitterValues
-        check(emitterValues.size == emissiveGeometries.size) { "every emitter's values were snapshotted" }
-        for ((emitterIndex, sceneGeometry) in emissiveGeometries.withIndex()) {
-            val drape = groundDrapeFor(sceneGeometry.geometry)
-            val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
-            val grid = when (camera) {
-                is ResolvedMercatorCamera ->
-                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-
-                is ResolvedGlobeCamera ->
-                    geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-            }.requireResolvedAtDrawTime()
-            emissionGrids += grid
-            drawEmissionRedraw(binding, sceneGeometry, grid, geometryViewProjection, emitterValues[emitterIndex])
-        }
+        // Each emitter is redrawn with the grid its normal draw resolved moments earlier, from the same
+        // geometry, camera and drape, so the identical grid; the far band redraws a subset of them
+        // with the same grid, view-projection and consumer values.
+        for (emitter in emitters) drawEmissionRedraw(binding, emitter, geometryViewProjection)
 
         // ADR 0085's far band, only when some emitter asks for it with a weight that adds anything:
         // with every bloomReach at zero (or a zero reachGain) no extra draw happens and the frame is
         // the one ADR 0083 drew.
         val farBandLevel = bloomFarBandLevel(bloom)
-        val farBand = if (farBandLevel != null && bloomHasFarBand(bloom, emissiveGeometries.map { it.geometry })) {
+        val someEmitterReaches = emitters.any { it.sceneGeometry.geometry.bloomReach > 0f }
+        val farBand = if (farBandLevel != null && bloomHasFarBand(bloom, someEmitterReaches)) {
             BloomFarBand(farBandLevel, bloomFarBandStrategy) {
-                drawBloomFarBand(
-                    binding, bloom, emissiveGeometries, emissionGrids, geometryViewProjection,
-                    emitterValues,
-                )
+                drawBloomFarBand(binding, bloom, emitters, geometryViewProjection)
             }
         } else {
             null
@@ -792,7 +768,6 @@ internal class SceneContent(
         binding.disable(GL_CULL_FACE)
         binding.enable(GL_BLEND)
         binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-        applyPremultipliedBlendMode(binding, geometryBlend)
 
         // Consumer locations belong to a shared program and omitted values deliberately retain that
         // program's previous value; a sampler an omitting draw inherits samples whatever its unit then
@@ -802,23 +777,25 @@ internal class SceneContent(
         // (ADR 0080's 2026-10-21 and 2026-10-22 amendments). A value the frame had not set before the
         // bloom phase cannot be restored: RenG does not query what was there before the frame.
         consumerHistory.restoreTextureUnits(binding)
-        val restoredPrograms = HashSet<Int>()
-        for (emitter in emissiveGeometries) {
-            val program = emitter.pipeline.program
-            if (!restoredPrograms.add(program)) continue
+        for (index in emitters.indices) {
+            val pipeline = emitters[index].sceneGeometry.pipeline
+            val program = pipeline.program
+            // Each program once, at its first emitter; emitters are few, so a scan beats a set.
+            if (emitters.indexOfFirst { it.sceneGeometry.pipeline.program == program } != index) continue
             binding.useProgram(program)
-            consumerHistory.restoreProgram(binding, emitter.pipeline)
+            consumerHistory.restoreProgram(binding, pipeline)
         }
     }
 
     /** One emitter drawn with `rengGeometryEmissionPass` at one, into whatever target is bound. */
     private fun drawEmissionRedraw(
         binding: GlBinding,
-        sceneGeometry: SceneGeometry,
-        grid: GeometryGrid,
+        emitter: BloomEmitter,
         geometryViewProjection: FloatArray,
-        values: EmitterConsumerValues,
     ) {
+        val sceneGeometry = emitter.sceneGeometry
+        val values = emitter.values
+        val grid = emitter.grid
         drawGeometry(
             binding = binding,
             pipeline = sceneGeometry.pipeline,
@@ -848,7 +825,7 @@ internal class SceneContent(
      * reach image's level is added to the chain.
      *
      * A consumer value an emitter omits inherits its program's previous value, so a far redraw, like
-     * the emission redraw, draws each emitter with [emitterValues]: the effective uniforms and
+     * the emission redraw, draws each emitter with [BloomEmitter.values]: the effective uniforms and
      * textures it drew with in the normal pass, snapshotted there. Only a value no earlier draw of
      * this frame set can differ: that draw saw whatever the program held before the frame, which
      * RenG does not query. The blend colour is
@@ -863,10 +840,8 @@ internal class SceneContent(
     private fun drawBloomFarBand(
         binding: GlBinding,
         bloom: Bloom,
-        emissiveGeometries: List<SceneGeometry>,
-        emissionGrids: List<GeometryGrid>,
+        emitters: List<BloomEmitter>,
         geometryViewProjection: FloatArray,
-        emitterValues: List<EmitterConsumerValues>,
     ) {
         val coarse = bloomFarBandStrategy == BloomFarBandStrategy.COARSE_REDRAW
         if (coarse) {
@@ -884,16 +859,14 @@ internal class SceneContent(
         } else {
             binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         }
-        for ((index, sceneGeometry) in emissiveGeometries.withIndex()) {
+        for (emitter in emitters) {
             // An emitter with an empty grid bound nothing in the emission redraw, and draws nothing here.
-            if (emissionGrids[index].triangleIndices.isEmpty()) continue
-            val reach = sceneGeometry.geometry.bloomReach
+            if (emitter.grid.triangleIndices.isEmpty()) continue
+            val reach = emitter.sceneGeometry.geometry.bloomReach
             if (reach <= 0f) continue
             val weight = if (coarse) minOf(1f, reach * bloom.reachGain) else reach
             binding.blendColor(0f, 0f, 0f, weight)
-            drawEmissionRedraw(
-                binding, sceneGeometry, emissionGrids[index], geometryViewProjection, emitterValues[index],
-            )
+            drawEmissionRedraw(binding, emitter, geometryViewProjection)
         }
         binding.blendColor(0f, 0f, 0f, 0f)
     }
@@ -1719,6 +1692,13 @@ internal class EmitterConsumerValues(
     val textures: Map<String, Int>,
 )
 
+/** One emitter as its normal draw drew it, which is how the bloom phase redraws it. */
+internal class BloomEmitter(
+    val sceneGeometry: SceneGeometry,
+    val grid: GeometryGrid,
+    val values: EmitterConsumerValues,
+)
+
 /**
  * The consumer values this frame's normal geometry draws left behind (ADR 0080's 2026-10-22
  * amendment), kept only on a frame with a bloom phase.
@@ -1727,38 +1707,72 @@ internal class EmitterConsumerValues(
  * texture leaves its sampler pointing at a unit that holds whatever was last bound there.
  * [bindConsumerValues] binds a draw's textures to units `0..n-1` in name order, so the model here is
  * per program the merged uniforms and each sampler's unit, and across programs each unit's texture.
+ *
+ * A program's merged uniforms are copied on write: an emitter's snapshot shares the map as it stands,
+ * and the next [record] on that program that changes it replaces the map with a copy first. So an
+ * emitter sees exactly its effective values at its normal draw, and consecutive emitters on a program
+ * nothing changed in between share one map.
  */
 internal class ConsumerValueHistory {
-    private val uniformsByProgram = HashMap<Int, HashMap<String, ShaderValue>>()
+    /** One program's merged uniforms; [shared] while an emitter's snapshot holds [values]. */
+    private class MergedUniforms(var values: HashMap<String, ShaderValue>, var shared: Boolean = false)
+
+    private val uniformsByProgram = HashMap<Int, MergedUniforms>()
     private val samplerUnitsByProgram = HashMap<Int, HashMap<String, Int>>()
     private val textureByUnit = HashMap<Int, Int>()
 
-    /** Each emitter's effective values, in draw order. */
-    val emitterValues: MutableList<EmitterConsumerValues> = ArrayList()
+    /** Each emitter as its normal draw drew it, in draw order. */
+    val emitters: MutableList<BloomEmitter> = ArrayList()
 
     /** Records a normal draw that bound its values (a draw with an empty grid binds none). */
     fun record(sceneGeometry: SceneGeometry) {
         val program = sceneGeometry.pipeline.program
-        uniformsByProgram.getOrPut(program) { HashMap() }.putAll(sceneGeometry.consumerUniforms)
-        if (sceneGeometry.consumerTextures.isEmpty()) return
+        val uniforms = sceneGeometry.consumerUniforms
+        if (uniforms.isNotEmpty()) {
+            val merged = uniformsByProgram[program]
+            if (merged == null) {
+                uniformsByProgram[program] = MergedUniforms(HashMap(uniforms))
+            } else if (merged.shared) {
+                merged.values = HashMap(merged.values).apply { putAll(uniforms) }
+                merged.shared = false
+            } else {
+                merged.values.putAll(uniforms)
+            }
+        } else {
+            uniformsByProgram.getOrPut(program) { MergedUniforms(HashMap()) }
+        }
+        val textures = sceneGeometry.consumerTextures
+        if (textures.isEmpty()) return
         val samplerUnits = samplerUnitsByProgram.getOrPut(program) { HashMap() }
-        sceneGeometry.consumerTextures.entries.sortedBy { it.key }.forEachIndexed { unit, (name, texture) ->
+        val names = sceneGeometry.pipeline.textureNameOrder.of(textures.keys)
+        for (unit in names.indices) {
+            val name = names[unit]
             samplerUnits[name] = unit
-            textureByUnit[unit] = texture
+            textureByUnit[unit] = textures.getValue(name)
         }
     }
 
-    /** Snapshots what [sceneGeometry], an emitter, just drew with. */
-    fun snapshotEmitter(sceneGeometry: SceneGeometry) {
+    /** Snapshots what [sceneGeometry], an emitter, just drew with, and the [grid] it drew. */
+    fun snapshotEmitter(sceneGeometry: SceneGeometry, grid: GeometryGrid) {
         val program = sceneGeometry.pipeline.program
-        val textures = HashMap<String, Int>()
-        samplerUnitsByProgram[program]?.forEach { (name, unit) ->
-            textureByUnit[unit]?.let { textures[name] = it }
+        val samplerUnits = samplerUnitsByProgram[program]
+        val textures = if (samplerUnits.isNullOrEmpty()) {
+            emptyMap()
+        } else {
+            HashMap<String, Int>().also { textures ->
+                samplerUnits.forEach { (name, unit) -> textureByUnit[unit]?.let { textures[name] = it } }
+            }
         }
-        emitterValues += EmitterConsumerValues(
-            uniforms = HashMap(uniformsByProgram[program] ?: sceneGeometry.consumerUniforms),
-            textures = textures,
-        )
+        val merged = uniformsByProgram[program]
+        val uniforms = if (merged == null) {
+            // Nothing recorded on this program: the emitter drew nothing, and its own values are a
+            // frame-private snapshot already.
+            sceneGeometry.consumerUniforms
+        } else {
+            merged.shared = true
+            merged.values
+        }
+        emitters += BloomEmitter(sceneGeometry, grid, EmitterConsumerValues(uniforms, textures))
     }
 
     /** Rebinds every unit the normal pass had bound to the texture it left there. */
@@ -1772,11 +1786,11 @@ internal class ConsumerValueHistory {
     /** Re-sets every uniform and sampler unit the normal pass had set on [pipeline]'s bound program. */
     fun restoreProgram(binding: GlBinding, pipeline: GeometryPipeline) {
         val program = pipeline.program
-        uniformsByProgram[program]?.let { uniforms ->
+        uniformsByProgram[program]?.let { merged ->
             bindConsumerValues(
                 binding = binding,
-                locate = { name -> pipeline.consumerLocation(binding, name) },
-                uniforms = uniforms,
+                program = pipeline,
+                uniforms = merged.values,
                 textures = emptyMap(),
             )
         }

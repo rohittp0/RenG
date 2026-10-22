@@ -41,24 +41,43 @@ internal fun decodePng(
     maximumDecodedBytes: Long,
     maximumWorkingBytes: Long = Long.MAX_VALUE,
     storedFastPath: Boolean = true,
-): PngDecodeResult {
-    return when (val scan = scanPng(bytes)) {
-        is PngScan.Malformed -> PngDecodeResult.Malformed(scan.reason)
-        is PngScan.Unsupported -> PngDecodeResult.Unsupported(scan.reason)
-        is PngScan.Admitted -> decodeAdmitted(bytes, scan, maximumDecodedBytes, maximumWorkingBytes, storedFastPath)
-    }
-}
+): PngDecodeResult = prescanPng(bytes).decode(maximumDecodedBytes, maximumWorkingBytes, storedFastPath)
 
 /**
  * Exact final RGBA8 payload for an admitted PNG, without allocating decoded storage. `null` means
  * the container is not admitted or the declared dimensions cannot be represented as a Long byte
  * count; [decodePng] remains the authority on the eventual typed rejection.
  */
-internal fun projectedPngRgbaBytes(bytes: ByteArray): Long? {
-    val admitted = scanPng(bytes) as? PngScan.Admitted ?: return null
-    val pixels = admitted.header.width.toLong() * admitted.header.height.toLong()
-    if (pixels > Long.MAX_VALUE / 4L) return null
-    return pixels * 4L
+internal fun projectedPngRgbaBytes(bytes: ByteArray): Long? = prescanPng(bytes).projectedRgbaBytes
+
+/** Walks [bytes]' container once, for a caller that needs both its projection and its decode. */
+internal fun prescanPng(bytes: ByteArray): PngPrescan = PngPrescan(bytes, scanPng(bytes))
+
+/**
+ * One [scanPng] of a candidate PNG, answering both [projectedPngRgbaBytes] and [decodePng] without
+ * walking the chunks and checking their CRCs a second time. The scan's ranges index into [bytes], so
+ * the caller must not mutate them while this is in use.
+ */
+internal class PngPrescan internal constructor(private val bytes: ByteArray, private val scan: PngScan) {
+    /** Exactly what [projectedPngRgbaBytes] returns for the same bytes. */
+    val projectedRgbaBytes: Long?
+        get() {
+            val admitted = scan as? PngScan.Admitted ?: return null
+            val pixels = admitted.header.width.toLong() * admitted.header.height.toLong()
+            if (pixels > Long.MAX_VALUE / 4L) return null
+            return pixels * 4L
+        }
+
+    /** Exactly what [decodePng] returns for the same bytes and limits. */
+    fun decode(
+        maximumDecodedBytes: Long,
+        maximumWorkingBytes: Long = Long.MAX_VALUE,
+        storedFastPath: Boolean = true,
+    ): PngDecodeResult = when (scan) {
+        is PngScan.Malformed -> PngDecodeResult.Malformed(scan.reason)
+        is PngScan.Unsupported -> PngDecodeResult.Unsupported(scan.reason)
+        is PngScan.Admitted -> decodeAdmitted(bytes, scan, maximumDecodedBytes, maximumWorkingBytes, storedFastPath)
+    }
 }
 
 private fun decodeAdmitted(

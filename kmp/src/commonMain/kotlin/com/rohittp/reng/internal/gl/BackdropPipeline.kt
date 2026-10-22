@@ -178,10 +178,13 @@ internal class ConsumerBackdropPipeline(
     val resolutionLocation: Int,
     val frameIndexLocation: Int,
     val inverseViewProjectionLocation: Int,
-) {
+) : ConsumerValueProgram {
     private val consumerLocations: MutableMap<String, Int> = HashMap()
 
-    fun consumerLocation(binding: GlBinding, name: String): Int {
+    override val uniformNameOrder: ConsumerNameOrder = ConsumerNameOrder()
+    override val textureNameOrder: ConsumerNameOrder = ConsumerNameOrder()
+
+    override fun consumerLocation(binding: GlBinding, name: String): Int {
         consumerLocations[name]?.let { return it }
         val location = binding.getUniformLocation(program, name)
         if (location >= 0) consumerLocations[name] = location
@@ -379,7 +382,7 @@ internal fun drawBackdrop(
             }
             bindConsumerValues(
                 binding = binding,
-                locate = { name -> pipeline.consumerLocation(binding, name) },
+                program = pipeline,
                 uniforms = backdrop.uniforms,
                 textures = backdrop.textures,
             )

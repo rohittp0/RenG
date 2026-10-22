@@ -94,6 +94,7 @@ import com.rohittp.reng.internal.gl.ancestorOf
 import com.rohittp.reng.internal.gl.createBackdropPipeline
 import com.rohittp.reng.internal.gl.createBloomResources
 import com.rohittp.reng.internal.gl.BloomFarBandStrategy
+import com.rohittp.reng.internal.gl.bloomFarBandLevel
 import com.rohittp.reng.internal.gl.bloomHasFarBand
 import com.rohittp.reng.internal.gl.bloomUsesHighPrecisionEmission
 import com.rohittp.reng.internal.gl.ensureBloomReachTargets
@@ -148,15 +149,17 @@ import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.ShaderPairMemo
+import com.rohittp.reng.internal.identity.shaderPairMemoCapacity
 import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.Etc2ContainerResult
 import com.rohittp.reng.internal.image.PngDecodeResult
+import com.rohittp.reng.internal.image.PngPrescan
 import com.rohittp.reng.internal.image.TextureImage
 import com.rohittp.reng.internal.image.decodePng
 import com.rohittp.reng.internal.image.isEtc2Container
 import com.rohittp.reng.internal.image.parseEtc2Container
-import com.rohittp.reng.internal.image.projectedPngRgbaBytes
+import com.rohittp.reng.internal.image.prescanPng
 import com.rohittp.reng.internal.label.FadedLabel
 import com.rohittp.reng.internal.label.LabelFadeState
 import com.rohittp.reng.internal.label.LabelGroundElevation
@@ -202,6 +205,7 @@ import com.rohittp.reng.internal.residentGpuTexturesOverBudgetDiagnostic
 import com.rohittp.reng.internal.resource.ResourceOperationDefinition
 import com.rohittp.reng.internal.resource.ResourceOperationOutcome
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
+import com.rohittp.reng.internal.shader.shaderProfileMemoCapacity
 import com.rohittp.reng.internal.terrain.DemEncoding
 import com.rohittp.reng.internal.terrain.DemTexels
 import com.rohittp.reng.internal.terrain.DemTileCoordinate
@@ -719,21 +723,18 @@ internal class RenGPreparedFrame(
         preparedFrameCpuReservation = preparedFrameCpuReservation,
     )
 
-    internal val stickers: List<PreparedSticker> get() = ownershipLock.withLock { ArrayList(stickerSnapshot) }
-    internal val geometries: List<PreparedGeometry> get() = ownershipLock.withLock { ArrayList(geometrySnapshot) }
-    internal val models: List<PreparedModel> get() = ownershipLock.withLock { ArrayList(modelSnapshot) }
-    internal val basemapTiles: List<RenderedBasemapTile> get() = ownershipLock.withLock {
-        ArrayList(basemapTileSnapshot)
-    }
+    // Each list snapshot is a private copy made at construction and never mutated afterwards -- close
+    // replaces it with an empty list rather than clearing it -- so a read hands out the snapshot itself:
+    // a reader that outlives a close keeps the contents it read, exactly as a copy would.
+    internal val stickers: List<PreparedSticker> get() = ownershipLock.withLock { stickerSnapshot }
+    internal val geometries: List<PreparedGeometry> get() = ownershipLock.withLock { geometrySnapshot }
+    internal val models: List<PreparedModel> get() = ownershipLock.withLock { modelSnapshot }
+    internal val basemapTiles: List<RenderedBasemapTile> get() = ownershipLock.withLock { basemapTileSnapshot }
     internal val groundInstances: List<PreparedGroundInstance> get() = ownershipLock.withLock {
-        ArrayList(groundInstanceSnapshot)
+        groundInstanceSnapshot
     }
-    internal val mapOrder: List<DrawnThingReference> get() = ownershipLock.withLock {
-        ArrayList(mapOrderSnapshot)
-    }
-    internal val screenOrder: List<DrawnThingReference> get() = ownershipLock.withLock {
-        ArrayList(screenOrderSnapshot)
-    }
+    internal val mapOrder: List<DrawnThingReference> get() = ownershipLock.withLock { mapOrderSnapshot }
+    internal val screenOrder: List<DrawnThingReference> get() = ownershipLock.withLock { screenOrderSnapshot }
     internal val backdrop: PreparedBackdrop? get() = ownershipLock.withLock { backdropSnapshot }
     internal val bloom: Bloom? get() = ownershipLock.withLock { bloomSnapshot }
     internal val terrain: PreparedTerrain? get() = ownershipLock.withLock { terrainSnapshot }
@@ -1195,7 +1196,7 @@ internal class RenGRenderer(
      * The canonical form and derived keys of every consumer shader pair this renderer has seen, shared
      * by the validation, planning, encoding and draw paths that each used to derive them again.
      */
-    private val shaderPairMemo = ShaderPairMemo()
+    private val shaderPairMemo = ShaderPairMemo(shaderPairMemoCapacity(configuration.maximumConsumerPipelinesPerFrame))
 
     /**
      * Every external route's derived key and Rentile private key this renderer has met, shared by the
@@ -1208,7 +1209,8 @@ internal class RenGRenderer(
     // Every planSpatial this renderer runs -- prepare's, through each FramePlanningCore, and readAhead's
     // -- shares it, so a consumer's shader sources are scanned for their profile directive once rather
     // than once a frame. Locked, because readAhead may plan on another thread.
-    private val shaderProfileMemo = ShaderProfileMemo()
+    private val shaderProfileMemo =
+        ShaderProfileMemo(shaderProfileMemoCapacity(configuration.maximumConsumerPipelinesPerFrame))
     private val geometryKeyDeriver: ResourceKeyDeriver =
         ResourceKeyDeriver(shaderPairs = shaderPairMemo, externalKeys = externalKeyMemo)
 
@@ -2479,7 +2481,8 @@ internal class RenGRenderer(
             )
             return retained.image
         }
-        val projectedBytes = projectedPngRgbaBytes(pngBytes)
+        val png = prescanPng(pngBytes)
+        val projectedBytes = png.projectedRgbaBytes
         if (
             projectedBytes != null &&
             projectedBytes <= configuration.resourceLimits.maximumDecodedImageBytes
@@ -2488,7 +2491,7 @@ internal class RenGRenderer(
                 preparedFrameCpuReservation.tryAddFrameOwned(projectedBytes),
             )
         }
-        val decoded = decodeGlyphAtlas(pngBytes)
+        val decoded = decodeGlyphAtlas(png)
         check(projectedBytes == null || projectedBytes == decoded.byteCount.toLong()) {
             "glyph-atlas projection and decoded byte count must agree"
         }
@@ -2524,7 +2527,8 @@ internal class RenGRenderer(
             return retained
         }
         val key = geometryKeyDeriver.spriteAtlas(manifest.atlasPngBytes).key
-        val projectedBytes = projectedPngRgbaBytes(manifest.atlasPngBytes)
+        val png = prescanPng(manifest.atlasPngBytes)
+        val projectedBytes = png.projectedRgbaBytes
         if (
             projectedBytes != null &&
             projectedBytes <= configuration.resourceLimits.maximumDecodedImageBytes
@@ -2533,7 +2537,7 @@ internal class RenGRenderer(
                 preparedFrameCpuReservation.tryAddFrameOwned(projectedBytes),
             )
         }
-        val decoded = decodeSpriteAtlas(manifest.atlasPngBytes)
+        val decoded = decodeSpriteAtlas(png)
         check(projectedBytes == null || projectedBytes == decoded.byteCount.toLong()) {
             "sprite-atlas projection and decoded byte count must agree"
         }
@@ -2557,10 +2561,9 @@ internal class RenGRenderer(
      * glyph atlas makes over the same limit, and for the same reason: a silent half-drawn symbol is
      * the failure this whole task exists to close.
      */
-    private fun decodeSpriteAtlas(pngBytes: ByteArray): DecodedImage =
+    private fun decodeSpriteAtlas(png: PngPrescan): DecodedImage =
         when (
-            val decoded = decodePng(
-                pngBytes,
+            val decoded = png.decode(
                 configuration.resourceLimits.maximumDecodedImageBytes,
                 configuration.resourceLimits.maximumImageDecodeWorkingBytes,
             )
@@ -2579,10 +2582,9 @@ internal class RenGRenderer(
             )
         }
 
-    private fun decodeGlyphAtlas(pngBytes: ByteArray): DecodedImage =
+    private fun decodeGlyphAtlas(png: PngPrescan): DecodedImage =
         when (
-            val decoded = decodePng(
-                pngBytes,
+            val decoded = png.decode(
                 configuration.resourceLimits.maximumDecodedImageBytes,
                 configuration.resourceLimits.maximumImageDecodeWorkingBytes,
             )
@@ -3212,7 +3214,8 @@ internal class RenGRenderer(
                 continue
             }
             val stored = generation.stored
-            val projectedRgbaBytes = projectedPngRgbaBytes(stored.byteSnapshot)
+            val png = prescanPng(stored.byteSnapshot)
+            val projectedRgbaBytes = png.projectedRgbaBytes
             if (
                 projectedRgbaBytes != null &&
                 projectedRgbaBytes <= configuration.resourceLimits.maximumDecodedImageBytes
@@ -3226,8 +3229,7 @@ internal class RenGRenderer(
                 )
             }
             val image = when (
-                val decoded = decodePng(
-                    stored.byteSnapshot,
+                val decoded = png.decode(
                     configuration.resourceLimits.maximumDecodedImageBytes,
                     configuration.resourceLimits.maximumImageDecodeWorkingBytes,
                 )
@@ -3988,7 +3990,7 @@ internal class RenGRenderer(
             return null
         }
         if (bloomFarBandStrategy == BloomFarBandStrategy.REACH_IMAGE && bloomHasFarBand(bloom, emitters) &&
-            ensureBloomReachTargets(binding, resources) == null
+            ensureBloomReachTargets(binding, resources, checkNotNull(bloomFarBandLevel(bloom))) == null
         ) {
             stagedDiagnostics += bloomUnavailableDiagnostic()
             return null

@@ -967,9 +967,9 @@ class SceneContentTest {
             "disable(${hex(GL_CULL_FACE)})",
             "enable(${hex(GL_BLEND)})",
             "blendEquationSeparate(${hex(GL_FUNC_ADD)},${hex(GL_FUNC_ADD)})",
-            "blendFuncSeparate(${hex(GL_DST_COLOR)},${hex(GL_ONE_MINUS_SRC_ALPHA)}," +
-                "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)})",
         )
+        // The blend function is not part of the re-established state: the phase leaves it as the
+        // chain left it, and the loop's cleared currentBlend makes the next geometry bind its own.
         assertEquals(
             expectedStateSequence,
             binding.log.subList(compositeDraw + 1, compositeDraw + 1 + expectedStateSequence.size),
@@ -1063,6 +1063,26 @@ class SceneContentTest {
         assertEquals(null, reachResources.reach)
     }
 
+    // A far band at level n reads reach levels 1..n only, so only those are allocated; a later frame
+    // with a deeper reachLevel adds the missing levels to the same targets.
+    @Test
+    fun reachTargetsGrowToADeeperLevelKeepingTheLevelsAlreadyAllocated() {
+        val binding = RecordingGlBinding()
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val shallow = assertNotNull(ensureBloomReachTargets(binding, resources, throughLevel = 2))
+        val firstTwo = shallow.levels.toList()
+        assertEquals(2, firstTwo.size)
+        val deep = assertNotNull(ensureBloomReachTargets(binding, resources, throughLevel = 5))
+        assertTrue(deep === shallow, "the same targets grow")
+        assertEquals(firstTwo, deep.levels.take(2), "the levels already allocated are kept")
+        assertEquals(
+            resources.downsampleLevels.take(5).map { it.width to it.height },
+            deep.levels.map { it.width to it.height },
+        )
+        assertTrue(ensureBloomReachTargets(binding, resources, throughLevel = 3) === deep)
+        assertEquals(5, deep.levels.size, "a shallower frame frees nothing")
+    }
+
     /**
      * ADR 0085's reach image: the reaching emitter is redrawn into a cleared, full-resolution image
      * under the emission redraw's depth state, scaled by its reach through the blend constant; the
@@ -1077,11 +1097,15 @@ class SceneContentTest {
         )
         val emitter = newGeometryPipeline(binding)
         val resources = newBloomResources(binding, depthRenderbuffer = 77)
-        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
-        assertTrue(ensureBloomReachTargets(binding, resources) === reach, "allocated once")
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources, throughLevel = Bloom.DEFAULT_REACH_LEVEL))
+        assertTrue(ensureBloomReachTargets(binding, resources, Bloom.DEFAULT_REACH_LEVEL) === reach, "allocated once")
         assertEquals(OUTPUT_SIZE.width, reach.image.width)
         assertEquals(OUTPUT_SIZE.height, reach.image.height)
-        assertEquals(resources.downsampleLevels.map { it.width to it.height }, reach.levels.map { it.width to it.height })
+        // Only the levels a far band at reachLevel reads exist: 1..reachLevel, at the main chain's sizes.
+        assertEquals(
+            resources.downsampleLevels.take(Bloom.DEFAULT_REACH_LEVEL).map { it.width to it.height },
+            reach.levels.map { it.width to it.height },
+        )
         val scene = Scene(
             outputPixelSize = OUTPUT_SIZE,
             frameIndex = 0L,
@@ -1169,7 +1193,7 @@ class SceneContentTest {
         )
         val pipelineP = newGeometryPipeline(binding)
         val resources = newBloomResources(binding, depthRenderbuffer = 77)
-        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources, Bloom.DEFAULT_REACH_LEVEL))
         fun emitter(reach: Float, u: Float?) = SceneGeometry(
             testGeometry().copy(emissive = true, bloomReach = reach),
             pipelineP,
@@ -1239,7 +1263,7 @@ class SceneContentTest {
             binding.log[bind + 1].split(",")[2]
         }
         assertEquals(List(formats.size) { hex(GL_RGBA16F) }, formats)
-        val reach = assertNotNull(ensureBloomReachTargets(binding, resources))
+        val reach = assertNotNull(ensureBloomReachTargets(binding, resources, Bloom.DEFAULT_REACH_LEVEL))
         val reachFormat = binding.log[binding.log.indexOf("bindTexture(${hex(GL_TEXTURE_2D)},${reach.image.texture})") + 1]
         assertTrue(reachFormat.contains(hex(GL_RGBA16F)), reachFormat)
 

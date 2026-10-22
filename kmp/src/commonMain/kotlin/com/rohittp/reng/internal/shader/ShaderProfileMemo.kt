@@ -1,5 +1,8 @@
 package com.rohittp.reng.internal.shader
 
+import com.rohittp.reng.DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME
+import com.rohittp.reng.internal.cache.BoundedMemo
+import com.rohittp.reng.internal.identity.shaderPairMemoCapacity
 import com.rohittp.reng.internal.thread.PlatformLock
 
 /**
@@ -20,9 +23,12 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * the runtime, and the same source instance -- the common case, since a consumer reuses one
  * [com.rohittp.reng.ShaderPair] -- compares by identity before any character.
  *
- * **It is bounded**, oldest-first, exactly as [com.rohittp.reng.internal.identity.ShaderPairMemo] is and
- * for its reason: an entry retains its source, and a consumer that generated a shader per frame must not
- * grow it without limit. Two sources per pair, so twice that memo's pair capacity.
+ * **It is bounded, and one frame's sources always fit**, by second chance, exactly as
+ * [com.rohittp.reng.internal.identity.ShaderPairMemo] is and for its reason: an entry retains its source,
+ * and a consumer that generated a shader per frame must not grow it without limit, while a bound below one
+ * frame's working set would make a busy frame rescan every source. Each pair contributes two sources, so
+ * the renderer sizes it with [shaderProfileMemoCapacity]: twice the shader-pair memo's capacity for the
+ * same `maximumConsumerPipelinesPerFrame`.
  *
  * **It is locked**, because `readAhead` may plan on another thread while `prepare` plans. The scan runs
  * outside the lock; two threads that both miss scan equal answers and the insert keeps the first.
@@ -31,7 +37,7 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * [scanShaderProfile].
  */
 internal class ShaderProfileMemo(
-    private val capacity: Int = MAXIMUM_REMEMBERED_SHADER_SOURCES,
+    private val capacity: Int = shaderProfileMemoCapacity(DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME),
     private val scan: (String) -> ShaderProfilePlan? = ::scanShaderProfile,
 ) {
     init {
@@ -41,28 +47,17 @@ internal class ShaderProfileMemo(
     /** A remembered scan; [plan] is `null` when the source has no usable profile directive. */
     private class Scanned(val plan: ShaderProfilePlan?)
 
-    private val scanned: MutableMap<String, Scanned> = LinkedHashMap()
+    private val scanned: BoundedMemo<String, Scanned> = BoundedMemo(capacity)
     private val lock = PlatformLock()
 
     /** Exactly `scanShaderProfile(source)`, scanned at most once per remembered [source]. */
     internal fun profileOf(source: String): ShaderProfilePlan? {
-        lock.withLock { scanned[source] }?.let { return it.plan }
+        lock.withLock { scanned.get(source) }?.let { return it.plan }
         val derived = Scanned(scan(source))
-        return lock.withLock {
-            val existing = scanned[source]
-            if (existing != null) {
-                existing.plan
-            } else {
-                scanned[source] = derived
-                val oldest = scanned.iterator()
-                while (scanned.size > capacity) {
-                    oldest.next()
-                    oldest.remove()
-                }
-                derived.plan
-            }
-        }
+        return lock.withLock { scanned.putIfAbsent(source, derived) }.plan
     }
 }
 
-internal const val MAXIMUM_REMEMBERED_SHADER_SOURCES: Int = 128
+/** Twice [shaderPairMemoCapacity] for the same limit: a vertex and a fragment source per pair. */
+internal fun shaderProfileMemoCapacity(maximumConsumerPipelinesPerFrame: Int): Int =
+    2 * shaderPairMemoCapacity(maximumConsumerPipelinesPerFrame)

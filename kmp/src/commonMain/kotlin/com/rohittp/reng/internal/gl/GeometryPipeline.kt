@@ -93,7 +93,7 @@ internal class GeometryPipeline(
     val geometryBoundsLocation: Int,
     val frameIndexLocation: Int,
     val emissionPassLocation: Int,
-) {
+) : ConsumerValueProgram {
     /**
      * Consumer uniform and sampler names resolved against [program], memoised on first use.
      *
@@ -110,12 +110,15 @@ internal class GeometryPipeline(
     private val consumerLocations: MutableMap<String, Int> = HashMap()
 
     /** [name]'s location in [program], from the memo above or from the driver exactly once. */
-    fun consumerLocation(binding: GlBinding, name: String): Int {
+    override fun consumerLocation(binding: GlBinding, name: String): Int {
         consumerLocations[name]?.let { return it }
         val location = binding.getUniformLocation(program, name)
         if (location >= 0) consumerLocations[name] = location
         return location
     }
+
+    override val uniformNameOrder: ConsumerNameOrder = ConsumerNameOrder()
+    override val textureNameOrder: ConsumerNameOrder = ConsumerNameOrder()
 
     /**
      * The CPU byte buffers [drawGeometry] packs this pipeline's grid into before uploading it, reused
@@ -442,7 +445,7 @@ internal fun drawGeometry(
 
     bindConsumerValues(
         binding = binding,
-        locate = { name -> pipeline.consumerLocation(binding, name) },
+        program = pipeline,
         uniforms = uniformsSnapshot,
         textures = texturesSnapshot,
     )
@@ -458,35 +461,76 @@ internal fun endGeometryEmissionPass(binding: GlBinding, pipeline: GeometryPipel
 }
 
 /**
- * Binds [uniforms] and then [textures] by name, each resolved through [locate], in name order.
+ * A linked program a consumer's uniforms and textures are bound to by name: the geometry pass's and
+ * the consumer backdrop's (ADR 0071).
+ */
+internal interface ConsumerValueProgram {
+    /** [name]'s location in this program, or a negative value when the program does not declare it. */
+    fun consumerLocation(binding: GlBinding, name: String): Int
+
+    /** The order [bindConsumerValues] sets consumer uniforms in. */
+    val uniformNameOrder: ConsumerNameOrder
+
+    /** The order [bindConsumerValues] assigns consumer textures to units `0..n-1` in. */
+    val textureNameOrder: ConsumerNameOrder
+}
+
+/**
+ * The names of a consumer value map in ascending `String` order, remembered for the last set of names
+ * it was asked about, so a program drawn with the same names frame after frame sorts them once rather
+ * than on every draw. A different set of names is sorted afresh and replaces the remembered one; the
+ * answer is always exactly `keys.sorted()`.
+ *
+ * Confined to the GL thread, as the program it belongs to is.
+ */
+internal class ConsumerNameOrder {
+    private var names: Array<String> = emptyArray()
+
+    fun of(keys: Set<String>): Array<String> {
+        val remembered = names
+        if (remembered.size == keys.size && remembered.all { it in keys }) return remembered
+        return keys.toTypedArray().also { it.sort() }.also { names = it }
+    }
+}
+
+/**
+ * Binds [uniforms] and then [textures] by name, each resolved against [program], in name order.
  *
  * Shared by the geometry pass and the consumer backdrop (ADR 0071) so the two cannot drift in how a
  * name resolves, what an undeclared one does (nothing -- ADR 0008), or which unit a texture lands
  * on. Name order rather than map order is what makes the unit assignment deterministic for a given
- * document, and plain `String` comparison is what keeps it locale-independent.
+ * document, and plain `String` comparison is what keeps it locale-independent. The order comes from
+ * [ConsumerValueProgram.textureNameOrder], which `ConsumerValueHistory.record` reads too, so the
+ * history's model of which unit a sampler reads is this assignment.
  *
  * The `activeTexture`/`bindTexture` pair runs even when the sampler is undeclared: the unit is
  * consumed either way, so skipping it would shift every later texture's unit.
  */
 internal fun bindConsumerValues(
     binding: GlBinding,
-    locate: (String) -> Int,
+    program: ConsumerValueProgram,
     uniforms: Map<String, ShaderValue>,
     textures: Map<String, Int>,
 ) {
-    uniforms.entries.sortedBy { it.key }.forEach { (name, value) ->
-        val location = locate(name)
-        if (location >= 0) {
-            bindConsumerUniform(binding, location, value)
+    if (uniforms.isNotEmpty()) {
+        for (name in program.uniformNameOrder.of(uniforms.keys)) {
+            val location = program.consumerLocation(binding, name)
+            if (location >= 0) {
+                bindConsumerUniform(binding, location, uniforms.getValue(name))
+            }
         }
     }
 
-    textures.entries.sortedBy { it.key }.forEachIndexed { unitIndex, (name, texture) ->
-        val samplerLocation = locate(name)
-        binding.activeTexture(GL_TEXTURE0 + unitIndex)
-        binding.bindTexture(GL_TEXTURE_2D, texture)
-        if (samplerLocation >= 0) {
-            binding.uniform1i(samplerLocation, unitIndex)
+    if (textures.isNotEmpty()) {
+        val names = program.textureNameOrder.of(textures.keys)
+        for (unitIndex in names.indices) {
+            val name = names[unitIndex]
+            val samplerLocation = program.consumerLocation(binding, name)
+            binding.activeTexture(GL_TEXTURE0 + unitIndex)
+            binding.bindTexture(GL_TEXTURE_2D, textures.getValue(name))
+            if (samplerLocation >= 0) {
+                binding.uniform1i(samplerLocation, unitIndex)
+            }
         }
     }
 }

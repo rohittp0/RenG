@@ -51,4 +51,12 @@ internal actual class PlatformLock {
             check(pthread_mutex_unlock(mutex.ptr) == 0) { "failed to release mutex" }
         }
     }
+
+    internal actual fun lock() {
+        check(pthread_mutex_lock(mutex.ptr) == 0) { "failed to acquire mutex" }
+    }
+
+    internal actual fun unlock() {
+        check(pthread_mutex_unlock(mutex.ptr) == 0) { "failed to release mutex" }
+    }
 }

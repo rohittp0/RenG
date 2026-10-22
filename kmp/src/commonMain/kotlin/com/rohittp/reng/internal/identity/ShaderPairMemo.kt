@@ -1,6 +1,8 @@
 package com.rohittp.reng.internal.identity
 
+import com.rohittp.reng.DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.internal.cache.BoundedMemo
 import com.rohittp.reng.internal.gl.InternalPipelineRole
 import com.rohittp.reng.internal.thread.PlatformLock
 
@@ -18,16 +20,21 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * byte. The `String` hash codes a lookup takes are cached by the runtime, and equal pairs that are not the
  * same instance are compared once, at memcpy speed, rather than encoded and hashed.
  *
- * **It is bounded.** A consumer has a handful of shader pairs, but an entry holds a copy of both sources in
- * canonical form, and a consumer that generated a pair per frame must not grow it without limit. Both maps
- * spend their bound oldest-first.
+ * **It is bounded, and one frame's working set always fits.** An entry holds a copy of both sources in
+ * canonical form, and a consumer that generated a pair per frame must not grow it without limit. But a
+ * bound smaller than what one legal frame names makes every lookup of a busy frame miss, because each
+ * pair comes round again only after more distinct pairs than the memo holds. So the renderer sizes it
+ * with [shaderPairMemoCapacity] from `maximumConsumerPipelinesPerFrame`: every consumer pipeline key a
+ * frame may name (geometry programs and a shader backdrop, counted together by that limit) plus one per
+ * [InternalPipelineRole] for RenG's own programs. Both maps spend the bound by second chance
+ * ([com.rohittp.reng.internal.cache.BoundedMemo]), so pairs a frame names every frame outlive one-offs.
  *
  * **It is locked**, because drawing may overlap preparation. The derivation itself runs outside the lock,
  * since the SHA-256 is the cost being avoided; two threads that both miss derive equal values and the
  * insert keeps whichever arrived first.
  */
 internal class ShaderPairMemo(
-    private val capacity: Int = MAXIMUM_REMEMBERED_SHADER_PAIRS,
+    private val capacity: Int = shaderPairMemoCapacity(DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME),
 ) {
     init {
         require(capacity >= 1) { "capacity must be at least 1" }
@@ -43,12 +50,12 @@ internal class ShaderPairMemo(
 
     private data class KeyIdentity(val role: InternalPipelineRole?, val shaderPair: ShaderPair)
 
-    private val canonical: MutableMap<ShaderPair, Canonical> = LinkedHashMap()
-    private val keys: MutableMap<KeyIdentity, DerivedResourceKey> = LinkedHashMap()
+    private val canonical: BoundedMemo<ShaderPair, Canonical> = BoundedMemo(capacity)
+    private val keys: BoundedMemo<KeyIdentity, DerivedResourceKey> = BoundedMemo(capacity)
     private val lock = PlatformLock()
 
     internal fun canonicalOf(shaderPair: ShaderPair): Canonical {
-        lock.withLock { canonical[shaderPair] }?.let { return it }
+        lock.withLock { canonical.get(shaderPair) }?.let { return it }
         val vertex = CanonicalBinary.exactUtf8(shaderPair.vertexSource)
         val fragment = CanonicalBinary.exactUtf8(shaderPair.fragmentSource)
         val derived = Canonical(
@@ -59,7 +66,7 @@ internal class ShaderPairMemo(
                 field(2, fragment)
             },
         )
-        return lock.withLock { remember(canonical, shaderPair, derived) }
+        return lock.withLock { canonical.putIfAbsent(shaderPair, derived) }
     }
 
     /** The key of [shaderPair] as a geometry program when [role] is `null`, else as that internal pipeline. */
@@ -73,24 +80,21 @@ internal class ShaderPairMemo(
     }
 
     internal fun lookupKey(role: InternalPipelineRole?, shaderPair: ShaderPair): DerivedResourceKey? =
-        lock.withLock { keys[KeyIdentity(role, shaderPair)] }
+        lock.withLock { keys.get(KeyIdentity(role, shaderPair)) }
 
     internal fun rememberKey(
         role: InternalPipelineRole?,
         shaderPair: ShaderPair,
         derived: DerivedResourceKey,
-    ): DerivedResourceKey = lock.withLock { remember(keys, KeyIdentity(role, shaderPair), derived) }
-
-    private fun <K : Any, V : Any> remember(map: MutableMap<K, V>, identity: K, value: V): V {
-        map[identity]?.let { return it }
-        map[identity] = value
-        val oldest = map.iterator()
-        while (map.size > capacity) {
-            oldest.next()
-            oldest.remove()
-        }
-        return value
-    }
+    ): DerivedResourceKey = lock.withLock { keys.putIfAbsent(KeyIdentity(role, shaderPair), derived) }
 }
 
-internal const val MAXIMUM_REMEMBERED_SHADER_PAIRS: Int = 64
+/**
+ * A [ShaderPairMemo] capacity that holds one frame's full working set under
+ * [maximumConsumerPipelinesPerFrame]: each consumer pipeline key at most once, plus every internal
+ * pipeline role, and never fewer than [MINIMUM_REMEMBERED_SHADER_PAIRS].
+ */
+internal fun shaderPairMemoCapacity(maximumConsumerPipelinesPerFrame: Int): Int =
+    maxOf(MINIMUM_REMEMBERED_SHADER_PAIRS, maximumConsumerPipelinesPerFrame + InternalPipelineRole.entries.size)
+
+internal const val MINIMUM_REMEMBERED_SHADER_PAIRS: Int = 64

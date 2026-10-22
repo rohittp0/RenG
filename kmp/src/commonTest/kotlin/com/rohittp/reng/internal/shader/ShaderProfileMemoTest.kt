@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.shader
 
 import com.rohittp.reng.Camera
+import com.rohittp.reng.DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
@@ -24,7 +25,7 @@ class ShaderProfileMemoTest {
 
     private var scans = 0
 
-    private fun countingMemo(capacity: Int = MAXIMUM_REMEMBERED_SHADER_SOURCES): ShaderProfileMemo =
+    private fun countingMemo(capacity: Int = shaderProfileMemoCapacity(DEFAULT_MAXIMUM_CONSUMER_PIPELINES_PER_FRAME)): ShaderProfileMemo =
         ShaderProfileMemo(capacity) { source ->
             scans += 1
             scanShaderProfile(source)
@@ -76,7 +77,7 @@ class ShaderProfileMemoTest {
     }
 
     @Test
-    fun theMemoSpendsItsBoundOldestFirst() {
+    fun theMemoForgetsAnUnusedSourceBeforeARecentlyUsedOne() {
         val memo = countingMemo(capacity = 2)
         val a = "#version 300 es\n// a"
         val b = "#version 300 es\n// b"
@@ -86,13 +87,13 @@ class ShaderProfileMemoTest {
         memo.profileOf(b)
         memo.profileOf(c) // evicts a
         assertEquals(3, scans)
-        memo.profileOf(b) // still remembered
+        memo.profileOf(b) // still remembered, and now marked as used
         assertEquals(3, scans)
-        memo.profileOf(a) // forgotten, so scanned again; evicts b
-        assertEquals(4, scans)
-        memo.profileOf(c)
+        memo.profileOf(a) // forgotten, so scanned again; b gets a second chance and the unused c goes
         assertEquals(4, scans)
         memo.profileOf(b)
+        assertEquals(4, scans)
+        memo.profileOf(c)
         assertEquals(5, scans)
     }
 

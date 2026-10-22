@@ -16,8 +16,7 @@ import com.rohittp.reng.internal.glb.scanGlb
 import com.rohittp.reng.internal.glb.validateGltfFeatures
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.PngDecodeResult
-import com.rohittp.reng.internal.image.decodePng
-import com.rohittp.reng.internal.image.projectedPngRgbaBytes
+import com.rohittp.reng.internal.image.prescanPng
 import com.rohittp.reng.internal.math.DoubleMatrix4
 
 /** The attribute semantics RenG binds. Every other semantic `validateGltfFeatures` admits --
@@ -448,11 +447,12 @@ private class ModelDecoder(
     private fun decodeImages(): List<DecodedImage> = document.images.map { image ->
         val view = document.bufferViews[image.bufferView ?: fail(ModelDecodeResult.Malformed)]
         val payload = bin.copyOfRange(view.byteOffset, view.byteLength) ?: fail(ModelDecodeResult.Malformed)
-        projectedPngRgbaBytes(payload)?.let { projectedBytes ->
+        val png = prescanPng(payload)
+        png.projectedRgbaBytes?.let { projectedBytes ->
             if (projectedBytes > budgetBytes - decodedBytes) fail(ModelDecodeResult.TooLarge)
             reserveDecodedCpuBytes(projectedBytes)
         }
-        val decoded = when (val result = decodePng(payload, budgetBytes, imageWorkingBudgetBytes)) {
+        val decoded = when (val result = png.decode(budgetBytes, imageWorkingBudgetBytes)) {
             is PngDecodeResult.Success -> result.image
             is PngDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)
             is PngDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)

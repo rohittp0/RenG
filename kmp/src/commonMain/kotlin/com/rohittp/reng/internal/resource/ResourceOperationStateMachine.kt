@@ -319,10 +319,12 @@ internal object ResourceOperationStateMachine {
         fun snapshotState(): ResourceOperationState.Running = runningSnapshot()
 
         fun nextPendingClassGateOrdinal(): Long? {
-            val indexed = pendingClassGateRouteIndexes
-                .filter { index -> isOrdinaryClassGateReady(routeRecords[index]) }
-                .minOrNull()
-                ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+            // A loop rather than filter/min: the pumps ask after every event, so this allocates nothing.
+            var first = -1
+            for (index in pendingClassGateRouteIndexes) {
+                if ((first < 0 || index < first) && isOrdinaryClassGateReady(routeRecords[index])) first = index
+            }
+            val indexed = if (first < 0) null else (routeRecords[first].cursor as PendingClassGates).ordinal
             if (crossCheckIndexes) {
                 val scanned = routeRecords.firstOrNull(::isOrdinaryClassGateReady)?.let {
                     (it.cursor as PendingClassGates).ordinal
@@ -341,13 +343,13 @@ internal object ResourceOperationStateMachine {
             // Nothing pending is the common case after every event; under cross-checking the scan below
             // still runs, so an index that is wrongly empty is caught.
             if (!crossCheckIndexes && pendingClassGateRouteIndexes.isEmpty()) return null
-            val staged = styleCommitStates.mapTo(mutableSetOf()) { it.ordinal }
-            val indexed = pendingClassGateRouteIndexes
-                .filter { index -> isStyleCommitReady(routeRecords[index], staged) }
-                .minOrNull()
-                ?.let { index -> (routeRecords[index].cursor as PendingClassGates).ordinal }
+            var first = -1
+            for (index in pendingClassGateRouteIndexes) {
+                if ((first < 0 || index < first) && isStyleCommitReady(routeRecords[index])) first = index
+            }
+            val indexed = if (first < 0) null else (routeRecords[first].cursor as PendingClassGates).ordinal
             if (crossCheckIndexes) {
-                val scanned = routeRecords.firstOrNull { isStyleCommitReady(it, staged) }?.let {
+                val scanned = routeRecords.firstOrNull(::isStyleCommitReady)?.let {
                     (it.cursor as PendingClassGates).ordinal
                 }
                 check(indexed == scanned) { "pending style-commit index chose $indexed where the scan chooses $scanned" }
@@ -355,13 +357,19 @@ internal object ResourceOperationStateMachine {
             return indexed
         }
 
-        private fun isStyleCommitReady(record: RouteRecord, staged: Set<Long>): Boolean {
+        private fun isStyleCommitReady(record: RouteRecord): Boolean {
             val cursor = record.cursor
             return cursor is PendingClassGates &&
                 cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
                 record.status == ResourceRouteStatus.RUNNING &&
                 cursor.ordinal in activeRouteOrdinals &&
-                cursor.ordinal !in staged
+                !isStyleCommitStaged(cursor.ordinal)
+        }
+
+        /** Whether the style route [ordinal] has already staged its commit; a scan of the few style commits. */
+        private fun isStyleCommitStaged(ordinal: Long): Boolean {
+            for (state in styleCommitStates) if (state.ordinal == ordinal) return true
+            return false
         }
 
         private fun trackPendingClassGates(index: Int, cursor: ResourceRouteCursor?) {
@@ -1638,11 +1646,14 @@ internal object ResourceOperationStateMachine {
             while (activeRouteOrdinals.size < initial.definition.maximumConcurrentRoutes) {
                 if (terminalSelection != null) return
                 val ceiling = startCeilingOrdinal
-                val resumable = parkedRoutes
-                    .filter { parked ->
-                        (ceiling == null || parked.ordinal < ceiling) && isParkedBarrierReady(parked)
+                var resumable: ParkedRoute? = null
+                for (parked in parkedRoutes) {
+                    if (resumable != null && parked.ordinal >= resumable.ordinal) continue
+                    if ((ceiling == null || parked.ordinal < ceiling) && isParkedBarrierReady(parked)) {
+                        resumable = parked
                     }
-                    .minByOrNull(ParkedRoute::ordinal) ?: return
+                }
+                if (resumable == null) return
                 val routeIndex = requireNotNull(routeIndexByOrdinal[resumable.ordinal]) {
                     "a parked route must name an assigned route"
                 }

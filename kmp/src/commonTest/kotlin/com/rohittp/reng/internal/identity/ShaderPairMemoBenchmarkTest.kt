@@ -11,6 +11,9 @@ import kotlin.test.Test
  * - `cycle32`: fewer pairs than the memo remembers, so after warm-up every lookup hits;
  * - `cycle100`: more pairs than it remembers. A first-in-first-out bound cycled in order evicts each pair
  *   just before it comes round again, so every lookup re-encodes and re-hashes both sources.
+ * - `mixed48hot40cold`: each "frame" names [HOT_PAIRS] pairs that recur every frame, interleaved with
+ *   [COLD_PAIRS] one-off pairs never seen again -- more distinct pairs per frame than the memo
+ *   remembers, of which the recurring ones fit. The cold pairs are built before the timed region.
  *
  * One iteration is [LOOKUPS] lookups. Each pair is a realistic ~2 KB of GLSL, unique per pair.
  */
@@ -19,6 +22,29 @@ class ShaderPairMemoBenchmarkTest {
     fun cyclingDistinctShaderPairsThroughTheMemo() {
         measure("b6.shader_pair_memo.cycle32.lookups$LOOKUPS", pairCount = 32)
         measure("b6.shader_pair_memo.cycle100.lookups$LOOKUPS", pairCount = 100)
+        measureMixed("b6.shader_pair_memo.mixed${HOT_PAIRS}hot${COLD_PAIRS}cold.lookups$LOOKUPS")
+    }
+
+    private fun measureMixed(name: String) {
+        val deriver = ResourceKeyDeriver()
+        val hot = List(HOT_PAIRS) { shaderPair(it) }
+        var nextCold = HOT_PAIRS
+        var position = 0
+        // One frame's order: hot and cold alternate until the cold ones run out, then the rest of the hot.
+        val frameSize = HOT_PAIRS + COLD_PAIRS
+        fun isHot(slot: Int): Boolean = slot >= 2 * COLD_PAIRS || slot % 2 == 0
+        fun hotIndex(slot: Int): Int = if (slot >= 2 * COLD_PAIRS) slot - COLD_PAIRS else slot / 2
+        RengBench.measure(name, warmupIterations = 5, minimumIterations = 20) {
+            val start = position
+            val pairs = List(LOOKUPS) { offset ->
+                val slot = (start + offset) % frameSize
+                if (isHot(slot)) hot[hotIndex(slot)] else shaderPair(nextCold++)
+            }
+            position = (start + LOOKUPS) % frameSize
+            timed {
+                for (pair in pairs) fold(deriver.geometryProgram(pair).key.stableId.hashCode())
+            }
+        }
     }
 
     private fun measure(name: String, pairCount: Int) {
@@ -53,5 +79,7 @@ class ShaderPairMemoBenchmarkTest {
 
     private companion object {
         const val LOOKUPS = 1000
+        const val HOT_PAIRS = 48
+        const val COLD_PAIRS = 40
     }
 }

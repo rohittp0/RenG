@@ -1477,11 +1477,12 @@ class RenderedTileKeyRemembranceTest {
 
     /**
      * The bound is exactly `maximumBasemapTileInstances`' own ceiling, so one frame can never evict a
-     * key it is still using -- which is the whole argument for the number. Past it the oldest goes,
-     * and forgetting costs one re-derivation, which is what every frame used to pay for every tile.
+     * key it is still using -- which is the whole argument for the number. Past it a key nothing asked
+     * for since it was last passed over goes first (second chance), and forgetting costs one
+     * re-derivation, which is what every frame used to pay for every tile.
      */
     @Test
-    fun theRemembranceIsBoundedAndForgetsTheOldestFirst() {
+    fun theRemembranceIsBoundedAndForgetsAnUnusedKeyBeforeARecentlyUsedOne() {
         val sha256 = CountingSha256()
         val host = basemapEngineHost(sha256 = sha256)
         fun tileAt(index: Int) = CanonicalBasemapTile(lod = 22, tileY = index, canonicalX = 0)
@@ -1490,17 +1491,20 @@ class RenderedTileKeyRemembranceTest {
         host.renderedTileKey(STYLE_DIGEST, oldest)
         for (index in 1 until MAXIMUM_REMEMBERED_TILE_KEYS) host.renderedTileKey(STYLE_DIGEST, tileAt(index))
 
-        // Still exactly full, so the first entry is still remembered.
+        // Still exactly full, so the first entry is still remembered -- and asking for it marks it used.
         val beforeOverflow = sha256.digests
         host.renderedTileKey(STYLE_DIGEST, oldest)
         assertEquals(beforeOverflow, sha256.digests)
 
-        // One past the bound evicts it, and the newcomer stays.
+        // One past the bound: the marked first entry gets a second chance, the unmarked second goes, and
+        // the newcomer stays.
         val newcomer = tileAt(MAXIMUM_REMEMBERED_TILE_KEYS)
         host.renderedTileKey(STYLE_DIGEST, newcomer)
         val afterOverflow = sha256.digests
         host.renderedTileKey(STYLE_DIGEST, oldest)
-        assertTrue(sha256.digests > afterOverflow, "the oldest entry must have been forgotten")
+        assertEquals(afterOverflow, sha256.digests, "the just-used first entry must survive the overflow")
+        host.renderedTileKey(STYLE_DIGEST, tileAt(1))
+        assertTrue(sha256.digests > afterOverflow, "the oldest unused entry must have been forgotten")
 
         val afterRederiving = sha256.digests
         host.renderedTileKey(STYLE_DIGEST, newcomer)

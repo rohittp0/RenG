@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.basemap
 
 import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.internal.cache.BoundedMemo
 import com.rohittp.reng.internal.cache.ResidentGeneration
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.thread.PlatformLock
@@ -39,7 +40,7 @@ internal value class VerifiedStoredResource private constructor(val stored: Stor
  *
  * Only a [BasemapStyleManifestOutcome.Derived] outcome is remembered. A document RenG cannot read is not
  * a result to remember, so a rejection is re-derived, and fails, exactly as it did before. The bound is
- * small and spent oldest-first, since a style rarely changes.
+ * small and spent by second chance, since a style rarely changes.
  *
  * Reached from wherever the consumer prepares, so the map sits under a lock. The parse runs outside it:
  * two threads that both miss derive the same manifest, and the insert keeps whichever arrived first.
@@ -50,7 +51,7 @@ internal class StyleManifestMemo(
 ) {
     private data class Identity(val contentDigest: String, val baseUri: String)
 
-    private val remembered: MutableMap<Identity, BasemapStyleManifestOutcome.Derived> = LinkedHashMap()
+    private val remembered: BoundedMemo<Identity, BasemapStyleManifestOutcome.Derived> = BoundedMemo(capacity)
     private val lock = PlatformLock()
 
     init {
@@ -60,20 +61,11 @@ internal class StyleManifestMemo(
     fun manifestFor(resource: VerifiedStoredResource, baseUri: String): BasemapStyleManifestOutcome {
         val stored = resource.stored
         val identity = Identity(stored.contentDigest, baseUri)
-        lock.withLock { remembered[identity] }?.let { return it }
+        lock.withLock { remembered.get(identity) }?.let { return it }
 
         val outcome = derive(stored.byteSnapshot, baseUri)
         if (outcome !is BasemapStyleManifestOutcome.Derived) return outcome
-        return lock.withLock {
-            remembered[identity]?.let { return@withLock it }
-            remembered[identity] = outcome
-            val oldest = remembered.iterator()
-            while (remembered.size > capacity) {
-                oldest.next()
-                oldest.remove()
-            }
-            outcome
-        }
+        return lock.withLock { remembered.putIfAbsent(identity, outcome) }
     }
 }
 

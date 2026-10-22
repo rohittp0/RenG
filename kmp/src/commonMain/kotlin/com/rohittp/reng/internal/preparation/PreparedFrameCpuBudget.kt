@@ -33,7 +33,8 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
 
     internal class Reservation internal constructor(
         private val owner: PreparedFrameCpuBudget,
-        internal val generationClaims: MutableList<GenerationClaim> = mutableListOf(),
+        /** This reservation's claims keyed by generation, in the order they were first claimed. */
+        internal val generationClaims: LinkedHashMap<ResidentGenerationId, GenerationClaim> = LinkedHashMap(),
         internal var frameOwnedBytes: Long = 0L,
     ) {
         private var released: Boolean = false
@@ -122,11 +123,11 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
 
             projections.forEach { (id, projection) ->
                 val account = generations[id]
-                val claim = reservation.claimFor(id)
+                val claim = reservation.generationClaims[id]
                 if (account == null) {
                     check(claim == null) { "a reserved generation must remain globally accounted" }
                     val added = GenerationClaim(id, projection.bytes)
-                    reservation.generationClaims += added
+                    reservation.generationClaims[id] = added
                     generations[id] = GenerationAccount(
                         generation = projection.generation,
                         claims = mutableListOf(added),
@@ -138,7 +139,7 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
                     }
                     if (claim == null) {
                         val added = GenerationClaim(id, projection.bytes)
-                        reservation.generationClaims += added
+                        reservation.generationClaims[id] = added
                         account.claims += added
                     } else {
                         claim.projectedBytes = maxOf(claim.projectedBytes, projection.bytes)
@@ -156,9 +157,7 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
         lock.withLock {
             if (!reservation.markReleased()) return@withLock
             var releasedBytes = reservation.frameOwnedBytes
-            var claimIndex = 0
-            while (claimIndex < reservation.generationClaims.size) {
-                val claim = reservation.generationClaims[claimIndex]
+            for (claim in reservation.generationClaims.values) {
                 val account = checkNotNull(generations[claim.id]) { "reserved generation must remain accounted" }
                 val accountClaimIndex = account.claims.indexOf(claim)
                 check(accountClaimIndex >= 0) { "reservation claim must remain globally accounted" }
@@ -179,7 +178,6 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
                     releasedBytes = saturatedAdd(releasedBytes, account.bytes - retainedBytes)
                     account.bytes = retainedBytes
                 }
-                claimIndex += 1
             }
             check(releasedBytes <= outstandingBytes) { "prepared-frame CPU budget cannot become negative" }
             outstandingBytes -= releasedBytes
@@ -202,16 +200,6 @@ internal class PreparedFrameCpuBudget(private val maximumBytes: Long) {
     private fun projectionsFor(
         generations: Collection<ResidentGeneration>,
     ): Map<ResidentGenerationId, GenerationProjection> = generations.associateWithProjectedBytes()
-
-    private fun Reservation.claimFor(id: ResidentGenerationId): GenerationClaim? {
-        var index = 0
-        while (index < generationClaims.size) {
-            val claim = generationClaims[index]
-            if (claim.id == id) return claim
-            index += 1
-        }
-        return null
-    }
 
     private fun Collection<ResidentGeneration>.associateWithProjectedBytes(): Map<ResidentGenerationId, GenerationProjection> {
         val projections = LinkedHashMap<ResidentGenerationId, GenerationProjection>()

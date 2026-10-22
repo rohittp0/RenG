@@ -44,6 +44,13 @@ internal enum class InternalPipelineRole(internal val wireValue: Int) {
     BLOOM_DOWNSAMPLE(11),
     BLOOM_UPSAMPLE(12),
     BLOOM_COMPOSITE(13),
+
+    /**
+     * ADR 0071's consumer backdrop. Its own role, not [BACKDROP]'s: a consumer pair byte-identical to
+     * RenG's own pattern shader would otherwise derive the same key, share its program, and have the
+     * consumer pipeline cache's eviction delete RenG's live one. Appended, so nothing moves.
+     */
+    CONSUMER_BACKDROP(14),
 }
 
 /**

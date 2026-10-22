@@ -165,6 +165,46 @@ class ReadAheadRoutingTest {
         }
     }
 
+    /**
+     * The production review's case. A foreground knows the url but has not acquired it yet when the
+     * warm's flight makes the exchange, so the exchange is routed to -- and latched by -- the
+     * foreground registry. The foreground then closes (a cancelled or failed prepare) before the bytes
+     * arrive. The warm's write must still be accepted: it used to fall through to the read-ahead
+     * registry, which never latched those bytes, and was refused as an integrity failure.
+     */
+    @Test
+    fun aWarmWriteSurvivesTheForegroundThatServedItsExchangeClosing() = runTest {
+        val transport = GatedHostTransport()
+        val store = MemoryHostStore()
+        val recorder = EngineMetricRecorder()
+        val host = readAheadHost(transport, store, recorder)
+        try {
+            val style = host.compile()
+
+            val foregroundMayClose = CompletableDeferred<Unit>()
+            val foreground = async {
+                host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                    foregroundMayClose.await()
+                }
+            }
+            // Lets the foreground open its operation and register the route before the warm starts.
+            kotlinx.coroutines.yield()
+            val warm = async { host.warmWindow(style, listOf(HOST_RASTER_TILE), listOf(hostRasterRoute)) }
+            transport.awaitEntered()
+
+            foregroundMayClose.complete(Unit)
+            awaitResult(foreground)
+            transport.release()
+            val summary = awaitResult(warm)
+
+            assertEquals(ReadAheadWarmSummary(fetched = 1, alreadyCached = 0, failed = 0), summary)
+            assertEquals(1, transport.callCount(), "one exchange")
+            assertEquals(1, store.writeCount(), "the warm's bytes reach the Store")
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun aFailedTileIsCountedNeverThrowsAndTheNextWindowRetriesIt() = runTest {
         val transport = ScriptedHostTransport(failFirst = 1)

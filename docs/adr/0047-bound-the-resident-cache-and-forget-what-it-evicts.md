@@ -84,3 +84,11 @@ operations and never an adapter call, a decode or a parse — the same disciplin
 here follows. It frees CPU bytes only; a GL texture uploaded from an evicted resource stays resident
 under its own budget until its own eviction, because the two are tracked separately and neither knows
 the other's rules.
+
+## Amendment, 2026-10-22: a leased retired generation no longer shields the current one
+
+A key with a leased retired generation was skipped whole, so an old frame holding a superseded
+generation kept the key's unleased current generation resident however far over budget. The sweep now
+evicts any unleased current generation. A key with retired generations keeps its entry, holding only
+those, until the last of their leases is released, and then is removed; it is never marked `freed`, it
+reads as not resident, and a route that observed it earlier restores into the same entry.

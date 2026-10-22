@@ -118,8 +118,6 @@ internal sealed interface RendererLifecycleAction {
 
     data class ValidateFramebuffer(val framebufferName: FramebufferName) : RendererLifecycleAction
 
-    data object RequestPreparationCancellation : RendererLifecycleAction
-
     data class ExecutePermittedOperation(
         val operation: RendererLifecycleOperation,
     ) : RendererLifecycleAction
@@ -156,11 +154,6 @@ internal sealed interface RendererLifecycleCursor {
         val framebufferName: FramebufferName,
     ) : RendererLifecycleCursor
 
-    data class AwaitingPreparationTermination(
-        override val snapshot: RendererLifecycleSnapshot,
-        override val operation: RendererLifecycleOperation,
-    ) : RendererLifecycleCursor
-
     data class AwaitingPermittedOperation(
         override val snapshot: RendererLifecycleSnapshot,
         override val operation: RendererLifecycleOperation,
@@ -184,8 +177,6 @@ internal sealed interface RendererLifecycleObservation {
     ) : RendererLifecycleObservation
 
     data class FramebufferObserved(val fact: FramebufferFact) : RendererLifecycleObservation
-
-    data object PreparationTerminated : RendererLifecycleObservation
 
     data object PermittedOperationSucceeded : RendererLifecycleObservation
 

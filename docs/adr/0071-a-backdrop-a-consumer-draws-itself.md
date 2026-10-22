@@ -120,3 +120,9 @@ An LRU bounds history, not one pathological frame. Planning therefore also count
 Backdrop pipeline keys in each frame and rejects more than `maximumConsumerPipelinesPerFrame` (256 by default) as
 `RESOURCE_LIMIT_EXCEEDED` before acquisition or GL work. A frame may temporarily take the retained cache above its
 steady limit while its pipelines are leased; cleanup trims it before the draw returns.
+
+## Amendment, 2026-10-22: consumer backdrops have a key role of their own
+
+Consumer backdrops were keyed under RenG's own backdrop role, so a consumer pair byte-identical to the
+internal pattern shader aliased its program, and consumer-cache eviction deleted RenG's live one. They
+are now keyed under `CONSUMER_BACKDROP` (wire value 14).

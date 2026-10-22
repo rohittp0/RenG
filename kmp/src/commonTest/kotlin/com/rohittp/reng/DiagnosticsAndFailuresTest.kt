@@ -114,10 +114,11 @@ class DiagnosticsAndFailuresTest {
         // 104 until ADR 0071 admitted an internal-pipeline identity for the two shader codes, then
         // the prepared-frame aggregate CPU ceiling added one FRAME_PREPARATION limit shape, then
         // 107 until a tile evicted before its draw got RESOURCE_UNAVAILABLE's four DRAW identities.
-        // 110 since ADR 0081 retired IDENTITY_COLLISION at FRAME_PLANNING.
-        assertEquals(110, allowedFailureCases.size)
+        // 110 since ADR 0081 retired IDENTITY_COLLISION at FRAME_PLANNING; 111 since the per-frame
+        // consumer pipeline limit's RESOURCE_LIMIT_EXCEEDED at FRAME_PLANNING names SHADER_PAIR.
+        assertEquals(111, allowedFailureCases.size)
         assertEquals(33, allowedFailureCases.count { !it.hasDiagnostic })
-        assertEquals(77, allowedFailureCases.count { it.hasDiagnostic })
+        assertEquals(78, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
         allowedFailureCases.forEach(::assertFailureTableOutcome)
@@ -888,7 +889,11 @@ class DiagnosticsAndFailuresTest {
                 ).map { failureContext(RenGErrorCode.INVALID_VALUE, PipelineStage.FRAME_PLANNING, it) },
             )
             addAll(
-                listOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES).map {
+                listOf(
+                    DiagnosticField.PLANS,
+                    DiagnosticField.BASEMAP_TILE_INSTANCES,
+                    DiagnosticField.SHADER_PAIR,
+                ).map {
                     failureContext(
                         RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
                         PipelineStage.FRAME_PLANNING,

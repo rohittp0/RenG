@@ -16,6 +16,8 @@ import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
 import com.rohittp.reng.internal.basemap.glyphRangeRoutes
 import com.rohittp.reng.internal.basemap.parseBasemapTileJson
 import com.rohittp.reng.internal.basemap.StyleManifestMemo
+import com.rohittp.reng.internal.basemap.VerifiedStoredResource
+import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -156,6 +158,27 @@ internal class BasemapEngineHost(
     @Volatile
     private var readAheadOperation: FirewallOperation? = null
 
+    /**
+     * Foreground operations that closed while a read-ahead window was open, newest last, kept only so
+     * that a warm flight whose Transport call they served can still write its bytes (see
+     * [RoutedEngineStore.write]). A warm flight's exchange is routed foreground-first, so when the
+     * foreground knows the url it is the foreground registry that latches the digest; a foreground that
+     * is then cancelled or fails closes before the warm's write arrives, and the read-ahead registry,
+     * which never latched those bytes, would refuse the write as an integrity failure. Bounded, and
+     * cleared when the window ends: a write can only arrive while the warm that started it is running.
+     */
+    private var lingeringForeground: List<FirewallOperation> = emptyList()
+    private val lingeringLock = PlatformLock()
+
+    private fun retireForeground(operation: FirewallOperation) {
+        if (readAheadOperation == null) return
+        lingeringLock.withLock {
+            lingeringForeground = (lingeringForeground + operation).takeLast(MAXIMUM_LINGERING_FOREGROUND_OPERATIONS)
+        }
+    }
+
+    private fun clearLingeringForeground() = lingeringLock.withLock { lingeringForeground = emptyList() }
+
     private var compiledStyle: CompiledStyleBinding? = null
 
     private var derivedManifest: StyleManifestBinding? = null
@@ -177,8 +200,8 @@ internal class BasemapEngineHost(
      * prepare. The driver's style validation and [styleManifest] share it, so a style validated on one
      * frame is not parsed again by the next frame's validation.
      */
-    fun derivedStyleManifest(stored: StoredRawResource, baseUri: String): BasemapStyleManifestOutcome =
-        styleManifestMemo.manifestFor(stored, baseUri)
+    fun derivedStyleManifest(content: ResolvedResourceContent, baseUri: String): BasemapStyleManifestOutcome =
+        styleManifestMemo.manifestFor(VerifiedStoredResource.of(content), baseUri)
 
     /**
      * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069). A `LinkedHashMap` because
@@ -277,12 +300,14 @@ internal class BasemapEngineHost(
             sha256 = sha256,
             redactedLocatorDigests = redactedLocatorDigests,
         )
-        activeOperation = FirewallOperation(accessMode, registry)
+        val operation = FirewallOperation(accessMode, registry)
+        activeOperation = operation
         return try {
             registerRoutes(routes)
             coroutineScope { block() }
         } finally {
             activeOperation = null
+            retireForeground(operation)
         }
     }
 
@@ -302,7 +327,7 @@ internal class BasemapEngineHost(
         block: suspend () -> T,
     ): T {
         check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
-        activeOperation = FirewallOperation(
+        val operation = FirewallOperation(
             accessMode = accessMode,
             registry = OperationRegistry(
                 transport = consumerTransport,
@@ -313,10 +338,12 @@ internal class BasemapEngineHost(
             ),
             shared = true,
         )
+        activeOperation = operation
         return try {
             coroutineScope { block() }
         } finally {
             activeOperation = null
+            retireForeground(operation)
         }
     }
 
@@ -412,6 +439,7 @@ internal class BasemapEngineHost(
             return warmed
         } finally {
             readAheadOperation = null
+            clearLingeringForeground()
         }
     }
 
@@ -678,7 +706,7 @@ internal class BasemapEngineHost(
         // document: this method's one caller reads `stored` from ResidentCache.current() after the
         // driver's visibility install. See the KDoc -- the compilation beside this one runs before that
         // install and so must read the caller's content.
-        val outcome = styleManifestMemo.manifestFor(lease.generation.stored, baseUri)
+        val outcome = styleManifestMemo.manifestFor(VerifiedStoredResource.of(lease.generation), baseUri)
         if (outcome !is BasemapStyleManifestOutcome.Derived) {
             cache.releaseLease(lease)
             return outcome
@@ -1256,6 +1284,7 @@ internal class BasemapEngineHost(
         // a foreground acquisition had joined -- finds no operation and is refused before it can reach
         // the consumer's Transport or Store (ADR 0075).
         readAheadOperation = null
+        clearLingeringForeground()
         engine.close()
     }
 
@@ -1434,7 +1463,10 @@ internal class BasemapEngineHost(
          * latched digest, foreground first. The route alone cannot decide it: a warm flight's write can
          * arrive after a foreground registered the same url, and the foreground never latched the bytes.
          *
-         * When neither latched them, the write goes to whichever knows the route, foreground first, so
+         * A warm flight's exchange may have been served by a foreground that has since closed; while the
+         * window is open such a foreground lingers ([lingeringForeground]) and its latch still decides.
+         *
+         * When none latched them, the write goes to whichever knows the route, foreground first, so
          * the registry refuses it as an integrity failure exactly as it always has.
          */
         override suspend fun write(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
@@ -1447,12 +1479,22 @@ internal class BasemapEngineHost(
                 readAhead != null &&
                     readAhead.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
                     readAhead
-                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
-                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
-                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+                else -> (if (readAhead != null) lingeringLatching(key, resource.contentDigest) else null)
+                    ?: when {
+                        foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) ->
+                            foreground
+                        readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) ->
+                            readAhead
+                        else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+                    }
             }
             operation.store.write(key, resource)
         }
+
+        private suspend fun lingeringLatching(key: EngineRawResourceKey, digest: String): FirewallOperation? =
+            lingeringLock.withLock { lingeringForeground }.lastOrNull {
+                it.registry.hasLatchedDigest(key.stableId, key.resourceClass, digest)
+            }
 
         override suspend fun remove(key: EngineRawResourceKey) {
             // Private and terminal whether or not an invocation is open (ADR 0016): RenG's own Store has
@@ -1712,3 +1754,6 @@ internal data class ReadAheadWarmSummary(
     val alreadyCached: Int,
     val failed: Int,
 )
+
+/** How many closed foreground operations a read-ahead window keeps for its writes; see [BasemapEngineHost]. */
+private const val MAXIMUM_LINGERING_FOREGROUND_OPERATIONS: Int = 4

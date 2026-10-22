@@ -596,20 +596,11 @@ internal class SceneContent(
                 scene.geometries.indexOfLast { it.geometry.emissive }
             }
             var currentBlend: BlendMode? = null
-            val lastNormalGeometryByProgram = if (lastEmissiveGeometryIndex >= 0) {
-                HashMap<Int, SceneGeometry>()
-            } else {
-                null
-            }
-            // ADR 0080 (2026-10-21 amendment) and ADR 0085: what each program's consumer uniforms hold
-            // when the bloom phase starts, as far as this frame set them, every normal draw's merged
-            // over the earlier ones. Kept only on a frame with a bloom phase, which restores it after
-            // its redraws and starts its far band from it.
-            val normalUniformsByProgram = if (lastEmissiveGeometryIndex >= 0) {
-                HashMap<Int, HashMap<String, ShaderValue>>()
-            } else {
-                null
-            }
+            // ADR 0080 (2026-10-21 and 2026-10-22 amendments) and ADR 0085: the consumer state this
+            // frame's normal draws left on each program and texture unit, and the effective values
+            // each emitter drew with. Kept only on a frame with a bloom phase, whose redraws replay
+            // the emitters' values and which restores the rest afterwards.
+            val consumerHistory = if (lastEmissiveGeometryIndex >= 0) ConsumerValueHistory() else null
             for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
                 if (sceneGeometry.geometry.blend != currentBlend) {
                     applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
@@ -642,11 +633,9 @@ internal class SceneContent(
                     consumerTextures = sceneGeometry.consumerTextures,
                     emissionPass = 0,
                 )
-                if (grid.triangleIndices.isNotEmpty()) {
-                    lastNormalGeometryByProgram?.set(sceneGeometry.pipeline.program, sceneGeometry)
-                    normalUniformsByProgram
-                        ?.getOrPut(sceneGeometry.pipeline.program) { HashMap() }
-                        ?.putAll(sceneGeometry.consumerUniforms)
+                if (consumerHistory != null) {
+                    if (grid.triangleIndices.isNotEmpty()) consumerHistory.record(sceneGeometry)
+                    if (sceneGeometry.geometry.emissive) consumerHistory.snapshotEmitter(sceneGeometry)
                 }
                 if (geometryIndex == lastEmissiveGeometryIndex) {
                     // ADR 0080: compositing here makes the rest of the existing phase order an
@@ -656,8 +645,7 @@ internal class SceneContent(
                     drawBloomPhase(
                         binding,
                         sceneGeometry.geometry.blend,
-                        checkNotNull(lastNormalGeometryByProgram),
-                        checkNotNull(normalUniformsByProgram),
+                        checkNotNull(consumerHistory),
                     )
                     currentBlend = null
                 }
@@ -724,8 +712,7 @@ internal class SceneContent(
     private fun drawBloomPhase(
         binding: GlBinding,
         geometryBlend: BlendMode,
-        lastNormalGeometryByProgram: Map<Int, SceneGeometry>,
-        normalUniformsByProgram: Map<Int, Map<String, ShaderValue>>,
+        consumerHistory: ConsumerValueHistory,
     ) {
         val bloom = bloom ?: return
         val resources = bloomResources ?: return
@@ -760,7 +747,9 @@ internal class SceneContent(
         // Resolved once and kept for the far band, which redraws a subset of these with the same
         // grid, drape, view-projection and consumer values.
         val emissionGrids = ArrayList<GeometryGrid>(emissiveGeometries.size)
-        for (sceneGeometry in emissiveGeometries) {
+        val emitterValues = consumerHistory.emitterValues
+        check(emitterValues.size == emissiveGeometries.size) { "every emitter's values were snapshotted" }
+        for ((emitterIndex, sceneGeometry) in emissiveGeometries.withIndex()) {
             val drape = groundDrapeFor(sceneGeometry.geometry)
             val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
             val grid = when (camera) {
@@ -771,7 +760,7 @@ internal class SceneContent(
                     geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
             }.requireResolvedAtDrawTime()
             emissionGrids += grid
-            drawEmissionRedraw(binding, sceneGeometry, grid, geometryViewProjection)
+            drawEmissionRedraw(binding, sceneGeometry, grid, geometryViewProjection, emitterValues[emitterIndex])
         }
 
         // ADR 0085's far band, only when some emitter asks for it with a weight that adds anything:
@@ -782,7 +771,7 @@ internal class SceneContent(
             BloomFarBand(farBandLevel, bloomFarBandStrategy) {
                 drawBloomFarBand(
                     binding, bloom, emissiveGeometries, emissionGrids, geometryViewProjection,
-                    normalUniformsByProgram,
+                    emitterValues,
                 )
             }
         } else {
@@ -806,24 +795,19 @@ internal class SceneContent(
         applyPremultipliedBlendMode(binding, geometryBlend)
 
         // Consumer locations belong to a shared program and omitted values deliberately retain that
-        // program's previous value. Emission and far redraws disturb that history, so before the loop
-        // continues every program they touched gets back every uniform the normal pass had set on it
-        // (ADR 0080's 2026-10-21 amendment): the merged history, not only the last normal draw's own
-        // values, which would leave a uniform that draw omitted at a redraw's value. Texture units and
-        // sampler uniforms are rebound from the last normal draw on the program, as before. A uniform
-        // the frame had not set on the program before the bloom phase cannot be restored: RenG does
-        // not query what the program held before the frame.
-        for (normalGeometry in scene.geometries) {
-            val program = normalGeometry.pipeline.program
-            if (lastNormalGeometryByProgram[program] !== normalGeometry) continue
-            if (emissiveGeometries.none { it.pipeline.program == program }) continue
-            binding.useProgram(normalGeometry.pipeline.program)
-            bindConsumerValues(
-                binding = binding,
-                locate = { name -> normalGeometry.pipeline.consumerLocation(binding, name) },
-                uniforms = normalUniformsByProgram[program] ?: normalGeometry.consumerUniforms,
-                textures = normalGeometry.consumerTextures,
-            )
+        // program's previous value; a sampler an omitting draw inherits samples whatever its unit then
+        // holds. Emission and far redraws disturb both, so before the loop continues every texture
+        // unit this frame's geometry draws had bound gets its texture back, and every program the
+        // redraws touched gets back every uniform and sampler unit the normal pass had set on it
+        // (ADR 0080's 2026-10-21 and 2026-10-22 amendments). A value the frame had not set before the
+        // bloom phase cannot be restored: RenG does not query what was there before the frame.
+        consumerHistory.restoreTextureUnits(binding)
+        val restoredPrograms = HashSet<Int>()
+        for (emitter in emissiveGeometries) {
+            val program = emitter.pipeline.program
+            if (!restoredPrograms.add(program)) continue
+            binding.useProgram(program)
+            consumerHistory.restoreProgram(binding, emitter.pipeline)
         }
     }
 
@@ -833,7 +817,7 @@ internal class SceneContent(
         sceneGeometry: SceneGeometry,
         grid: GeometryGrid,
         geometryViewProjection: FloatArray,
-        consumerUniforms: Map<String, ShaderValue> = sceneGeometry.consumerUniforms,
+        values: EmitterConsumerValues,
     ) {
         drawGeometry(
             binding = binding,
@@ -844,8 +828,8 @@ internal class SceneContent(
             resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
             boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
             frameIndex = scene.frameIndex,
-            consumerUniforms = consumerUniforms,
-            consumerTextures = sceneGeometry.consumerTextures,
+            consumerUniforms = values.uniforms,
+            consumerTextures = values.textures,
             emissionPass = 1,
         )
         endGeometryEmissionPass(binding, sceneGeometry.pipeline)
@@ -863,14 +847,11 @@ internal class SceneContent(
      * alpha `ONE, ONE_MINUS_SRC_ALPHA`, unscaled). `reachGain` is applied later, unclamped, where the
      * reach image's level is added to the chain.
      *
-     * A consumer uniform an emitter omits inherits its program's previous value, so a far redraw
-     * must see the program history its emission redraw saw, not whatever the last emission redraw on
-     * that program left. [normalUniformsByProgram] is every uniform this frame's normal pass had set
-     * on each program when the emission redraw started; walking the emitters in the emission
-     * redraw's order and merging each drawn one's uniforms over it rebuilds the values every emitter
-     * saw there, and each reaching emitter is drawn with that whole merged set. Only a uniform no
-     * earlier draw of this frame set, but a later emitter does, can differ: the emission redraw saw
-     * whatever the program held before the frame, which RenG does not query. The blend colour is
+     * A consumer value an emitter omits inherits its program's previous value, so a far redraw, like
+     * the emission redraw, draws each emitter with [emitterValues]: the effective uniforms and
+     * textures it drew with in the normal pass, snapshotted there. Only a value no earlier draw of
+     * this frame set can differ: that draw saw whatever the program held before the frame, which
+     * RenG does not query. The blend colour is
      * returned to GL's default afterwards; it is a member of the Restore Set, so the consumer's own
      * value comes back when the draw returns either way.
      *
@@ -885,7 +866,7 @@ internal class SceneContent(
         emissiveGeometries: List<SceneGeometry>,
         emissionGrids: List<GeometryGrid>,
         geometryViewProjection: FloatArray,
-        normalUniformsByProgram: Map<Int, Map<String, ShaderValue>>,
+        emitterValues: List<EmitterConsumerValues>,
     ) {
         val coarse = bloomFarBandStrategy == BloomFarBandStrategy.COARSE_REDRAW
         if (coarse) {
@@ -903,24 +884,15 @@ internal class SceneContent(
         } else {
             binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         }
-        val uniformsByProgram = HashMap<Int, HashMap<String, ShaderValue>>()
-        for (sceneGeometry in emissiveGeometries) {
-            if (sceneGeometry.geometry.bloomReach <= 0f) continue
-            val program = sceneGeometry.pipeline.program
-            uniformsByProgram.getOrPut(program) { HashMap(normalUniformsByProgram[program].orEmpty()) }
-        }
         for ((index, sceneGeometry) in emissiveGeometries.withIndex()) {
             // An emitter with an empty grid bound nothing in the emission redraw, and draws nothing here.
             if (emissionGrids[index].triangleIndices.isEmpty()) continue
-            val uniforms = uniformsByProgram[sceneGeometry.pipeline.program] ?: continue
-            uniforms.putAll(sceneGeometry.consumerUniforms)
             val reach = sceneGeometry.geometry.bloomReach
             if (reach <= 0f) continue
             val weight = if (coarse) minOf(1f, reach * bloom.reachGain) else reach
             binding.blendColor(0f, 0f, 0f, weight)
             drawEmissionRedraw(
-                binding, sceneGeometry, emissionGrids[index], geometryViewProjection,
-                consumerUniforms = uniforms,
+                binding, sceneGeometry, emissionGrids[index], geometryViewProjection, emitterValues[index],
             )
         }
         binding.blendColor(0f, 0f, 0f, 0f)
@@ -1739,4 +1711,78 @@ private fun DoubleMatrix4.transformAffinePoint(point: DoubleVector3): DoubleVect
 /** This matrix's elements in the column-major order [GlBinding.uniformMatrix4fv] expects. */
 internal fun DoubleMatrix4.toColumnMajorFloatArray(): FloatArray = FloatArray(16) { index ->
     columnMajorElement(index).toFloat()
+}
+
+/** One emitter's effective consumer values at its normal draw: its own merged over what it inherited. */
+internal class EmitterConsumerValues(
+    val uniforms: Map<String, ShaderValue>,
+    val textures: Map<String, Int>,
+)
+
+/**
+ * The consumer values this frame's normal geometry draws left behind (ADR 0080's 2026-10-22
+ * amendment), kept only on a frame with a bloom phase.
+ *
+ * Consumer values are sparse: an omitted uniform keeps its program's previous value, and an omitted
+ * texture leaves its sampler pointing at a unit that holds whatever was last bound there.
+ * [bindConsumerValues] binds a draw's textures to units `0..n-1` in name order, so the model here is
+ * per program the merged uniforms and each sampler's unit, and across programs each unit's texture.
+ */
+internal class ConsumerValueHistory {
+    private val uniformsByProgram = HashMap<Int, HashMap<String, ShaderValue>>()
+    private val samplerUnitsByProgram = HashMap<Int, HashMap<String, Int>>()
+    private val textureByUnit = HashMap<Int, Int>()
+
+    /** Each emitter's effective values, in draw order. */
+    val emitterValues: MutableList<EmitterConsumerValues> = ArrayList()
+
+    /** Records a normal draw that bound its values (a draw with an empty grid binds none). */
+    fun record(sceneGeometry: SceneGeometry) {
+        val program = sceneGeometry.pipeline.program
+        uniformsByProgram.getOrPut(program) { HashMap() }.putAll(sceneGeometry.consumerUniforms)
+        if (sceneGeometry.consumerTextures.isEmpty()) return
+        val samplerUnits = samplerUnitsByProgram.getOrPut(program) { HashMap() }
+        sceneGeometry.consumerTextures.entries.sortedBy { it.key }.forEachIndexed { unit, (name, texture) ->
+            samplerUnits[name] = unit
+            textureByUnit[unit] = texture
+        }
+    }
+
+    /** Snapshots what [sceneGeometry], an emitter, just drew with. */
+    fun snapshotEmitter(sceneGeometry: SceneGeometry) {
+        val program = sceneGeometry.pipeline.program
+        val textures = HashMap<String, Int>()
+        samplerUnitsByProgram[program]?.forEach { (name, unit) ->
+            textureByUnit[unit]?.let { textures[name] = it }
+        }
+        emitterValues += EmitterConsumerValues(
+            uniforms = HashMap(uniformsByProgram[program] ?: sceneGeometry.consumerUniforms),
+            textures = textures,
+        )
+    }
+
+    /** Rebinds every unit the normal pass had bound to the texture it left there. */
+    fun restoreTextureUnits(binding: GlBinding) {
+        textureByUnit.forEach { (unit, texture) ->
+            binding.activeTexture(GL_TEXTURE0 + unit)
+            binding.bindTexture(GL_TEXTURE_2D, texture)
+        }
+    }
+
+    /** Re-sets every uniform and sampler unit the normal pass had set on [pipeline]'s bound program. */
+    fun restoreProgram(binding: GlBinding, pipeline: GeometryPipeline) {
+        val program = pipeline.program
+        uniformsByProgram[program]?.let { uniforms ->
+            bindConsumerValues(
+                binding = binding,
+                locate = { name -> pipeline.consumerLocation(binding, name) },
+                uniforms = uniforms,
+                textures = emptyMap(),
+            )
+        }
+        samplerUnitsByProgram[program]?.forEach { (name, unit) ->
+            val location = pipeline.consumerLocation(binding, name)
+            if (location >= 0) binding.uniform1i(location, unit)
+        }
+    }
 }

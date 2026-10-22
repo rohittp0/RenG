@@ -1154,10 +1154,11 @@ class SceneContentTest {
     }
 
     /**
-     * ADR 0085: a far redraw sees the consumer values its emission redraw saw. E1 and E3 reach and
-     * omit `u`, so each inherits program P's previous value: the emission redraw starts where the
-     * normal pass left P (E4's 7), so E1 sees 7 and E3 inherits E2's 2. Drawing each emitter with only
-     * its own values would hand E3 the 7 the emission redraw's last bind left on P.
+     * ADR 0085: a far redraw sees the consumer values its emission redraw saw, and both see what the
+     * emitter drew with in the normal pass (ADR 0080's 2026-10-22 amendment). E1 and E3 reach and
+     * omit `u`, so each inherits program P's previous value: E1 inherited N's 5 and E3 inherited E2's
+     * 2. This test used to require the emission redraw to give E1 7 -- where the normal pass left P,
+     * not what E1 drew with -- which was the sparse-inheritance defect itself.
      */
     @Test
     fun aFarRedrawSeesTheConsumerValuesItsEmissionRedrawSaw() {
@@ -1220,7 +1221,7 @@ class SceneContentTest {
         val reachEnd = log.indexOfFirstFrom(reachBind) { it == "useProgram(${resources.downsample.program})" }
         assertEquals(listOf<Float?>(5f, 5f, 2f, 2f, 7f), drawnValues(0, emissionBind), "the normal pass")
         val emissionValues = drawnValues(emissionBind, reachBind)
-        assertEquals(listOf<Float?>(7f, 2f, 2f, 7f), emissionValues, "the emission redraw inherits P's history")
+        assertEquals(listOf<Float?>(5f, 2f, 2f, 7f), emissionValues, "each emission redraw draws its normal draw's values")
         assertEquals(
             listOf(emissionValues[0], emissionValues[2]),
             drawnValues(reachBind, reachEnd),
@@ -1298,6 +1299,72 @@ class SceneContentTest {
         assertFalse(failure(highPrecision = true) { linkStatus = 0 }.halfFloatTargetRefused)
     }
 
+    /**
+     * A context that advertises half-float colour but refuses every `RGBA16F` target. On an RGBA8
+     * emission chain the upsample levels are still half-float there (ADR 0074), so their refusal is a
+     * half-float refusal too -- it used to read as BLOOM_UNAVAILABLE -- and the retry the renderer
+     * then makes is RGBA8 throughout, upsample included, rather than refused the same way again.
+     */
+    @Test
+    fun aRefusedHalfFloatUpsampleIsAPrecisionRefusalAndTheRetryIsWhollyRgba8() {
+        fun refusingHalfFloat(): Pair<RecordingGlBinding, GlBinding> {
+            val recording = RecordingGlBinding().withNoDeclaredNames()
+            var lastFormat = 0
+            return recording to object : GlBinding by recording {
+                override fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int) {
+                    lastFormat = internalFormat
+                    recording.texStorage2D(target, levels, internalFormat, width, height)
+                }
+
+                override fun checkFramebufferStatus(target: Int): Int {
+                    recording.checkFramebufferStatus(target)
+                    return if (lastFormat == GL_RGBA16F) INCOMPLETE_FRAMEBUFFER_STATUS else GL_FRAMEBUFFER_COMPLETE
+                }
+            }
+        }
+        fun create(binding: GlBinding, halfFloatUpsample: Boolean) = createBloomResources(
+            binding = binding,
+            profile = bloomTestProfile(supportsHalfFloat = true),
+            cache = GlProgramCache(),
+            outputSize = OUTPUT_SIZE,
+            sharedDepthRenderbuffer = 77,
+            halfFloatUpsample = halfFloatUpsample,
+        )
+
+        val (_, first) = refusingHalfFloat()
+        val refused = assertIs<BloomResourcesResult.Failed>(create(first, halfFloatUpsample = true))
+        assertTrue(refused.halfFloatTargetRefused, "a refused RGBA16F upsample target is a half-float refusal")
+
+        val (recording, retry) = refusingHalfFloat()
+        assertIs<BloomResourcesResult.Created>(create(retry, halfFloatUpsample = false))
+        assertTrue(
+            recording.log.filter { it.startsWith("texStorage2D") }.none { it.contains(hex(GL_RGBA16F)) },
+            "the retry allocates no half-float target at all",
+        )
+    }
+
+    /**
+     * A half-float emission image can hold a NaN, and `clamp` of a NaN is undefined in GLSL, so the
+     * light helper zeroes NaNs before it clamps; the composite reads the emission alpha it suppresses
+     * by through the same helper rather than raw.
+     */
+    @Test
+    fun everyEmissionReadIsSanitisedOfNanAndBounded() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        newBloomResources(binding, depthRenderbuffer = 77, highPrecisionEmission = true)
+        val sources = binding.shaderSources.values
+        val downsample = sources.single { it.contains("rengBloomSourceTexel") }
+        val upsample = sources.single { it.contains("rengBloomLevelWeight") }
+        val composite = sources.single { it.contains("rengBloomInsideSuppression") }
+        listOf(downsample, upsample, composite).forEach { source ->
+            assertTrue(source.contains("c = mix(c, vec4(0.0), isnan(c));"), source)
+        }
+        assertTrue(
+            composite.contains("rengBloomLight(texture(rengBloomEmission, rengBloomUv)).a"),
+            "the composite's suppression reads a bounded emission alpha: $composite",
+        )
+    }
+
     @Test
     fun theFarBandLevelIsReachLevelBoundedByTheChain() {
         assertEquals(3, bloomFarBandLevel(Bloom()))
@@ -1372,6 +1439,93 @@ class SceneContentTest {
         assertEquals(6, drawn.size, drawn.toString())
         assertEquals(listOf<Pair<Float?, Float?>>(null to 1f, null to 9f, 2f to 9f), drawn.take(3), "the normal pass")
         assertEquals(2f to 9f, drawn.last(), "G must inherit the normal pass's u and v, not the redraw's v: $drawn")
+    }
+
+    /**
+     * ADR 0080's 2026-10-22 amendment: an emitter's emission redraw draws with the values it drew
+     * with in the normal pass. A (emissive) sets `u` red, B (not emissive) sets it blue on the same
+     * program, and C (emissive) omits it, so C drew blue. Replaying each emitter's own sparse values
+     * gave C A's red, the last value the emission redraw itself had bound.
+     */
+    @Test
+    fun anEmitterThatInheritedFromAnOrdinaryDrawBloomsWithWhatItInherited() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "u" to CONSUMER_U_LOCATION,
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(emissive: Boolean, u: Float?) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipelineP,
+            consumerUniforms = u?.let { mapOf("u" to ShaderValue.Scalar(it)) } ?: emptyMap(),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                geometry(emissive = true, u = RED),
+                geometry(emissive = false, u = BLUE),
+                geometry(emissive = true, u = null),
+            ),
+        )
+        binding.log.clear()
+        bloomSceneContent(scene, resources).draw(binding)
+
+        val emissionBind = binding.log.indexOf(
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})",
+        )
+        val draws = simulatedConsumerDraws(binding.log, pipelineP.program)
+        assertEquals(listOf<Float?>(RED, BLUE, BLUE), draws.filter { it.index < emissionBind }.map { it.u })
+        assertEquals(
+            listOf<Float?>(RED, BLUE),
+            draws.filter { it.index > emissionBind }.take(2).map { it.u },
+            "C's emission redraw must carry the blue it drew with, not A's red",
+        )
+    }
+
+    /**
+     * The texture half of the amendment above. A (emissive) binds texture 10 to sampler `t`, B (not
+     * emissive) binds 20, C (emissive) omits `t` and so sampled 20. C's emission redraw must sample
+     * 20, and G, drawn after the bloom phase and also omitting `t`, must sample the 20 the normal pass
+     * left -- not A's redrawn 10 or a bloom target the chain left on the unit.
+     */
+    @Test
+    fun anEmitterThatInheritedATextureBloomsWithItAndTheNextDrawStillInheritsIt() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "t" to CONSUMER_T_LOCATION,
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(emissive: Boolean, t: Int?) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipelineP,
+            consumerUniforms = emptyMap(),
+            consumerTextures = t?.let { mapOf("t" to it) } ?: emptyMap(),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(
+                geometry(emissive = true, t = 10),
+                geometry(emissive = false, t = 20),
+                geometry(emissive = true, t = null),
+                geometry(emissive = false, t = null),
+            ),
+        )
+        binding.log.clear()
+        bloomSceneContent(scene, resources).draw(binding)
+
+        val emissionBind = binding.log.indexOf(
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})",
+        )
+        val draws = simulatedConsumerDraws(binding.log, pipelineP.program)
+        assertEquals(listOf<Int?>(10, 20, 20), draws.filter { it.index < emissionBind }.map { it.texture })
+        val afterEmission = draws.filter { it.index > emissionBind }
+        assertEquals(3, afterEmission.size, "two emission redraws, then G: $afterEmission")
+        assertEquals(listOf<Int?>(10, 20), afterEmission.take(2).map { it.texture }, "the emission redraws")
+        assertEquals(20, afterEmission.last().texture, "G must sample the texture the normal pass left")
     }
 
     /**
@@ -3048,6 +3202,17 @@ class SceneContentTest {
         return result
     }
 
+    private fun bloomSceneContent(scene: Scene, resources: BloomResources): SceneContent = SceneContent(
+        camera = topDownCamera(),
+        scene = scene,
+        stickerPipeline = newStickerPipeline(),
+        groundPipeline = newGroundPipeline(),
+        bloom = Bloom(),
+        bloomResources = resources,
+        surfaceFramebuffer = 55,
+        surfaceDepthRenderbuffer = 77,
+    )
+
     private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
 
     private fun decodeLittleEndianFloats(bytes: ByteArray): FloatArray {
@@ -3134,3 +3299,41 @@ private fun minimalShaderPair(): ShaderPair = ShaderPair(
 
 /** GL_FRAMEBUFFER_UNSUPPORTED, the status a context gives a colour format it cannot render to. */
 private const val INCOMPLETE_FRAMEBUFFER_STATUS: Int = 0x8CDD
+
+private const val CONSUMER_U_LOCATION: Int = 61
+private const val CONSUMER_T_LOCATION: Int = 63
+private const val RED: Float = 1f
+private const val BLUE: Float = 2f
+
+private class SimulatedConsumerDraw(val index: Int, val u: Float?, val texture: Int?) {
+    override fun toString(): String = "#$index(u=$u, t=$texture)"
+}
+
+/**
+ * Replays [log] as GL would hold the state: uniforms per program, texture bindings per unit. Each
+ * `drawElements` on [program] reads `u` and the texture on the unit sampler `t` points at.
+ */
+private fun simulatedConsumerDraws(log: List<String>, program: Int): List<SimulatedConsumerDraw> {
+    var current = 0
+    var activeUnit = 0
+    val unitTextures = HashMap<Int, Int>()
+    var u: Float? = null
+    var samplerUnit: Int? = null
+    val draws = ArrayList<SimulatedConsumerDraw>()
+    for ((index, call) in log.withIndex()) {
+        when {
+            call.startsWith("useProgram(") -> current = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+            call.startsWith("activeTexture(0x") ->
+                activeUnit = call.removePrefix("activeTexture(0x").removeSuffix(")").toInt(16) - GL_TEXTURE0
+            call.startsWith("bindTexture(0x${GL_TEXTURE_2D.toString(16).uppercase()},") ->
+                unitTextures[activeUnit] = call.substringAfter(",").removeSuffix(")").toInt()
+            current != program -> Unit
+            call.startsWith("uniform1f($CONSUMER_U_LOCATION,") -> u = call.substringAfter(",").removeSuffix(")").toFloat()
+            call.startsWith("uniform1i($CONSUMER_T_LOCATION,") ->
+                samplerUnit = call.substringAfter(",").removeSuffix(")").toInt()
+            call.startsWith("drawElements") ->
+                draws += SimulatedConsumerDraw(index, u, samplerUnit?.let { unitTextures[it] })
+        }
+    }
+    return draws
+}

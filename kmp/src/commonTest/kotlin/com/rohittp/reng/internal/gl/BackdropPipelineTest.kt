@@ -21,6 +21,7 @@ class BackdropPipelineTest {
         assertEquals(11, InternalPipelineRole.BLOOM_DOWNSAMPLE.wireValue)
         assertEquals(12, InternalPipelineRole.BLOOM_UPSAMPLE.wireValue)
         assertEquals(13, InternalPipelineRole.BLOOM_COMPOSITE.wireValue)
+        assertEquals(14, InternalPipelineRole.CONSUMER_BACKDROP.wireValue)
     }
 
     @Test
@@ -95,6 +96,9 @@ class BackdropPipelineTest {
         assertTrue(binding.log.any { it.startsWith("uniform2f($REPEAT_LOCATION,4.5,8.0") }, binding.log.toString())
         assertTrue(binding.log.any { it == "bindTexture(0xDE1,77)" }, binding.log.toString())
         assertTrue(binding.log.any { it.startsWith("drawArrays(0x5,0,4)") }, binding.log.toString())
+        // A sampler object the host left on unit 0 would override the pattern's repeat wrap.
+        val sampler = binding.log.indexOf("bindSampler(0,0)")
+        assertTrue(sampler in 0 until binding.log.indexOfFirst { it.startsWith("drawArrays") }, binding.log.toString())
     }
 
     /**
@@ -266,10 +270,10 @@ class ConsumerBackdropPipelineTest {
     @Test
     fun aKeyIsTheShaderSourceSoTwoShadersAreTwoProgramsAndOneIsOne() {
         val deriver = ResourceKeyDeriver()
-        val first = deriver.internalPipeline(InternalPipelineRole.BACKDROP, CONSUMER_SHADER_PAIR).key
-        val again = deriver.internalPipeline(InternalPipelineRole.BACKDROP, CONSUMER_SHADER_PAIR).key
+        val first = deriver.internalPipeline(InternalPipelineRole.CONSUMER_BACKDROP, CONSUMER_SHADER_PAIR).key
+        val again = deriver.internalPipeline(InternalPipelineRole.CONSUMER_BACKDROP, CONSUMER_SHADER_PAIR).key
         val other = deriver.internalPipeline(
-            InternalPipelineRole.BACKDROP,
+            InternalPipelineRole.CONSUMER_BACKDROP,
             ShaderPair(CONSUMER_SHADER_PAIR.vertexSource, OTHER_FRAGMENT_SOURCE),
         ).key
         val rengsOwn = deriver.internalPipeline(InternalPipelineRole.BACKDROP, BACKDROP_SHADER_PAIR).key
@@ -277,6 +281,24 @@ class ConsumerBackdropPipelineTest {
         assertEquals(first, again)
         assertTrue(first != other)
         assertTrue(first != rengsOwn)
+    }
+
+    /**
+     * A consumer pair byte-identical to RenG's own pattern shader must still be a different program
+     * key: sharing it let the consumer pipeline cache's eviction delete RenG's live pattern program.
+     */
+    @Test
+    fun aConsumerPairIdenticalToRenGsPatternShaderStillHasItsOwnKey() {
+        val binding = RecordingGlBinding().withNoDeclaredNames()
+        val cache = GlProgramCache()
+        val rengs = (createBackdropPipeline(binding, ShaderDialect.GLES, cache) as BackdropPipelineResult.Created)
+            .pipeline
+        val consumers = (
+            createConsumerBackdropPipeline(binding, ShaderDialect.GLES, cache, BACKDROP_SHADER_PAIR)
+                as ConsumerBackdropPipelineResult.Created
+            ).pipeline
+
+        assertTrue(rengs.key != consumers.key, "a consumer backdrop must not alias RenG's own program key")
     }
 
     @Test

@@ -62,3 +62,12 @@ The related exposure that `GL_UNPACK_ALIGNMENT` is normalised inside `drawFrame`
 uploads have already read whatever the host left, is real and is **not** addressed here. It is
 narrow — RGBA8 rows are 4-byte aligned, so only an odd-width texture under a host alignment of 8
 misreads — and it is a different decision about a different piece of state.
+
+## Amendment, 2026-10-22: the region sets RenG's unpack state, and nothing bypasses its binding
+
+The pixel-unpack state (`PIXEL_UNPACK_BUFFER` 0, row length and skips 0, alignment 4) was set where
+`drawFrame` began, after the uploads the region already contained, so a host's unpack buffer or row
+length reached every ground-tile upload. It is now set as the region opens; the host's values are in
+the snapshot as before. Bloom target creation, DEM, glyph-atlas and sprite-atlas uploads used the
+renderer's own binding inside the region, binding on the host's active unit unseen by the texture-unit
+capture (ADR 0055); they now use the captured binding.

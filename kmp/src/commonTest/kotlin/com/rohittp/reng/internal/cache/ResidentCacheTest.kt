@@ -343,20 +343,56 @@ class ResidentCacheTest {
         )
     }
 
+    /**
+     * Replaces `aKeyWhoseRetiredGenerationIsStillLeasedIsNotEvicted`, which asserted the defect: a
+     * leased retired generation shielded the key's unleased current one, so an old frame holding the
+     * previous generation kept the new one resident however far over budget. Now the current one is
+     * evicted, the retired one stays counted until its lease goes, and the key reads as not resident.
+     */
     @Test
-    fun aKeyWhoseRetiredGenerationIsStillLeasedIsNotEvicted() {
+    fun anUnleasedCurrentGenerationIsEvictedEvenWhileARetiredOneIsLeased() {
         val cache = ResidentCache(residentByteBudget = 64L)
         val pinned = keyNamed("retired-pinned")
         val lease = cache.takeLease(cache.install(pinned, storedA, null))
         // Superseding moves the leased generation to `retired` and leaves an unleased current one.
-        // Judged on its current generation alone the key looks evictable; it is not, because
-        // something still holds the generation behind it.
         cache.install(pinned, storedB, null)
 
         cache.install(keyNamed("retired-pinned-pressure"), storedA, null)
 
-        assertNotNull(cache.current(pinned))
+        assertNull(cache.current(pinned), "the unleased current generation is evicted")
+        assertFalse(cache.wasFreed(pinned), "an eviction is never a consumer free")
+        val held = cache.report(ResourceSelector.All, noGpuObjects)
+        assertEquals(64L, held.cpuResidency.residentBytes, "only the leased retired generation is still counted")
+        assertEquals(1, held.entries.single { it.key == pinned }.retiredGenerationCount)
+
+        // Reloadable while the old frame still holds its generation, and the old one stays tracked.
+        val restored = assertNotNull(cache.observeOrRestoreAndTakeLease(pinned, storedB))
+        assertEquals(128L, cache.report(ResourceSelector.All, noGpuObjects).cpuResidency.residentBytes)
+        cache.releaseLease(restored)
         cache.releaseLease(lease)
+
+        val after = cache.report(ResourceSelector.All, noGpuObjects)
+        assertEquals(
+            after.entries.sumOf { it.usage.rawBytes },
+            after.cpuResidency.residentBytes,
+            "byte accounting stays exact",
+        )
+        assertTrue(after.cpuResidency.residentBytes <= 64L)
+    }
+
+    /** Once the retired generation's lease goes too, an evicted key is forgotten entirely. */
+    @Test
+    fun anEvictedKeyIsForgottenOnceItsLastRetiredLeaseIsReleased() {
+        val cache = ResidentCache(residentByteBudget = 64L)
+        val pinned = keyNamed("retired-then-forgotten")
+        val lease = cache.takeLease(cache.install(pinned, storedA, null))
+        cache.install(pinned, storedB, null)
+        cache.install(keyNamed("retired-then-forgotten-pressure"), storedA, null)
+
+        cache.releaseLease(lease)
+
+        assertTrue(cache.report(ResourceSelector.ByKey(pinned), noGpuObjects).entries.isEmpty())
+        assertEquals(0L, cache.report(ResourceSelector.All, noGpuObjects).cpuResidency.residentBytes)
     }
 
     @Test

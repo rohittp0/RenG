@@ -349,10 +349,11 @@ internal class ResidentCache(
             touch(key)
             return@locked Lease(current)
         }
-        // An entry with no current generation exists only after a free(): eviction removes the key.
-        if (entry != null) return@locked null
-        val restored = KeyEntry()
-        entries[key] = restored
+        // An entry with no current generation is either a consumer's free(), which is refused, or a
+        // key whose current generation the budget evicted while a retired one is still leased, which
+        // is restored into the same entry so its retired generations stay tracked.
+        if (entry != null && entry.freed) return@locked null
+        val restored = entry ?: KeyEntry().also { entries[key] = it }
         val generation = newGeneration(key = key, stored = stored, decoded = null)
         generation.addLease()
         restored.current = generation
@@ -368,8 +369,11 @@ internal class ResidentCache(
         val generation = lease.generation
         generation.removeLease()
         if (generation.leaseCount == 0) {
-            val removed = entries[generation.key]?.retired?.remove(generation) == true
+            val entry = entries[generation.key]
+            val removed = entry?.retired?.remove(generation) == true
             if (removed) residentBytes -= generation.byteSize
+            // An entry whose current generation was evicted while this one was leased has nothing left.
+            if (removed && entry != null) removeIfEmptyAndUnfreed(generation.key, entry)
             // A current generation can have kept the cache over budget only because this lease pinned
             // it. The moment the last lease goes it is a candidate, so enforce the ceiling before the
             // release returns rather than waiting for an unrelated future install.
@@ -498,16 +502,20 @@ internal class ResidentCache(
     }
 
     /**
-     * Evicts least-recently-used keys until [residentBytes] is within [residentByteBudget].
+     * Evicts least-recently-used current generations until [residentBytes] is within
+     * [residentByteBudget].
      *
-     * A key is a candidate only when its current generation holds no lease and it has no retired
-     * generations — a retired generation exists only because something leases it, so such a key is in
-     * use by definition. A leased key is skipped rather than stopping the sweep, so one live frame
-     * cannot pin the whole cache above its budget.
+     * A current generation is a candidate whenever it holds no lease. A leased one is skipped rather
+     * than stopping the sweep, so one live frame cannot pin the whole cache above its budget. A key's
+     * retired generations are not candidates -- each exists only because something leases it -- but
+     * they no longer shield the key's unleased current generation: an old frame holding the previous
+     * generation would otherwise keep the new one resident for as long as it lived.
      *
-     * The evicted key is **removed from [entries] outright and never marked `freed`** (ADR 0047):
-     * `freed` means the consumer asked, and `wasFreed` turns it into a diagnostic blaming them for a
-     * decision this cache made on its own.
+     * An evicted key is **never marked `freed`** (ADR 0047): `freed` means the consumer asked, and
+     * `wasFreed` turns it into a diagnostic blaming them for a decision this cache made on its own. With
+     * no retired generation it is removed from [entries] outright; with one, its entry stays, holding
+     * only the retired generations, until [releaseLease] drops the last of them. Either way it has no
+     * current generation, so every lookup treats it as not resident and the next install reloads it.
      */
     private fun evictOverBudget() {
         if (residentBytes <= residentByteBudget) return
@@ -516,13 +524,20 @@ internal class ResidentCache(
             if (residentBytes <= residentByteBudget) return
             val entry = entries[key] ?: continue
             val generation = entry.current
-            if (generation == null || generation.leaseCount > 0 || entry.retired.isNotEmpty()) continue
+            if (generation == null || generation.leaseCount > 0) continue
             residentBytes -= generation.byteSize
             evictedKeyCount += 1L
             evictedBytes += generation.byteSize
-            entries.remove(key)
-            recency.remove(key)
+            entry.current = null
+            removeIfEmptyAndUnfreed(key, entry)
         }
+    }
+
+    /** Forgets an entry eviction emptied: no current, no retired, and no consumer free to remember. */
+    private fun removeIfEmptyAndUnfreed(key: ResourceKey, entry: KeyEntry) {
+        if (entry.current != null || entry.retired.isNotEmpty() || entry.freed) return
+        entries.remove(key)
+        recency.remove(key)
     }
 
     private fun ResourceKey.matches(selector: ResourceSelector): Boolean = when (selector) {

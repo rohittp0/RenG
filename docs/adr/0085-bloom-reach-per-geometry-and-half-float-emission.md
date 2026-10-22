@@ -161,3 +161,13 @@ Cost and the phone GPU are measured in Travel Animator, not here.
 This extends ADRs 0074 and 0080 (a second redraw inside the bloom phase, which leaves the same restored
 state; after both redraws each touched program gets back the normal pass's merged uniform history, per
 ADR 0080's 2026-10-21 amendment) and leaves 0082 and 0083's composite as it was.
+
+## Amendment, 2026-10-22: a refusal is a refusal of any half-float target, and the retry is RGBA8
+
+The upsample levels are half-float wherever the context can render it (ADR 0074), so a context that
+advertises the capability but refuses `RGBA16F` as a format refused them too and read as
+`BLOOM_UNAVAILABLE`, and the RGBA8 retry asked for half-float upsample levels again. A refused `RGBA16F`
+target of any role is now a half-float refusal, and every set made after one is RGBA8 throughout,
+upsample levels included. `BLOOM_EMISSION_PRECISION_REDUCED` is still staged only for a frame that
+asked for half-float. The light helper also zeroes a NaN before it clamps (GLSL leaves `clamp` of a NaN
+undefined), and the composite reads the emission alpha it suppresses by through the same helper.

@@ -164,9 +164,9 @@ private fun backdropQuad(binding: GlBinding): BackdropQuad {
 /**
  * A backdrop drawn from a shader pair the consumer wrote (ADR 0071).
  *
- * Keyed under [InternalPipelineRole.BACKDROP] like RenG's own, because the role is RenG's even
- * though the text is not, and the key already hashes both sources -- so two consumer shaders get
- * two keys and RenG's own gets a third. [consumerLocations] memoises exactly as
+ * Keyed under [InternalPipelineRole.CONSUMER_BACKDROP], which hashes both sources -- so two consumer
+ * shaders get two keys -- and is a namespace of its own, so even a consumer pair byte-identical to
+ * RenG's pattern shader never names RenG's program. [consumerLocations] memoises exactly as
  * [GeometryPipeline]'s does, and for the same reason: a location is a property of the linked
  * program, and the two die together.
  */
@@ -209,7 +209,7 @@ internal fun createConsumerBackdropPipeline(
     shaderPair: ShaderPair,
     deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
 ): ConsumerBackdropPipelineResult {
-    val key = deriver.internalPipeline(InternalPipelineRole.BACKDROP, shaderPair).key
+    val key = deriver.internalPipeline(InternalPipelineRole.CONSUMER_BACKDROP, shaderPair).key
     val vertexPlan = scanShaderProfile(shaderPair.vertexSource)
         ?: return ConsumerBackdropPipelineResult.Failed(
             shaderProgramFailure(RenGErrorCode.SHADER_COMPILE_FAILED, key, consumerAuthored = true),
@@ -358,6 +358,9 @@ internal fun drawBackdrop(
                 )
             }
             binding.bindTexture(GL_TEXTURE_2D, backdrop.texture)
+            // The texture's own wrapping sampler state, not a sampler object the host left on unit 0.
+            // The captured binding saves unit 0's sampler before this overwrites it (ADR 0055).
+            binding.bindSampler(0, 0)
         }
 
         is ResolvedBackdrop.Shader -> {

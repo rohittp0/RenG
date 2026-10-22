@@ -125,8 +125,11 @@ private fun decodeAdmitted(
     // The fast path declined, possibly part-way through: start again from a zero row above the first,
     // in the same buffers, so a declined attempt costs no working bytes beyond what was budgeted above.
     previousRow.fill(0)
-    val inflater = IdatInflater(bytes, scan.imageDataRanges)
+    // Constructed inside the try: a native `inflateInit_` failure throws InflateException from the
+    // constructor, and it must reach the typed result below rather than escape decodePng.
+    var openedInflater: IdatInflater? = null
     return try {
+        val inflater = IdatInflater(bytes, scan.imageDataRanges).also { openedInflater = it }
         for (row in 0 until height) {
             if (!inflater.fillExactly(currentRow)) {
                 return PngDecodeResult.Malformed(PngReject.IMAGE_DATA_LENGTH)
@@ -159,7 +162,7 @@ private fun decodeAdmitted(
     } catch (failure: InflateException) {
         PngDecodeResult.Malformed(PngReject.IMAGE_DATA_LENGTH)
     } finally {
-        inflater.close()
+        openedInflater?.close()
     }
 }
 

@@ -98,3 +98,10 @@ translation.
 
 **A cold first frame pays more, not less.** The margin is fetched before it is needed, once. Every
 frame after it is where this is paid back, which is the trade a margin always is.
+
+## Amendment, 2026-10-22: the settled set is history
+
+`clearFrameHistory()` now drops the settled label tile set. It decides which candidates the next frame
+plans over, so keeping it made the frame after a clear depend on the frames before it, against ADR
+0035's rule that a cleared renderer's frame is a function of its plan. The retained handover is a cache
+and stays: a fresh set over the same tiles derives the same request key and is still served from it.

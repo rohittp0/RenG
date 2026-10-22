@@ -203,7 +203,8 @@ public data class ResourceLimits(
      * several full rasters. A separate ceiling keeps hostile, extremely wide images from turning
      * those otherwise-small row workspaces into another process-sized allocation.
      *
-     * Declared last to preserve positional source and binary compatibility.
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
      */
     public val maximumImageDecodeWorkingBytes: Long = 512L * 1024L * 1024L,
     /**
@@ -211,7 +212,8 @@ public data class ResourceLimits(
      * from [maximumResidentGpuTextureBytes] so image-heavy and geometry-heavy applications can tune
      * the two independent driver allocations without one silently consuming the other's allowance.
      *
-     * Declared last to preserve positional source and binary compatibility.
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
      */
     public val maximumResidentGpuBufferBytes: Long = 512L * 1024L * 1024L,
     /**
@@ -224,7 +226,8 @@ public data class ResourceLimits(
      * Without a separate admission ceiling, a consumer can keep opening frames over unique resources
      * until process memory is exhausted even though the resident cache is nominally over budget.
      *
-     * Declared last to preserve positional source and binary compatibility.
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
      */
     public val maximumInFlightPreparedFrameCpuBytes: Long = 1024L * 1024L * 1024L,
     /**

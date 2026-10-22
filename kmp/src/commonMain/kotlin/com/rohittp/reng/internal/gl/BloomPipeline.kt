@@ -35,9 +35,16 @@ internal const val BLOOM_TARGET_LEVEL_COUNT: Int = 7
  */
 internal const val BLOOM_LIGHT_CEILING: String = "64.0"
 
-/** The GLSL helper both chain programs read light through; see [BLOOM_LIGHT_CEILING]. */
+/**
+ * The GLSL helper every bloom program reads emission-derived light through; see
+ * [BLOOM_LIGHT_CEILING]. A NaN is zeroed first: `clamp` of a NaN is undefined in GLSL, and one NaN
+ * texel spreads through every tap of the chain that reads it.
+ */
 internal const val BLOOM_LIGHT_GLSL: String =
-    "vec4 rengBloomLight(vec4 c) { return clamp(c, 0.0, $BLOOM_LIGHT_CEILING); }\n"
+    "vec4 rengBloomLight(vec4 c) {\n" +
+        "    c = mix(c, vec4(0.0), isnan(c));\n" +
+        "    return clamp(c, 0.0, $BLOOM_LIGHT_CEILING);\n" +
+        "}\n"
 
 /**
  * Where the composite's soft shoulder starts, as a fraction of full scale. Below the knee the
@@ -149,6 +156,7 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "uniform sampler2D rengBloomDestination;\n" +
         "in vec2 rengBloomUv;\n" +
         "layout(location = 0) out vec4 rengBloomColour;\n" +
+        BLOOM_LIGHT_GLSL +
         "vec3 rengBloomToLinear(vec3 c) {\n" +
         "    c = clamp(c, 0.0, 1.0);\n" +
         "    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));\n" +
@@ -179,7 +187,8 @@ private const val BLOOM_COMPOSITE_FRAGMENT_SOURCE: String =
         "    vec3 rengBloomC = texture(rengBloomSource, rengBloomUv).rgb;\n" +
         "    float rengBloomMaximum = max(rengBloomC.r, max(rengBloomC.g, rengBloomC.b));\n" +
         "    rengBloomC = mix(rengBloomC, vec3(rengBloomMaximum), rengBloomWhiteness);\n" +
-        "    float rengBloomInside = smoothstep(0.02, 0.30, texture(rengBloomEmission, rengBloomUv).a);\n" +
+        "    float rengBloomInside =\n" +
+        "        smoothstep(0.02, 0.30, rengBloomLight(texture(rengBloomEmission, rengBloomUv)).a);\n" +
         "    rengBloomC *= rengBloomIntensity *\n" +
         "        (1.0 - rengBloomInsideSuppression * rengBloomInside);\n" +
         "    vec3 rengBloomD = texture(rengBloomDestination, rengBloomUv).rgb;\n" +
@@ -323,11 +332,11 @@ internal fun ensureBloomReachTargets(binding: GlBinding, resources: BloomResourc
 internal sealed interface BloomResourcesResult {
     data class Created(val resources: BloomResources) : BloomResourcesResult
     /**
-     * [halfFloatTargetRefused] is true only when a half-float emission target (the emission image or
-     * a downsample level of a [createBloomResources] call with `highPrecisionEmission`) was refused as
+     * [halfFloatTargetRefused] is true only when an `RGBA16F` target -- the emission image or a
+     * downsample level of a chain with `highPrecisionEmission`, or an upsample level -- was refused as
      * a format: an incomplete framebuffer or a GL error other than `GL_OUT_OF_MEMORY` (ADR 0085). A
-     * program that fails to link, memory running out, or any RGBA8 or upsample target failing leaves
-     * it false, since an RGBA8 chain would fail the same way.
+     * program that fails to link, memory running out, or any RGBA8 target failing leaves it false,
+     * since a wholly RGBA8 chain would fail the same way.
      */
     data class Failed(
         val failure: FailureDescriptor,
@@ -343,6 +352,11 @@ internal fun createBloomResources(
     sharedDepthRenderbuffer: Int,
     deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
     highPrecisionEmission: Boolean = false,
+    /**
+     * Whether the upsample levels may be `RGBA16F` where the context can render it (ADR 0074). False
+     * once the context has refused a half-float target, so the RGBA8 retry is RGBA8 throughout.
+     */
+    halfFloatUpsample: Boolean = true,
 ): BloomResourcesResult {
     require(!highPrecisionEmission || profile.supportsHalfFloatColourBuffer) {
         "a half-float emission chain requires a context that renders to half-float colour"
@@ -391,6 +405,14 @@ internal fun createBloomResources(
     val onEmissionTargetRefused: (Boolean) -> Unit = { formatRefused ->
         halfFloatTargetRefused = highPrecisionEmission && formatRefused
     }
+    val upsampleFormat = if (highPrecisionEmission || (halfFloatUpsample && profile.supportsHalfFloatColourBuffer)) {
+        GL_RGBA16F
+    } else {
+        GL_RGBA8
+    }
+    val onUpsampleTargetRefused: (Boolean) -> Unit = { formatRefused ->
+        halfFloatTargetRefused = upsampleFormat == GL_RGBA16F && formatRefused
+    }
     fun fail(): BloomResourcesResult.Failed {
         allocated.forEach { deleteBloomTarget(binding, it) }
         binding.deleteVertexArrays(1, intArrayOf(vertexArray))
@@ -434,12 +456,12 @@ internal fun createBloomResources(
         downsampleLevels += target
     }
 
-    val upsampleFormat = if (profile.supportsHalfFloatColourBuffer) GL_RGBA16F else GL_RGBA8
     val upsampleLevels = ArrayList<BloomTarget>(BLOOM_TARGET_LEVEL_COUNT)
     for (level in 0 until BLOOM_TARGET_LEVEL_COUNT) {
         val size = levelSizes[level]
-        val target = createBloomTarget(binding, size.first, size.second, upsampleFormat, null)
-            ?: return fail()
+        val target = createBloomTarget(
+            binding, size.first, size.second, upsampleFormat, null, onUpsampleTargetRefused,
+        ) ?: return fail()
         allocated += target
         upsampleLevels += target
     }

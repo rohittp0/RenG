@@ -104,10 +104,11 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
             ResourceClassGate.PARSE_GLB -> runParseGlb(content)
             ResourceClassGate.VALIDATE_GLB_FEATURES -> runValidateGlbFeatures(content)
         }
-        // Only a pass (ADR 0060). A failure can be about this run rather than these bytes --
-        // `decodePng` refuses an image over `maximumDecodedImageBytes`, which the consumer configures
-        // and may raise between frames -- and remembering one would turn a transient refusal into a
-        // permanent verdict the consumer cannot clear.
+        // Only a pass (ADR 0060). [limits] is fixed for this runner's life -- it is the renderer's
+        // configuration, which cannot change -- so a remembered pass never skips a stricter check. A
+        // failure, though, can be about this run rather than these bytes: a native inflater that could
+        // not be initialised reads as a malformed image, and remembering that would turn a transient
+        // refusal into a permanent verdict the consumer cannot clear.
         if (outcome == SuppliedValidationOutcome.Valid) remember(identity)
         return outcome
     }

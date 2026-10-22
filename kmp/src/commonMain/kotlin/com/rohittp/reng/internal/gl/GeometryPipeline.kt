@@ -93,6 +93,13 @@ internal class GeometryPipeline(
     val geometryBoundsLocation: Int,
     val frameIndexLocation: Int,
     val emissionPassLocation: Int,
+    /**
+     * Every consumer value RenG has set on [program] since it was linked (ADR 0080's 2026-10-22 note).
+     * Owned by the [GlProgramCache] that owns the program, so every pipeline over one program shares
+     * one shadow, and it is dropped exactly when the program is removed or the cache forgets a lost
+     * context; this is the reference taken at creation.
+     */
+    override val consumerShadow: ConsumerValueShadow,
 ) : ConsumerValueProgram {
     /**
      * Consumer uniform and sampler names resolved against [program], memoised on first use.
@@ -118,14 +125,6 @@ internal class GeometryPipeline(
 
     override val uniformNameOrder: ConsumerNameOrder = ConsumerNameOrder()
     override val textureNameOrder: ConsumerNameOrder = ConsumerNameOrder()
-
-    /**
-     * Every consumer value RenG has set on [program] since it was linked (ADR 0080's 2026-10-22 note).
-     * Owned by this pipeline because the program is: both are created together and deleted together in
-     * [deleteGeometryPipeline], and a lost context replaces the pipeline and so starts a fresh shadow
-     * for the freshly linked program.
-     */
-    override val consumerShadow: ConsumerValueShadow = ConsumerValueShadow()
 
     /**
      * The CPU byte buffers [drawGeometry] packs this pipeline's grid into before uploading it, reused
@@ -299,6 +298,7 @@ internal fun createGeometryPipeline(
             geometryBoundsLocation = binding.getUniformLocation(program, UNIFORM_GEOMETRY_BOUNDS),
             frameIndexLocation = binding.getUniformLocation(program, UNIFORM_FRAME_INDEX),
             emissionPassLocation = binding.getUniformLocation(program, UNIFORM_GEOMETRY_EMISSION_PASS),
+            consumerShadow = cache.consumerShadow(key),
         ),
     )
 }
@@ -618,7 +618,8 @@ private val SAMPLER_UNIT_VALUES: Array<ShaderValue.Integer> =
 
 /**
  * One emitter's consumer state at its normal draw: every value its program held then, and the texture
- * each consumer unit held then (`-1` where the frame had bound none), indexed by unit.
+ * each consumer unit held then, indexed by unit, in [rebindConsumerUnit]'s terms ([UNTOUCHED_UNIT]
+ * where the unit still held what the host left on it).
  */
 internal class EmitterConsumerValues(
     val uniforms: Map<String, ShaderValue>,
@@ -631,9 +632,9 @@ internal class EmitterConsumerValues(
  *
  * Every name the program's shadow holds now is set: to its value in [values], or, absent there, to
  * zero of its type -- a name the shadow did not yet hold at the emitter's draw had never been set since
- * link, so it held the link-time zero. Then each sampler's unit gets back the texture it held. No unit
- * is renumbered, so the units bound are ones the normal pass had already bound legally; a unit the
- * frame bound no consumer texture to is left as it is, because RenG does not know what it held.
+ * link, so it held the link-time zero. Then each unit a sampler reads gets back the texture it held
+ * then, whoever had bound it: the unit of every sampler the shadow holds, and unit 0, which any sampler
+ * never set since link reads. No unit is renumbered, so every unit bound is a consumer unit.
  */
 internal fun replayConsumerValues(binding: GlBinding, pipeline: GeometryPipeline, values: EmitterConsumerValues) {
     val shadow = pipeline.consumerShadow
@@ -643,10 +644,25 @@ internal fun replayConsumerValues(binding: GlBinding, pipeline: GeometryPipeline
         if (location < 0) continue
         bindConsumerUniform(binding, location, snapshot[name] ?: zeroOf(current))
     }
+    rebindConsumerUnit(binding, 0, values.textureByUnit[0])
     for (name in shadow.samplerNames) {
         val unit = (snapshot[name] as? ShaderValue.Integer)?.value ?: 0
-        val texture = values.textureByUnit.getOrNull(unit) ?: -1
-        if (texture < 0) continue
+        if (unit in 1 until values.textureByUnit.size) rebindConsumerUnit(binding, unit, values.textureByUnit[unit])
+    }
+}
+
+/**
+ * Binds consumer [unit] back to [texture], a value [ConsumerValueHistory.currentBindings] recorded.
+ *
+ * Inside a capture region (every renderer draw, ADR 0054) the binding knows every unit's texture,
+ * including one another RenG pass bound and the host's own, so the unit is put back exactly. A caller
+ * drawing outside one has only the consumer binds the history saw, and a unit it knows nothing about
+ * ([UNTOUCHED_UNIT]) is left as it is.
+ */
+internal fun rebindConsumerUnit(binding: GlBinding, unit: Int, texture: Int) {
+    if (binding is TextureUnitCapturingBinding) {
+        binding.rebindConsumerUnit(unit, texture)
+    } else if (texture != UNTOUCHED_UNIT) {
         binding.activeTexture(GL_TEXTURE0 + unit)
         binding.bindTexture(GL_TEXTURE_2D, texture)
     }

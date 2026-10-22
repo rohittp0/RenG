@@ -78,10 +78,13 @@ The snapshot above began empty each frame, so an emitter that omitted a value th
 was redrawn with whatever a later emitter had left, and the reconstructed name-to-texture map could
 name more samplers than one draw may bind (two emitters each binding 15 of 16 names gave 16) and fail
 the draw. Consumer programs are RenG's own, so every consumer value a program holds is one RenG set or
-the link-time zero. Each geometry pipeline now keeps a shadow of every consumer value set on its program
-since link, a sampler as the unit it points at; it lives and dies with the program. An emitter's
-snapshot is that shadow (copied on write) plus the texture on each consumer unit at its draw. A redraw
-sets every name the shadow holds, to the snapshot's value or, where the snapshot lacks it, to zero of
-its type, and rebinds each sampler's unit to its snapshotted texture without renumbering. The restore
-sets the shadow as the normal pass left it. Only a unit this frame bound no consumer texture to is
-still not restorable.
+the link-time zero. The program cache now keeps, beside each program it caches, a shadow of every
+consumer value set on that program since link, a sampler as the unit it points at; every pipeline over
+the program shares it, and it is dropped when the program is removed or the cache forgets a lost
+context. An emitter's snapshot is that shadow (copied on write) plus the texture on each consumer unit
+at its draw, read from the capture region's binding (ADR 0055), which sees every bind -- a consumer's,
+another RenG pass's, and the host's original -- so a unit holding a texture no consumer bound is known
+too. A redraw sets every name the shadow holds, to the snapshot's value or, where the snapshot lacks
+it, to zero of its type, and rebinds unit 0 (which any never-set sampler reads) and each sampler's unit
+to its snapshotted texture without renumbering. Afterwards every consumer unit gets back the texture
+the normal pass left on it, and each redrawn program the shadow as the normal pass left it.

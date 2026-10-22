@@ -599,7 +599,11 @@ internal class SceneContent(
             // normal draws left on each consumer unit, and each emitter's consumer state at its normal
             // draw. Kept only on a frame with a bloom phase, whose redraws replay the emitters' state
             // and which restores the rest afterwards. What each program holds is its pipeline's shadow.
-            val consumerHistory = if (lastEmissiveGeometryIndex >= 0) ConsumerValueHistory() else null
+            val consumerHistory = if (lastEmissiveGeometryIndex >= 0) {
+                ConsumerValueHistory(binding as? TextureUnitCapturingBinding)
+            } else {
+                null
+            }
             for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
                 if (sceneGeometry.geometry.blend != currentBlend) {
                     applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
@@ -709,6 +713,8 @@ internal class SceneContent(
         val resources = bloomResources ?: return
         val emitters = consumerHistory.emitters
         if (emitters.isEmpty()) return
+        // The consumer units as the normal pass leaves them, which the restore below returns to.
+        val unitsAtNormalPassEnd = consumerHistory.currentBindings()
         val framebuffer = requireNotNull(surfaceFramebuffer) {
             "bloom requires the main offscreen framebuffer"
         }
@@ -770,12 +776,12 @@ internal class SceneContent(
 
         // Consumer locations belong to a shared program and omitted values deliberately retain that
         // program's previous value; a sampler an omitting draw inherits samples whatever its unit then
-        // holds. Emission and far redraws disturb both, so before the loop continues every texture
-        // unit this frame's geometry draws had bound gets its texture back, and every program the
-        // redraws touched gets back every value its shadow holds -- everything RenG has set on it
-        // since link, as the normal pass left it (ADR 0080's 2026-10-21 and 2026-10-22 amendments). A
-        // unit this frame bound no consumer texture to is not restored: RenG does not query it.
-        consumerHistory.restoreTextureUnits(binding)
+        // holds. Emission and far redraws and the bloom chain disturb both, so before the loop
+        // continues every consumer texture unit gets back the texture the normal pass left on it,
+        // whoever bound it, and every program the redraws touched gets back every value its shadow
+        // holds -- everything RenG has set on it since link, as the normal pass left it (ADR 0080's
+        // 2026-10-21 and 2026-10-22 amendments).
+        consumerHistory.restoreTextureUnits(binding, unitsAtNormalPassEnd)
         for (index in emitters.indices) {
             val pipeline = emitters[index].sceneGeometry.pipeline
             val program = pipeline.program
@@ -823,8 +829,7 @@ internal class SceneContent(
      *
      * A consumer value an emitter omits inherits its program's previous value, so a far redraw, like
      * the emission redraw, replays [BloomEmitter.values]: every value its program held and the texture
-     * on each unit its samplers read, at its normal draw. Only a unit this frame bound no consumer
-     * texture to can differ, because RenG does not query what it holds. The blend colour is
+     * on each unit its samplers read, at its normal draw. The blend colour is
      * returned to GL's default afterwards; it is a member of the Restore Set, so the consumer's own
      * value comes back when the draw returns either way.
      */
@@ -1680,19 +1685,21 @@ internal class BloomEmitter(
  *
  * Consumer values are sparse: an omitted uniform keeps its program's previous value, and an omitted
  * texture leaves its sampler pointing at a unit that holds whatever was last bound there. What each
- * program holds is its pipeline's [ConsumerValueShadow], which outlives the frame; what each unit holds
- * is frame state, recorded here. [bindConsumerValues] binds a draw's textures to units `0..n-1` in name
- * order, and [record] follows the same order.
+ * program holds is its pipeline's [ConsumerValueShadow], which outlives the frame. What each unit holds
+ * is read from [capturing], the capture region's binding, which sees every bind -- a consumer's,
+ * another RenG pass's, and the host's original -- so a unit is put back exactly whoever bound it.
+ * Outside a capture region only the consumer binds [record] sees are known.
  */
-internal class ConsumerValueHistory {
-    /** The texture on each consumer unit, `-1` where this frame has bound none. */
-    private val textureByUnit = IntArray(MAXIMUM_CONSUMER_TEXTURES) { -1 }
+internal class ConsumerValueHistory(private val capturing: TextureUnitCapturingBinding?) {
+    /** Outside a capture region: the consumer texture on each unit, [UNTOUCHED_UNIT] where none. */
+    private val textureByUnit = IntArray(MAXIMUM_CONSUMER_TEXTURES) { UNTOUCHED_UNIT }
 
     /** Each emitter as its normal draw drew it, in draw order. */
     val emitters: MutableList<BloomEmitter> = ArrayList()
 
     /** Records a normal draw that bound its values (a draw with an empty grid binds none). */
     fun record(sceneGeometry: SceneGeometry) {
+        if (capturing != null) return
         val textures = sceneGeometry.consumerTextures
         if (textures.isEmpty()) return
         val names = sceneGeometry.pipeline.textureNameOrder.of(textures.keys)
@@ -1703,18 +1710,16 @@ internal class ConsumerValueHistory {
     fun snapshotEmitter(sceneGeometry: SceneGeometry, grid: GeometryGrid) {
         val values = EmitterConsumerValues(
             uniforms = sceneGeometry.pipeline.consumerShadow.snapshot(),
-            textureByUnit = textureByUnit.copyOf(),
+            textureByUnit = currentBindings(),
         )
         emitters += BloomEmitter(sceneGeometry, grid, values)
     }
 
-    /** Rebinds every unit the normal pass had bound to the texture it left there. */
-    fun restoreTextureUnits(binding: GlBinding) {
-        for (unit in textureByUnit.indices) {
-            val texture = textureByUnit[unit]
-            if (texture < 0) continue
-            binding.activeTexture(GL_TEXTURE0 + unit)
-            binding.bindTexture(GL_TEXTURE_2D, texture)
-        }
+    /** Each consumer unit's texture now, in [rebindConsumerUnit]'s terms. */
+    fun currentBindings(): IntArray = capturing?.consumerUnitBindings() ?: textureByUnit.copyOf()
+
+    /** Puts every consumer unit back to [bindings], taken from [currentBindings] earlier. */
+    fun restoreTextureUnits(binding: GlBinding, bindings: IntArray) {
+        for (unit in bindings.indices) rebindConsumerUnit(binding, unit, bindings[unit])
     }
 }

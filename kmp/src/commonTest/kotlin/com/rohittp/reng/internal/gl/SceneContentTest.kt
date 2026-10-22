@@ -48,6 +48,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class SceneContentTest {
@@ -1601,6 +1603,113 @@ class SceneContentTest {
             between(thirdEmission, binding.log.size),
             "frame 3's redraws: A drew with the 3 frame 2 left",
         )
+    }
+
+    /**
+     * ADR 0080's 2026-10-22 note: a consumer-value shadow describes a linked program, so it belongs to
+     * the program cache. Two pipelines over one cached program share it, and an emitter drawn through
+     * one is replayed correctly against values set through the other: frame 1 leaves 3 through Q; in
+     * frame 2, A (through P) omits `u` and so draws with 3, and B (through P) sets 1. A's redraw must
+     * see 3. Removing the program drops its shadow.
+     */
+    @Test
+    fun pipelinesOverOneCachedProgramShareItsShadowAndReplayAcrossEachOther() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "u" to CONSUMER_U_LOCATION,
+        )
+        val programs = GlProgramCache()
+        fun pipeline() = (
+            createGeometryPipeline(binding, ShaderDialect.GLES, programs, minimalShaderPair()) as GeometryPipelineResult.Created
+            ).pipeline
+        val pipelineP = pipeline()
+        val pipelineQ = pipeline()
+        assertEquals(pipelineP.program, pipelineQ.program, "one cached program")
+        assertSame(pipelineP.consumerShadow, pipelineQ.consumerShadow, "one program, one shadow")
+
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(pipeline: GeometryPipeline, emissive: Boolean, u: Float?) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipeline,
+            consumerUniforms = u?.let { mapOf("u" to ShaderValue.Scalar(it)) } ?: emptyMap(),
+        )
+        binding.log.clear()
+        bloomSceneContent(Scene(OUTPUT_SIZE, 0L, geometries = listOf(geometry(pipelineQ, false, 3f))), resources)
+            .draw(binding)
+        val second = binding.log.size
+        bloomSceneContent(
+            Scene(OUTPUT_SIZE, 0L, geometries = listOf(geometry(pipelineP, true, null), geometry(pipelineP, true, 1f))),
+            resources,
+        ).draw(binding)
+        val emission = binding.log.indexOfFirstFrom(second) {
+            it == "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})"
+        }
+        val draws = simulatedConsumerDraws(binding.log, pipelineP.program).map { it.index to (it.u ?: 0f) }
+        assertEquals(listOf(3f, 1f), draws.filter { it.first in second until emission }.map { it.second }, "normal pass")
+        assertEquals(listOf(3f, 1f), draws.filter { it.first > emission }.map { it.second }, "A's redraw sees the 3 Q left")
+
+        val shadow = pipelineP.consumerShadow
+        programs.remove(pipelineP.key)
+        assertNotSame(shadow, pipeline().consumerShadow, "a relinked program starts a fresh shadow")
+    }
+
+    /**
+     * ADR 0080's 2026-10-22 note, the texture half: emitter A's sampler `t` was never set, so it reads
+     * unit 0, which still holds the host's texture (4242). Emitter B then binds consumer texture 20 to
+     * unit 0. A's redraw must sample the host's 4242 again, and G, after the bloom phase, B's 20. Drawn
+     * through the capture region's binding, as every renderer draw is.
+     */
+    @Test
+    fun anEmitterSamplingANonConsumerTextureBloomsWithItAfterAConsumerRebindsTheUnit() {
+        val hostTexture = 4242
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "t" to CONSUMER_T_LOCATION,
+        )
+        binding.integers[GL_ACTIVE_TEXTURE] = intArrayOf(GL_TEXTURE0)
+        binding.integers[GL_TEXTURE_BINDING_2D] = intArrayOf(hostTexture)
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(emissive: Boolean, t: Int?) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipelineP,
+            consumerUniforms = emptyMap(),
+            consumerTextures = t?.let { mapOf("t" to it) } ?: emptyMap(),
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(geometry(true, null), geometry(true, 20), geometry(false, null)),
+        )
+        binding.log.clear()
+        val capturing = TextureUnitCapturingBinding(binding)
+        bloomSceneContent(scene, resources).draw(capturing)
+
+        // GL state from the log: an unset sampler reads unit 0, and an unbound unit holds the host's.
+        var program = 0
+        var activeUnit = 0
+        val unitTextures = HashMap<Int, Int>()
+        var samplerUnit = 0
+        val sampled = ArrayList<Pair<Int, Int>>()
+        for ((index, call) in binding.log.withIndex()) {
+            when {
+                call.startsWith("useProgram(") -> program = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+                call.startsWith("activeTexture(0x") ->
+                    activeUnit = call.removePrefix("activeTexture(0x").removeSuffix(")").toInt(16) - GL_TEXTURE0
+                call.startsWith("bindTexture(${hex(GL_TEXTURE_2D)},") ->
+                    unitTextures[activeUnit] = call.substringAfter(",").removeSuffix(")").toInt()
+                program != pipelineP.program -> Unit
+                call.startsWith("uniform1i($CONSUMER_T_LOCATION,") ->
+                    samplerUnit = call.substringAfter(",").removeSuffix(")").toInt()
+                call.startsWith("drawElements") -> sampled += index to (unitTextures[samplerUnit] ?: hostTexture)
+            }
+        }
+        val emissionBind = binding.log.indexOf(
+            "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})",
+        )
+        assertEquals(listOf(hostTexture, 20), sampled.filter { it.first < emissionBind }.map { it.second }, "normal")
+        val after = sampled.filter { it.first > emissionBind }.map { it.second }
+        assertEquals(listOf(hostTexture, 20, 20), after, "A's redraw samples the host's texture; B's and G's 20")
     }
 
     /**

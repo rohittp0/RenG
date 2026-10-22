@@ -31,6 +31,14 @@ internal class TextureUnitCapturingBinding(
     /** Prior state per `GL_TEXTUREi` token, in the order the draw first touched them. */
     private val saved: LinkedHashMap<Int, GlTextureUnitState> = LinkedHashMap()
 
+    /**
+     * The `GL_TEXTURE_2D` binding on each consumer texture unit (`0 until MAXIMUM_CONSUMER_TEXTURES`)
+     * as this region last set it, or [UNTOUCHED_UNIT] where the region has not bound one -- where
+     * the unit still holds the host's texture. Kept so the bloom phase can put a unit back exactly as
+     * an emitter saw it, whoever bound it (ADR 0080's 2026-10-22 note); one array write per bind.
+     */
+    private val consumerUnitTexture2d = IntArray(MAXIMUM_CONSUMER_TEXTURES) { UNTOUCHED_UNIT }
+
     override fun activeTexture(unit: Int) {
         activeUnit = unit
         delegate.activeTexture(unit)
@@ -38,7 +46,11 @@ internal class TextureUnitCapturingBinding(
 
     override fun bindTexture(target: Int, texture: Int) {
         // Only GL_TEXTURE_2D is part of the Restore Set, and it is the only target RenG binds.
-        if (target == GL_TEXTURE_2D) rememberUnit(activeUnit)
+        if (target == GL_TEXTURE_2D) {
+            rememberUnit(activeUnit)
+            val unit = activeUnit - GL_TEXTURE0
+            if (unit in consumerUnitTexture2d.indices) consumerUnitTexture2d[unit] = texture
+        }
         delegate.bindTexture(target, texture)
     }
 
@@ -81,7 +93,28 @@ internal class TextureUnitCapturingBinding(
         }
         delegate.activeTexture(originalActiveUnit)
         saved.clear()
+        consumerUnitTexture2d.fill(UNTOUCHED_UNIT)
         activeUnit = originalActiveUnit
+    }
+
+    /** Each consumer unit's `GL_TEXTURE_2D` binding now, [UNTOUCHED_UNIT] where it is the host's. */
+    fun consumerUnitBindings(): IntArray = consumerUnitTexture2d.copyOf()
+
+    /**
+     * Binds [texture] to consumer [unit], where [texture] is a value [consumerUnitBindings] returned:
+     * [UNTOUCHED_UNIT] means the host's texture, which is already there if nothing has bound the unit
+     * since and otherwise is the one saved when it was first overwritten.
+     */
+    fun rebindConsumerUnit(unit: Int, texture: Int) {
+        if (consumerUnitTexture2d[unit] == texture) return
+        val target = if (texture != UNTOUCHED_UNIT) {
+            texture
+        } else {
+            saved.getValue(GL_TEXTURE0 + unit).texture2d
+        }
+        activeTexture(GL_TEXTURE0 + unit)
+        bindTexture(GL_TEXTURE_2D, target)
+        if (texture == UNTOUCHED_UNIT) consumerUnitTexture2d[unit] = UNTOUCHED_UNIT
     }
 
     /** How many units this draw has overwritten so far. Read by tests, and by nothing else. */
@@ -95,3 +128,6 @@ private fun GlBinding.queryInt(pname: Int): Int {
     getIntegerv(pname, out)
     return out.single()
 }
+
+/** A consumer unit this capture region has not bound a texture to. */
+internal const val UNTOUCHED_UNIT: Int = -1

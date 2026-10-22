@@ -241,6 +241,9 @@ public sealed interface Renderer : AutoCloseable {
      * knows which frame it needs first, and the way to say so is two calls — the urgent frame, then
      * the rest — rather than a per-plan priority that would make one batch mean several engine
      * lanes at once.
+     *
+     * An empty [plans] is refused with [RenGErrorCode.INVALID_VALUE] at
+     * [PipelineStage.FRAME_PLANNING], before any consumer exchange.
      */
     public suspend fun prepareBatch(
         plans: List<FramePlan>,
@@ -299,8 +302,19 @@ public sealed interface Renderer : AutoCloseable {
      */
     public suspend fun awaitReadAheadIdle(): Unit
 
+    /**
+     * Cancels the [prepare] or [prepareBatch] running when it is called and returns once that
+     * preparation has ended (ADR 0014). A preparation that starts after the call is not cancelled.
+     */
     public suspend fun cancelPreparations(): Unit
 
+    /**
+     * Clears the ordering, diff and LOD baseline the next [prepare] plans against (ADR 0035).
+     *
+     * Throws [RenGErrorCode.PREPARATION_IN_PROGRESS] while a [prepare] or [prepareBatch] is running,
+     * which is the whole of its suspended lifetime, not only its first step; call
+     * [cancelPreparations] first to end one.
+     */
     public fun clearFrameHistory(): Unit
 
     public fun queryResources(selector: ResourceSelector = ResourceSelector.All): ResourceReport
@@ -312,6 +326,10 @@ public sealed interface Renderer : AutoCloseable {
      */
     public fun queryMetrics(): MetricReport
 
+    /**
+     * Throws [RenGErrorCode.PREPARATION_IN_PROGRESS] while a [prepare] or [prepareBatch] is running,
+     * for the whole of its suspended lifetime; call [cancelPreparations] first to end one.
+     */
     public fun freeResources(selector: ResourceSelector = ResourceSelector.All): ResourceFreeResult
 
     public fun notifyGpuObjectsGone(): Unit
@@ -322,5 +340,9 @@ public sealed interface Renderer : AutoCloseable {
 
     public fun draw(preparedFrame: PreparedFrame, renderTarget: RenderTarget): Unit
 
+    /**
+     * Throws [RenGErrorCode.PREPARATION_IN_PROGRESS] while a [prepare] or [prepareBatch] is running,
+     * for the whole of its suspended lifetime; call [cancelPreparations] first to end one.
+     */
     override fun close(): Unit
 }

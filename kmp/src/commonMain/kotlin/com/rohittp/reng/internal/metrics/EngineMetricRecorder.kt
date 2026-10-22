@@ -7,7 +7,7 @@ import com.rohittp.rentile.MetricName
 import com.rohittp.rentile.RenderPriority as EngineRenderPriority
 import com.rohittp.rentile.MetricsSink
 import com.rohittp.rentile.RentileMetric
-import kotlinx.coroutines.sync.Mutex
+import com.rohittp.reng.internal.thread.PlatformLock
 
 /**
  * The sink RenG installs in the engine, accumulating every metric it emits into RenG's own
@@ -19,11 +19,13 @@ import kotlinx.coroutines.sync.Mutex
  *
  * Locked rather than lock-free because the engine records from whatever thread it happens to be
  * working on -- a preparation may resume anywhere -- and a `Map` mutated from two of them at once is
- * undefined on every target RenG ships. The critical section is one map read and one write, which is
- * why the same spin-on-`tryLock` shape `ResidentCache` uses is appropriate here too.
+ * undefined on every target RenG ships. The critical section is one map read and one write, guarded by
+ * the same blocking [PlatformLock] `ResidentCache` uses. Not a coroutine `Mutex` spun on `tryLock`:
+ * `Mutex.unlock` hands the lock to a queued suspended waiter, and a thread spinning for it could
+ * starve that waiter on a single-threaded dispatcher.
  */
 internal class EngineMetricRecorder : MetricsSink {
-    private val mutex = Mutex()
+    private val lock = PlatformLock()
     private val totals: MutableMap<RenGMetricName, Long> = LinkedHashMap()
 
     override fun record(metric: RentileMetric) {
@@ -49,16 +51,7 @@ internal class EngineMetricRecorder : MetricsSink {
     /** Every total as it stands, as the public report. */
     fun snapshot(): MetricReport = locked { MetricReport(totals) }
 
-    private inline fun <T> locked(block: () -> T): T {
-        while (!mutex.tryLock()) {
-            // Uncontended in practice: the critical section is one map read and one write.
-        }
-        try {
-            return block()
-        } finally {
-            mutex.unlock()
-        }
-    }
+    private fun <T> locked(block: () -> T): T = lock.withLock(block)
 }
 
 /**

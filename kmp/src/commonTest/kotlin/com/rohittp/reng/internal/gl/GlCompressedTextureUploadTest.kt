@@ -8,6 +8,7 @@ import com.rohittp.reng.internal.image.parseEtc2Container
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** ADR 0084: an ETC2 sticker's chain reaches the GPU as blocks, or decoded, and never generated. */
@@ -129,6 +130,29 @@ class GlCompressedTextureUploadTest {
             binding.calls("texSubImage2D"),
         )
         assertTrue(binding.texSubImage2DPayloads.all { it.size <= 1024 * 1024 })
+    }
+
+    /** An upload that throws part-way deletes the texture it generated: nothing else knows its name. */
+    @Test
+    fun anUploadThatThrowsDeletesTheTextureItGenerated() {
+        listOf(false, true).forEach { native ->
+            val recording = RecordingGlBinding()
+            val failing = object : GlBinding by recording {
+                override fun texSubImage2D(
+                    target: Int, level: Int, xOffset: Int, yOffset: Int, width: Int, height: Int,
+                    format: Int, type: Int, pixels: ByteArray,
+                ): Unit = throw IllegalStateException("upload refused")
+
+                override fun compressedTexImage2D(
+                    target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+                    border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+                ): Unit = throw IllegalStateException("upload refused")
+            }
+            assertFailsWith<IllegalStateException> { uploadCompressedTexture(failing, compressed(chain), native) }
+            val generated = recording.log.count { it.startsWith("genTextures") }
+            assertEquals(1, generated, "native=$native")
+            assertEquals(1, recording.deletedNames.size, "native=$native: the generated texture must be deleted")
+        }
     }
 
     @Test

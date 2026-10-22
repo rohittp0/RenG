@@ -41,3 +41,14 @@ in reverse construction order, atomically taking each frame's leases and raw-pix
 Only then does the invocation end; neither the provisional history nor a newly compiled prepared style becomes
 visible. Valid cache content acquired before the terminal outcome may remain, as above, but no caller-owned frame
 or ownership token leaks out of the failed transaction.
+
+## Amendment, 2026-10-22: only the preparation ends its own admission window
+
+`cancelPreparations()` joins the worker it snapshotted and then ran the lifecycle's own cancellation
+step, which cleared the "preparation active" flag on a termination nobody had awaited: a `prepare` that
+began between the join and that step kept running with `close()`, `freeResources()` and
+`clearFrameHistory()` admitted. The lifecycle's controller could not await it instead -- it runs inside
+the operation gate, which the preparation needs to end itself -- so the barrier stays wholly in the
+session coordinator and the lifecycle's cancellation is a no-op: only `EndPreparation` (or a failed
+`BeginPreparation`) closes the window, and a preparation started after the barrier's snapshot keeps the
+others refused until it ends.

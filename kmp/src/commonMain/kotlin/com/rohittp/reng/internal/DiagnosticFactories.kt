@@ -428,7 +428,12 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
 
         RenGErrorCode.RESOURCE_LIMIT_EXCEEDED -> when (stage) {
             PipelineStage.FRAME_PLANNING -> FailureRule.Context(
-                fields = setOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES),
+                fields = setOf(
+                    DiagnosticField.PLANS,
+                    DiagnosticField.BASEMAP_TILE_INSTANCES,
+                    // maximumConsumerPipelinesPerFrame: the distinct consumer programs one plan names.
+                    DiagnosticField.SHADER_PAIR,
+                ),
                 numericLimit = PresenceRequirement.REQUIRED,
             )
 

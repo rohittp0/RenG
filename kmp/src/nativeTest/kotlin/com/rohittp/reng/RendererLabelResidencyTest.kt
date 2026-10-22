@@ -310,6 +310,31 @@ class RendererLabelResidencyTest {
     }
 
     /**
+     * ADR 0070's settled label tile set is history, so `clearFrameHistory()` drops it (ADR 0035: after
+     * a clear the frame is a pure function of its plan). A camera one tile east of [cameraA] is still
+     * inside A's margin, so with A's set kept it plans over A's tiles and fetches nothing; a fresh
+     * renderer plans over its own ring. After a clear the renderer must ask for that ring too.
+     */
+    @Test
+    fun afterAHistoryClearTheLabelTilesAreTheOnesAFreshRendererPlans() = runTest {
+        val freshTransport = ResidencyTransport()
+        residencyRenderer(freshTransport).prepare(residencyPlan(frameIndex = 0L, camera = cameraEastOfA(tiles = 1)))
+        val freshTiles = freshTransport.tileUrls()
+
+        val transport = ResidencyTransport()
+        val renderer = residencyRenderer(transport)
+        renderer.prepare(residencyPlan(frameIndex = 0L, camera = cameraA()))
+        renderer.clearFrameHistory()
+        renderer.prepare(residencyPlan(frameIndex = 0L, camera = cameraEastOfA(tiles = 1)))
+
+        assertEquals(
+            (TILE_URLS_A + freshTiles).toSet().sorted(),
+            transport.tileUrls().toSet().sorted(),
+            "the frame after a clear plans the label tiles a fresh renderer plans, not the cleared history's",
+        )
+    }
+
+    /**
      * `clearFrameHistory()` clears history and is not a cache invalidation, which is a decision rather
      * than an accident and is therefore pinned.
      *

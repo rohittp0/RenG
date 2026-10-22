@@ -313,6 +313,10 @@ internal inline fun <T> withCapturedGlState(
     val tracked = TextureUnitCapturingBinding(binding)
     val snapshot = captureGlState(binding, profile)
     try {
+        // Set as the region opens, not where the frame starts drawing: texture uploads run inside
+        // the region before that (ground tiles, stickers, atlases), and the host's unpack buffer or
+        // row length would otherwise reach them. The host's values are in the snapshot above.
+        establishUnpackState(binding)
         return block(tracked)
     } finally {
         restoreGlState(binding, snapshot)
@@ -321,4 +325,13 @@ internal inline fun <T> withCapturedGlState(
         // thing written either way.
         tracked.restoreTouchedUnits()
     }
+}
+
+/** The pixel-unpack state every RenG upload assumes: tightly packed client memory, no unpack buffer. */
+internal fun establishUnpackState(binding: GlBinding) {
+    binding.pixelStorei(GL_UNPACK_ALIGNMENT, GL_UNPACK_ALIGNMENT_DEFAULT)
+    binding.pixelStorei(GL_UNPACK_ROW_LENGTH, 0)
+    binding.pixelStorei(GL_UNPACK_SKIP_ROWS, 0)
+    binding.pixelStorei(GL_UNPACK_SKIP_PIXELS, 0)
+    binding.bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
 }

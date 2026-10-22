@@ -58,3 +58,16 @@ and sampler uniforms are still rebound from the last normal draw on the program.
 had not set on the program before the bloom phase, but a redraw did, cannot be restored: RenG does
 not query what the program held before the frame. The history is kept only on frames with an
 emitter; a frame without one does nothing new. ADR 0085's far redraw starts from the same history.
+
+## Amendment, 2026-10-22: a redraw replays what its emitter drew with
+
+The 2026-10-21 amendment still replayed each emitter's own sparse values in the emission redraw, so an
+emitter that omitted a value inherited whatever the redraw before it had bound, not what it had drawn
+with: emissive A (`u` red), ordinary B (`u` blue), emissive C (omits `u`) drew C blue and bloomed it red.
+Sampler bindings had the same gap, and the restore rebound only the last normal draw's explicit
+textures. RenG now records, during the normal pass on a frame with a bloom phase, each program's merged
+uniforms and sampler units and each texture unit's texture as the geometry draws left them, snapshots
+each emitter's effective uniforms and textures at its own draw, and replays those snapshots in the
+emission redraw and ADR 0085's far band. Afterwards it rebinds every texture unit the normal pass had
+bound and, on each program a redraw touched, every uniform and sampler unit. A value the frame had not
+set before the bloom phase is still not restorable.

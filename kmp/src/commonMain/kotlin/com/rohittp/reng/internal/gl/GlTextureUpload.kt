@@ -306,35 +306,59 @@ internal fun compressedSamplerState(image: CompressedImage): TextureSamplerState
  * at the last level the container brought, which is what keeps a partial chain complete.
  */
 internal fun uploadCompressedTexture(binding: GlBinding, image: CompressedImage, native: Boolean): Int {
+    // Sized before any GL object exists, so a refusal leaves nothing behind.
+    val workspaceBytes = if (native) 0 else decodeWorkspaceBytes(image)
     val names = IntArray(1)
     binding.genTextures(1, names)
     val texture = names[0]
-    binding.bindTexture(GL_TEXTURE_2D, texture)
-    if (native) {
-        val internalFormat = image.format.glInternalFormat
-        for (level in 0 until image.levelCount) {
-            image.readLevel(level) { bytes, offset, length ->
-                binding.compressedTexImage2D(
-                    GL_TEXTURE_2D, level, internalFormat, image.levelWidth(level), image.levelHeight(level),
-                    0, length, bytes, offset,
-                )
+    try {
+        binding.bindTexture(GL_TEXTURE_2D, texture)
+        if (native) {
+            val internalFormat = image.format.glInternalFormat
+            for (level in 0 until image.levelCount) {
+                image.readLevel(level) { bytes, offset, length ->
+                    binding.compressedTexImage2D(
+                        GL_TEXTURE_2D, level, internalFormat, image.levelWidth(level), image.levelHeight(level),
+                        0, length, bytes, offset,
+                    )
+                }
             }
+        } else {
+            uploadDecodedLevels(binding, image, workspaceBytes)
         }
-    } else {
-        uploadDecodedLevels(binding, image)
+        binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, image.levelCount - 1)
+        setSamplerParameters(binding, compressedSamplerState(image))
+    } catch (@Suppress("TooGenericExceptionCaught") failure: Throwable) {
+        // Not yet registered anywhere, so nothing else would ever delete it.
+        binding.deleteTextures(1, intArrayOf(texture))
+        throw failure
     }
-    binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, image.levelCount - 1)
-    setSamplerParameters(binding, compressedSamplerState(image))
     return texture
 }
 
-/** The CPU path: one workspace of whole block rows, at most [DECODE_UPLOAD_CHUNK_BYTES] or one block row. */
-private fun uploadDecodedLevels(binding: GlBinding, image: CompressedImage) {
+/**
+ * The CPU path's RGBA workspace, computed in Long: whole block rows, at most
+ * [DECODE_UPLOAD_CHUNK_BYTES] or one block row, and never more than the level-zero raster.
+ *
+ * Every admitted container's chain is within the decoded-image ceiling, which `ResourceLimits` caps
+ * at `Int.MAX_VALUE`, so this always fits; it is checked rather than assumed because an `Int`
+ * product that wrapped would allocate the wrong workspace silently.
+ */
+private fun decodeWorkspaceBytes(image: CompressedImage): Int {
+    val blockRowBytes = image.width.toLong() * 4L * RGBA_CHANNELS
+    val blockRowsPerChunk = maxOf(1L, DECODE_UPLOAD_CHUNK_BYTES / blockRowBytes)
+    val rows = minOf(blockRowsPerChunk * 4L, image.height.toLong())
+    val bytes = rows * image.width.toLong() * RGBA_CHANNELS
+    require(bytes <= Int.MAX_VALUE.toLong()) { "the ETC2 decode workspace must fit an array" }
+    return bytes.toInt()
+}
+
+/** The CPU path: one workspace of whole block rows, decoded and uploaded a run at a time. */
+private fun uploadDecodedLevels(binding: GlBinding, image: CompressedImage, workspaceBytes: Int) {
     binding.texStorage2D(GL_TEXTURE_2D, image.levelCount, GL_RGBA8, image.width, image.height)
     val blockRowBytes = image.width.toLong() * 4L * RGBA_CHANNELS
     val blockRowsPerChunk = maxOf(1L, DECODE_UPLOAD_CHUNK_BYTES / blockRowBytes).toInt()
-    // At most the level-zero raster, which the decoded-image ceiling already bounded to an Int.
-    val workspace = ByteArray(minOf(blockRowsPerChunk * 4, image.height) * image.width * RGBA_CHANNELS)
+    val workspace = ByteArray(workspaceBytes)
     for (level in 0 until image.levelCount) {
         val width = image.levelWidth(level)
         val height = image.levelHeight(level)

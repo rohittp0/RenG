@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.gl.GL_ACTIVE_TEXTURE
 import com.rohittp.reng.internal.gl.GL_BLEND
 import com.rohittp.reng.internal.gl.GL_COLOR_ATTACHMENT0
 import com.rohittp.reng.internal.gl.GL_COLOR_BUFFER_BIT
@@ -10,7 +11,9 @@ import com.rohittp.reng.internal.gl.GL_READ_FRAMEBUFFER
 import com.rohittp.reng.internal.gl.GL_RGBA
 import com.rohittp.reng.internal.gl.GL_RGBA8
 import com.rohittp.reng.internal.gl.GL_SCISSOR_TEST
+import com.rohittp.reng.internal.gl.GL_TEXTURE0
 import com.rohittp.reng.internal.gl.GL_TEXTURE_2D
+import com.rohittp.reng.internal.gl.GL_TEXTURE_BINDING_2D
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_BYTE
 import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.RenderContextProbe
@@ -51,6 +54,7 @@ internal fun runBloomReadbackSuite(
         probe,
     )
     val failures = BloomCollectedFailures()
+    val hostTexture = IntArray(1).also { binding.genTextures(1, it) }[0]
     try {
         val renderTarget = renderer.mintRenderTarget(FramebufferName(target.framebuffer.toUInt()))
         val nullBloomEmissive = clearDrawAndReadBloom(
@@ -65,10 +69,20 @@ internal fun runBloomReadbackSuite(
             binding, renderer, renderTarget, target.framebuffer,
             bloomPlan(frameIndex = 2L, bloom = Bloom(), emissive = false),
         )
+        // The renderer's first bloom frame, which allocates its bloom targets. A host texture bound
+        // on the host's active unit must survive it (ADR 0054/0055): target creation used to bind on
+        // that unit through the renderer's raw binding, unseen by the capture, and the host's
+        // texture was lost.
+        binding.activeTexture(GL_TEXTURE0 + HOST_TEXTURE_UNIT)
+        binding.bindTexture(GL_TEXTURE_2D, hostTexture)
         val activeBloom = clearDrawAndReadBloom(
             binding, renderer, renderTarget, target.framebuffer,
             bloomPlan(frameIndex = 3L, bloom = Bloom(), emissive = true),
         )
+        val hostActiveUnitAfterBloom = binding.queryInt(GL_ACTIVE_TEXTURE)
+        val hostTextureAfterBloom = binding.queryInt(GL_TEXTURE_BINDING_2D)
+        binding.bindTexture(GL_TEXTURE_2D, 0)
+        binding.activeTexture(GL_TEXTURE0)
         val suppressedBloom = clearDrawAndReadBloom(
             binding, renderer, renderTarget, target.framebuffer,
             bloomPlan(
@@ -155,6 +169,10 @@ internal fun runBloomReadbackSuite(
             ),
         )
 
+        failures.run("a host texture on its active unit survives the first bloom frame") {
+            assertEquals(GL_TEXTURE0 + HOST_TEXTURE_UNIT, hostActiveUnitAfterBloom, "host active unit")
+            assertEquals(hostTexture, hostTextureAfterBloom, "host texture on its active unit")
+        }
         failures.run("bloom null ignores emissive") {
             val differentBytes = differingBytes(nullBloomEmissive, nullBloomOrdinary)
             println("RenG bloom readback case 1: dialect=$dialect differingBytes=$differentBytes")
@@ -332,8 +350,18 @@ internal fun runBloomReadbackSuite(
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target.framebuffer))
         binding.deleteTextures(1, intArrayOf(target.texture))
+        binding.deleteTextures(1, intArrayOf(hostTexture))
     }
     failures.throwIfAny()
+}
+
+/** A unit other than 0, so "the host left it active" is a distinctive observation. */
+private const val HOST_TEXTURE_UNIT: Int = 3
+
+private fun GlBinding.queryInt(pname: Int): Int {
+    val out = IntArray(1)
+    getIntegerv(pname, out)
+    return out[0]
 }
 
 private fun bloomPlan(

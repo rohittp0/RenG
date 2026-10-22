@@ -22,10 +22,6 @@ internal fun interface RenderCallBarrier {
     fun awaitRenderCallQuiescence()
 }
 
-internal fun interface PreparationController {
-    fun requestCancellationAndAwaitTermination()
-}
-
 /**
  * Drives [RendererLifecycleStateMachine] with the real GL facts the machine's actions ask for, and
  * executes the single permitted operation it authorizes. This driver re-decides nothing: every
@@ -40,7 +36,6 @@ internal class GlLifecycleDriver(
     private val programs: GlProgramCache,
     private val operationGate: GlOperationGate = GlOperationGate(),
     private val barrier: RenderCallBarrier = RenderCallBarrier { },
-    private val preparation: PreparationController = PreparationController { },
     initialSnapshot: RendererLifecycleSnapshot,
     initialContext: RenderContextIdentity? = null,
     initialProfile: RenderContextProfile? = null,
@@ -143,11 +138,6 @@ internal class GlLifecycleDriver(
 
         is RendererLifecycleAction.ValidateFramebuffer ->
             RendererLifecycleObservation.FramebufferObserved(framebufferFact(action.framebufferName))
-
-        RendererLifecycleAction.RequestPreparationCancellation -> {
-            preparation.requestCancellationAndAwaitTermination()
-            RendererLifecycleObservation.PreparationTerminated
-        }
 
         is RendererLifecycleAction.ExecutePermittedOperation ->
             executor.execute(action.operation)

@@ -1,7 +1,32 @@
 package com.rohittp.reng.internal.basemap
 
 import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.internal.cache.ResidentGeneration
+import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.thread.PlatformLock
+import kotlin.jvm.JvmInline
+
+/**
+ * Stored bytes whose `contentDigest` RenG has itself established names them -- the precondition
+ * [StyleManifestMemo] keys on (ADR 0061: a consumer-supplied digest is not trusted alone).
+ *
+ * Made only from the two places that hold such bytes: a [ResolvedResourceContent], which is built from
+ * a Transport body RenG hashed itself, a 304 merged onto such a baseline, a Store read that
+ * `copyValidStoredResource` re-hashed, or a resident copy of one of those; and a [ResidentGeneration],
+ * installed from such content. Re-hashing here instead would cost a SHA-256 of the whole document on
+ * every prepare, which is most of what the memo exists to save.
+ */
+@JvmInline
+internal value class VerifiedStoredResource private constructor(val stored: StoredRawResource) {
+    internal companion object {
+        fun of(content: ResolvedResourceContent): VerifiedStoredResource = VerifiedStoredResource(content.stored)
+
+        fun of(generation: ResidentGeneration): VerifiedStoredResource = VerifiedStoredResource(generation.stored)
+
+        /** For tests whose fixtures name their documents by placeholder digests. */
+        fun assumedForTest(stored: StoredRawResource): VerifiedStoredResource = VerifiedStoredResource(stored)
+    }
+}
 
 /**
  * Remembers the manifest [deriveBasemapStyleManifest] produced for a style document, by the document's
@@ -32,7 +57,8 @@ internal class StyleManifestMemo(
         require(capacity >= 1) { "capacity must be at least 1" }
     }
 
-    fun manifestFor(stored: StoredRawResource, baseUri: String): BasemapStyleManifestOutcome {
+    fun manifestFor(resource: VerifiedStoredResource, baseUri: String): BasemapStyleManifestOutcome {
+        val stored = resource.stored
         val identity = Identity(stored.contentDigest, baseUri)
         lock.withLock { remembered[identity] }?.let { return it }
 

@@ -55,13 +55,6 @@ internal object RendererLifecycleStateMachine {
             resumeFramebuffer(cursor, observation.fact)
         }
 
-        is RendererLifecycleCursor.AwaitingPreparationTermination -> {
-            require(observation is RendererLifecycleObservation.PreparationTerminated) {
-                "preparation-termination observation required"
-            }
-            succeeded(cursor.snapshot.copy(preparationActive = false))
-        }
-
         is RendererLifecycleCursor.AwaitingPermittedOperation ->
             resumePermittedOperation(cursor, observation)
     }
@@ -94,10 +87,7 @@ internal object RendererLifecycleStateMachine {
 
         RendererLifecycleOperation.EndPreparation -> endPreparation(snapshot)
 
-        RendererLifecycleOperation.CancelPreparations -> beginCancellation(
-            snapshot,
-            RendererLifecycleOperation.CancelPreparations,
-        )
+        RendererLifecycleOperation.CancelPreparations -> beginCancellation(snapshot)
         RendererLifecycleOperation.ClearFrameHistory,
         is RendererLifecycleOperation.QueryResources,
         RendererLifecycleOperation.QueryMetrics,
@@ -134,10 +124,7 @@ internal object RendererLifecycleStateMachine {
 
         RendererLifecycleOperation.EndPreparation -> endPreparation(snapshot)
 
-        RendererLifecycleOperation.CancelPreparations -> beginCancellation(
-            snapshot,
-            RendererLifecycleOperation.CancelPreparations,
-        )
+        RendererLifecycleOperation.CancelPreparations -> beginCancellation(snapshot)
         RendererLifecycleOperation.ClearFrameHistory,
         is RendererLifecycleOperation.QueryResources,
         is RendererLifecycleOperation.FreeResources,
@@ -213,18 +200,19 @@ internal object RendererLifecycleStateMachine {
         )
     }
 
-    private fun beginCancellation(
-        snapshot: RendererLifecycleSnapshot,
-        operation: RendererLifecycleOperation.CancelPreparations,
-    ): RendererLifecycleTransition = if (snapshot.preparationActive) {
-        transition(
-            snapshot = snapshot,
-            action = RendererLifecycleAction.RequestPreparationCancellation,
-            cursor = RendererLifecycleCursor.AwaitingPreparationTermination(snapshot, operation),
-        )
-    } else {
+    /**
+     * Always a no-op here, and the admission window is deliberately left as it is.
+     *
+     * The barrier itself lives outside this machine: the renderer's `PreparationSessionCoordinator`
+     * cancels and joins the published preparation worker before this operation runs (ADR 0014), and
+     * that worker ends its own admission window through [RendererLifecycleOperation.EndPreparation]
+     * on every path. A `preparationActive` still set when this operation reaches the gate therefore
+     * belongs to a preparation that began *after* the barrier's snapshot -- and clearing it here would
+     * let `close()`, `freeResources()` and `clearFrameHistory()` succeed while that preparation runs.
+     * Only `EndPreparation` (or a failed `BeginPreparation`) clears the window.
+     */
+    private fun beginCancellation(snapshot: RendererLifecycleSnapshot): RendererLifecycleTransition =
         noOp(snapshot)
-    }
 
     private fun endPreparation(
         snapshot: RendererLifecycleSnapshot,

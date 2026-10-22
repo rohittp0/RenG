@@ -8,9 +8,9 @@ import kotlinx.coroutines.test.runTest
  * The cases in which `Renderer.readAhead` must do nothing (ADR 0075), on every target: it needs no
  * prepared frame to prove that, and so needs no rasterizer either.
  *
- * The cases that need a successful `prepare` first -- `CACHE_ONLY`, and the frames a window actually
- * warms -- are in `nativeTest`'s `RendererReadAheadTest`, because a `prepare` that renders tiles needs
- * Skia.
+ * The cases that need a successful `prepare` first -- `CACHE_ONLY`, a hint after close, and the frames
+ * a window actually warms -- are in `nativeTest`'s `RendererReadAheadTest`, because a `prepare` that
+ * renders tiles needs Skia.
  */
 class RendererReadAheadGuardTest {
 
@@ -39,19 +39,6 @@ class RendererReadAheadGuardTest {
 
         assertEquals(emptyList(), transport.requestedUrls())
         renderer.close()
-    }
-
-    @Test
-    fun aHintAfterCloseDoesNothingAndDoesNotThrow() = runTest {
-        val transport = StyleTransport()
-        val renderer = styleRenderer(transport) as RenGRenderer
-        renderer.close()
-
-        renderer.readAhead(listOf(basemapPlan(frameIndex = 0L)))
-        renderer.awaitReadAheadIdle()
-
-        assertEquals(emptyList(), transport.requestedUrls())
-        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.READ_AHEAD_FETCHED], "a closed renderer reports nothing")
     }
 
     @Test

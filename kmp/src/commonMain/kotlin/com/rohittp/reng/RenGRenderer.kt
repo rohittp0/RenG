@@ -1467,13 +1467,28 @@ internal class RenGRenderer(
      * Created on the first hint that has something to warm, so a renderer that never reads ahead
      * allocates no scope and starts no coroutine. Its scope is the renderer's own, and [close] cancels
      * it.
+     *
+     * Guarded by [readAheadLock] together with [readAheadClosed], so creation-and-submit and close's
+     * cancellation are atomic with respect to each other: a hint racing [close] either submits to a
+     * scheduler close then cancels, or finds the renderer closed and creates nothing. A lazy here let
+     * a hint admitted before close create the scope after close had found none to cancel.
      */
-    private val readAheadScheduler: Lazy<ReadAheadScheduler<ReadAheadRequest>> = lazy {
-        ReadAheadScheduler(
+    private var readAheadScheduler: ReadAheadScheduler<ReadAheadRequest>? = null
+    private var readAheadClosed: Boolean = false
+    private val readAheadLock = PlatformLock()
+
+    /** Whether a read-ahead worker was ever started. For tests only. */
+    internal val readAheadWorkerStarted: Boolean
+        get() = readAheadLock.withLock { readAheadScheduler != null }
+
+    private fun submitReadAhead(window: ReadAheadWindow<ReadAheadRequest>) = readAheadLock.withLock {
+        if (readAheadClosed) return@withLock
+        val scheduler = readAheadScheduler ?: ReadAheadScheduler(
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             warmWhenNothingIsCold = renderedTileCache != null,
             warm = ::warmReadAheadWindow,
-        )
+        ).also { readAheadScheduler = it }
+        scheduler.submit(window)
     }
 
     /**
@@ -1635,7 +1650,7 @@ internal class RenGRenderer(
             glObjectRegistry.resident(basemapEngineHost.renderedTileKey(snapshot.style, tile)) == null
         }
         if (cold.isEmpty()) return
-        readAheadScheduler.value.submit(
+        submitReadAhead(
             ReadAheadWindow(
                 context = ReadAheadRequest(snapshot, cold),
                 styleDigest = snapshot.style.digest,
@@ -1651,7 +1666,7 @@ internal class RenGRenderer(
         get() = renderedTileCache?.bytes ?: 0L
 
     override suspend fun awaitReadAheadIdle() {
-        if (readAheadScheduler.isInitialized()) readAheadScheduler.value.awaitIdle()
+        readAheadLock.withLock { readAheadScheduler }?.awaitIdle()
     }
 
     private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
@@ -1819,7 +1834,7 @@ internal class RenGRenderer(
                 (plan.backdrop as? Backdrop.Shader)?.let { backdrop ->
                     add(
                         geometryKeyDeriver
-                            .internalPipeline(InternalPipelineRole.BACKDROP, backdrop.shaderPair)
+                            .internalPipeline(InternalPipelineRole.CONSUMER_BACKDROP, backdrop.shaderPair)
                             .key,
                     )
                 }
@@ -3760,6 +3775,10 @@ internal class RenGRenderer(
                 // The hint's LOD chain starts where prepare's now does.
                 readAheadSnapshot = readAheadSnapshot?.withSelectedLod(null)
                 previousLabelFade = LabelFadeState.EMPTY
+                // History, not a cache: ADR 0070's settled label tile set decides which candidates the
+                // next frame plans over, so keeping it would make the frame after a clear depend on
+                // the frames before it (ADR 0035).
+                previousLabelTiles = null
                 // `retainedLabelHandover`, `retainedGlyphAtlas` and `retainedSpriteAtlas` are
                 // deliberately NOT cleared here,
                 // and the omission is a decision rather than an oversight: they are caches, this call
@@ -3925,6 +3944,8 @@ internal class RenGRenderer(
         profile: RenderContextProfile,
         depthRenderbuffer: Int,
         stagedDiagnostics: MutableList<Diagnostic>,
+        /** The captured binding (ADR 0054): target creation binds textures on the host's active unit. */
+        binding: GlBinding,
     ): BloomResources? {
         val wantsHighPrecision = bloomUsesHighPrecisionEmission(bloom, profile) && !bloomHalfFloatRefused
         if (bloom.highPrecisionEmission && !wantsHighPrecision) {
@@ -3943,16 +3964,20 @@ internal class RenGRenderer(
             outputSize = configuration.outputPixelSize,
             sharedDepthRenderbuffer = depthRenderbuffer,
             highPrecisionEmission = highPrecision,
+            // After a refusal the retry, and every later set, is RGBA8 throughout.
+            halfFloatUpsample = !bloomHalfFloatRefused,
         )
         val resources = bloomResources ?: run {
             var result = create(wantsHighPrecision)
-            // Only a refused half-float target is a precision refusal; a program that fails to link
-            // or memory running out is BLOOM_UNAVAILABLE, as it is for an RGBA8 chain, and the next
-            // frame asking for half-float tries again.
+            // Only a refused half-float target -- emission, downsample or upsample -- is a precision
+            // refusal; a program that fails to link or memory running out is BLOOM_UNAVAILABLE, as it
+            // is for an RGBA8 chain, and the next frame asking for half-float tries again.
             if (result is BloomResourcesResult.Failed && result.halfFloatTargetRefused) {
                 bloomHalfFloatRefused = true
                 result = create(false)
-                if (result is BloomResourcesResult.Created) {
+                // Reduced only for a frame that asked for half-float emission; an upsample refusal on
+                // an RGBA8 chain changes no precision the consumer asked for.
+                if (result is BloomResourcesResult.Created && wantsHighPrecision) {
                     stagedDiagnostics += bloomEmissionPrecisionReducedDiagnostic()
                 }
             }
@@ -4076,8 +4101,19 @@ internal class RenGRenderer(
                 )
             }
         }
+        if (outcome is RendererLifecycleOutcome.Failed) {
+            // The typed draw failure wins over the sink (the rule `performDraw` states for its own
+            // diagnostics): a frame that failed still tells the consumer what it staged, but a sink
+            // that throws while doing so is attached as suppressed rather than replacing the failure.
+            val failure = outcome.failure.toException()
+            try {
+                stagedDiagnostics.forEach(configuration.diagnosticSink::emit)
+            } catch (@Suppress("TooGenericExceptionCaught") sinkFailure: Throwable) {
+                failure.addSuppressed(sinkFailure)
+            }
+            throw failure
+        }
         stagedDiagnostics.forEach(configuration.diagnosticSink::emit)
-        if (outcome is RendererLifecycleOutcome.Failed) throw outcome.failure.toException()
     }
 
     /**
@@ -4316,8 +4352,8 @@ internal class RenGRenderer(
             groundTiles = sceneGroundTiles,
             terrain = sceneTerrain(frame),
             models = sceneModels,
-            labels = sceneLabels(frame, textureLeases),
-            icons = sceneIcons(frame, textureLeases),
+            labels = sceneLabels(frame, textureLeases, binding),
+            icons = sceneIcons(frame, textureLeases, binding),
             mapOrder = frame.mapOrder,
             screenOrder = frame.screenOrder,
         )
@@ -4331,6 +4367,7 @@ internal class RenGRenderer(
                 profile = profile,
                 depthRenderbuffer = surface.depthRenderbuffer,
                 stagedDiagnostics = stagedDiagnostics,
+                binding = binding,
             )
         } else {
             null
@@ -4379,7 +4416,7 @@ internal class RenGRenderer(
             // maps are cleared and deleted on the same three occasions.
             is PreparedBackdrop.Shader -> {
                 val key = geometryKeyDeriver
-                    .internalPipeline(InternalPipelineRole.BACKDROP, prepared.shaderPair).key
+                    .internalPipeline(InternalPipelineRole.CONSUMER_BACKDROP, prepared.shaderPair).key
                 val pipelineLease = consumerPipelines.leaseBackdrop(key) ?: when (
                     val result = createConsumerBackdropPipeline(
                         binding, profile.dialect, programs, prepared.shaderPair,
@@ -4495,6 +4532,8 @@ internal class RenGRenderer(
     private fun sceneLabels(
         frame: RenGPreparedFrame,
         textureLeases: MutableList<TextureLease>,
+        /** The captured binding (ADR 0054): an upload binds on the host's active unit. */
+        binding: GlBinding,
     ): List<LabelBatch> {
         val prepared = frame.labels ?: return emptyList()
         val atlas = uploadGlyphAtlas(binding, glObjectRegistry, prepared.atlasKey, prepared.atlas)
@@ -4524,6 +4563,8 @@ internal class RenGRenderer(
     private fun sceneIcons(
         frame: RenGPreparedFrame,
         textureLeases: MutableList<TextureLease>,
+        /** The captured binding (ADR 0054): an upload binds on the host's active unit. */
+        binding: GlBinding,
     ): List<IconBatch> {
         val prepared = frame.labels ?: return emptyList()
         val key = prepared.spriteAtlasKey ?: return emptyList()
@@ -4692,7 +4733,7 @@ internal class RenGRenderer(
         val renderedByKey = frame.basemapTiles.associateBy { it.key }
         var provisionalTileCount = 0
         val texturesByKey = HashMap<ResourceKey, Int>(renderedByKey.size)
-        val elevationByTile = resolveDemTextures(frame.terrain, groundLeases)
+        val elevationByTile = resolveDemTextures(frame.terrain, groundLeases, binding)
         val tiles = ArrayList<SceneGroundTile>(groundInstances.size)
         for (groundInstance in groundInstances) {
             val key = groundInstance.resourceKey
@@ -4835,6 +4876,8 @@ internal class RenGRenderer(
     private fun resolveDemTextures(
         terrain: PreparedTerrain?,
         groundLeases: MutableList<TextureLease>,
+        /** The captured binding (ADR 0054): an upload binds on the host's active unit. */
+        binding: GlBinding,
     ): Map<CanonicalBasemapTile, SceneTileDem> {
         if (terrain == null) return emptyMap()
         val elevated = terrain.elevatedTiles
@@ -5067,7 +5110,10 @@ internal class RenGRenderer(
                 // worker is not joined; the host clears its read-ahead operation before it closes the
                 // engine, which is what refuses any callback still on its way.
                 readAheadSnapshot = null
-                if (readAheadScheduler.isInitialized()) readAheadScheduler.value.cancel()
+                readAheadLock.withLock {
+                    readAheadClosed = true
+                    readAheadScheduler?.cancel()
+                }
                 // After the worker is cancelled, so nothing is inserting. Closed rather than merely
                 // emptied: a draw already finishing in the worker must not leave pixels behind (ADR 0077).
                 renderedTileCache?.close()

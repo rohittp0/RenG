@@ -207,7 +207,7 @@ internal class ResourceActionExecutor(
      */
     private fun validateBasemapStyle(action: ValidateBasemapStyle): BasemapStyleValidationOutcome {
         val derivation = basemapEngineHost.derivedStyleManifest(
-            stored = action.content.stored,
+            content = action.content,
             baseUri = action.content.route.locator.value,
         )
         return when (derivation) {

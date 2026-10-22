@@ -56,6 +56,28 @@ class RendererReadAheadTest {
         renderer.close()
     }
 
+    /**
+     * Moved here from `RendererReadAheadGuardTest.aHintAfterCloseDoesNothingAndDoesNotThrow`, which
+     * closed a renderer that had never prepared: with no read-ahead snapshot a hint returns before any
+     * close check, so that test passed whatever close did. This one prepares first, so the renderer
+     * has a snapshot, and the hint after close names tiles the first frame never fetched.
+     */
+    @Test
+    fun aHintAfterCloseFetchesNothingAndStartsNoWorker() = runTest {
+        val transport = FreshTileTransport()
+        val renderer = styleRenderer(transport, store = PersistentStore()) as RenGRenderer
+        renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+        val beforeClose = transport.tileRequests()
+        renderer.close()
+
+        renderer.readAhead(listOf(shiftedPlan(frameIndex = 1L), farShiftedPlan(frameIndex = 2L)))
+        real { renderer.awaitReadAheadIdle() }
+
+        assertEquals(beforeClose, transport.tileRequests(), "a hint after close fetches nothing")
+        assertEquals(false, renderer.readAheadWorkerStarted, "a hint after close starts no worker")
+        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.READ_AHEAD_FETCHED], "a closed renderer reports nothing")
+    }
+
     @Test
     fun aHintAfterACacheOnlyPrepareDoesNothing() = runTest {
         val transport = FreshTileTransport()

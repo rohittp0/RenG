@@ -508,9 +508,6 @@ class RendererLifecycleMatrixTest {
             is RendererLifecycleAction.ValidateFramebuffer ->
                 cursor is RendererLifecycleCursor.AwaitingFramebuffer
 
-            RendererLifecycleAction.RequestPreparationCancellation ->
-                cursor is RendererLifecycleCursor.AwaitingPreparationTermination
-
             is RendererLifecycleAction.ExecutePermittedOperation ->
                 cursor is RendererLifecycleCursor.AwaitingPermittedOperation
         }

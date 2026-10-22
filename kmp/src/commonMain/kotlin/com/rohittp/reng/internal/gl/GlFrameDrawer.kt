@@ -66,13 +66,9 @@ internal fun drawFrame(
 ): FailureDescriptor? {
     GlErrorQueue.drainOnEntry(binding)
 
+    // The region establishes RenG's pixel-unpack state when it opens (see withCapturedGlState), so
+    // every upload in it -- including those made before this frame draws -- reads it.
     return withCapturedGlState(binding, profile) { binding ->
-        binding.pixelStorei(GL_UNPACK_ALIGNMENT, GL_UNPACK_ALIGNMENT_DEFAULT)
-        binding.pixelStorei(GL_UNPACK_ROW_LENGTH, 0)
-        binding.pixelStorei(GL_UNPACK_SKIP_ROWS, 0)
-        binding.pixelStorei(GL_UNPACK_SKIP_PIXELS, 0)
-        binding.bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
-
         binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, surface.framebuffer)
         binding.viewport(0, 0, surface.descriptor.widthPixels, surface.descriptor.heightPixels)
         binding.disable(GL_SCISSOR_TEST)

@@ -330,6 +330,34 @@ internal fun runBloomPerElementReadbackSuite(
                     "($reachSpread vs $coarseSpread)",
             )
         }
+
+        // (inherit) ADR 0080's 2026-10-22 amendment: an emitter that omits a uniform blooms with the
+        // value it inherited, even from an ordinary Geometry between two emitters on one program. A
+        // sets red, B (not emissive) blue, C omits it and draws blue, so C must bloom exactly as a C
+        // that sets blue itself does. Replaying each emitter's own sparse values bloomed C red.
+        failures.run("inherit: an emitter blooms with a uniform it inherited from an ordinary draw") {
+            fun coloured(left: Int, width: Int, emissive: Boolean, colour: ShaderValue.Vec3?) = Geometry(
+                topLeft = pixelGeo(left, STROKE_TOP, altitude = 1.0),
+                bottomRight = pixelGeo(left + width, STROKE_BOTTOM, altitude = 1.0),
+                shaderPair = ShaderPair(PER_ELEMENT_VERTEX_SOURCE, COLOUR_FRAGMENT_SOURCE),
+                uniforms = colour?.let { mapOf("uColour" to it) } ?: emptyMap(),
+                emissive = emissive,
+            )
+            val red = ShaderValue.Vec3(1f, 0f, 0f)
+            val blue = ShaderValue.Vec3(0f, 0f, 1f)
+            val a = coloured(STROKE_A_LEFT, STROKE_WIDTH, emissive = true, colour = red)
+            val b = coloured(FAR_LEFT, THIN_WIDTH, emissive = false, colour = blue)
+            val inherited = draw(Bloom(), listOf(a, b, coloured(STROKE_B_LEFT, STROKE_WIDTH, true, null)))
+            val explicit = draw(Bloom(), listOf(a, b, coloured(STROKE_B_LEFT, STROKE_WIDTH, true, blue)))
+            val haloX = STROKE_B_LEFT - B_HALO_DISTANCE
+            println(
+                "RenG per-element bloom case inherit: dialect=$dialect " +
+                    "inheritedHalo=${inherited.pixel(haloX, MID_Y).describe()} " +
+                    "explicitHalo=${explicit.pixel(haloX, MID_Y).describe()} " +
+                    "differingBytes=${differingBytes(explicit, inherited)}",
+            )
+            assertContentEquals(explicit, inherited, "C must bloom with the blue it inherited from B")
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target.framebuffer))
@@ -554,3 +582,11 @@ private const val UNIFORM_LIGHT_FRAGMENT_SOURCE: String =
         "uniform float uLight;\n" +
         "out vec4 rengGeometryColour;\n" +
         "void main() { rengGeometryColour = vec4(vec3(uLight), 1.0); }\n"
+
+/** Draws and emits `uColour`, which a Geometry may omit to inherit its program's previous value. */
+private const val COLOUR_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform vec3 uColour;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(uColour, 1.0); }\n"

@@ -48,6 +48,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -1031,8 +1033,10 @@ private fun engineTransportClassFor(resourceClass: ResourceClass): EngineResourc
  * operation-scoped registry, "the engine's second attempt is not a consumer retry" (ADR 0016) holds
  * for the lifetime of the registry, not just for the duration of the first call.
  */
-private class SuspendJoin<K : Any, V> {
-    private val mutex = Mutex()
+internal class SuspendJoin<K : Any, V>(
+    // A parameter only so a test can hold the lock from outside and queue a waiter behind it.
+    private val mutex: Mutex = Mutex(),
+) {
     private val inFlight = mutableMapOf<K, CompletableDeferred<V>>()
 
     /**
@@ -1104,19 +1108,17 @@ private class SuspendJoin<K : Any, V> {
      * harmless simplification and would make the race real, and this turns that into a retry rather
      * than a deferred nothing ever completes (ADR 0050).
      *
-     * Non-suspending, and that is load-bearing rather than a style choice: the only caller runs this
-     * inside a catch for its own cancellation, where `Mutex.withLock` is a cancellable suspension
-     * point that would throw instead of taking the lock. The critical section is one map read and one
-     * removal, and this class never holds the lock across a suspension, so the spin cannot deadlock.
+     * The only caller runs this inside a catch for its own cancellation, where a plain `withLock`
+     * would throw instead of taking the lock, so the lock is taken under [NonCancellable]. It must
+     * suspend rather than spin on `tryLock`: kotlinx `Mutex.unlock` hands the lock straight to a
+     * queued suspended waiter, and on a single-threaded dispatcher a spinning caller would starve that
+     * waiter -- which holds the lock but cannot run to release it -- forever.
      */
-    private fun forget(key: K, deferred: CompletableDeferred<V>) {
-        while (!mutex.tryLock()) {
-            // Uncontended in practice: every critical section here is a map lookup.
-        }
-        try {
-            if (inFlight[key] === deferred) inFlight.remove(key)
-        } finally {
-            mutex.unlock()
+    private suspend fun forget(key: K, deferred: CompletableDeferred<V>) {
+        withContext(NonCancellable) {
+            mutex.withLock {
+                if (inFlight[key] === deferred) inFlight.remove(key)
+            }
         }
     }
 }

@@ -45,6 +45,34 @@ class RendererCapturedRegionTest {
         frame.close()
     }
 
+    /**
+     * Uploads run inside the region before the frame starts drawing, so RenG's pixel-unpack state must
+     * be set when the region opens: a host that left an unpack buffer bound or a row length set would
+     * otherwise have its values read by every ground-tile upload. It used to be set only where
+     * `drawFrame` began, after those uploads.
+     */
+    @Test
+    fun everyUploadRunsWithRenGsUnpackStateSetInsideTheCapture() = runTest {
+        val binding = styleGlBinding()
+        val renderer = capturingRenderer(binding)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val frame = renderer.prepare(basemapPlan(frameIndex = 0L))
+        binding.log.clear()
+
+        renderer.draw(frame, target)
+
+        val captureStart = binding.log.indexOfFirst { it.startsWith(CAPTURE_MARKER_PREFIX) }
+        val firstUpload = binding.log.indexOfFirst {
+            it.startsWith("texImage2D") || it.startsWith("texSubImage2D") || it.startsWith("compressedTexImage2D")
+        }
+        val rowLength = binding.log.indexOf("pixelStorei(0xCF2,0)")
+        val unpackBuffer = binding.log.indexOf("bindBuffer(0x88EC,0)")
+        assertTrue(firstUpload >= 0, "the frame must upload something: ${binding.log.take(8)}")
+        assertTrue(rowLength in captureStart until firstUpload, "row length reset at $rowLength, upload at $firstUpload")
+        assertTrue(unpackBuffer in captureStart until firstUpload, "unpack buffer reset at $unpackBuffer, upload at $firstUpload")
+        frame.close()
+    }
+
     @Test
     fun theDrawCapturesOnceRatherThanOncePerNestedRegion() = runTest {
         val binding = styleGlBinding()

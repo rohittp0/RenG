@@ -610,6 +610,77 @@ class RendererFactoryTest {
         assertTrue(actual.toList() != unitQuad.toList(), "a real 2x2 image must not draw as a 1x1 unit quad")
     }
 
+    // ---- Production review: the per-frame consumer pipeline limit is a typed failure -----------------
+
+    @Test
+    fun aPlanOverThePerFramePipelineLimitIsATypedResourceLimitFailure() = runTest {
+        val renderer = createRenderer(
+            RendererConfiguration(
+                outputPixelSize = OutputPixelSize(64, 64),
+                transport = Transport { error("test transport must not execute") },
+                store = NoOpStore(),
+                maximumConsumerPipelinesPerFrame = 1,
+            ),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        fun geometry(shaderPair: ShaderPair) = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = shaderPair,
+        )
+        val first = minimalGeometryShaderPair()
+        val second = ShaderPair(first.vertexSource, first.fragmentSource.replace("vec4(1.0)", "vec4(0.5)"))
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            geometries = listOf(geometry(first), geometry(second)),
+        )
+
+        // Before the allowlist named SHADER_PAIR here, building this exception threw
+        // IllegalArgumentException from RenGException's own context check instead.
+        val failure = assertFailsWith<RenGException> { renderer.prepare(plan) }
+        assertEquals(RenGErrorCode.RESOURCE_LIMIT_EXCEEDED, failure.code)
+        assertEquals(PipelineStage.FRAME_PLANNING, failure.stage)
+    }
+
+    /**
+     * A draw that fails while it has staged diagnostics still emits them, but a sink that throws while
+     * doing so must not replace the typed draw failure: the failure is thrown, carrying the sink's
+     * exception as suppressed. The sink used to run first and its exception escaped instead.
+     */
+    @Test
+    fun aThrowingSinkDoesNotMaskATypedDrawFailure() = runTest {
+        var sinkThrows = false
+        val binding = validGlesBinding()
+        val renderer = createRenderer(
+            testConfiguration(
+                diagnosticSink = DiagnosticSink { if (sinkThrows) throw IllegalStateException("sink refused") },
+            ),
+            binding,
+            fixedProbe(),
+        )
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalGeometryShaderPair(),
+        )
+        // drawBasemap with no style configured stages BASEMAP_NOT_CONFIGURED on the draw.
+        val frame = renderer.prepare(
+            FramePlan(frameIndex = 0L, camera = testCamera(), drawBasemap = true, geometries = listOf(geometry)),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.compileStatus = 0
+        sinkThrows = true
+
+        val failure = assertFailsWith<RenGException> { renderer.draw(frame, target) }
+        assertEquals(RenGErrorCode.SHADER_COMPILE_FAILED, failure.code)
+        assertTrue(
+            failure.suppressedExceptions.any { it.message == "sink refused" },
+            "the sink's exception travels as suppressed: ${failure.suppressedExceptions}",
+        )
+    }
+
     // ---- Task 9b item 3: a live Geometry.uniforms mutation after prepare() must not reach draw() ----
 
     @Test

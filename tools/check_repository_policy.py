@@ -287,7 +287,8 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
     # whole-file digests: comments and whitespace are free, and any token is not. Each of these
     # two files pins four equally-exact accepted forms -- the pre-Cycle-C original, ADR 0019's
     # coroutines form, ADR 0032's device-test form, and ADR 0042's serialization form, which is the
-    # one currently on disk.
+    # one currently on disk for the catalog. `kmp/build.gradle.kts` pins a fifth, the opt-in
+    # benchmark form, which is the one on disk for it.
     # Every form carries the rentile 0.11.3 bump (see base_versions below, which must move in
     # lockstep with these fingerprints), and the three older forms cannot be recomputed from disk;
     # they are the catalog fixtures in tools/tests/test_check_repository_policy.py, so all four move
@@ -304,6 +305,10 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
         "386c6936c783eb1004ac0efe0a7954b0e93674d739f407e298e94a7a0763ccc7",
         "3d81ad92a07df321c226e3b796d02b7be85ca332b00f63e04c800d23fc399dfc",
         "22c1bbba0dd403502accadb914d7bc7e8a6ce7e5cc625f4a3d09a4f75b0e02d0",
+        # The opt-in benchmark form, on disk: ADR 0042's serialization form plus the
+        # `tasks.withType<AbstractTestTask>` filter that skips `*BenchmarkTest` classes unless
+        # `-Preng.benchmarks=true`. Its fixture is _KMP_BUILD_WITH_BENCHMARKS in tools/tests.
+        "8585bc4f3749083f15ed580971390c23a1b9fad6fc9cf2a919c02abb4b1e14fb",
     }),
     "settings.gradle.kts": frozenset({
         "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",

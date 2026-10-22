@@ -138,3 +138,17 @@ tasks.withType<PublishToMavenRepository>()
     .configureEach {
         dependsOn(targetR2PublicationTasks)
     }
+
+// Benchmarks are opt-in. A test class whose name ends in `BenchmarkTest` measures, it does not
+// gate, so every test task skips it by default; `-Preng.benchmarks=true` inverts that and runs
+// the benchmarks alone. Each prints `RENG-BENCH <name> median_ns=.. p90_ns=.. iterations=..`.
+val rengBenchmarks = providers.gradleProperty("reng.benchmarks").orNull.toBoolean()
+
+tasks.withType<AbstractTestTask>().configureEach {
+    filter.isFailOnNoMatchingTests = false
+    if (rengBenchmarks) {
+        filter.includeTestsMatching("*BenchmarkTest")
+    } else {
+        filter.excludeTestsMatching("*BenchmarkTest")
+    }
+}

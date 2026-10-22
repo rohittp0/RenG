@@ -39,3 +39,11 @@ fixture, which has no geometries, does not move.
 digest would have kept most of the speed, but not the reason the check existed, and the owner chose to relax
 it. Reusing a geometry's encoding when it equals the previous frame's was also considered; with uniforms that
 change every sample it would rarely hit.
+
+## Note, 2026-10-22: what remained of identity encoding after this decision
+
+On an OPPO CPH2629 (2026-10-09), exporting a project whose motion blur prepares every output frame up to
+six times, resource-key derivation was 13% of RenG's time (`RouteMemo` now derives each external
+reference's key once) and frame encoding a fifth, of which uniforms were 79% once shader sources left the
+encoding (`UniformListEncoding` now writes the list in two passes with no intermediate objects; its
+redundant finiteness check alone was about a sixth of plan identity encoding).

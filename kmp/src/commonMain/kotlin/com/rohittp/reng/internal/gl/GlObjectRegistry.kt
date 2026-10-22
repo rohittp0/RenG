@@ -143,12 +143,12 @@ internal class GlObjectRegistry(
     /**
      * A separate pool for [registerAllocation]'s textures (stickers, model and geometry-consumer
      * textures, label text textures), or `null` for one pool shared with [registerTexture]'s (basemap
-     * tiles, DEMs, the basemap's glyph and sprite atlases) -- the behaviour before
-     * [ResourceLimits.maximumResidentGpuContentTextureBytes] existed.
+     * tiles, DEMs, the basemap's glyph and sprite atlases) when
+     * [ResourceLimits.maximumResidentGpuContentTextureBytes] is not set.
      *
-     * With a pool of its own, content can no longer evict tiles and tiles can no longer evict content:
-     * [residentTextureByteBudget] then bounds [registerTexture]'s textures alone. See that field's KDoc
-     * for the measurement that made sharing one LRU the cause of tile thrash.
+     * With a pool of its own, content cannot evict tiles and tiles cannot evict content:
+     * [residentTextureByteBudget] then bounds [registerTexture]'s textures alone (ADR 0047's
+     * 2026-10-22 note on content textures).
      */
     private val residentContentTextureByteBudget: Long? = null,
 ) {
@@ -532,9 +532,8 @@ internal class GlObjectRegistry(
     /**
      * Every live handle [key] holds of exactly [type], in registration order.
      *
-     * Legacy callers of [register] may associate several object types with one logical key. Filtering
-     * by type at the caller used to require each caller to write the same
-     * `firstOrNull { it.type == }`; asking the registry directly keeps that filter from drifting.
+     * Legacy callers of [register] may associate several object types with one logical key; asking the
+     * registry for one type keeps every caller's filter the same.
      */
     internal fun handlesOfType(key: ResourceKey, type: GlObjectType): List<GlObjectHandle> =
         lock.locked { live[key].orEmpty().filter { it.type == type } }
@@ -787,7 +786,7 @@ internal class GlObjectRegistry(
         allocationBufferBytes = 0L
     }
 
-    /** The running pool totals as they stand: tile texture, content texture and buffer bytes. */
+    /** The running pool totals as they stand (tile texture, content texture, buffer bytes); for tests. */
     internal fun poolBytes(): GpuPoolBytes = lock.locked {
         GpuPoolBytes(tileTextureBytes, contentTextureBytes, allocationBufferBytes)
     }

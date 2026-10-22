@@ -13,8 +13,7 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * backdrop, on every plan -- `prepare`'s and every `readAhead` hint's -- to turn an unusable profile
  * directive into `INVALID_VALUE` at `FRAME_PLANNING` rather than a GL fault at draw (ADR 0071). The scan
  * is a character walk of the whole source looking for `#version` lines and comments, and the sources do
- * not change between frames. Simpleperf on an OPPO CPH2629 exporting a 28 s 720p24 project charged 1.5%
- * of all of the app's CPU to `scanShaderProfile` and its `startsWithAt`, under `planSpatial`.
+ * not change between frames.
  *
  * **It cannot be stale.** The scan is a pure function of one `String`, and a `String` is immutable, so a
  * remembered answer -- including "no usable profile", remembered as a `null` plan -- is exactly the

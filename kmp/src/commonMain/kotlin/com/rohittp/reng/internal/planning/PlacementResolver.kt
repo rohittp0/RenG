@@ -99,9 +99,8 @@ internal fun resolvePlacement(
         // map, where north is straight up at every point -- so the transport between two anchors IS
         // the identity, and a spherical one rotates by an angle the projection already flattened away.
         //
-        // Measured at latitude 20, camera level, model stationary: 4 degrees of drift at 10 degrees
-        // of separation, 12 at 20, and 34 plus a 37% loss of drawn area at 40, the model tipping
-        // while nothing else in the frame does. `GlobePlacementResolver` keeps the spherical form.
+        // A spherical transport here tips the model while nothing else in the frame does, worse
+        // with separation (ADR 0063). `GlobePlacementResolver` keeps the spherical form.
         AnchoringMode.MAP -> {
             val viewBasis = DoubleMatrix3.rowMajor(
                 camera.right.x, camera.right.y, camera.right.z,

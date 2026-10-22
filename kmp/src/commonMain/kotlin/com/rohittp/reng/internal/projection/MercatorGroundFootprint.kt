@@ -46,9 +46,8 @@ internal fun clippedPhysicalPixelFootprint(
  * with the same exact test finds each edge inside the stride before it. A run too short for any sample
  * to land in falls back to the full scan.
  *
- * Measured on a OnePlus 12 (2026-10-07), per-row casting was ~14% of the render thread during
- * preview playback at 692x1231: three full scans a frame (this one and two in `groundLodBands`), each
- * allocating per row. This costs about `ADMISSIBLE_ROW_SAMPLES + 2 log2(stride)` casts.
+ * A frame scans three times (this one and two in `groundLodBands`), so a per-row scan is a real share
+ * of the render thread (ADR 0064). This costs about `ADMISSIBLE_ROW_SAMPLES + 2 log2(stride)` casts.
  */
 internal fun admissibleGroundRows(camera: ResolvedMercatorCamera): IntRange? {
     val height = camera.outputPixelSize.height

@@ -3,7 +3,6 @@ package com.rohittp.reng.internal.identity
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 
 /**
  * The copies removed from canonical encoding and identity registration. The encoders' exact bytes are

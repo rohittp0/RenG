@@ -114,9 +114,8 @@ internal class BasemapEngineHost(
     /**
      * Remembering, like the renderer's own resolver: every [OperationRegistry] this host opens resolves
      * every route it preregisters, and the tile plan names the same few hundred routes on every frame.
-     * Without the memo each of them was redacted, hashed and spelled out in hex again per frame -- on
-     * an OPPO CPH2629 export (2026-10-09) that, with [redactedLocatorDigests]' derivation, was most of
-     * RenG's "resource keys" time. Bounded and exact for the reasons [RouteMemo] gives.
+     * Without the memo each of them would be redacted, hashed and spelled out in hex again per frame
+     * (ADR 0081). Bounded and exact for the reasons [RouteMemo] gives.
      */
     private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(
         sha256 = AcceleratedSha256,
@@ -318,9 +317,8 @@ internal class BasemapEngineHost(
      * (ADR 0051), so a `prepareBatch` gets one route index and one set of single-flight latches for
      * the whole batch rather than one per frame.
      *
-     * The cost this removes is measured: three frames over one camera cost 14 engine resource
-     * requests where one frame costs 6, because each frame re-asked for the four tiles the frame
-     * before it had already fetched.
+     * Without it each frame of a batch over one camera re-asks the engine for the tiles the frame
+     * before it already fetched.
      *
      * Opening is still exclusive — this is the root, and a root may not nest inside anything.
      */
@@ -349,20 +347,6 @@ internal class BasemapEngineHost(
         }
     }
 
-    /**
-     * Declares [routes] on the invocation that is already open.
-     *
-     * Preregistration cannot all happen when the invocation opens, because the routes a style's
-     * compilation will make the engine ask for are not knowable until the style document has been read —
-     * and reading it is itself work RenG's driver performs *inside* the invocation. This is therefore the
-     * incremental half of [withOperation]'s initial list, delegating to the same
-     * [OperationRegistry.preregister]: idempotent for an identical repeat (two occurrences joining one
-     * route), and a hard `AMBIGUOUS_RESOURCE_ROUTE` for a genuinely conflicting one.
-     *
-     * Declaring a route with no invocation open is the same fault [RoutedEngineTransport] reports one
-     * level later — an exchange RenG never planned — so it fails the same way, rather than silently
-     * accruing routes into a registry that does not exist.
-     */
     /**
      * Warms the raw resources [tiles] need, as one read-ahead window (ADR 0075), and reports what the
      * engine did.
@@ -465,6 +449,20 @@ internal class BasemapEngineHost(
      */
     suspend fun spriteAtlasManifest(): SpriteAtlasManifest? = activeOperation?.registry?.spriteAtlasManifest()
 
+    /**
+     * Declares [routes] on the invocation that is already open.
+     *
+     * Preregistration cannot all happen when the invocation opens, because the routes a style's
+     * compilation will make the engine ask for are not knowable until the style document has been read —
+     * and reading it is itself work RenG's driver performs *inside* the invocation. This is therefore the
+     * incremental half of [withOperation]'s initial list, delegating to the same
+     * [OperationRegistry.preregister]: idempotent for an identical repeat (two occurrences joining one
+     * route), and a hard `AMBIGUOUS_RESOURCE_ROUTE` for a genuinely conflicting one.
+     *
+     * Declaring a route with no invocation open is the same fault [RoutedEngineTransport] reports one
+     * level later — an exchange RenG never planned — so it fails the same way, rather than silently
+     * accruing routes into a registry that does not exist.
+     */
     suspend fun registerRoutes(routes: List<ResourceRouteKey>) {
         requireOpen()
         val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
@@ -1241,12 +1239,10 @@ internal class BasemapEngineHost(
     /**
      * [basemapTileKey] for `(styleDigest, tile)`, derived once and then remembered (ADR 0069).
      *
-     * **The derivation is not cheap and it used to run twice per visible tile per frame**, before
-     * anything had been decided: `renderBasemapTiles` asks for every canonical tile's key to test
-     * residency, `groundInstances` asks for the same keys again, and each ask built a fresh
-     * `ResourceKeyDeriver`, a canonical binary, a SHA-256 and a 64-character hex string. At the
-     * counts `CLAUDE.md` records -- 93 canonical tiles at 3840x2160 and pitch 0, 167 with a frame of
-     * LOD history -- a still camera with every tile resident paid all of it every frame.
+     * **The derivation is not cheap and is asked for twice per visible tile per frame**, before
+     * anything has been decided: tile provisioning asks for every canonical tile's key to test
+     * residency and `groundInstances` asks for the same keys again; each derivation builds a
+     * `ResourceKeyDeriver`, a canonical binary, a SHA-256 and a 64-character hex string.
      *
      * The answer is a pure function of `(styleDigest, tile)`: [tileOutputSize] and [sha256] are fixed
      * for this host's lifetime. Bounded at [MAXIMUM_REMEMBERED_TILE_KEYS], by second chance.
@@ -1530,11 +1526,6 @@ internal class BasemapEngineHost(
     )
 }
 
-/**
- * One prepared, fully-acquired basemap batch, plus the RenG tiles it was asked for. [close] is
- * idempotent, non-blocking, and non-throwing, because Rentile documents `PreparedBatch.close()` as
- * exactly that.
- */
 /** What [BasemapEngineHost.prepareTilesReportingUnavailableColour] produced (ADR 0057). */
 internal sealed interface BasemapTilePreparation {
     class Prepared(val tiles: PreparedBasemapTiles) : BasemapTilePreparation
@@ -1550,6 +1541,11 @@ internal sealed interface BasemapTilePreparation {
     ) : BasemapTilePreparation
 }
 
+/**
+ * One prepared, fully-acquired basemap batch, plus the RenG tiles it was asked for. [close] is
+ * idempotent, non-blocking, and non-throwing, because Rentile documents `PreparedBatch.close()` as
+ * exactly that.
+ */
 internal class PreparedBasemapTiles(
     internal val batch: PreparedBatch,
     internal val style: PreparedStyle,

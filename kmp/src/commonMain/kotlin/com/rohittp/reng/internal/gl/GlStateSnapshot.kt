@@ -148,30 +148,6 @@ internal fun captureGlState(
     )
 }
 
-/**
- * Reads [textureUnitCount] units' 2D bindings and samplers.
- *
- * **Not used by capture any more** (ADR 0055 saves a unit when a draw first writes it). This exists
- * for verification: a conformance check should look at more units than the implementation tracks,
- * precisely so that a unit RenG touched and failed to restore is visible. Production never walks a
- * fixed set; the thing checking production does.
- */
-internal fun captureTextureUnits(binding: GlBinding, textureUnitCount: Int): List<GlTextureUnitState> {
-    require(textureUnitCount > 0) { "at least one texture unit is captured" }
-    val activeTextureUnit = binding.integer(GL_ACTIVE_TEXTURE)
-    val units = ArrayList<GlTextureUnitState>(textureUnitCount)
-    for (index in 0 until textureUnitCount) {
-        binding.activeTexture(GL_TEXTURE0 + index)
-        units += GlTextureUnitState(
-            unit = GL_TEXTURE0 + index,
-            texture2d = binding.integer(GL_TEXTURE_BINDING_2D),
-            sampler = binding.integer(GL_SAMPLER_BINDING),
-        )
-    }
-    binding.activeTexture(activeTextureUnit)
-    return units
-}
-
 private fun GlBinding.integer(pname: Int): Int = integers(pname, 1).single()
 
 private fun GlBinding.integeri(pname: Int, index: Int): Int {

@@ -4,9 +4,8 @@ package com.rohittp.reng.internal.gl
  * A [GlBinding] that saves a texture unit's prior bindings the first time a draw overwrites them,
  * and puts back exactly those (ADR 0055).
  *
- * This replaces walking a fixed fifteen units up front, which cost 30 queries and 62 writes every
- * frame regardless of content where a measured frame touches two -- and, more importantly, had a
- * ceiling, leaving a pass binding a unit above it unprotected exactly as units 1..14 once were.
+ * Walking a fixed set of units up front would cost queries and writes every frame regardless of
+ * content and, worse, have a ceiling that leaves a pass binding a unit above it unprotected.
  * Saving inside the call that overwrites has no ceiling to get wrong: a unit is saved because it is
  * being written, not because someone predicted it would be.
  *

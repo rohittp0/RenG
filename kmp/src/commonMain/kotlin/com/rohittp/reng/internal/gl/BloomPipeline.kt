@@ -55,10 +55,9 @@ internal const val BLOOM_LIGHT_GLSL: String =
  * frame. The hue steer that follows it ([BLOOM_HUE_STEER_START], ADR 0083) keeps the shoulder's
  * linear luminance but can lower the brightest channel of a bright fill under strong light.
  *
- * A constant rather than a [com.rohittp.reng.Bloom] field: nothing needs to tune it yet. 0.8 was
- * chosen by measurement in Travel Animator: under a white 6 px route glowing at 60% over a lime
- * region, the band of clipped pixels beyond the stroke went from 5 px with the additive composite
- * to 0 (29 to 0 at 12 px and 100%), while the light added on a dark ground stayed within 1% of it.
+ * A constant rather than a [com.rohittp.reng.Bloom] field: nothing needs to tune it yet. ADR 0082
+ * records why 0.8: it removes the clipped band beyond a bright stroke while leaving the light added
+ * on a dark ground within 1% of the additive composite's.
  */
 internal const val BLOOM_SHOULDER_KNEE: String = "0.8"
 
@@ -69,12 +68,8 @@ internal const val BLOOM_SHOULDER_KNEE: String = "0.8"
  * smoothstep, towards the bloom light's own hue; lightness and linear luminance stay the
  * shoulder's. At or below it the steer, whose weight would be zero there, is skipped: the bloom's
  * long faint tail stays plain light added to the ground, so it does not desaturate the ground far
- * from the emitter, and most of the frame skips the Oklab round trip (the composite's extra cost on
- * the CPH2629 fell from ~2.0 to ~1.0 ms per 1080x1920 frame).
- *
- * Measured in Travel Animator (ADR 0083): with a red #FF3B30 glow at alpha 0x8B, 6 px, the halo 4 px
- * past the stroke is 2 degrees off the glow's Oklab hue on the teal sea and 0 off on a lime region
- * (91 and 65 with the shoulder alone), while the light added on a dark ground stays 0.96-1.01x it.
+ * from the emitter, and most of the frame skips the Oklab round trip. ADR 0083 records the hue and
+ * luminance this threshold yields.
  */
 internal const val BLOOM_HUE_STEER_START: String = "0.03"
 
@@ -646,35 +641,14 @@ internal fun bloomHasFarBand(bloom: Bloom, someEmitterReaches: Boolean): Boolean
     bloomFarBandLevel(bloom) != null && bloom.reachGain > 0f && someEmitterReaches
 
 /**
- * How a frame's far band reaches downsample level [BloomFarBand.level] (ADR 0085).
- *
- * [REACH_IMAGE] is the only strategy a consumer can get. [COARSE_REDRAW] is internal and exists to
- * measure what the reach image buys: it rasterises the emitters straight into the level, at its
- * resolution, with the depth test off, so a line thinner than the level's pixel drops out between
- * sample centres and shimmers as the camera moves.
- */
-internal enum class BloomFarBandStrategy {
-    /**
-     * Every reaching emitter is redrawn, scaled by its reach and depth-tested like the emission
-     * redraw, into a full-resolution reach image; the identical downsample kernel takes that image
-     * down to the level, where it is added scaled by `reachGain`.
-     */
-    REACH_IMAGE,
-
-    /** Every reaching emitter is drawn straight into the level, scaled by `reach * reachGain`. */
-    COARSE_REDRAW,
-}
-
-/**
- * ADR 0085's far band. [draw] draws every reaching emitter into the target it is handed, which is
- * bound with its viewport set: the cleared reach image under [BloomFarBandStrategy.REACH_IMAGE], or
- * the main chain's level [level] after the chain has written it under
- * [BloomFarBandStrategy.COARSE_REDRAW]. It owns its own depth and blend state; [drawBloom]
+ * ADR 0085's far band. [draw] redraws every reaching emitter, scaled by its reach and depth-tested
+ * like the emission redraw, into the full-resolution reach image it is handed, which is cleared and
+ * bound with its viewport set; the identical downsample kernel takes that image down to [level],
+ * where it is added scaled by `reachGain`. [draw] owns its own depth and blend state; [drawBloom]
  * re-establishes its own afterwards.
  */
 internal class BloomFarBand(
     val level: Int,
-    val strategy: BloomFarBandStrategy,
     val draw: (BloomTarget) -> Unit,
 )
 
@@ -705,7 +679,7 @@ internal fun drawBloom(
     binding.bindSampler(0, 0)
     binding.bindSampler(1, 0)
 
-    val reach = if (farBand?.strategy == BloomFarBandStrategy.REACH_IMAGE) {
+    val reach = if (farBand != null) {
         val targets = requireNotNull(resources.reach) { "a reach-image far band requires the reach targets" }
         check(targets.levels.size >= farBand.level) { "the reach targets must reach the far band's level" }
         binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targets.image.framebuffer)
@@ -730,32 +704,24 @@ internal fun drawBloom(
         val target = resources.downsampleLevels[level - 1]
         drawBloomDownsample(binding, resources, source, target)
         if (farBand != null && farBand.level == level) {
-            when (farBand.strategy) {
-                BloomFarBandStrategy.REACH_IMAGE -> {
-                    // The reach image's level, the same size as this one, added at reachGain with the
-                    // level's alpha kept. The upsample program with no accumulation is exactly
-                    // `reachGain * texture(level)`: both its samplers read the reach level, so the
-                    // zero-weighted tent reads nothing undefined.
-                    val reachLevel = checkNotNull(reach).levels[level - 1]
-                    binding.enable(GL_BLEND)
-                    binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-                    binding.blendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE)
-                    drawBloomUpsample(
-                        binding = binding,
-                        resources = resources,
-                        target = target,
-                        accumulation = reachLevel,
-                        accumulationWeight = 0f,
-                        level = reachLevel,
-                        levelWeight = bloom.reachGain,
-                    )
-                    binding.disable(GL_BLEND)
-                }
-                BloomFarBandStrategy.COARSE_REDRAW -> {
-                    farBand.draw(target)
-                    restoreBloomChainState(binding, resources)
-                }
-            }
+            // The reach image's level, the same size as this one, added at reachGain with the
+            // level's alpha kept. The upsample program with no accumulation is exactly
+            // `reachGain * texture(level)`: both its samplers read the reach level, so the
+            // zero-weighted tent reads nothing undefined.
+            val reachLevel = checkNotNull(reach).levels[level - 1]
+            binding.enable(GL_BLEND)
+            binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+            binding.blendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE)
+            drawBloomUpsample(
+                binding = binding,
+                resources = resources,
+                target = target,
+                accumulation = reachLevel,
+                accumulationWeight = 0f,
+                level = reachLevel,
+                levelWeight = bloom.reachGain,
+            )
+            binding.disable(GL_BLEND)
         }
         source = target
     }

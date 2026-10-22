@@ -1,6 +1,5 @@
 package com.rohittp.reng
 
-import com.rohittp.reng.internal.gl.BloomFarBandStrategy
 import com.rohittp.reng.internal.gl.GL_BLEND
 import com.rohittp.reng.internal.gl.GL_COLOR_ATTACHMENT0
 import com.rohittp.reng.internal.gl.GL_COLOR_BUFFER_BIT
@@ -297,38 +296,22 @@ internal fun runBloomPerElementReadbackSuite(
             }
         }
 
-        // The design review's shimmer risk, measured: a 4 px line moved through one level-3 pixel.
-        failures.run("shimmer: the reach image holds a thin line's far light steadier than a coarse redraw") {
-            fun farLightAcrossPhases(strategy: BloomFarBandStrategy): List<Int> {
-                rengRenderer.bloomFarBandStrategy = strategy
-                try {
-                    return (0 until 8).map { phase ->
-                        val line = stroke(STROKE_A_LEFT + phase, THIN_WIDTH)
-                        val x = STROKE_A_LEFT + phase + THIN_WIDTH + SHIMMER_DISTANCE
-                        val bloom = Bloom(intensity = 1f)
-                        val reach0 = draw(bloom, listOf(line))
-                        val reach1 = draw(bloom, listOf(line.copy(bloomReach = 1f)))
-                        reach1.pixel(x, MID_Y)[0] - reach0.pixel(x, MID_Y)[0]
-                    }
-                } finally {
-                    rengRenderer.bloomFarBandStrategy = BloomFarBandStrategy.REACH_IMAGE
-                }
+        // The shimmer risk: a 4 px line moved through one level-3 pixel must add far light at every phase.
+        failures.run("shimmer: the reach image adds a thin line's far light at every phase") {
+            val reachImage = (0 until 8).map { phase ->
+                val line = stroke(STROKE_A_LEFT + phase, THIN_WIDTH)
+                val x = STROKE_A_LEFT + phase + THIN_WIDTH + SHIMMER_DISTANCE
+                val bloom = Bloom(intensity = 1f)
+                val reach0 = draw(bloom, listOf(line))
+                val reach1 = draw(bloom, listOf(line.copy(bloomReach = 1f)))
+                reach1.pixel(x, MID_Y)[0] - reach0.pixel(x, MID_Y)[0]
             }
-            val reachImage = farLightAcrossPhases(BloomFarBandStrategy.REACH_IMAGE)
-            val coarse = farLightAcrossPhases(BloomFarBandStrategy.COARSE_REDRAW)
-            val reachSpread = reachImage.max() - reachImage.min()
-            val coarseSpread = coarse.max() - coarse.min()
             println(
                 "RenG per-element bloom case shimmer: dialect=$dialect far light $SHIMMER_DISTANCE px past a " +
-                    "$THIN_WIDTH px line at phases 0..7: reachImage=$reachImage (spread $reachSpread) " +
-                    "coarse=$coarse (spread $coarseSpread)",
+                    "$THIN_WIDTH px line at phases 0..7: reachImage=$reachImage " +
+                    "(spread ${reachImage.max() - reachImage.min()})",
             )
             assertTrue(reachImage.min() > 0, "the reach image must add light at every phase: $reachImage")
-            assertTrue(
-                reachSpread <= coarseSpread,
-                "the reach image must vary with phase no more than the coarse redraw " +
-                    "($reachSpread vs $coarseSpread)",
-            )
         }
 
         // (inherit) ADR 0080's 2026-10-22 amendment: an emitter that omits a uniform blooms with the

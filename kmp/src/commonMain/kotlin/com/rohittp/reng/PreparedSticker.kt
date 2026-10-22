@@ -9,7 +9,7 @@ import com.rohittp.reng.internal.planning.FramePlanningCore
  * admitted without decoding (ADR 0084) -- and the [ResourceKey]
  * [FramePlanningCore]'s static traversal already derived for it — the same key
  * [RenGRenderer.performDraw]'s texture cache uses so a repeated draw of an unchanged sticker image
- * reuses its GL texture (Task 9b item 1) instead of re-uploading it every frame.
+ * reuses its GL texture instead of re-uploading it every frame.
  */
 internal class PreparedSticker(
     internal val placement: Placement,

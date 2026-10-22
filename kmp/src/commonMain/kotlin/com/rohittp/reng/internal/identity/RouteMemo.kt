@@ -10,11 +10,9 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * route is not derived again on every `prepare`: an external reference's [DerivedResourceKey], or its
  * Rentile private key.
  *
- * **Why.** Every `prepare` derived every external reference's key from scratch -- encode the root,
- * SHA-256 it, spell out the hex -- and resolved its Rentile private key, which for RenG-keyed classes
- * derives the same key a second time; a model texture was hashed about four times per `prepare`. On an
- * OPPO CPH2629 (2026-10-09), exporting a project whose motion blur prepares every frame up to six
- * times, resource keys were 13% of RenG's time.
+ * **Why.** Deriving a key from scratch encodes the root, SHA-256s it and spells out the hex, and
+ * resolving the Rentile private key derives it again for RenG-keyed classes; without the memo every
+ * `prepare` pays that for every external reference (ADR 0081).
  *
  * **It cannot be stale.** Both derivations read nothing but the class and the locator's exact string
  * ([ResourceLocator] equality is that string), so a hit is the value a fresh derivation would give,

@@ -44,8 +44,7 @@ internal class GroundTileProvisioner(
      *
      * ADR 0046's residency filter cannot see inside a batch, because nothing in a batch is drawn and
      * so no texture becomes resident until the consumer draws: without this, every frame
-     * re-rasterises every tile the frame before it just rendered. Measured at three frames over one
-     * camera: twelve renders for four distinct tiles.
+     * re-rasterises every tile the frame before it just rendered.
      *
      * Batch-scoped and nothing wider. A renderer-lifetime memo would be an unbounded store of raw
      * pixels beside the two budgets that already govern them, and outside a batch there is a draw
@@ -68,23 +67,19 @@ internal class GroundTileProvisioner(
      *
      * Returns empty whenever there is no basemap to place: no style configured, or no tile selected.
      *
-     * **It used to return empty whenever no tile was *rendered*, and that is no longer the same
-     * condition.** `renderBasemapTiles` now asks the engine only for tiles whose texture is not already
-     * resident, so a frame that pans back over ground it has drawn before legitimately renders nothing
-     * and still has ground to place. Keying this on the rendered list dropped the ground entirely on
-     * exactly those frames — caught by `MacosGlConformanceTest`'s coplanar-geometry case, which found
-     * a quad with no ground beneath it and called itself vacuous rather than passing.
+     * **Rendering nothing is not having no ground.** `renderBasemapTiles` asks the engine only for
+     * tiles whose texture is not already resident, so a frame that pans back over ground it has drawn
+     * before legitimately renders nothing and still has ground to place; keying this on the rendered
+     * list would drop the ground on exactly those frames.
      *
      * **"Already resident" means resident when this frame selected the tile, not resident now.**
      * [residentAtSelection] is the set `renderBasemapTiles` skipped for that reason, and it is accepted
      * here without asking the registry again. Asking again was a race: a skipped tile holds no lease,
      * a draw may overlap preparation by contract (CONTEXT.md), and that draw's byte-budget eviction
-     * could delete the texture between selection and this `check`. The `check` then threw a bare
-     * `IllegalStateException` out of `prepare` -- measured on a OnePlus 12 on 2026-10-08, where a video
-     * export preparing frame N+1 while frame N drew failed at the same frame on 3 of 3 runs, and
-     * completed with the overlap disabled. Nothing about that frame was wrong at selection; the tile
-     * left afterwards, and it could equally leave after this `check` passed and before the frame's own
-     * draw. So the draw is the one place that answers it: `resolveGroundTiles` leases the texture if
+     * could delete the texture between selection and this `check`, which would then throw a bare
+     * `IllegalStateException` out of `prepare` for a frame that was right at selection. The tile could
+     * equally leave after this `check` passed and before the frame's own draw, so the draw is the one
+     * place that answers it: `resolveGroundTiles` leases the texture if
      * it is still there, falls back to a resident ancestor, or fails with the typed
      * RESOURCE_UNAVAILABLE at DRAW that a consumer can answer by preparing again. The live registry
      * read stays as a fourth way to pass, for a tile that became resident since selection.
@@ -107,10 +102,8 @@ internal class GroundTileProvisioner(
                 tileY = instance.tileY,
                 canonicalX = instance.canonicalX,
             )
-            // The local memo this used to keep is gone: it collapsed the several unwrapped world-copy
-            // instances of one canonical tile, which the host's own remembrance now does (ADR 0069),
-            // and it could never see the derivations `renderBasemapTiles` made for the same tiles a
-            // moment earlier in this same frame.
+            // No local memo: the host's own remembrance (ADR 0069) collapses the world copies of one
+            // canonical tile and shares the derivations `renderBasemapTiles` made for this frame.
             val key = basemapEngineHost.renderedTileKey(styleDigest, instance)
             // Rendered this frame, on the GPU when this frame selected it (and possibly evicted since
             // by an overlapping draw -- the draw answers that, see the KDoc), on the GPU now, or --
@@ -150,7 +143,7 @@ internal class GroundTileProvisioner(
         // Routes for EVERY visible tile, never only the missing ones. `tileTimeRoutes` expands a
         // `raster-dem` source through `demNeighbourhoodOrSelf`, so terrain's routes come from this
         // same list, and a resident colour texture says nothing about whether the DEM beneath it is
-        // acquired. Narrowing this to `missing` failed eight of nine terrain readback cases.
+        // acquired, so narrowing this to `missing` would leave terrain unrouted.
         basemapEngineHost.registerRoutes(
             tileTimeRoutes(
                 manifest = manifest,
@@ -161,10 +154,8 @@ internal class GroundTileProvisioner(
         )
 
         // Only tiles that are neither resident on the GPU (ADR 0046) nor already rendered by this
-        // batch (ADR 0052) go to the engine; before ADR 0046 every frame rasterised every visible
-        // tile and discarded the PNG at draw, 863-2105 ms of a 895-2256 ms frame on a Snapdragon
-        // 8 Gen 3. The memo exists because residency cannot see inside a batch, where nothing has
-        // been drawn yet.
+        // batch (ADR 0052) go to the engine. The memo exists because residency cannot see inside a
+        // batch, where nothing has been drawn yet.
         //
         // A memo hit is copied into THIS frame's tile list rather than left with the frame that
         // rendered it: a batch fixes no draw order, so a frame pointing at a sibling's texture
@@ -254,13 +245,6 @@ internal class GroundTileProvisioner(
                 }
             }
         }
-        if (rawReservation == null && rememberedRawBytes == 0L) {
-            val freshBytes = checkedRawTileBytes(missing.size)
-            if (freshBytes != null && freshBytes > 0L) {
-                rawReservation = rawTileBudget.tryReserve(freshBytes)
-                renderFreshAsRaw = rawReservation != null
-            }
-        }
         rawReservation?.let(rawReservationSink)
         if (useRememberedRaw) alreadyRendered += rememberedRaw.map { it.second }
         if (takeFromCache != null && cachedKeys.isNotEmpty()) {
@@ -316,10 +300,8 @@ internal class GroundTileProvisioner(
      * more, and `resolveGroundTiles` then draws the dropped ones from their ancestors through the same
      * `colourWindow` a budget-deferred tile uses, reporting `GROUND_PRESENTED_PROVISIONALLY` the same way.
      *
-     * **Why this exists.** Measured in a consumer's editor on a phone with no network: two imagery tiles
-     * the Store did not hold could not download, and every `prepare` whose view needed either threw
-     * `RESOURCE_UNAVAILABLE` at `RESOURCE_LOOKUP` -- 397 failures, and 5.6 s of playback with the preview
-     * frozen -- while a coarser tile over each of them sat resident on the GPU the whole time.
+     * **Why this exists.** Without it a tile that cannot download freezes every view that needs it,
+     * though a coarser tile over it is resident on the GPU (ADR 0057 records the case).
      *
      * **All-or-nothing, deliberately.** If any tile the failure names has no resident ancestor, the
      * original failure is rethrown unchanged rather than the presentable ones being dropped and the

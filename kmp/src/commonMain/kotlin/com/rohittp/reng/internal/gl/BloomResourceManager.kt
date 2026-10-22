@@ -39,8 +39,6 @@ internal class BloomResourceManager(
         stagedDiagnostics: MutableList<Diagnostic>,
         /** The captured binding (ADR 0054): target creation binds textures on the host's active unit. */
         binding: GlBinding,
-        /** The renderer's [BloomFarBandStrategy] for this draw. */
-        bloomFarBandStrategy: BloomFarBandStrategy,
     ): BloomResources? {
         val wantsHighPrecision = bloomUsesHighPrecisionEmission(bloom, profile) && !bloomHalfFloatRefused
         if (bloom.highPrecisionEmission && !wantsHighPrecision) {
@@ -82,7 +80,7 @@ internal class BloomResourceManager(
             stagedDiagnostics += bloomUnavailableDiagnostic()
             return null
         }
-        if (bloomFarBandStrategy == BloomFarBandStrategy.REACH_IMAGE && bloomHasFarBand(bloom, emitters) &&
+        if (bloomHasFarBand(bloom, emitters) &&
             ensureBloomReachTargets(binding, resources, checkNotNull(bloomFarBandLevel(bloom))) == null
         ) {
             stagedDiagnostics += bloomUnavailableDiagnostic()

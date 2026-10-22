@@ -17,7 +17,7 @@ internal sealed interface PngDecodeResult {
 }
 
 /** Channels per pixel for each colour type [scanPng] admits; also this format's filtering "bpp". */
-private fun channelsFor(colourType: Int): Int = when (colourType) {
+internal fun channelsFor(colourType: Int): Int = when (colourType) {
     0 -> 1 // greyscale
     2 -> 3 // truecolour
     3 -> 1 // palette index
@@ -33,8 +33,8 @@ private fun channelsFor(colourType: Int): Int = when (colourType) {
  * RGBA8, applying `tRNS` alpha for colour types 0, 2, and 3. `maximumDecodedBytes` gates the *declared*
  * raster size — `width * height * 4` from the header alone — before any array is allocated.
  *
- * [storedFastPath] exists for tests alone: `false` forces every input through [InflateStream], so a
- * test can prove [decodeStoredRows] answers byte for byte what the general path does.
+ * [storedFastPath] `false` forces every input through [InflateStream]; tests use it to prove
+ * [decodeStoredRows] answers byte for byte what the general path does.
  */
 internal fun decodePng(
     bytes: ByteArray,
@@ -92,19 +92,9 @@ private fun decodeAdmitted(
     val height = header.height
     val colourType = header.colourType
 
-    // Decide the ceiling from the header's own dimensions alone, before any array — raster or
-    // output — is allocated, so a maliciously large declared size can never force a huge allocation.
-    // width and height are each individually bounded to 1..2^31-1 by scanPng's DIMENSION_OUT_OF_RANGE
-    // and ZERO_DIMENSION checks, so their product alone cannot overflow Long: at most (2^31-1)^2 ≈
-    // 4.6e18, comfortably under Long.MAX_VALUE (~9.22e18). It is multiplying that product by 4 (for
-    // RGBA) that can overflow: width = height = 2^31-1 wraps `* 4L` to a negative Long, so the
-    // comparison is never true for any positive maximumDecodedBytes and TooLarge never fires — a
-    // 58-byte file could otherwise defeat any ceiling. Comparing by DIVISION instead keeps this check
-    // correct for every admitted dimension pair, with no wraparound: for maximumDecodedBytes >= 0,
-    // `pixelCount > maximumDecodedBytes / 4` is exactly equivalent to
-    // `pixelCount * 4 > maximumDecodedBytes` (Kotlin's Long division truncates toward zero, so for a
-    // non-negative dividend the remainder it drops is always in 0..3, which never changes which side of
-    // the comparison wins), and neither operand here is ever a product of two width/height-scale values.
+    // Decide the ceiling from the header's dimensions alone, before any array is allocated. Each
+    // dimension is at most 2^31-1, so their product fits a Long but `* 4` can wrap; dividing the
+    // ceiling instead is exactly equivalent for a non-negative ceiling and cannot overflow.
     val pixelCount = width.toLong() * height.toLong()
     if (pixelCount > maximumDecodedBytes / 4) return PngDecodeResult.TooLarge
 
@@ -115,9 +105,9 @@ private fun decodeAdmitted(
     }
 
     val channels = channelsFor(colourType)
-    // "bpp" for filtering purposes: bytes per complete pixel, rounded up to at least 1. Every colour
-    // type scanPng admits is bit depth 8 only, so channels is already >= 1 and never fractional.
-    val bpp = maxOf(1, channels)
+    // "bpp" for filtering purposes: bytes per complete pixel. Every colour type scanPng admits is bit
+    // depth 8, so that is exactly the channel count.
+    val bpp = channels
 
     // Prove the row width fits before narrowing it for the two streaming row buffers. This check does
     // not rely on callers keeping their configured ceiling within Int range; decodePng remains safe for
@@ -255,11 +245,10 @@ private class IdatInflater(private val bytes: ByteArray, private val ranges: Lis
  * stream is anything else, or anything about it is wrong, and the caller then decodes it the general
  * way from the start.
  *
- * **Why.** The app writes its labels, glyph data and route and region bakes with a PNG writer that
- * stores rather than compresses -- filter 0 on every row, RGBA8, stored blocks -- and on an OPPO
- * CPH2629 export (2026-10-09) decoding about twenty newly published labels stalled one frame for
- * about 320 ms, almost all of it the inflate seam, the row unfilter and the widen. A stored block's
- * bytes *are* its output, so the inflate is a copy.
+ * **Why.** A consumer that writes labels, glyph data and bakes with a PNG writer that stores rather
+ * than compresses -- filter 0 on every row, RGBA8, stored blocks -- otherwise pays the inflate seam,
+ * the row unfilter and the widen for bytes that are already the output: a stored block's bytes *are*
+ * its output, so the inflate is a copy.
  *
  * **It answers only what the general path would.** ADR 0020 delegates inflate to the platform's zlib
  * rather than writing one, and this does not reopen that: it decodes no Huffman code and repairs
@@ -273,7 +262,7 @@ private class IdatInflater(private val bytes: ByteArray, private val ranges: Lis
  * [currentRow] and [previousRow] arrive as the general path allocates them, `previousRow` zero; this
  * may leave anything in them, and in [rgba], when it declines.
  */
-private fun decodeStoredRows(
+internal fun decodeStoredRows(
     bytes: ByteArray,
     scan: PngScan.Admitted,
     bpp: Int,
@@ -316,25 +305,6 @@ private fun decodeStoredRows(
         current = swap
     }
     return stream.finish() && stream.readBigEndianInt() == adler.value && stream.exhausted
-}
-
-/**
- * Whether [decodeStoredRows] alone decodes [bytes], for tests that must know the fast path -- not the
- * general one it falls back to -- is what produced an answer.
- */
-internal fun storedFastPathDecodes(bytes: ByteArray): Boolean {
-    val scan = scanPng(bytes) as? PngScan.Admitted ?: return false
-    val channels = channelsFor(scan.header.colourType)
-    val stride = scan.header.width * channels
-    return decodeStoredRows(
-        bytes = bytes,
-        scan = scan,
-        bpp = channels,
-        channels = channels,
-        currentRow = ByteArray(stride + 1),
-        previousRow = ByteArray(stride + 1),
-        rgba = ByteArray(scan.header.width * scan.header.height * 4),
-    )
 }
 
 /**
@@ -495,7 +465,7 @@ private const val OPAQUE: Byte = -1 // 0xFF unsigned
 
 /**
  * Widens unfiltered raw pixel bytes into tightly packed RGBA8, applying `tRNS` for types 0, 2, 3.
- * Returns `null` if a colour-type-3 raster byte indexes past the end of the admitted `PLTE` payload —
+ * Returns `false` if a colour-type-3 raster byte indexes past the end of the admitted `PLTE` payload —
  * `scanPng` only checks that a palette exists for colour type 3, never that every index a (possibly
  * hostile) raster contains actually fits it.
  */
@@ -516,49 +486,44 @@ private fun widenRowToRgba(
     }
     var out = rgbaOffset
     for (col in 0 until width) {
-            val pixelStart = 1 + col * channels
-            when (colourType) {
-                0 -> {
-                    val grey = row[pixelStart]
-                    rgba[out] = grey
-                    rgba[out + 1] = grey
-                    rgba[out + 2] = grey
-                    rgba[out + 3] = greyKeyAlpha(transparency, grey)
-                }
-                2 -> {
-                    val r = row[pixelStart]
-                    val g = row[pixelStart + 1]
-                    val b = row[pixelStart + 2]
-                    rgba[out] = r
-                    rgba[out + 1] = g
-                    rgba[out + 2] = b
-                    rgba[out + 3] = rgbKeyAlpha(transparency, r, g, b)
-                }
-                3 -> {
-                    val index = row[pixelStart].toInt() and 0xFF
-                    val paletteBytes = requireNotNull(palette) { "colour type 3 requires a palette" }
-                    val paletteOffset = index * 3
-                    if (paletteOffset + 3 > paletteBytes.size) return false
-                    rgba[out] = paletteBytes[paletteOffset]
-                    rgba[out + 1] = paletteBytes[paletteOffset + 1]
-                    rgba[out + 2] = paletteBytes[paletteOffset + 2]
-                    rgba[out + 3] = paletteAlpha(transparency, index)
-                }
-                4 -> {
-                    val grey = row[pixelStart]
-                    rgba[out] = grey
-                    rgba[out + 1] = grey
-                    rgba[out + 2] = grey
-                    rgba[out + 3] = row[pixelStart + 1]
-                }
-                else -> { // 6: truecolour + alpha, copied through unchanged.
-                    rgba[out] = row[pixelStart]
-                    rgba[out + 1] = row[pixelStart + 1]
-                    rgba[out + 2] = row[pixelStart + 2]
-                    rgba[out + 3] = row[pixelStart + 3]
-                }
+        val pixelStart = 1 + col * channels
+        when (colourType) {
+            0 -> {
+                val grey = row[pixelStart]
+                rgba[out] = grey
+                rgba[out + 1] = grey
+                rgba[out + 2] = grey
+                rgba[out + 3] = greyKeyAlpha(transparency, grey)
             }
-            out += 4
+            2 -> {
+                val r = row[pixelStart]
+                val g = row[pixelStart + 1]
+                val b = row[pixelStart + 2]
+                rgba[out] = r
+                rgba[out + 1] = g
+                rgba[out + 2] = b
+                rgba[out + 3] = rgbKeyAlpha(transparency, r, g, b)
+            }
+            3 -> {
+                val index = row[pixelStart].toInt() and 0xFF
+                val paletteBytes = requireNotNull(palette) { "colour type 3 requires a palette" }
+                val paletteOffset = index * 3
+                if (paletteOffset + 3 > paletteBytes.size) return false
+                rgba[out] = paletteBytes[paletteOffset]
+                rgba[out + 1] = paletteBytes[paletteOffset + 1]
+                rgba[out + 2] = paletteBytes[paletteOffset + 2]
+                rgba[out + 3] = paletteAlpha(transparency, index)
+            }
+            4 -> {
+                val grey = row[pixelStart]
+                rgba[out] = grey
+                rgba[out + 1] = grey
+                rgba[out + 2] = grey
+                rgba[out + 3] = row[pixelStart + 1]
+            }
+            else -> error("colour type 6 is copied whole above")
+        }
+        out += 4
     }
     return true
 }

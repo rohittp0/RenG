@@ -113,7 +113,7 @@ public data class ResourceLimits(
      * rather than degrading. 256 MiB clears that worst case by 1.88x.
      *
      * Still **shared** with every raster RenG decodes -- sticker images, model textures, basemap
-     * tiles -- which is Cycle F-2's recorded debt rather than a decision taken here: a consumer
+     * tiles -- which is recorded debt rather than a decision taken here: a consumer
      * tightening this for rasters can still starve the atlas.
      */
     public val maximumDecodedImageBytes: Long = 256L * 1024L * 1024L,
@@ -129,8 +129,7 @@ public data class ResourceLimits(
      *
      * The two *defaults* are nonetheless sized to agree: 512 canonical 512x512 RGBA8 tiles are
      * exactly 512 MiB, so a frame at the default tile ceiling cannot thrash against the default
-     * budget. They sat 4x apart until a level 3840x2160 camera was measured reaching 167 tiles. This
-     * is an eviction threshold rather than a reservation, so the larger default costs nothing until a
+     * budget. This is an eviction threshold rather than a reservation, so the larger default costs nothing until a
      * frame needs it.
      */
     public val maximumResidentGpuTextureBytes: Long = 512L * 1024L * 1024L,
@@ -237,11 +236,9 @@ public data class ResourceLimits(
      *
      * When set, [maximumResidentGpuTextureBytes] bounds the key-registered textures alone -- basemap
      * tiles, DEMs, and the basemap's glyph and sprite atlases -- and each pool evicts only for its own
-     * pressure. Why: content is drawn every frame, so under one shared LRU it is
-     * always the most recent and tiles take every eviction. Measured on an OPPO CPH2629 (2026-10-08,
-     * 1080p export, 128 MiB shared budget): 16 1024x768 stickers put 48 MiB of textures beside the
-     * tiles and the export re-rasterised 128 tiles in 120 frames, against about 11 without them, even
-     * with every CPU-side resource resident -- the tiles' working set no longer fit what was left.
+     * pressure. Why: content is drawn every frame, so under one shared LRU it is always the most
+     * recent and tiles take every eviction; enough content shrinks what is left below the tiles'
+     * working set and every frame re-rasterises tiles (ADR 0047).
      *
      * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
      * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.

@@ -90,3 +90,8 @@ arithmetic rather than a performance fix.
 It also introduces no fade. The ground stops at a hard line, and what is behind it is whatever the
 consumer's surface was cleared to -- transparent black, since `GlFrameDrawer` clears to
 `(0, 0, 0, 0)` and RenG draws no sky. ADR 0069 gives a consumer something to put there.
+
+**Note, 2026-10-22.** `admissibleGroundRows` samples rows and binary-searches the run's edges instead of
+casting every row, relying on the per-row test being monotone in `v`. On a OnePlus 12 (2026-10-07) per-row
+casting was ~14% of the render thread during preview playback at 692x1231: three full scans a frame, each
+allocating per row.

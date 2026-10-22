@@ -121,18 +121,9 @@ internal class PreparationDriver(
      * its actions, outcome or state ever differ from the session's. For tests: it restores the per-event
      * copy the session exists to remove. See [ResourceOperationStateMachine.Session].
      */
-    private val shadowCheck: Boolean = shadowCheckSessionsByDefault,
+    private val shadowCheck: Boolean = false,
 ) {
 
-    /**
-     * [leaseSink], when supplied, collects every resident-cache lease this run takes, so the owner that
-     * asked for the operation can release them once it is done with the content -- which is what
-     * [com.rohittp.reng.PreparedFrame.close] does with the ones its own preparation took. Omitting it
-     * leaves the leases outstanding for the cache's lifetime, which is what every caller did before
-     * owner-lease bookkeeping existed and what every test driving this class directly still expects.
-     * [leaseObserver], when supplied, runs immediately after that lease has been recorded for cleanup;
-     * throwing from it aborts the operation while leaving the lease reachable by the caller's rollback.
-     */
     /**
      * The steady-state shortcut: leases every reference in [references] that the operation would only
      * re-confirm, and returns the ones it must still drive.
@@ -144,10 +135,8 @@ internal class PreparationDriver(
      * visibility by leasing it -- decides nothing new; it costs about six scheduler steps and four
      * coroutine round-trips. Here it is one atomic [ResidentCache.observeAndTakeLease].
      *
-     * **Why.** On an OPPO CPH2629 (2026-10-08, Geoanimator's ComplexityScalingBenchmarkTest, 1080p, RenG
-     * 0.6.0-local19) the scheduler and this driver were still 35% of RenG's time in a frame with 64 text
-     * labels (prepare 73 ms) and 24% with 16 vehicles, almost all of it for references that were resident
-     * and unchanged since the previous frame.
+     * **Why.** Most references in a steady frame are resident and unchanged since the previous frame, so
+     * driving each through the scheduler costs a frame far more than the one lease it ends in.
      *
      * **What it keeps.** The lease goes to [leaseSink] and then [leaseObserver], exactly as
      * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. Decided per
@@ -212,6 +201,14 @@ internal class PreparationDriver(
         return references.filter { it.resourceKey !in bypassedKeys }
     }
 
+    /**
+     * [leaseSink], when supplied, collects every resident-cache lease this run takes, so the owner that
+     * asked for the operation can release them once it is done with the content -- which is what
+     * [com.rohittp.reng.PreparedFrame.close] does with the ones its own preparation took. Omitting it
+     * leaves the leases outstanding for the cache's lifetime.
+     * [leaseObserver], when supplied, runs immediately after that lease has been recorded for cleanup;
+     * throwing from it aborts the operation while leaving the lease reachable by the caller's rollback.
+     */
     suspend fun run(
         definition: ResourceOperationDefinition,
         leaseSink: MutableList<Lease>? = null,
@@ -341,13 +338,6 @@ internal class PreparationDriver(
         requireNotNull(outcome)
     }
 }
-
-/**
- * Whether a [PreparationDriver] built without an explicit `shadowCheck` checks its session against the pure
- * transition path. False in production. A test run may set it to put every driven operation in the suite
- * through the differential check.
- */
-internal var shadowCheckSessionsByDefault: Boolean = false
 
 /**
  * Executes one action through [executor] and, if that throws a bare [CancellationException] rather than

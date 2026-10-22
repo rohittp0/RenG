@@ -732,3 +732,25 @@ private fun assertLifecycleUnderARealContext(
     binding.deleteFramebuffers(1, intArrayOf(survivor))
     GlErrorQueue.drainOnEntry(binding)
 }
+
+/**
+ * Reads [textureUnitCount] units' 2D bindings and samplers. Capture saves only the units a draw writes
+ * (ADR 0055); a conformance check looks at more units than that, so a unit RenG touched and failed to
+ * restore is visible.
+ */
+private fun captureTextureUnits(binding: GlBinding, textureUnitCount: Int): List<GlTextureUnitState> {
+    require(textureUnitCount > 0) { "at least one texture unit is captured" }
+    fun integer(pname: Int): Int = IntArray(1).also { binding.getIntegerv(pname, it) }.single()
+    val activeTextureUnit = integer(GL_ACTIVE_TEXTURE)
+    val units = ArrayList<GlTextureUnitState>(textureUnitCount)
+    for (index in 0 until textureUnitCount) {
+        binding.activeTexture(GL_TEXTURE0 + index)
+        units += GlTextureUnitState(
+            unit = GL_TEXTURE0 + index,
+            texture2d = integer(GL_TEXTURE_BINDING_2D),
+            sampler = integer(GL_SAMPLER_BINDING),
+        )
+    }
+    binding.activeTexture(activeTextureUnit)
+    return units
+}

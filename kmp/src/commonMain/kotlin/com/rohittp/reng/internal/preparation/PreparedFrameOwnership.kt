@@ -4,6 +4,7 @@ import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.PreparedFrameClosePayload
 import com.rohittp.reng.PreparedTerrain
 import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.RenGException
 import com.rohittp.reng.RenGPreparedFrame
 import com.rohittp.reng.RendererConfiguration
 import com.rohittp.reng.internal.DiagnosticField
@@ -74,18 +75,21 @@ internal class PreparedFrameOwnership(
 
     internal fun requirePreparedFrameCpuAdmission(update: PreparedFrameCpuBudget.Update) {
         if (update is PreparedFrameCpuBudget.Update.Rejected) {
-            throw renGFailure(
-                RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                PipelineStage.FRAME_PREPARATION,
-                failureContextDiagnostic(
-                    stage = PipelineStage.FRAME_PREPARATION,
-                    fieldName = DiagnosticField.PREPARED_FRAME_CPU_BYTES,
-                    limit = configuration.resourceLimits.maximumInFlightPreparedFrameCpuBytes,
-                    actual = update.projectedBytes,
-                ),
-            )
+            throw preparedFrameCpuRejection(update.projectedBytes)
         }
     }
+
+    /** The `RESOURCE_LIMIT_EXCEEDED` a frame whose CPU projection [projectedBytes] was refused fails with. */
+    internal fun preparedFrameCpuRejection(projectedBytes: Long): RenGException = renGFailure(
+        RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+        PipelineStage.FRAME_PREPARATION,
+        failureContextDiagnostic(
+            stage = PipelineStage.FRAME_PREPARATION,
+            fieldName = DiagnosticField.PREPARED_FRAME_CPU_BYTES,
+            limit = configuration.resourceLimits.maximumInFlightPreparedFrameCpuBytes,
+            actual = projectedBytes,
+        ),
+    )
 
     internal fun disposePreparedFrame(frame: RenGPreparedFrame) {
         val payload = frame.takeClosePayload()
@@ -110,16 +114,29 @@ internal class PreparedFrameOwnership(
      * replacement frame cannot be admitted while raw pixels or resident generations remain retained.
      */
     internal fun releasePreparedFrameOwnership(payload: PreparedFrameClosePayload) {
+        releasePreparedFrameOwnership(payload.rawTileReservation, payload.leases, payload.preparedFrameCpuReservation)
+    }
+
+    /**
+     * [releasePreparedFrameOwnership] for tokens no frame was constructed to hold, as a preparation that
+     * failed before its frame existed leaves them; [preparedFrameCpuReservation] is `null` when it failed
+     * before admission.
+     */
+    internal fun releasePreparedFrameOwnership(
+        rawTileReservation: RawTileBudget.Reservation?,
+        leases: List<Lease>,
+        preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation?,
+    ) {
         try {
             try {
-                payload.rawTileReservation?.release()
+                rawTileReservation?.release()
             } catch (_: Throwable) {
                 // Continue draining resident generations.
             }
-            releaseLeases(payload.leases)
+            releaseLeases(leases)
         } finally {
             try {
-                payload.preparedFrameCpuReservation.release()
+                preparedFrameCpuReservation?.release()
             } catch (_: Throwable) {
                 // Ownership is already terminal; no later token remains to drain.
             }

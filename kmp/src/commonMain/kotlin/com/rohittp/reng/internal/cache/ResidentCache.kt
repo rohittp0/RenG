@@ -334,10 +334,9 @@ internal class ResidentCache(
      *
      * **Why restoring is right.** A lookup observes residency without leasing it, then runs its class
      * gates (a PNG decode, a GLB parse), and only then installs visibility; the budget sweep that runs on
-     * every install, attach and lease release may evict the key in that window, since nothing leased it.
-     * Measured on an OPPO CPH2629 (2026-10-08): a 1080p export with 16 image stickers failed at frame 44
-     * with `RESOURCE_UNAVAILABLE {STICKER_IMAGE}`, and one with 16 vehicles once with `{MODEL_TEXTURE}`,
-     * though the route held every byte it needed. An evicted key is one this cache forgot on its own
+     * every install, attach and lease release may evict the key in that window, since nothing leased it,
+     * and refusing then would fail a frame whose route holds every byte it needs (ADR 0047's 2026-10-22
+     * note). An evicted key is one this cache forgot on its own
      * (ADR 0047), and the bytes in hand are the exact bytes the class gates just validated, so installing
      * them is the reload the next lookup would have made anyway (ADR 0059's same-key, same-digest content).
      *
@@ -535,9 +534,9 @@ internal class ResidentCache(
      *
      * A current generation is a candidate whenever it holds no lease. A leased one is skipped rather
      * than stopping the sweep, so one live frame cannot pin the whole cache above its budget. A key's
-     * retired generations are not candidates -- each exists only because something leases it -- but
-     * they no longer shield the key's unleased current generation: an old frame holding the previous
-     * generation would otherwise keep the new one resident for as long as it lived.
+     * retired generations are not candidates -- each exists only because something leases it -- and
+     * they do not shield the key's unleased current generation, or an old frame holding the previous
+     * generation would keep the new one resident for as long as it lived.
      *
      * An evicted key is **never marked `freed`** (ADR 0047): `freed` means the consumer asked, and
      * `wasFreed` turns it into a diagnostic blaming them for a decision this cache made on its own. With
@@ -698,5 +697,6 @@ private class EvictionQueue {
         return minimum
     }
 
+    /** Every queued `(stamp, key)`, in heap order; read only by [ResidentCache.evictableKeys]. */
     fun entries(): List<Pair<Long, ResourceKey>> = List(size) { stamps[it] to checkNotNull(keys[it]) }
 }

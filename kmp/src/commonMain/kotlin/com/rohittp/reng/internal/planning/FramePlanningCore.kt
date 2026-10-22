@@ -163,8 +163,7 @@ internal sealed interface FramePlanningOutcome {
  * [FramePlanningCore.plan] and read-ahead call this one function, so the tiles warmed for a frame cannot
  * drift from the tiles `prepare` later selects for it.
  *
- * Cycle G task 10: this dispatch used to be `GLOBE -> return unsupportedProjectionModeFailure()`. It is
- * an exhaustive dispatch to two sibling planners rather than one planner taking a mode, because the
+ * This is an exhaustive dispatch to two sibling planners rather than one planner taking a mode, because the
  * globe's footprint and tile selection are not the Mercator ones reparameterised -- see
  * `planGlobeSpatial` and `selectGlobeTiles` for what actually differs.
  */

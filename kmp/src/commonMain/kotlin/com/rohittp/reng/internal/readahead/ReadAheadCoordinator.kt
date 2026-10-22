@@ -242,12 +242,6 @@ internal class ReadAheadCoordinator(
         )
     }
 
-    /** Tiles and bytes the rendered-tile cache holds, or zero when it is disabled. For tests only. */
-    internal val renderedTileCacheTiles: Int
-        get() = renderedTileCache?.size ?: 0
-    internal val renderedTileCacheBytes: Long
-        get() = renderedTileCache?.bytes ?: 0L
-
     internal suspend fun awaitReadAheadIdle() {
         readAheadLock.withLock { readAheadScheduler }?.awaitIdle()
     }

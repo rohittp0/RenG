@@ -27,7 +27,6 @@ import com.rohittp.reng.internal.firewall.reportLabelContentExclusions
 import com.rohittp.reng.internal.firewall.reportTerrainDegradation
 import com.rohittp.reng.internal.gl.BACKDROP_SAMPLER_STATE
 import com.rohittp.reng.internal.gl.BackdropPipeline
-import com.rohittp.reng.internal.gl.BloomFarBandStrategy
 import com.rohittp.reng.internal.gl.BloomResourceManager
 import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.ConsumerBackdropPipelineResult
@@ -253,7 +252,7 @@ internal class RenGRenderer(
 
     /**
      * The canonical form and derived keys of every consumer shader pair this renderer has seen, shared
-     * by the validation, planning, encoding and draw paths that each used to derive them again.
+     * by the validation, planning, encoding and draw paths so none of them derives them again.
      */
     private val shaderPairMemo = ShaderPairMemo(shaderPairMemoCapacity(configuration.maximumConsumerPipelinesPerFrame))
 
@@ -348,12 +347,6 @@ internal class RenGRenderer(
     private var globeGroundPipeline: GlobeGroundPipeline? = null
 
     private val bloomResourceManager = BloomResourceManager(configuration = configuration, programs = programs)
-
-    /**
-     * How a far band reaches its level (ADR 0085). Internal: [BloomFarBandStrategy.COARSE_REDRAW]
-     * exists only so RenG's own tests can measure what the reach image buys.
-     */
-    internal var bloomFarBandStrategy: BloomFarBandStrategy = BloomFarBandStrategy.REACH_IMAGE
 
     private var identityRegistry: CanonicalIdentityRegistry = CanonicalIdentityRegistry()
     private var framePlanningCore: FramePlanningCore = newFramePlanningCore(identityRegistry)
@@ -494,7 +487,7 @@ internal class RenGRenderer(
 
     // ---- Read-ahead (ADR 0075) ----------------------------------------------------------------
 
-    private val readAheadCoordinator: ReadAheadCoordinator = ReadAheadCoordinator(
+    internal val readAheadCoordinator: ReadAheadCoordinator = ReadAheadCoordinator(
         configuration = configuration,
         basemapEngineHost = basemapEngineHost,
         glObjectRegistry = glObjectRegistry,
@@ -512,17 +505,9 @@ internal class RenGRenderer(
         renderedTileCache = readAheadCoordinator.renderedTileCache,
     )
 
-    internal val readAheadWorkerStarted: Boolean
-        get() = readAheadCoordinator.readAheadWorkerStarted
-
     override fun readAhead(plans: List<FramePlan>) {
         readAheadCoordinator.readAhead(plans)
     }
-
-    internal val renderedTileCacheTiles: Int
-        get() = readAheadCoordinator.renderedTileCacheTiles
-    internal val renderedTileCacheBytes: Long
-        get() = readAheadCoordinator.renderedTileCacheBytes
 
     override suspend fun awaitReadAheadIdle() {
         readAheadCoordinator.awaitReadAheadIdle()
@@ -778,16 +763,8 @@ internal class RenGRenderer(
                 )
             ) {
                 is PreparedFrameCpuBudget.Admission.Admitted -> admission.reservation
-                is PreparedFrameCpuBudget.Admission.Rejected -> throw renGFailure(
-                    RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                    PipelineStage.FRAME_PREPARATION,
-                    failureContextDiagnostic(
-                        stage = PipelineStage.FRAME_PREPARATION,
-                        fieldName = DiagnosticField.PREPARED_FRAME_CPU_BYTES,
-                        limit = configuration.resourceLimits.maximumInFlightPreparedFrameCpuBytes,
-                        actual = admission.projectedBytes,
-                    ),
-                )
+                is PreparedFrameCpuBudget.Admission.Rejected ->
+                    throw frameOwnership.preparedFrameCpuRejection(admission.projectedBytes)
             }
             preparedFrameCpuReservation = cpuReservation
 
@@ -973,7 +950,7 @@ internal class RenGRenderer(
                         tileSizeLogicalPixels = backdrop.tileSizeLogicalPixels,
                     )
                 }
-                // The uniform map is snapshotted here for the reason Task 9b item 3 gives for a
+                // The uniform map is snapshotted here for the reason [PreparedGeometry] gives for a
                 // geometry's: it is the consumer's own reference until this `.toMap()`.
                 is Backdrop.Shader -> PreparedBackdrop.Shader(
                     shaderPair = backdrop.shaderPair,
@@ -1187,37 +1164,12 @@ internal class RenGRenderer(
                 if (abandonedFrame != null) {
                     frameOwnership.disposePreparedFrame(abandonedFrame)
                 } else {
-                    try {
-                        try {
-                            rawTileReservation?.release()
-                        } catch (_: Throwable) {
-                            // Continue draining resident generations.
-                        }
-                        frameOwnership.releaseLeases(leases)
-                    } finally {
-                        try {
-                            preparedFrameCpuReservation?.release()
-                        } catch (_: Throwable) {
-                            // Ownership is terminal; no later token remains to drain.
-                        }
-                    }
+                    frameOwnership.releasePreparedFrameOwnership(rawTileReservation, leases, preparedFrameCpuReservation)
                 }
             }
         }
     }
 
-    /**
-     * Decodes the glyph atlas the engine packed for this frame, to the same canonical RGBA8 every
-     * other image in this renderer becomes.
-     *
-     * **The failure is the one the identical bytes already have elsewhere**, not a new policy: an
-     * engine-produced PNG that `decodePng` will not take is `RESOURCE_DECODE_FAILED` at
-     * `RESOURCE_DECODING`, exactly as a sticker or geometry texture is a few lines up in
-     * [acquireFrameResources], and exactly as a rendered ground tile is at draw time. What is
-     * genuinely reachable here is the budget rather than a malformed container: an atlas shares
-     * [ResourceLimits.maximumDecodedImageBytes] with every raster RenG decodes, and a style whose
-     * font stacks pack past it fails the frame rather than drawing text without its glyphs.
-     */
     /**
      * [decodeGlyphAtlas], but paid once per distinct atlas rather than once per frame that keeps a label.
      *
@@ -1243,26 +1195,40 @@ internal class RenGRenderer(
             )
             return retained.image
         }
-        val png = prescanPng(pngBytes)
+        val decoded = decodeChargingProjection(
+            png = prescanPng(pngBytes),
+            what = "glyph-atlas",
+            charge = preparedFrameCpuReservation::tryAddFrameOwned,
+            decode = ::decodeGlyphAtlas,
+        )
+        retainedGlyphAtlas = RetainedGlyphAtlas(key, decoded)
+        return decoded
+    }
+
+    /**
+     * Decodes [png], charging its decoded bytes to the prepared-frame CPU budget through [charge]: the
+     * header's projection before the decode when it is within `maximumDecodedImageBytes`, so an
+     * over-budget frame fails before allocating, and otherwise the actual byte count after it, so a
+     * decoder whose scanner cannot project still attaches no uncharged expansion. [what] names the
+     * image in the check that projection and decode agree.
+     */
+    private inline fun decodeChargingProjection(
+        png: PngPrescan,
+        what: String,
+        charge: (Long) -> PreparedFrameCpuBudget.Update,
+        decode: (PngPrescan) -> DecodedImage,
+    ): DecodedImage {
         val projectedBytes = png.projectedRgbaBytes
-        if (
-            projectedBytes != null &&
-            projectedBytes <= configuration.resourceLimits.maximumDecodedImageBytes
-        ) {
-            frameOwnership.requirePreparedFrameCpuAdmission(
-                preparedFrameCpuReservation.tryAddFrameOwned(projectedBytes),
-            )
+        if (projectedBytes != null && projectedBytes <= configuration.resourceLimits.maximumDecodedImageBytes) {
+            frameOwnership.requirePreparedFrameCpuAdmission(charge(projectedBytes))
         }
-        val decoded = decodeGlyphAtlas(png)
+        val decoded = decode(png)
         check(projectedBytes == null || projectedBytes == decoded.byteCount.toLong()) {
-            "glyph-atlas projection and decoded byte count must agree"
+            "$what projection and decoded byte count must agree"
         }
         if (projectedBytes == null) {
-            frameOwnership.requirePreparedFrameCpuAdmission(
-                preparedFrameCpuReservation.tryAddFrameOwned(decoded.byteCount.toLong()),
-            )
+            frameOwnership.requirePreparedFrameCpuAdmission(charge(decoded.byteCount.toLong()))
         }
-        retainedGlyphAtlas = RetainedGlyphAtlas(key, decoded)
         return decoded
     }
 
@@ -1289,25 +1255,12 @@ internal class RenGRenderer(
             return retained
         }
         val key = geometryKeyDeriver.spriteAtlas(manifest.atlasPngBytes).key
-        val png = prescanPng(manifest.atlasPngBytes)
-        val projectedBytes = png.projectedRgbaBytes
-        if (
-            projectedBytes != null &&
-            projectedBytes <= configuration.resourceLimits.maximumDecodedImageBytes
-        ) {
-            frameOwnership.requirePreparedFrameCpuAdmission(
-                preparedFrameCpuReservation.tryAddFrameOwned(projectedBytes),
-            )
-        }
-        val decoded = decodeSpriteAtlas(png)
-        check(projectedBytes == null || projectedBytes == decoded.byteCount.toLong()) {
-            "sprite-atlas projection and decoded byte count must agree"
-        }
-        if (projectedBytes == null) {
-            frameOwnership.requirePreparedFrameCpuAdmission(
-                preparedFrameCpuReservation.tryAddFrameOwned(decoded.byteCount.toLong()),
-            )
-        }
+        val decoded = decodeChargingProjection(
+            png = prescanPng(manifest.atlasPngBytes),
+            what = "sprite-atlas",
+            charge = preparedFrameCpuReservation::tryAddFrameOwned,
+            decode = ::decodeSpriteAtlas,
+        )
         return RetainedSpriteAtlas(manifest, key, decoded).also { retainedSpriteAtlas = it }
     }
 
@@ -1344,6 +1297,18 @@ internal class RenGRenderer(
             )
         }
 
+    /**
+     * Decodes the glyph atlas the engine packed for this frame, to the same canonical RGBA8 every
+     * other image in this renderer becomes.
+     *
+     * **The failure is the one the identical bytes already have elsewhere**, not a new policy: an
+     * engine-produced PNG that `decodePng` will not take is `RESOURCE_DECODE_FAILED` at
+     * `RESOURCE_DECODING`, exactly as a sticker or geometry texture is a few lines up in
+     * [acquireFrameResources], and exactly as a rendered ground tile is at draw time. What is
+     * genuinely reachable here is the budget rather than a malformed container: an atlas shares
+     * [ResourceLimits.maximumDecodedImageBytes] with every raster RenG decodes, and a style whose
+     * font stacks pack past it fails the frame rather than drawing text without its glyphs.
+     */
     private fun decodeGlyphAtlas(png: PngPrescan): DecodedImage =
         when (
             val decoded = png.decode(
@@ -1365,21 +1330,6 @@ internal class RenGRenderer(
             )
         }
 
-    /**
-     * This frame's terrain in the form the draw needs, or `null` when it has none to draw with.
-     *
-     * **`Degraded` collapses to `null` here rather than being carried**, because by this point ADR
-     * 0041's report has already been emitted and the two degradations have exactly one remaining
-     * consequence: the whole ground draws flat, which is what a `null` terrain means. Carrying the
-     * reason onward would put a second authority on that decision inside the draw.
-     *
-     * An `Acquired` outcome with **no** DEM tiles is deliberately *not* collapsed. Its per-frame
-     * uniforms — the decode, the interior size, the exaggeration — are properties of the source
-     * rather than of the coverage, so the frame keeps them, every tile draws flat because each one
-     * individually has no DEM, and the coverage diagnostic has already named the count. Collapsing
-     * would make the frame's granularity fall back to the flat rule as a side effect of a coverage
-     * gap, which is a different picture from the one the style asked for.
-     */
     /**
      * The CPU-readable view of the surface this frame's ground will draw, or `null` when nothing in
      * the frame asked where the ground is.
@@ -1474,6 +1424,21 @@ internal class RenGRenderer(
         }
     }
 
+    /**
+     * This frame's terrain in the form the draw needs, or `null` when it has none to draw with.
+     *
+     * **`Degraded` collapses to `null` here rather than being carried**, because by this point ADR
+     * 0041's report has already been emitted and the two degradations have exactly one remaining
+     * consequence: the whole ground draws flat, which is what a `null` terrain means. Carrying the
+     * reason onward would put a second authority on that decision inside the draw.
+     *
+     * An `Acquired` outcome with **no** DEM tiles is deliberately *not* collapsed. Its per-frame
+     * uniforms — the decode, the interior size, the exaggeration — are properties of the source
+     * rather than of the coverage, so the frame keeps them, every tile draws flat because each one
+     * individually has no DEM, and the coverage diagnostic has already named the count. Collapsing
+     * would make the frame's granularity fall back to the flat rule as a side effect of a coverage
+     * gap, which is a different picture from the one the style asked for.
+     */
     private fun preparedTerrain(acquired: FrameAcquisition): PreparedTerrain? {
         val outcome = acquired.terrain as? TerrainAcquisitionOutcome.Acquired ?: return null
         val demTiles = LinkedHashMap<CanonicalBasemapTile, AcquiredDemTile>()
@@ -1872,55 +1837,38 @@ internal class RenGRenderer(
             }
             // Decoded once per generation, not once per frame (ADR 0059). The only consumer of these
             // pixels is `cachedTexture`'s upload lambda, which does not run once a texture is
-            // registered -- so before this, every frame after a sticker's first decoded its PNG and
-            // threw the result away. Measured at 14.3 ms for one 512x512 image on a native build,
-            // against a consumer frame budget of about 51 ms.
+            // registered, so a per-frame decode would be thrown away on every frame after the first.
             val residentDecoded = generation.decoded
             if (residentDecoded != null) {
                 decodedByKey[reference.resourceKey] = residentDecoded
                 continue
             }
-            val stored = generation.stored
-            val png = prescanPng(stored.byteSnapshot)
-            val projectedRgbaBytes = png.projectedRgbaBytes
-            if (
-                projectedRgbaBytes != null &&
-                projectedRgbaBytes <= configuration.resourceLimits.maximumDecodedImageBytes
-            ) {
-                val projectedGenerationBytes = SaturatingByteCounter().apply {
-                    add(generation.byteSize)
-                    add(projectedRgbaBytes)
-                }.bytes
-                frameOwnership.requirePreparedFrameCpuAdmission(
-                    preparedFrameCpuReservation.tryProjectGeneration(generation, projectedGenerationBytes),
-                )
-            }
-            val image = when (
-                val decoded = png.decode(
-                    configuration.resourceLimits.maximumDecodedImageBytes,
-                    configuration.resourceLimits.maximumImageDecodeWorkingBytes,
-                )
-            ) {
-                is PngDecodeResult.Success -> decoded.image
-                else -> throw imageDecodeFailure(reference)
-            }
-            // Decode is synchronous and may dominate an image-heavy frame. Observe cancellation
-            // before retaining its result or starting another image.
-            currentCoroutineContext().ensureActive()
-            check(projectedRgbaBytes == null || projectedRgbaBytes == image.byteCount.toLong()) {
-                "PNG projection and decoded byte count must agree"
-            }
-            if (projectedRgbaBytes == null) {
-                // Successful PNGs normally take the header projection above. Keep this fallback so a
-                // future decoder format cannot attach an uncharged expansion if its scanner lags it.
-                val actualGenerationBytes = SaturatingByteCounter().apply {
-                    add(generation.byteSize)
-                    add(image.byteCount.toLong())
-                }.bytes
-                frameOwnership.requirePreparedFrameCpuAdmission(
-                    preparedFrameCpuReservation.tryProjectGeneration(generation, actualGenerationBytes),
-                )
-            }
+            val image = decodeChargingProjection(
+                png = prescanPng(generation.stored.byteSnapshot),
+                what = "PNG",
+                charge = { decodedBytes ->
+                    val generationBytes = SaturatingByteCounter().apply {
+                        add(generation.byteSize)
+                        add(decodedBytes)
+                    }.bytes
+                    preparedFrameCpuReservation.tryProjectGeneration(generation, generationBytes)
+                },
+                decode = { png ->
+                    val decoded = when (
+                        val result = png.decode(
+                            configuration.resourceLimits.maximumDecodedImageBytes,
+                            configuration.resourceLimits.maximumImageDecodeWorkingBytes,
+                        )
+                    ) {
+                        is PngDecodeResult.Success -> result.image
+                        else -> throw imageDecodeFailure(reference)
+                    }
+                    // Decode is synchronous and may dominate an image-heavy frame. Observe cancellation
+                    // before retaining its result or starting another image.
+                    currentCoroutineContext().ensureActive()
+                    decoded
+                },
+            )
             // Charged to maximumResidentCpuResourceBytes here, which is what keeps this memo bounded
             // and what finally makes `queryResources`' decodedCpuBytes a number rather than a zero.
             residentCache.attachDecoded(generation, image)
@@ -2470,9 +2418,8 @@ internal class RenGRenderer(
             // The captured region opens HERE, not inside drawFrame (ADR 0054). `resolveGroundTiles`
             // uploads every ground tile that is not already resident, and an upload ends by binding
             // its new texture without putting back what was there — on whatever unit the host left
-            // active. Capturing after that recorded RenG's own texture as if it were the host's and
-            // faithfully restored it, losing the host's binding: measured at four of a frame's
-            // twenty-four texture binds landing before the capture began.
+            // active. Capturing after that would record RenG's own texture as if it were the host's
+            // and restore it, losing the host's binding.
             //
             // `drawFrame` still opens a region of its own for every other caller, and finds this one
             // already open and joins it.
@@ -2480,32 +2427,32 @@ internal class RenGRenderer(
                 when (val resolved = resolveGroundTiles(frame, textureLeases, captured)) {
                     is GroundTilesResult.Failed -> resolved.failure
                     is GroundTilesResult.Resolved -> {
-                    // ADR 0057's "and say so", emitted before the draw rather than after it so that
-                    // a frame which then fails has still told the consumer what it was about to
-                    // present. One per frame, never one per tile.
-                    if (resolved.provisionalTileCount > 0) {
-                        stagedDiagnostics += groundPresentedProvisionallyDiagnostic(resolved.provisionalTileCount)
+                        // ADR 0057's "and say so", emitted before the draw rather than after it so that
+                        // a frame which then fails has still told the consumer what it was about to
+                        // present. One per frame, never one per tile.
+                        if (resolved.provisionalTileCount > 0) {
+                            stagedDiagnostics += groundPresentedProvisionallyDiagnostic(resolved.provisionalTileCount)
+                        }
+                        drawResolvedFrame(
+                            backdropPipeline = backdrop,
+                            frame = frame,
+                            framebufferName = framebufferName,
+                            profile = profile,
+                            surface = surface,
+                            composite = composite,
+                            sticker = sticker,
+                            ground = ground,
+                            label = label,
+                            icon = icon,
+                            resolvedCamera = resolvedCamera,
+                            sceneGroundTiles = resolved.tiles,
+                            textureLeases = textureLeases,
+                            gpuAllocationLeases = gpuAllocationLeases,
+                            consumerPipelineLeases = consumerPipelineLeases,
+                            stagedDiagnostics = stagedDiagnostics,
+                            binding = captured,
+                        )
                     }
-                    drawResolvedFrame(
-                        backdropPipeline = backdrop,
-                        frame = frame,
-                        framebufferName = framebufferName,
-                        profile = profile,
-                        surface = surface,
-                        composite = composite,
-                        sticker = sticker,
-                        ground = ground,
-                        label = label,
-                        icon = icon,
-                        resolvedCamera = resolvedCamera,
-                        sceneGroundTiles = resolved.tiles,
-                        textureLeases = textureLeases,
-                        gpuAllocationLeases = gpuAllocationLeases,
-                        consumerPipelineLeases = consumerPipelineLeases,
-                        stagedDiagnostics = stagedDiagnostics,
-                        binding = captured,
-                    )
-                }
                 }
             }
         } finally {
@@ -2682,7 +2629,6 @@ internal class RenGRenderer(
                 depthRenderbuffer = surface.depthRenderbuffer,
                 stagedDiagnostics = stagedDiagnostics,
                 binding = binding,
-                bloomFarBandStrategy = bloomFarBandStrategy,
             )
         } else {
             null
@@ -2776,7 +2722,6 @@ internal class RenGRenderer(
             bloomResources = resolvedBloomResources,
             surfaceFramebuffer = surface.framebuffer,
             surfaceDepthRenderbuffer = surface.depthRenderbuffer,
-            bloomFarBandStrategy = bloomFarBandStrategy,
         )
 
         return drawFrame(
@@ -2799,10 +2744,9 @@ internal class RenGRenderer(
      * reconciles it with the globe's curvature claim, because a frame draws its whole ground at one
      * granularity or a sliver of background shows between two tiles that disagree.
      *
-     * The LOD is the frame's own rather than any tile's (ADR 0066). It used to be read off the first
-     * ground instance, on the premise that both tile selectors emit one LOD per frame; ADR 0065 ended
-     * that for Mercator, and `first()` became the coarsest band at the top of the frame. A frame with
-     * no ground instances still returns `null` above before reaching here.
+     * The LOD is the frame's own rather than any tile's (ADR 0066): under ADR 0065 a Mercator frame's
+     * ground instances span several LODs, so no single instance speaks for the frame. A frame with no
+     * ground instances returns `null` above before reaching here.
      */
     private fun sceneTerrain(frame: RenGPreparedFrame): SceneTerrain? {
         val terrain = frame.terrain ?: return null

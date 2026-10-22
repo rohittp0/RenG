@@ -102,12 +102,9 @@ internal class ResourceActionExecutor(
     private val clock: () -> Long,
     /**
      * Where every lease this executor takes is recorded, so the owner that requested the operation can
-     * release it once it is finished with the content -- the "owner-lease bookkeeping" [installVisibility]
-     * used to name as a future task's job. A [com.rohittp.reng.PreparedFrame] releasing its own leases on
-     * `close()` is exactly that owner, and without this the lease of every generation a preparation ever
-     * installed stayed outstanding for the renderer's whole life. Null keeps the older behaviour -- the
-     * lease is still taken, which is what keeps the generation alive, and then simply dropped -- which is
-     * what every test that drives this class directly still wants.
+     * release it once it is finished with the content; a [com.rohittp.reng.PreparedFrame] releasing its
+     * own leases on `close()` is that owner. Null still takes the lease, which is what keeps the
+     * generation alive, and then drops it, leaving it outstanding for the cache's lifetime.
      */
     private val leaseSink: MutableList<Lease>? = null,
     /** Invoked only after the matching lease is reachable through [leaseSink] for rollback. */
@@ -271,8 +268,7 @@ internal class ResourceActionExecutor(
      * The returned [Lease] is recorded in [leaseSink] whenever the owner supplied one, so that owner can
      * release it once the content is no longer needed -- a [com.rohittp.reng.PreparedFrame] releasing its
      * own leases on `close()` is precisely that. With no sink the lease is still taken (it is what keeps
-     * the generation alive) but not retained, which is the older behaviour every direct test of this class
-     * relies on.
+     * the generation alive) but not retained.
      *
      * A [ContentProvenance.RESIDENT] generation can genuinely vanish between when this route first
      * observed it and when visibility is installed here. The common way is the cache's own budget
@@ -297,14 +293,8 @@ internal class ResourceActionExecutor(
             ContentProvenance.TRANSPORT_200,
             ContentProvenance.TRANSPORT_304_MERGED,
             -> {
-                // Two statements, and they cannot be collapsed into one. Writing the record as a safe call
-                // on the sink -- `leaseSink?.add(cache.installAndTakeLease(...))` -- would take the install
-                // with it: a Kotlin safe call short-circuits its whole argument list, so with no sink
-                // supplied the install never runs at all and the resource is never made resident. The cache
-                // call is therefore always evaluated into a local first, and the record is a plain call
-                // that decides for itself whether there is a sink to write to.
-                // DriverCancellationTest.contentAcquiredBeforeCancellationMayRemainResident is the test
-                // that catches the collapsed form.
+                // The cache call is always evaluated into a local before [recordLease]: as an argument
+                // of a safe call on the sink it would be skipped whenever no sink is supplied.
                 // Freshly resolved does not mean different (ADR 0059). A resource whose server
                 // declares no freshness is re-read from the Store on every frame, and installing a
                 // byte-identical twin of the generation already here costs the budget twice, retires

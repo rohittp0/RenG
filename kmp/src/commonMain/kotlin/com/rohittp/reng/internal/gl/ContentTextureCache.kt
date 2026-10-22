@@ -10,7 +10,7 @@ internal class ContentTextureCache(
     private val glObjectRegistry: GlObjectRegistry,
 ) {
     /**
-     * Task 9b item 1: the texture-lifetime fix. Looks [key] up in [glObjectRegistry] first — the
+     * Looks [key] up in [glObjectRegistry] first — the
      * SAME registry [driver]'s own `forgetWithoutDeleting()` clears on context loss and on
      * [notifyGpuObjectsGone] (ADR 0007/0015: forgotten, not deleted, since the GL handles are already
      * gone and there is nothing valid left to delete) — and only calls [upload] on a genuine cache

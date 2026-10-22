@@ -55,3 +55,7 @@ Huffman decoder and repairs nothing: it succeeds only for a stream the platform 
 same bytes (header, `NLEN`, final block, exact length, Adler-32, nothing trailing), and every other stream,
 and every failure, goes through the platform seam from the start, so rejections stay the platform's.
 `PngStoredFastPathTest` holds the two paths to identical output, including under IDAT mutation.
+
+**Note, 2026-10-22.** The fast path's Adler-32 comes from the platform's zlib (`Adler32Stream`): a Kotlin
+byte loop was the largest single cost of decoding one large stored texture on the preview's GL thread
+(83 of 199 samples, OPPO CPH2629, 2026-10-09).

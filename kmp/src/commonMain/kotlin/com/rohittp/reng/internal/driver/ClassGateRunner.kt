@@ -73,8 +73,7 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
      *
      * Every gate re-derives its answer from the whole resource and the driver asks on every
      * preparation, so an unchanged resident PNG was copied out of the store and decoded again purely
-     * to re-answer "is this a valid PNG". Measured on a OnePlus 12R by the fork this is ported from:
-     * a frame carrying a 2048x1365 area fill, 334 ms to 119 ms.
+     * to re-answer "is this a valid PNG".
      *
      * Sound rather than merely likely: validity is a pure function of the bytes and `contentDigest`
      * is a SHA-256 of exactly those bytes. Keyed by gate *and* digest because the three ask different

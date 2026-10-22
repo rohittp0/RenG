@@ -170,18 +170,16 @@ internal object ResourceOperationStateMachine {
      * [ResourceOperationState.Running] on every event.
      *
      * **Why.** That copy is O(routes + occurrences) per event and a frame raises several events per
-     * resource, so a frame's scheduling was O(n^2): on an OPPO CPH2629 (2026-10-08, Geoanimator's
-     * ComplexityScalingBenchmarkTest, 1080p) a frame with 64 text labels -- three texture references
-     * each -- spent 657 ms in `prepare` against 11 ms without them, and the reducer's copy, refreeze and
-     * re-validation were 30% of every sample in the process. The decisions are unchanged: the session
-     * runs the same [SchedulerWork] methods [transition] does, in the same order, on the same events.
+     * resource, which makes a frame's scheduling O(n^2) in its resources. The decisions are unchanged:
+     * the session runs the same [SchedulerWork] methods [transition] does, in the same order, on the
+     * same events.
      *
      * **What the pure core still guarantees.** Every decision is still a deterministic function of the
      * definition and the events applied, actions are handed out as detached immutable lists, and
      * [snapshot] builds the same validated [ResourceOperationState.Running] [transition] would have, so a
-     * test can check the session against the pure path step by step. What production no longer does is
-     * re-run the whole state's invariant checks on every event; those detect implementation bugs, not bad
-     * input, and the differential check is where they now run.
+     * test can check the session against the pure path step by step. Production does not re-run the
+     * whole state's invariant checks on every event; those detect implementation bugs, not bad input,
+     * and the differential check is where they run.
      *
      * Confined to one coroutine, as the driver that owns it already is.
      */
@@ -256,17 +254,16 @@ internal object ResourceOperationStateMachine {
 
         /**
          * Ordinals of routes whose status is [ResourceRouteStatus.ELIGIBLE], ascending, maintained wherever a
-         * status changes. [startNotYetStartedRoutes] used to filter and sort every route record on every
-         * route completion, O(routes log routes) per completion and so O(routes^2 log routes) per operation;
-         * it now walks this queue from the front, in the same ordinal order, under the same filters. Ordinals
-         * are assigned in increasing order as routes become eligible, so an insertion is almost always an
-         * append. An entry whose route has since left ELIGIBLE is dropped when the walk reaches it.
+         * status changes, so [startNotYetStartedRoutes] walks it from the front, in ordinal order, instead of
+         * filtering and sorting every route record on every completion (which would be O(routes^2 log routes)
+         * per operation). Ordinals are assigned in increasing order as routes become eligible, so an
+         * insertion is almost always an append. An entry whose route has since left ELIGIBLE is dropped when
+         * the walk reaches it.
          *
-         * Consumed from [eligibleHead] rather than by removing index 0, which shifted the whole remaining
-         * list on every route start and made the walk quadratic again for long operations. A route that can
-         * never start (its private key's claim is unusable) is dropped when the walk reaches it, so nothing
-         * stays in front of the live head for long; the consumed prefix is compacted away once it is most of
-         * the list.
+         * Consumed by advancing [eligibleHead] rather than by removing index 0, which would shift the whole
+         * remaining list on every route start and make the walk quadratic. A route that can never start (its
+         * private key's claim is unusable) is dropped when the walk reaches it, so nothing stays in front of
+         * the live head for long; the consumed prefix is compacted away once it is most of the list.
          */
         private val eligibleOrdinals: MutableList<Long> = ArrayList()
         private var eligibleHead: Int = 0
@@ -286,22 +283,13 @@ internal object ResourceOperationStateMachine {
             }
         }
 
-        /**
-         * Takes the entry at [position] out of the live queue, by advancing the head when it is the head, and
-         * returns where the walk continues: the new head, or the same position when an entry behind the head
-         * was removed and the rest shifted down onto it.
-         */
-        private fun consumeEligible(position: Int): Int {
-            if (position != eligibleHead) {
-                eligibleOrdinals.removeAt(position)
-                return position
-            }
+        /** Takes the head entry out of the live queue by advancing [eligibleHead], compacting the consumed prefix. */
+        private fun consumeEligible() {
             eligibleHead += 1
             if (eligibleHead >= COMPACT_ELIGIBLE_AFTER && eligibleHead * 2 >= eligibleOrdinals.size) {
                 eligibleOrdinals.subList(0, eligibleHead).clear()
                 eligibleHead = 0
             }
-            return eligibleHead
         }
 
         fun dispatch(event: ResourceOperationEvent) = dispatchEvent(this, event)
@@ -2340,14 +2328,13 @@ internal object ResourceOperationStateMachine {
             val ceiling = startCeilingOrdinal
             val expected = if (crossCheckIndexes) startableOrdinalsByScan() else null
             val started = if (crossCheckIndexes) mutableListOf<Long>() else null
-            var position = eligibleHead
-            while (position < eligibleOrdinals.size) {
+            while (eligibleHead < eligibleOrdinals.size) {
                 if (activeRouteOrdinals.size >= initial.definition.maximumConcurrentRoutes) break
-                val ordinal = eligibleOrdinals[position]
+                val ordinal = eligibleOrdinals[eligibleHead]
                 val index = routeIndexByOrdinal[ordinal]
                 val record = index?.let(routeRecords::get)
                 if (record == null || record.status != ResourceRouteStatus.ELIGIBLE || record.ordinal != ordinal) {
-                    position = consumeEligible(position)
+                    consumeEligible()
                     continue
                 }
                 // Ascending, so nothing past the ceiling can start either.
@@ -2358,10 +2345,10 @@ internal object ResourceOperationStateMachine {
                     // fails the operation, and nothing makes one usable again. Dropping it now, rather
                     // than stepping over it on every later call, keeps every later start a head
                     // consumption instead of a removal from the middle.
-                    position = consumeEligible(position)
+                    consumeEligible()
                     continue
                 }
-                position = consumeEligible(position)
+                consumeEligible()
                 updateRouteRecord(index, status = ResourceRouteStatus.RUNNING)
                 activeRouteOrdinals += ordinal
                 actions += StartRoute(ordinal, record.registration)

@@ -236,10 +236,9 @@ private fun groundLodForRow(
  * A band costs its own tile selection, and `selectBasemapTiles` admits every tile *intersecting* a
  * footprint, so each extra band pays for the tiles straddling one more shared edge (ADR 0065).
  *
- * At 20 degrees of pitch the unmerged rule peels a 34-row band off the top of a 1080x1920 frame,
- * 1.8% of its height, and the split costs two tiles more than the coarser level saves. Requiring a
- * band to be worth a thirty-second of the frame removes that outright and is also the best of the
- * thresholds measured at the steep end.
+ * At shallow pitch the unmerged rule peels a sliver band off the top of the frame whose split costs
+ * more tiles than the coarser level saves. Requiring a band to be worth a thirty-second of the frame
+ * removes that outright (ADR 0065).
  *
  * A band merges forward, into the next in row order and so always the finer one, leaving a merged
  * band never blurrier than the rule asked for. A trailing band merges backward for the same reason.

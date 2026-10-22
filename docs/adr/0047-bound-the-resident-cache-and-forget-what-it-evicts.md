@@ -92,3 +92,20 @@ generation kept the key's unleased current generation resident however far over 
 evicts any unleased current generation. A key with retired generations keeps its entry, holding only
 those, until the last of their leases is released, and then is removed; it is never marked `freed`, it
 reads as not resident, and a route that observed it earlier restores into the same entry.
+
+## Note, 2026-10-22: content textures may take a GPU pool of their own
+
+`ResourceLimits.maximumResidentGpuContentTextureBytes` splits content textures (stickers, model and
+geometry textures, label text) from key-registered textures (tiles, DEMs, basemap atlases). Under one
+shared LRU, content is drawn every frame and so is always the most recent: tiles take every eviction.
+On an OPPO CPH2629 (2026-10-08, 1080p export, 128 MiB shared budget) sixteen 1024x768 stickers put
+48 MiB of textures beside the tiles, and the export re-rasterised 128 tiles in 120 frames against about
+11 without them, with every CPU-side resource resident.
+
+## Note, 2026-10-22: an evicted key a route already validated is restored, not refused
+
+A lookup observes residency without leasing it, so the budget sweep may evict the key before the
+route installs visibility. On an OPPO CPH2629 (2026-10-08) a 1080p export with 16 image stickers failed
+at frame 44 with `RESOURCE_UNAVAILABLE {STICKER_IMAGE}`, and one with 16 vehicles once with
+`{MODEL_TEXTURE}`, though the route held every byte it needed. `ResidentCache.observeOrRestoreAndTakeLease`
+installs the bytes the route already validated in that case.

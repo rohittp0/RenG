@@ -171,3 +171,8 @@ target of any role is now a half-float refusal, and every set made after one is 
 upsample levels included. `BLOOM_EMISSION_PRECISION_REDUCED` is still staged only for a frame that
 asked for half-float. The light helper also zeroes a NaN before it clamps (GLSL leaves `clamp` of a NaN
 undefined), and the composite reads the emission alpha it suppresses by through the same helper.
+
+## Amendment, 2026-10-22: the coarse-redraw comparison strategy is removed
+
+`BloomFarBandStrategy.COARSE_REDRAW`, kept only so RenG's tests could compare it with the reach image,
+is deleted along with the strategy switch; the reach image is the far band's only form.

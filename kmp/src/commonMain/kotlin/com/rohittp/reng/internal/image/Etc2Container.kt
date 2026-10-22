@@ -24,8 +24,9 @@ internal sealed interface TextureImage {
 }
 
 /**
- * One admitted ETC2 container: a complete mip chain of [format] blocks, sRGB-encoded and already
- * premultiplied by its producer (ADR 0084), so nothing on the way to a texture multiplies it again.
+ * One admitted ETC2 container: level zero and up to the rest of its mip chain, in [format] blocks,
+ * sRGB-encoded and already premultiplied by its producer (ADR 0084), so nothing on the way to a
+ * texture multiplies it again.
  *
  * A view, not a copy. The levels stay where they arrived, inside the stored raw resource's immutable
  * snapshot, which this image shares rather than duplicating: the generation already pays for those

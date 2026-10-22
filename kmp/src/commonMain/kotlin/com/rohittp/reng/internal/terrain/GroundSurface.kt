@@ -64,9 +64,8 @@ internal class GroundSurfaceTile(val source: DemTileCoordinate, val window: DemT
  *
  * ## Nothing here decodes anything
  *
- * Rentile `0.7.0` hands over already-decoded texels, so a lookup is three array reads and
- * [demElevationMetres]. The design's §6 argument for a *sparse* CPU decode — that decoding the
- * visible set would cost about 224 MiB — describes a decode that no longer exists. This surface
+ * Rentile hands over already-decoded texels (ADR 0044), so a lookup is three array reads and
+ * [demElevationMetres], and the design's §6 argument for a *sparse* CPU decode does not apply. This surface
  * retains the existing immutable [com.rohittp.reng.internal.image.DecodedImage] references and reads
  * channels through their internal indexed accessor; construction copies no DEM raster. The renderer
  * still builds the tile index only for a frame that actually queries elevation.

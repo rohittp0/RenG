@@ -277,10 +277,10 @@ private val PRESENTABLE_COLOUR_CLASSES: Set<RentileResourceClass> =
  * engine did not declare are all `null` too.
  *
  * Reads `affectedTiles` and nothing else [classifyEngineFailure] declines to read: never the `message`,
- * never `diagnostics`, never `statusCode`. A status code is deliberately not consulted. The phone this
- * was measured on was offline, which produces no status at all, and a 403 on one tile whose ancestor the
- * same credential fetched is no different to the consumer from a 503: either way the frame has the
- * ancestor's pixels and not the tile's.
+ * never `diagnostics`, never `statusCode`. A status code is deliberately not consulted: an offline
+ * device produces no status at all, and a 403 on one tile whose ancestor the same credential fetched
+ * is no different to the consumer from a 503: either way the frame has the ancestor's pixels and not
+ * the tile's.
  *
  * **One limit, inherited from the engine.** Rentile acquires a source sample once however many requested
  * tiles share it, and the failure names only the tile whose sample it acquired. Two tiles overzoomed past

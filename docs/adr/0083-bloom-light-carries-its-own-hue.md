@@ -67,3 +67,9 @@ shipped: about 1 ms per frame.
 
 This extends ADR 0082: its shoulder, frame copy, blend state and constants are unchanged, and ADR
 0074's chain, targets, suppression and placement (as amended by ADR 0080) are unchanged.
+
+## Note, 2026-10-22: the steer is skipped below its start
+
+Skipping the Oklab round trip where the steer's weight is zero (strength at or below
+`BLOOM_HUE_STEER_START`) took the composite's extra cost on an OPPO CPH2629 from about 2.0 to about
+1.0 ms per 1080x1920 frame.

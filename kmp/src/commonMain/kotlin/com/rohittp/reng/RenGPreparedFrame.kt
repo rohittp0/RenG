@@ -19,13 +19,11 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * GL-shaped, since GPU texture upload and geometry-pipeline compilation both need a live render
  * context and therefore happen in [RenGRenderer.draw], not here.
  *
- * **Task 9b item 3, closed here.** [geometries] no longer retains the exact [Geometry] instances
- * [FramePlan] carried with their live `uniforms`/`textures` `Map` references — every [PreparedGeometry]
- * in [geometries] carries a fixed `.toMap()` snapshot of `uniforms` and fully resolved, already-decoded
- * `consumerTextures`, both taken once, synchronously, inside `RenGRenderer.prepare()`. A consumer
- * mutating their own `uniforms`/`textures` map after `prepare()` returns can no longer change what a
- * later `draw()` on this same frame renders, closing the divergence [Geometry]'s own KDoc used to
- * document as an open gap.
+ * **[geometries] never retains a consumer's live `Map`.** Every [PreparedGeometry] carries a fixed
+ * `.toMap()` snapshot of `uniforms` and fully resolved, already-decoded `consumerTextures`, both taken
+ * once, synchronously, inside `RenGRenderer.prepare()`, so a consumer mutating their own
+ * `uniforms`/`textures` map after `prepare()` returns cannot change what a later `draw()` of this frame
+ * renders.
  */
 internal class RenGPreparedFrame(
     owner: RenGRenderer,
@@ -35,9 +33,8 @@ internal class RenGPreparedFrame(
     /**
      * Which projection the plan asked for, carried because [camera] alone cannot say: [Camera]'s
      * five fields mean the same thing in both modes and it is the *mode* that decides whether they
-     * describe a plane or a sphere (ADR 0037). A Prepared Frame used to carry no projection mode at
-     * all, which was honest while `FramePlanningCore` refused `GLOBE`; without it the draw would
-     * have to guess, and the guess it would make is the one that draws a globe frame flat.
+     * describe a plane or a sphere (ADR 0037). Without it the draw would have to guess, and the
+     * guess it would make is the one that draws a globe frame flat.
      */
     internal val projectionMode: ProjectionMode,
     internal val drawBasemap: Boolean,
@@ -135,10 +132,9 @@ internal class RenGPreparedFrame(
      * off `MercatorSpatialPlan.mapEntries` / `.screenEntries` at `prepare()` time and carried, never
      * re-derived at draw time.
      *
-     * The GL layer used to throw both answers away and rebuild them from a second resolution of every
-     * `Placement` plus a second sort inside `drawStickers`, which made the planner's unit-tested split
-     * and screen-compositing sort decorative. Snapshotting them here is what makes the planner the one
-     * authority: `internal.gl.Scene` consumes these lists and derives neither.
+     * Snapshotting them here makes the planner the one authority for the regime split and the
+     * screen-compositing sort: `internal.gl.Scene` consumes these lists and derives neither, so no
+     * second resolution of a `Placement` can disagree with the planner's.
      *
      * [mapOrder] is the planner's declaration order (stickers, then models) and is a statement of
      * regime membership rather than a draw order — ADR 0030's phase order is applied over it by

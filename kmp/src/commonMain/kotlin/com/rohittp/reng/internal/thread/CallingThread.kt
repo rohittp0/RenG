@@ -15,7 +15,7 @@ internal expect fun currentCallingThread(): CallingThread
 /**
  * Whether this call is on the thread [CallingThread] names.
  *
- * A predicate rather than an equality, because the platform answer is `pthread_equal` on the native
- * targets and identifiers there are not comparable by value.
+ * A predicate rather than an equality, because the native targets answer it by the identity of a
+ * per-thread `@ThreadLocal` token, which has no value to compare.
  */
 internal expect fun CallingThread.isCurrentThread(): Boolean

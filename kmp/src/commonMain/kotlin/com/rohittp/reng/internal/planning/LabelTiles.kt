@@ -7,7 +7,7 @@ package com.rohittp.reng.internal.planning
  * `BasemapEngineHost.labelCandidateRequestKey` is rentile's, over the sorted de-duplicated tile set,
  * and `RenGRenderer.labelHandover` retains exactly one answer under it. So the whole acquisition --
  * every label tile, every Glyph Range, a re-packed byte-identical atlas -- is paid again the moment
- * any single tile enters or leaves. Measured at 514-520 ms of a 605-610 ms `prepare()`, about 85%.
+ * any single tile enters or leaves, which is most of a `prepare()` (ADR 0070).
  *
  * Handing that key the ground's per-frame selection guarantees a miss on every frame a camera moves.
  * `HANDOFF.md` is right that "a moving camera evicts any bounded cache every frame", which is why
@@ -62,18 +62,9 @@ internal fun ringExpandedLabelTiles(
 }
 
 /**
- * How many tiles of margin a rebuilt label set carries, and **one** is measured rather than assumed.
+ * How many tiles of margin a rebuilt label set carries.
  *
  * A wider margin buys fewer rebuilds and pays for each quadratically, so the total turns around
- * immediately. Over a 120-frame pan at a tenth of a tile a frame, pitch 45:
- *
- * | margin | acquisitions | widest set | tiles fetched |
- * |---|---|---|---|
- * | none, today | 96 | 27 | 2592 |
- * | **one tile** | **13** | 77 | **1001** |
- * | two tiles | 9 | 151 | 1359 |
- * | three tiles | 7 | 240 | 1680 |
- *
- * One tile is the minimum and also the best of the three; there is nothing to tune here.
+ * immediately: one tile is the minimum and fetches the fewest tiles over a pan (ADR 0070's table).
  */
 internal const val LABEL_TILE_RINGS: Int = 1

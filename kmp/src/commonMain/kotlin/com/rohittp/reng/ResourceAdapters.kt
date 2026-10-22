@@ -195,13 +195,10 @@ public class StoredRawResource private constructor(
      * An equal-bytes resource carrying [metadata], which shares this one's snapshot instead of copying
      * it (ADR 0062 erratum).
      *
-     * **Why.** RenG used to re-wrap a resource it already held as `StoredRawResource(other.byteSnapshot,
-     * ...)` -- on every resident hit in every preparation, on every validated store read, and on every
-     * write it hands to the consumer's `Store` -- and each of those ran the public constructor's full
-     * array copy. On an OPPO CPH2629 exporting a 28 s 720p24 project, simpleperf charged 2.2% of all of
-     * the app's CPU to `memcpy` under this constructor, reached through `PreparationDriver.run`: tiles,
-     * terrain DEMs and styles are the largest arrays RenG holds, copied once a frame each, and the copies
-     * fed a garbage collector that took another 8.3%.
+     * **Why.** Re-wrapping a resource RenG already holds -- on every resident hit in every preparation,
+     * every validated store read, and every write handed to the consumer's `Store` -- would otherwise
+     * run the public constructor's full array copy on the largest arrays RenG holds (tiles, terrain
+     * DEMs, styles) once a frame each (ADR 0062 erratum).
      *
      * **Why it is safe.** The copy defended nothing. The array is private, never mutated, and reachable
      * from outside only through [bytes], which copies; so two resources sharing it are as independent

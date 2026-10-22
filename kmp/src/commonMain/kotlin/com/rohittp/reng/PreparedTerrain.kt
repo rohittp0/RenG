@@ -14,18 +14,13 @@ import com.rohittp.reng.internal.terrain.demTileWindowFor
  * One frame's terrain: everything the ground needs to displace itself, decoded but not yet padded and
  * not yet on the GPU.
  *
- * **Nothing here decodes anything, and until Rentile `0.7.0` that sentence was the opposite.** The
- * encoded bytes used to be carried to the draw and inflated there by RenG's own PNG decoder, which
- * cost a decode of every DEM in every frame's request -- the visible set plus its perimeter ring --
- * even when every padded texture was already resident, and which reached exactly **one** of the six
- * corpus styles that ask for terrain, because the other five serve WebP. The engine now hands over
- * the pixels it decoded to validate the tile, so that debt is not paid down but deleted: there is no
- * decode left to skip.
+ * **Nothing here decodes anything.** The engine hands over the pixels it decoded to validate the
+ * tile, so no DEM is decoded per frame and a WebP-served DEM needs no decoder of RenG's (ADR 0044).
  *
  * **What is still per-frame is the padding**, because `uploadDemTexture` consults residency only
  * after it is handed an assembled `PaddedDemTexture`. The repair `PaddedDemTexture.contentKey`'s own
  * KDoc names -- composing that key from the nine digests, which are known here, before assembling
- * anything -- is now fully available and is not taken in this task.
+ * anything -- is available and not yet taken.
  *
  * [demTiles] is keyed by **requested** canonical tile, which is how the acquisition matched it
  * (ADR 0041: never by list index). Its `sourceTile` may differ -- an overzoom or a world wrap -- and
@@ -58,8 +53,8 @@ internal class PreparedTerrain(
      * displaces only if it has a window onto its source ([demTileWindowFor]) and a source that can be
      * padded ([canPadDemTexture]); both are pure functions of what this class already holds, so the
      * frame can know its own coverage during `prepare()`, where the diagnostic fires, instead of
-     * discovering it at draw time where nothing was listening. Task 13's harness pass printed
-     * `diagnostics: none` for a frame that discarded every DEM it fetched, and this is why it could.
+     * discovering it at draw time where nothing was listening and a frame that discarded every DEM it
+     * fetched could report no diagnostic.
      *
      * **[canPadDemTexture] excludes nothing today, and is here on purpose.** Every tile that reached
      * this class came through `TerrainAcquisition.matchDemTiles`, which admits only a positive square

@@ -35,7 +35,7 @@ public class FramePlan(
     backdrop: Backdrop? = null,
     /**
      * The screen-space bloom applied to emissive geometries, or `null` for no emission pass.
-     * Declared last so every previously shipped positional parameter keeps its meaning.
+     * Declared last so every earlier positional parameter keeps its meaning.
      */
     bloom: Bloom? = null,
 ) {

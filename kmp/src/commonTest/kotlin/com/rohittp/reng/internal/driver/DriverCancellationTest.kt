@@ -45,7 +45,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
-import kotlin.test.assertTrue
 
 /**
  * Cancellation through [PreparationDriver]: an external caller cancelling its own coroutine must stop a

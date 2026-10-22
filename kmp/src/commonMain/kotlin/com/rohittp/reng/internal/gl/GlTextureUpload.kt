@@ -123,7 +123,7 @@ private fun checkedPositiveProduct(left: Long, right: Long): Long {
  * `CONTEXT.md` sets this same precedent for terrain samples, which must stay bit-exact.
  *
  * [image] is never mutated by either path. DATA is consumed synchronously from its immutable backing;
- * IMAGE premultiplication writes only into a bounded upload workspace. Cycle C's canonical decoded
+ * IMAGE premultiplication writes only into a bounded upload workspace. RenG's canonical decoded
  * form stays unpremultiplied.
  *
  * [sampler] sets the four `glTexParameteri` calls this upload always makes, and defaults to exactly

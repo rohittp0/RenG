@@ -267,7 +267,7 @@ internal const val NEAR_DISTANCE_LOGICAL_PIXELS: Double = 1.0
  * degrees (ADR 0064).
  *
  * **A numerical guard, not a work bound**, which is why it sits this close to 90: a ray just below
- * the horizon has a vanishing `q` and an arbitrarily large `t`, which used to reach tile selection
+ * the horizon has a vanishing `q` and an arbitrarily large `t`, which unguarded reaches tile selection
  * as a footprint spanning thousands of world copies -- an `OverBudget` failure, or a non-finite
  * vertex collapsing to an empty map. Bounding the *work* is `basemapLodForGroundAngle`'s job, which
  * leaves this free to sit where the arithmetic stops being trustworthy.
@@ -277,8 +277,8 @@ internal const val NEAR_DISTANCE_LOGICAL_PIXELS: Double = 1.0
  * is this constant's problem here, so it is inherited rather than rechosen.
  *
  * With a 22.5-degree vertical half field of view and `theta = pitch + atan(v)` exactly, this first
- * bites at `89.25 - 22.5 = 66.75` degrees of pitch: measured across the sweep it removes 0.00% of
- * frame height at 66.75, 0.62% at 67.0 and 1.60% at 67.4.
+ * bites at `89.25 - 22.5 = 66.75` degrees of pitch, and clips only a sliver of frame height just past
+ * it (ADR 0064).
  */
 internal const val MAXIMUM_GROUND_ANGLE_DEGREES: Double = 89.25
 

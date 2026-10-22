@@ -488,7 +488,6 @@ internal class SceneContent(
     private val bloomResources: BloomResources? = null,
     private val surfaceFramebuffer: Int? = null,
     private val surfaceDepthRenderbuffer: Int? = null,
-    private val bloomFarBandStrategy: BloomFarBandStrategy = BloomFarBandStrategy.REACH_IMAGE,
 ) : GlFrameContent {
 
     /**
@@ -747,8 +746,8 @@ internal class SceneContent(
         val farBandLevel = bloomFarBandLevel(bloom)
         val someEmitterReaches = emitters.any { it.sceneGeometry.geometry.bloomReach > 0f }
         val farBand = if (farBandLevel != null && bloomHasFarBand(bloom, someEmitterReaches)) {
-            BloomFarBand(farBandLevel, bloomFarBandStrategy) {
-                drawBloomFarBand(binding, bloom, emitters, geometryViewProjection)
+            BloomFarBand(farBandLevel) {
+                drawBloomFarBand(binding, emitters, geometryViewProjection)
             }
         } else {
             null
@@ -817,8 +816,7 @@ internal class SceneContent(
      * the target [drawBloom] has bound, with the grid, view-projection and consumer values of its
      * emission redraw and `rengGeometryEmissionPass` at one.
      *
-     * Under [BloomFarBandStrategy.REACH_IMAGE] the target is the full-resolution reach image, which
-     * shares the main depth renderbuffer, so the depth state is the emission redraw's. Each emitter's
+     * The target is the full-resolution reach image, which shares the main depth renderbuffer, so the depth state is the emission redraw's. Each emitter's
      * premultiplied light is scaled by its reach through the blend constant's alpha and composited
      * over the reach image as the emission redraw composites (`CONSTANT_ALPHA, ONE_MINUS_SRC_ALPHA`;
      * alpha `ONE, ONE_MINUS_SRC_ALPHA`, unscaled). `reachGain` is applied later, unclamped, where the
@@ -831,41 +829,25 @@ internal class SceneContent(
      * RenG does not query. The blend colour is
      * returned to GL's default afterwards; it is a member of the Restore Set, so the consumer's own
      * value comes back when the draw returns either way.
-     *
-     * Under the internal [BloomFarBandStrategy.COARSE_REDRAW] the target is the chain's level itself,
-     * smaller than the depth renderbuffer and without a depth attachment, so the depth test is off;
-     * the light is added scaled by `min(1, reach * reachGain)` (`CONSTANT_ALPHA, ONE`) and the level's
-     * alpha kept (`ZERO, ONE`). ES 3.0 clamps a blend constant to one, which is why it is clamped here.
      */
     private fun drawBloomFarBand(
         binding: GlBinding,
-        bloom: Bloom,
         emitters: List<BloomEmitter>,
         geometryViewProjection: FloatArray,
     ) {
-        val coarse = bloomFarBandStrategy == BloomFarBandStrategy.COARSE_REDRAW
-        if (coarse) {
-            binding.disable(GL_DEPTH_TEST)
-        } else {
-            binding.enable(GL_DEPTH_TEST)
-            binding.depthFunc(GL_GEQUAL)
-        }
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
         binding.depthMask(false)
         binding.disable(GL_CULL_FACE)
         binding.enable(GL_BLEND)
         binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-        if (coarse) {
-            binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE, GL_ZERO, GL_ONE)
-        } else {
-            binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-        }
+        binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         for (emitter in emitters) {
             // An emitter with an empty grid bound nothing in the emission redraw, and draws nothing here.
             if (emitter.grid.triangleIndices.isEmpty()) continue
             val reach = emitter.sceneGeometry.geometry.bloomReach
             if (reach <= 0f) continue
-            val weight = if (coarse) minOf(1f, reach * bloom.reachGain) else reach
-            binding.blendColor(0f, 0f, 0f, weight)
+            binding.blendColor(0f, 0f, 0f, reach)
             drawEmissionRedraw(binding, emitter, geometryViewProjection)
         }
         binding.blendColor(0f, 0f, 0f, 0f)

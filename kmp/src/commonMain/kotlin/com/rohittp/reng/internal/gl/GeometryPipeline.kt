@@ -98,9 +98,8 @@ internal class GeometryPipeline(
      * Consumer uniform and sampler names resolved against [program], memoised on first use.
      *
      * The six names above are known at creation and resolved there; a consumer's arrive with each
-     * `Geometry`, so [drawGeometry] used to ask the driver for every one on every draw -- forty-six
-     * `glGetUniformLocation` calls per instance per frame for a geometry declaring forty-six
-     * uniforms. A location is a property of the linked program, and the two are deleted together in
+     * `Geometry`, and without this memo [drawGeometry] would ask the driver for every one on every
+     * draw. A location is a property of the linked program, and the two are deleted together in
      * [deleteGeometryPipeline], so the memo cannot outlive what it describes.
      *
      * Negative locations are deliberately not cached. Consumer-authored names can vary without
@@ -124,9 +123,9 @@ internal class GeometryPipeline(
      * The CPU byte buffers [drawGeometry] packs this pipeline's grid into before uploading it, reused
      * across draws and grown by doubling.
      *
-     * Each draw used to allocate two fresh `ByteArray`s: eighty bytes on a Mercator geometry, but on
-     * the globe and drape paths, where a grid reaches [MAXIMUM_GLOBE_GROUND_CELLS_PER_TILE_SIDE]
-     * cells a side, about a megabyte per geometry per frame.
+     * Reused because on the globe and drape paths, where a grid reaches
+     * [MAXIMUM_GLOBE_GROUND_CELLS_PER_TILE_SIDE] cells a side, fresh arrays would be about a megabyte
+     * per geometry per frame.
      *
      * Safe to reuse only because they reach [GlBinding.bufferData] with an explicit byte count,
      * which every platform actual passes to `glBufferData` while pinning from index zero -- so an
@@ -397,9 +396,8 @@ internal fun drawGeometry(
 
     // Iterated directly, not copied. Both maps are already private to the frame being drawn:
     // `PreparedGeometry.uniformsSnapshot` is a `.toMap()` taken at prepare() time and never the
-    // caller's own reference, and the texture map is built fresh per frame from it. The copies that
-    // used to stand here guarded this call's iteration against a structural mutation that no
-    // production caller can perform, at the cost of two map copies per geometry per frame.
+    // caller's own reference, and the texture map is built fresh per frame from it, so no
+    // production caller can mutate either during this iteration.
     //
     // That makes it the caller's obligation rather than this function's: pass maps nothing else can
     // mutate while this call runs.

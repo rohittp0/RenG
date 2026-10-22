@@ -15,12 +15,10 @@ internal class CanonicalBytes private constructor(bytes: ByteArray, adopt: Boole
          * only to be digested. Either way no reference that could write to it survives, so the copy
          * defended nothing, and the bytes, equality and hash are those the copying constructor gives.
          *
-         * **Why.** Each level of a canonical encoding allocated its output, filled it, and then copied it
-         * again in this constructor; a frame plan is nested several levels deep and carries its
-         * geometries' vertices, so it was copied that many extra times on every `prepare`. Hashing a
-         * stored resource copied the whole tile or DEM to read it once. Simpleperf on an OPPO CPH2629
-         * exporting a 28 s 720p24 project put `CanonicalFieldWriter.encode` and `CanonicalBinary.list`
-         * among the memcpy-heavy frames, with 8.3% of the app's CPU in the garbage collector.
+         * **Why.** A frame plan's encoding is nested several levels deep and carries its geometries'
+         * vertices, so copying each level's freshly built output would copy it that many extra times
+         * on every `prepare`, and hashing a stored resource would copy the whole tile or DEM to read
+         * it once (ADR 0062).
          */
         internal fun adopting(unwritten: ByteArray): CanonicalBytes = CanonicalBytes(unwritten, adopt = true)
     }

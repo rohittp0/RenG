@@ -8,11 +8,9 @@ import com.rohittp.reng.internal.canonicalDouble
  * `CanonicalBinary.fields { field(1, exactUtf8(name)); field(2, value) }`, sorted by name, gives -- written
  * straight into one array.
  *
- * **Why.** After ADR 0081 took the shader sources out of a geometry's encoding, its uniforms were 79% of
- * what was left: every uniform became a name record, a value record, a list and one canonical object per
- * float, each allocated and then copied into the next level up, on every `prepare`. A label carries many
- * uniforms and a motion-blurred export prepares every output frame up to six times; on an OPPO CPH2629
- * (2026-10-09) the frame encoding was a fifth of RenG's time. Here the list is sized in one pass and
+ * **Why.** Uniforms are most of a geometry's encoding, and composing it would make every uniform a name
+ * record, a value record, a list and one canonical object per float, each allocated and copied into the
+ * next level up on every `prepare` (ADR 0081). Here the list is sized in one pass and
  * written in a second, with no intermediate objects.
  *
  * **The bytes and the failures are the composed encoders'.** Names go through [CanonicalBinary.exactUtf8]
@@ -20,8 +18,7 @@ import com.rohittp.reng.internal.canonicalDouble
  * the message it always did. Values are written as [canonicalDouble] writes them -- negative zero as zero
  * -- but not checked again: a [ShaderValue] is immutable and refuses a non-finite component at
  * construction (every variant's `init`, and [ShaderValue] is sealed), so the finiteness check the
- * composed encoders made could never fail here, and on an OPPO CPH2629 export (2026-10-09) it was about
- * a sixth of plan identity encoding. `UniformListEncodingTest` holds this to the composed encoding over
+ * composed encoders made could never fail here. `UniformListEncodingTest` holds this to the composed encoding over
  * randomised maps.
  *
  * [names] belongs to one encoder, which only its own planning core calls, one `prepare` at a time.

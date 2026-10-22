@@ -36,7 +36,11 @@ internal class GlProgramCache {
 
     internal fun keys(): List<ResourceKey> = ArrayList(programs.keys)
 
-    /** The shadow of the program cached under [key]; the program must be cached. */
+    /**
+     * The shadow of the program cached under [key]; the program must be cached. A cached program has at
+     * most one live consumer pipeline: [ConsumerPipelineCache] registers one pipeline per key, a
+     * pipeline's key is its program's key, and deleting the pipeline removes the program.
+     */
     internal fun consumerShadow(key: ResourceKey): ConsumerValueShadow {
         check(key in programs) { "a consumer-value shadow belongs to a cached program" }
         return shadows.getOrPut(key) { ConsumerValueShadow() }

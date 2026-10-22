@@ -457,6 +457,14 @@ internal class OperationRegistry(
     fun knowsStore(stableId: String, engineClass: EngineResourceClass): Boolean =
         routeIndex.storeRoutes.containsKey(StoreIndexKey(stableId, engineClass))
 
+    /** The route this registry preregistered for the exact `(url, engine class)` Transport carries, if any. */
+    fun transportRouteOf(url: String, engineClass: EngineResourceClass): ResourceRouteKey? =
+        routeIndex.transportRoutes[TransportIndexKey(url, engineClass)]
+
+    /** The route this registry preregistered for the exact `(stableId, engine class)` a Store key carries, if any. */
+    fun storeRouteOf(stableId: String, engineClass: EngineResourceClass): ResourceRouteKey? =
+        routeIndex.storeRoutes[StoreIndexKey(stableId, engineClass)]
+
     /**
      * Whether this registry latched a Transport response for the route [stableId] and [engineClass] name,
      * and that response's digest is exactly [digest].

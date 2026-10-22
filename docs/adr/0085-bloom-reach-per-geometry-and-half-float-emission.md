@@ -176,3 +176,9 @@ undefined), and the composite reads the emission alpha it suppresses by through 
 
 `BloomFarBandStrategy.COARSE_REDRAW`, kept only so RenG's tests could compare it with the reach image,
 is deleted along with the strategy switch; the reach image is the far band's only form.
+
+## Amendment, 2026-10-22: the far redraw replays program state since link
+
+The uniform step 1 called unrestorable -- one nothing earlier in the frame set but a later emitter does
+-- is now replayed: per ADR 0080's later 2026-10-22 amendment, every redraw sets each value its program
+has held since link as the emitter saw it, and a value never set to its link-time zero.

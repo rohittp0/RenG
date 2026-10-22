@@ -205,6 +205,82 @@ class ReadAheadRoutingTest {
         }
     }
 
+    /**
+     * The same case with five more foreground operations opening and closing between the exchange and
+     * its write. Nothing bounds how many foregrounds a slow warm flight outlives, so the operation that
+     * served the exchange must still be found however many came after it (ADR 0075's 2026-10-22 note).
+     */
+    @Test
+    fun aWarmWriteSurvivesManyForegroundsClosingAfterTheOneThatServedIt() = runTest {
+        val transport = GatedHostTransport()
+        val store = MemoryHostStore()
+        val recorder = EngineMetricRecorder()
+        val host = readAheadHost(transport, store, recorder)
+        try {
+            val style = host.compile()
+
+            val foregroundMayClose = CompletableDeferred<Unit>()
+            val foreground = async {
+                host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                    foregroundMayClose.await()
+                }
+            }
+            kotlinx.coroutines.yield()
+            val warm = async { host.warmWindow(style, listOf(HOST_RASTER_TILE), listOf(hostRasterRoute)) }
+            transport.awaitEntered()
+
+            foregroundMayClose.complete(Unit)
+            awaitResult(foreground)
+            repeat(5) { host.withOperation(ResourceAccessMode.NORMAL) {} }
+            transport.release()
+            val summary = awaitResult(warm)
+
+            assertEquals(ReadAheadWarmSummary(fetched = 1, alreadyCached = 0, failed = 0), summary)
+            assertEquals(1, transport.callCount(), "one exchange")
+            assertEquals(1, store.writeCount(), "the warm's bytes reach the Store")
+            assertEquals(0, host.servedExchangeRecordCount, "the write consumed its record")
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * A record of a served exchange lives only as long as the window. Here the exchange fails, so no
+     * write ever consumes its record; the record exists while the window is open (read in afterWarm,
+     * which runs inside it) and is gone once the window has ended.
+     */
+    @Test
+    fun aServedExchangeRecordIsNotRetainedAfterTheWindowEnds() = runTest {
+        val transport = ScriptedHostTransport(failFirst = Int.MAX_VALUE)
+        val store = MemoryHostStore()
+        val recorder = EngineMetricRecorder()
+        val host = readAheadHost(transport, store, recorder)
+        try {
+            val style = host.compile()
+
+            val foregroundMayClose = CompletableDeferred<Unit>()
+            val foreground = async {
+                host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                    foregroundMayClose.await()
+                }
+            }
+            kotlinx.coroutines.yield()
+            var recordsInsideTheWindow = -1
+            val summary = host.warmWindow(style, listOf(HOST_RASTER_TILE), listOf(hostRasterRoute)) {
+                recordsInsideTheWindow = host.servedExchangeRecordCount
+            }
+            foregroundMayClose.complete(Unit)
+            awaitResult(foreground)
+
+            assertEquals(1, summary.failed, "the exchange failed, so nothing was written")
+            assertEquals(0, store.writeCount())
+            assertEquals(1, recordsInsideTheWindow, "the foreground served the warm's exchange and it was recorded")
+            assertEquals(0, host.servedExchangeRecordCount, "nothing is retained once the window has ended")
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun aFailedTileIsCountedNeverThrowsAndTheNextWindowRetriesIt() = runTest {
         val transport = ScriptedHostTransport(failFirst = 1)

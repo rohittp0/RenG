@@ -159,25 +159,47 @@ internal class BasemapEngineHost(
     private var readAheadOperation: FirewallOperation? = null
 
     /**
-     * Foreground operations that closed while a read-ahead window was open, newest last, kept only so
-     * that a warm flight whose Transport call they served can still write its bytes (see
-     * [RoutedEngineStore.write]). A warm flight's exchange is routed foreground-first, so when the
-     * foreground knows the url it is the foreground registry that latches the digest; a foreground that
-     * is then cancelled or fails closes before the warm's write arrives, and the read-ahead registry,
-     * which never latched those bytes, would refuse the write as an integrity failure. Bounded, and
-     * cleared when the window ends: a write can only arrive while the warm that started it is running.
+     * For each read-ahead route whose Transport exchange a foreground operation served while the window
+     * was open, that operation (ADR 0075's 2026-10-22 note). A warm flight's exchange is routed
+     * foreground-first, so when the foreground knows the url it is the foreground registry that latches
+     * the digest; that foreground may close (a cancelled or failed prepare) before the flight's Store
+     * write arrives, and the read-ahead registry, which never latched those bytes, would refuse the
+     * write as an integrity failure. The write looks its route up here and removes the entry, so a
+     * closed operation is retained exactly while an exchange it served has a write still to come.
+     *
+     * Keyed by the read-ahead registry's own route object, which its Transport index and Store index
+     * resolve to alike, so the url a Transport request carries and the `(stableId, class)` a Store key
+     * carries find the same entry.
+     *
+     * Every write to this map, and to [readAheadOperation] when a window opens or ends, happens under
+     * [servedExchangesLock]; a record is added only after re-checking under the lock that the window it
+     * was routed in is still the open one. So a window's end, which clears the map in the same critical
+     * section that unpublishes the window, can never be followed by a record for that window.
      */
-    private var lingeringForeground: List<FirewallOperation> = emptyList()
-    private val lingeringLock = PlatformLock()
+    private val servedExchanges = HashMap<ResourceRouteKey, FirewallOperation>()
+    private val servedExchangesLock = PlatformLock()
 
-    private fun retireForeground(operation: FirewallOperation) {
-        if (readAheadOperation == null) return
-        lingeringLock.withLock {
-            lingeringForeground = (lingeringForeground + operation).takeLast(MAXIMUM_LINGERING_FOREGROUND_OPERATIONS)
+    /** How many served-exchange records are held; for tests of the window's lifetime. */
+    internal val servedExchangeRecordCount: Int get() = servedExchangesLock.withLock { servedExchanges.size }
+
+    private fun recordServedExchange(window: FirewallOperation, route: ResourceRouteKey, served: FirewallOperation) {
+        servedExchangesLock.withLock {
+            if (readAheadOperation === window) servedExchanges[route] = served
         }
     }
 
-    private fun clearLingeringForeground() = lingeringLock.withLock { lingeringForeground = emptyList() }
+    private fun takeServedExchange(window: FirewallOperation, key: EngineRawResourceKey): FirewallOperation? {
+        val route = window.registry.storeRouteOf(key.stableId, key.resourceClass) ?: return null
+        return servedExchangesLock.withLock { servedExchanges.remove(route) }
+    }
+
+    /** Publishes [window] (or `null` to end the open one), dropping every record the previous window held. */
+    private fun publishReadAheadOperation(window: FirewallOperation?) {
+        servedExchangesLock.withLock {
+            readAheadOperation = window
+            servedExchanges.clear()
+        }
+    }
 
     private var compiledStyle: CompiledStyleBinding? = null
 
@@ -308,7 +330,6 @@ internal class BasemapEngineHost(
             coroutineScope { block() }
         } finally {
             activeOperation = null
-            retireForeground(operation)
         }
     }
 
@@ -343,7 +364,6 @@ internal class BasemapEngineHost(
             coroutineScope { block() }
         } finally {
             activeOperation = null
-            retireForeground(operation)
         }
     }
 
@@ -394,7 +414,7 @@ internal class BasemapEngineHost(
         )
         registry.preregister(routes)
         val operation = FirewallOperation(RenGResourceAccessMode.NORMAL, registry)
-        readAheadOperation = operation
+        publishReadAheadOperation(operation)
         try {
             // Re-checked after publication: a close that ran between requireOpen and here has already
             // cleared this slot once, and must not be undone by the assignment above.
@@ -424,8 +444,7 @@ internal class BasemapEngineHost(
             }
             return warmed
         } finally {
-            readAheadOperation = null
-            clearLingeringForeground()
+            publishReadAheadOperation(null)
         }
     }
 
@@ -1271,8 +1290,7 @@ internal class BasemapEngineHost(
         // Cleared before the engine closes, so that a Rentile callback still on its way -- a warm flight
         // a foreground acquisition had joined -- finds no operation and is refused before it can reach
         // the consumer's Transport or Store (ADR 0075).
-        readAheadOperation = null
-        clearLingeringForeground()
+        publishReadAheadOperation(null)
         engine.close()
     }
 
@@ -1417,6 +1435,11 @@ internal class BasemapEngineHost(
                 readAhead != null && readAhead.registry.knowsTransport(request.url, request.resourceClass) -> readAhead
                 else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
             }
+            if (readAhead != null && operation === foreground) {
+                readAhead.registry.transportRouteOf(request.url, request.resourceClass)?.let { route ->
+                    recordServedExchange(readAhead, route, operation)
+                }
+            }
             return operation.transport.execute(request)
         }
     }
@@ -1451,8 +1474,9 @@ internal class BasemapEngineHost(
          * latched digest, foreground first. The route alone cannot decide it: a warm flight's write can
          * arrive after a foreground registered the same url, and the foreground never latched the bytes.
          *
-         * A warm flight's exchange may have been served by a foreground that has since closed; while the
-         * window is open such a foreground lingers ([lingeringForeground]) and its latch still decides.
+         * A warm flight's exchange may have been served by a foreground that has since closed; the
+         * record [RoutedEngineTransport] made of it ([servedExchanges]) finds that operation, and its latch
+         * still decides. Every write for a read-ahead route consumes its record, whichever branch routes it.
          *
          * When none latched them, the write goes to whichever knows the route, foreground first, so
          * the registry refuses it as an integrity failure exactly as it always has.
@@ -1460,6 +1484,7 @@ internal class BasemapEngineHost(
         override suspend fun write(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
             val foreground = activeOperation
             val readAhead = readAheadOperation
+            val served = if (readAhead != null) takeServedExchange(readAhead, key) else null
             val operation = when {
                 foreground != null &&
                     foreground.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
@@ -1467,22 +1492,15 @@ internal class BasemapEngineHost(
                 readAhead != null &&
                     readAhead.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
                     readAhead
-                else -> (if (readAhead != null) lingeringLatching(key, resource.contentDigest) else null)
-                    ?: when {
-                        foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) ->
-                            foreground
-                        readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) ->
-                            readAhead
-                        else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
-                    }
+                served != null &&
+                    served.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    served
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
             }
             operation.store.write(key, resource)
         }
-
-        private suspend fun lingeringLatching(key: EngineRawResourceKey, digest: String): FirewallOperation? =
-            lingeringLock.withLock { lingeringForeground }.lastOrNull {
-                it.registry.hasLatchedDigest(key.stableId, key.resourceClass, digest)
-            }
 
         override suspend fun remove(key: EngineRawResourceKey) {
             // Private and terminal whether or not an invocation is open (ADR 0016): RenG's own Store has
@@ -1742,6 +1760,3 @@ internal data class ReadAheadWarmSummary(
     val alreadyCached: Int,
     val failed: Int,
 )
-
-/** How many closed foreground operations a read-ahead window keeps for its writes; see [BasemapEngineHost]. */
-private const val MAXIMUM_LINGERING_FOREGROUND_OPERATIONS: Int = 4

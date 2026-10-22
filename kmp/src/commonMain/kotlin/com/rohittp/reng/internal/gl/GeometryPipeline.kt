@@ -120,6 +120,14 @@ internal class GeometryPipeline(
     override val textureNameOrder: ConsumerNameOrder = ConsumerNameOrder()
 
     /**
+     * Every consumer value RenG has set on [program] since it was linked (ADR 0080's 2026-10-22 note).
+     * Owned by this pipeline because the program is: both are created together and deleted together in
+     * [deleteGeometryPipeline], and a lost context replaces the pipeline and so starts a fresh shadow
+     * for the freshly linked program.
+     */
+    override val consumerShadow: ConsumerValueShadow = ConsumerValueShadow()
+
+    /**
      * The CPU byte buffers [drawGeometry] packs this pipeline's grid into before uploading it, reused
      * across draws and grown by doubling.
      *
@@ -383,6 +391,12 @@ internal fun drawGeometry(
     consumerUniforms: Map<String, ShaderValue> = emptyMap(),
     consumerTextures: Map<String, Int> = emptyMap(),
     emissionPass: Int = 0,
+    /**
+     * When set, the bloom phase's redraw of an emitter: instead of binding [consumerUniforms] and
+     * [consumerTextures], the program and texture units are put back exactly as the emitter's normal
+     * draw saw them (see [replayConsumerValues]). Both maps must then be empty.
+     */
+    consumerReplay: EmitterConsumerValues? = null,
 ) {
     require(modelViewProjection.size == GEOMETRY_MVP_FLOAT_COUNT) {
         "a model-view-projection matrix requires exactly sixteen elements"
@@ -441,12 +455,16 @@ internal fun drawGeometry(
         binding.uniform1i(pipeline.emissionPassLocation, emissionPass)
     }
 
-    bindConsumerValues(
-        binding = binding,
-        program = pipeline,
-        uniforms = uniformsSnapshot,
-        textures = texturesSnapshot,
-    )
+    if (consumerReplay != null) {
+        replayConsumerValues(binding, pipeline, consumerReplay)
+    } else {
+        bindConsumerValues(
+            binding = binding,
+            program = pipeline,
+            uniforms = uniformsSnapshot,
+            textures = texturesSnapshot,
+        )
+    }
 
     binding.drawElements(GL_TRIANGLES, grid.triangleIndices.size, GL_UNSIGNED_SHORT, 0)
 }
@@ -471,6 +489,9 @@ internal interface ConsumerValueProgram {
 
     /** The order [bindConsumerValues] assigns consumer textures to units `0..n-1` in. */
     val textureNameOrder: ConsumerNameOrder
+
+    /** What [bindConsumerValues] has set on this program since link, for a program the bloom phase redraws. */
+    val consumerShadow: ConsumerValueShadow? get() = null
 }
 
 /**
@@ -499,7 +520,9 @@ internal class ConsumerNameOrder {
  * on. Name order rather than map order is what makes the unit assignment deterministic for a given
  * document, and plain `String` comparison is what keeps it locale-independent. The order comes from
  * [ConsumerValueProgram.textureNameOrder], which `ConsumerValueHistory.record` reads too, so the
- * history's model of which unit a sampler reads is this assignment.
+ * history's model of which texture each unit holds is this assignment. Every value that reaches a
+ * declared location is also written to the program's [ConsumerValueProgram.consumerShadow], a sampler
+ * as the [ShaderValue.Integer] unit it was set to.
  *
  * The `activeTexture`/`bindTexture` pair runs even when the sampler is undeclared: the unit is
  * consumed either way, so skipping it would shift every later texture's unit.
@@ -510,11 +533,14 @@ internal fun bindConsumerValues(
     uniforms: Map<String, ShaderValue>,
     textures: Map<String, Int>,
 ) {
+    val shadow = program.consumerShadow
     if (uniforms.isNotEmpty()) {
         for (name in program.uniformNameOrder.of(uniforms.keys)) {
             val location = program.consumerLocation(binding, name)
             if (location >= 0) {
-                bindConsumerUniform(binding, location, uniforms.getValue(name))
+                val value = uniforms.getValue(name)
+                bindConsumerUniform(binding, location, value)
+                shadow?.set(name, value)
             }
         }
     }
@@ -528,10 +554,127 @@ internal fun bindConsumerValues(
             binding.bindTexture(GL_TEXTURE_2D, textures.getValue(name))
             if (samplerLocation >= 0) {
                 binding.uniform1i(samplerLocation, unitIndex)
+                shadow?.setSampler(name, unitIndex)
             }
         }
     }
 }
+
+/**
+ * Every consumer value RenG has set on one geometry program since it was linked (ADR 0080's
+ * 2026-10-22 note), a sampler as the [ShaderValue.Integer] unit it points at.
+ *
+ * Consumer programs are RenG's own: no consumer is ever handed the GL program name, so a value the
+ * program holds is either one RenG set through [bindConsumerValues] or the bloom phase's replay and
+ * restore, or the value the program was linked with -- zero of the uniform's type, since GLSL ES
+ * allows no initialiser on a uniform. The shadow is therefore a complete account of the program's
+ * consumer state: a name in it holds its value here, and a name absent from it holds zero.
+ *
+ * Only declared names are shadowed (a location of at least zero), so it is bounded by what the linked
+ * program declares, however consumer-authored names vary between frames. The bloom phase's replay and
+ * restore do not write it: they reproduce state it already describes.
+ *
+ * The map is copied on write: [snapshot] shares it as it stands, and the next [set] that changes a
+ * value replaces it with a copy first. A [set] that changes nothing returns before copying, and a
+ * frame with no emitter never shares the map, so a bloom-free frame pays one map lookup per value.
+ *
+ * Confined to the GL thread, as the program it belongs to is.
+ */
+internal class ConsumerValueShadow {
+    private var values: HashMap<String, ShaderValue> = HashMap()
+    private var shared: Boolean = false
+    private val samplers: HashSet<String> = HashSet()
+
+    /** Every name set on the program since link, with its current value. Do not retain; see [snapshot]. */
+    val current: Map<String, ShaderValue> get() = values
+
+    /** The names a texture was ever bound through; each one's value is the unit it points at. */
+    val samplerNames: Set<String> get() = samplers
+
+    fun set(name: String, value: ShaderValue) {
+        if (values[name] == value) return
+        if (shared) {
+            values = HashMap(values)
+            shared = false
+        }
+        values[name] = value
+    }
+
+    fun setSampler(name: String, unit: Int) {
+        samplers.add(name)
+        set(name, SAMPLER_UNIT_VALUES[unit])
+    }
+
+    /** The values as they stand, immutable from here on: a later [set] copies before it writes. */
+    fun snapshot(): Map<String, ShaderValue> {
+        shared = true
+        return values
+    }
+}
+
+/** The program value each consumer texture unit's sampler is set to, allocated once. */
+private val SAMPLER_UNIT_VALUES: Array<ShaderValue.Integer> =
+    Array(MAXIMUM_CONSUMER_TEXTURES) { ShaderValue.Integer(it) }
+
+/**
+ * One emitter's consumer state at its normal draw: every value its program held then, and the texture
+ * each consumer unit held then (`-1` where the frame had bound none), indexed by unit.
+ */
+internal class EmitterConsumerValues(
+    val uniforms: Map<String, ShaderValue>,
+    val textureByUnit: IntArray,
+)
+
+/**
+ * Puts [pipeline]'s bound program and the texture units its samplers read back exactly as [values]
+ * records them, for the bloom phase's redraw of an emitter (ADR 0080's 2026-10-22 note).
+ *
+ * Every name the program's shadow holds now is set: to its value in [values], or, absent there, to
+ * zero of its type -- a name the shadow did not yet hold at the emitter's draw had never been set since
+ * link, so it held the link-time zero. Then each sampler's unit gets back the texture it held. No unit
+ * is renumbered, so the units bound are ones the normal pass had already bound legally; a unit the
+ * frame bound no consumer texture to is left as it is, because RenG does not know what it held.
+ */
+internal fun replayConsumerValues(binding: GlBinding, pipeline: GeometryPipeline, values: EmitterConsumerValues) {
+    val shadow = pipeline.consumerShadow
+    val snapshot = values.uniforms
+    for ((name, current) in shadow.current) {
+        val location = pipeline.consumerLocation(binding, name)
+        if (location < 0) continue
+        bindConsumerUniform(binding, location, snapshot[name] ?: zeroOf(current))
+    }
+    for (name in shadow.samplerNames) {
+        val unit = (snapshot[name] as? ShaderValue.Integer)?.value ?: 0
+        val texture = values.textureByUnit.getOrNull(unit) ?: -1
+        if (texture < 0) continue
+        binding.activeTexture(GL_TEXTURE0 + unit)
+        binding.bindTexture(GL_TEXTURE_2D, texture)
+    }
+}
+
+/** Sets every value [pipeline]'s shadow holds on its bound program: the state the normal pass left. */
+internal fun restoreConsumerValues(binding: GlBinding, pipeline: GeometryPipeline) {
+    for ((name, value) in pipeline.consumerShadow.current) {
+        val location = pipeline.consumerLocation(binding, name)
+        if (location >= 0) bindConsumerUniform(binding, location, value)
+    }
+}
+
+/** The value a uniform of [like]'s type holds when its program is linked. */
+private fun zeroOf(like: ShaderValue): ShaderValue = when (like) {
+    is ShaderValue.Scalar -> ZERO_SCALAR
+    is ShaderValue.Vec2 -> ZERO_VEC2
+    is ShaderValue.Vec3 -> ZERO_VEC3
+    is ShaderValue.Vec4 -> ZERO_VEC4
+    is ShaderValue.Integer -> SAMPLER_UNIT_VALUES[0]
+    is ShaderValue.Mat4 -> ZERO_MAT4
+}
+
+private val ZERO_SCALAR = ShaderValue.Scalar(0f)
+private val ZERO_VEC2 = ShaderValue.Vec2(0f, 0f)
+private val ZERO_VEC3 = ShaderValue.Vec3(0f, 0f, 0f)
+private val ZERO_VEC4 = ShaderValue.Vec4(0f, 0f, 0f, 0f)
+private val ZERO_MAT4 = ShaderValue.Mat4(FloatArray(16))
 
 /**
  * Dispatches [value] to the one [GlBinding] setter matching its variant, at [location].

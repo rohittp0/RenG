@@ -92,3 +92,14 @@ finds no operation and is refused before it reaches the consumer.
 This amends ADR 0016 only where it describes the engine as reachable through one operation at a time. The
 firewall's other rules are kept unchanged: one registry per operation, never shared across access modes,
 routes registered before the exchange, and every write checked against the latched response.
+
+## Amendment, 2026-10-22: a served exchange is recorded until its write
+
+A warm flight's exchange that a foreground operation served is latched in the foreground registry, and
+that foreground may close before the flight's Store write arrives. While a window is open, the host
+records, when it routes an exchange on one of the window's routes to the foreground, which operation
+served it. A write consults the record after the open operations' latches, and every write on a window
+route consumes its record, so a closed operation is retained only while an exchange it served still has
+a write to come, however many foregrounds open and close meanwhile. Recording re-checks under one lock
+that the window is still the open one, and the window's end and `close()` unpublish it and drop every
+record in that same critical section.

@@ -71,3 +71,17 @@ each emitter's effective uniforms and textures at its own draw, and replays thos
 emission redraw and ADR 0085's far band. Afterwards it rebinds every texture unit the normal pass had
 bound and, on each program a redraw touched, every uniform and sampler unit. A value the frame had not
 set before the bloom phase is still not restorable.
+
+## Amendment, 2026-10-22 (later): the replay is the program's whole state since link
+
+The snapshot above began empty each frame, so an emitter that omitted a value the frame had not yet set
+was redrawn with whatever a later emitter had left, and the reconstructed name-to-texture map could
+name more samplers than one draw may bind (two emitters each binding 15 of 16 names gave 16) and fail
+the draw. Consumer programs are RenG's own, so every consumer value a program holds is one RenG set or
+the link-time zero. Each geometry pipeline now keeps a shadow of every consumer value set on its program
+since link, a sampler as the unit it points at; it lives and dies with the program. An emitter's
+snapshot is that shadow (copied on write) plus the texture on each consumer unit at its draw. A redraw
+sets every name the shadow holds, to the snapshot's value or, where the snapshot lacks it, to zero of
+its type, and rebinds each sampler's unit to its snapshotted texture without renumbering. The restore
+sets the shadow as the normal pass left it. Only a unit this frame bound no consumer texture to is
+still not restorable.

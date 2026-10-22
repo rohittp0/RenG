@@ -1553,6 +1553,121 @@ class SceneContentTest {
     }
 
     /**
+     * ADR 0080's 2026-10-22 note: an emitter that omits a value drew with whatever its program held
+     * before the frame, and its redraw must too. A omits `u` and B, a later emitter on the same
+     * program, sets it to 1, so by the bloom phase the program holds 1. On a fresh program A drew with
+     * the link-time 0; on a later frame, after a frame that left 3, A drew with 3. Both redraws must
+     * reproduce that, not B's 1.
+     */
+    @Test
+    fun anEmitterThatOmitsAValueBloomsWithWhatTheProgramHeldBeforeTheFrame() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            "u" to CONSUMER_U_LOCATION,
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun geometry(emissive: Boolean, u: Float?) = SceneGeometry(
+            testGeometry().copy(emissive = emissive),
+            pipelineP,
+            consumerUniforms = u?.let { mapOf("u" to ShaderValue.Scalar(it)) } ?: emptyMap(),
+        )
+        fun frame(vararg geometries: SceneGeometry): Int {
+            val start = binding.log.size
+            bloomSceneContent(Scene(OUTPUT_SIZE, frameIndex = 0L, geometries = geometries.toList()), resources)
+                .draw(binding)
+            return start
+        }
+        binding.log.clear()
+        val emissionBind = "bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})"
+
+        // Frame 1, on the freshly linked program.
+        val first = frame(geometry(emissive = true, u = null), geometry(emissive = true, u = 1f))
+        val firstEmission = binding.log.indexOfFirstFrom(first) { it == emissionBind }
+        // Frame 2 leaves 3 on the program.
+        val second = frame(geometry(emissive = false, u = 3f))
+        // Frame 3: the same two emitters again.
+        val third = frame(geometry(emissive = true, u = null), geometry(emissive = true, u = 1f))
+        val thirdEmission = binding.log.indexOfFirstFrom(third) { it == emissionBind }
+
+        // A value never set reads as the link-time zero.
+        val draws = simulatedConsumerDraws(binding.log, pipelineP.program).map { it.index to (it.u ?: 0f) }
+        fun between(from: Int, until: Int) = draws.filter { it.first in from until until }.map { it.second }
+        assertEquals(listOf(0f, 1f), between(first, firstEmission), "frame 1's normal pass")
+        assertEquals(listOf(0f, 1f), between(firstEmission, second), "frame 1's redraws: A drew with the link-time 0")
+        assertEquals(listOf(3f, 1f), between(third, thirdEmission), "frame 3's normal pass")
+        assertEquals(
+            listOf(3f, 1f),
+            between(thirdEmission, binding.log.size),
+            "frame 3's redraws: A drew with the 3 frame 2 left",
+        )
+    }
+
+    /**
+     * Two emitters on one program each bind 15 of 16 sampler names (the per-geometry limit), so the
+     * program has been bound through 16 names. Each redraw must sample exactly what its normal draw
+     * sampled -- including E1's 16th sampler, never set, which reads unit 0 -- and must not reach for
+     * a 16th unit or a 16-texture draw.
+     */
+    @Test
+    fun emittersSharingAProgramAcrossMoreSamplerNamesThanOneDrawMayBindRedrawWhatTheySampled() {
+        val names = (0 until 16).map { "s${it.toString().padStart(2, '0')}" }
+        val locationOf = names.withIndex().associate { (index, name) -> name to 100 + index }
+        val binding = RecordingGlBinding().withDeclaredNames(
+            UNIFORM_GEOMETRY_EMISSION_PASS to 60,
+            *locationOf.toList().toTypedArray(),
+        )
+        val pipelineP = newGeometryPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        fun emitter(names: List<String>, textureBase: Int) = SceneGeometry(
+            testGeometry().copy(emissive = true),
+            pipelineP,
+            consumerUniforms = emptyMap(),
+            consumerTextures = names.associateWith { textureBase + it.removePrefix("s").toInt() },
+        )
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            geometries = listOf(emitter(names.take(15), 1000), emitter(names.drop(1), 2000)),
+        )
+        binding.log.clear()
+        bloomSceneContent(scene, resources).draw(binding)
+        val log = binding.log
+
+        // Replays the log as GL state: each sampler's unit (0 until set) and each unit's texture.
+        var program = 0
+        var activeUnit = 0
+        val unitTextures = HashMap<Int, Int>()
+        val samplerUnits = HashMap<Int, Int>()
+        val sampled = ArrayList<Pair<Int, List<Int?>>>()
+        for ((index, call) in log.withIndex()) {
+            when {
+                call.startsWith("useProgram(") -> program = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+                call.startsWith("activeTexture(0x") -> {
+                    activeUnit = call.removePrefix("activeTexture(0x").removeSuffix(")").toInt(16) - GL_TEXTURE0
+                    assertTrue(activeUnit in 0 until 16, "a unit beyond GLES 3.0's guaranteed sixteen: $call")
+                }
+                call.startsWith("bindTexture(${hex(GL_TEXTURE_2D)},") ->
+                    unitTextures[activeUnit] = call.substringAfter(",").removeSuffix(")").toInt()
+                program != pipelineP.program -> Unit
+                call.startsWith("uniform1i(") -> {
+                    val location = call.removePrefix("uniform1i(").substringBefore(",").toInt()
+                    if (location in locationOf.values) samplerUnits[location] = call.substringAfter(",").removeSuffix(")").toInt()
+                }
+                call.startsWith("drawElements") ->
+                    sampled += index to names.map { unitTextures[samplerUnits[locationOf.getValue(it)] ?: 0] }
+            }
+        }
+        val emissionBind = log.indexOf("bindFramebuffer(${hex(GL_DRAW_FRAMEBUFFER)},${resources.emission.framebuffer})")
+        val normal = sampled.filter { it.first < emissionBind }.map { it.second }
+        val redraws = sampled.filter { it.first > emissionBind }.map { it.second }
+        assertEquals(2, normal.size, "two normal draws")
+        assertEquals(1000, normal[0][15], "E1's unset 16th sampler reads unit 0, which holds its s00")
+        assertEquals(2, redraws.size, "two emission redraws")
+        assertEquals(normal, redraws, "each redraw samples what its normal draw sampled")
+    }
+
+    /**
      * Consumer programs are shared by shader pair, and a Geometry is allowed to omit a uniform so
      * it inherits that program's previous value. The emission redraw must not replace the normal
      * pass's program history: here G must inherit X's 5, not E1's redrawn 1.

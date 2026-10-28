@@ -45,6 +45,34 @@ import kotlinx.coroutines.withContext
 class RendererBasemapTileTest {
 
     @Test
+    fun mixedGroundProgramsCompileLazilyAndRendererCloseDeletesThem() = runTest {
+        val binding = styleGlBinding()
+        val renderer = twoStyleRenderer(
+            transport = TwoStyleTileTransport(),
+            binding = binding,
+        )
+        assertEquals(
+            7,
+            binding.log.count { call -> call.startsWith("createProgram") },
+            "a renderer that has not blended still compiles the seven ordinary programs",
+        )
+
+        val target = renderer.mintRenderTarget(FramebufferName(value = 0u))
+        val frame = renderer.prepare(blendedPlan(frameIndex = 0L, camera = styleCamera()))
+        renderer.draw(preparedFrame = frame, renderTarget = target)
+        frame.close()
+        val compiled = binding.log.count { call -> call.startsWith("createProgram") }
+        assertEquals(9, compiled, "the first blended Mercator frame lazily compiles two mixed variants")
+
+        renderer.close()
+        assertEquals(
+            compiled,
+            binding.log.count { call -> call.startsWith("deleteProgram") },
+            "renderer teardown deletes the lazily compiled mixed variants",
+        )
+    }
+
+    @Test
     fun twoStyleAncestorFallbackIsAppliedPerStyle() = runTest {
         val sink = RecordingProvisionalSink()
         val renderer = twoStyleRenderer(
@@ -90,7 +118,7 @@ class RendererBasemapTileTest {
     @Test
     fun anUnavailableBlendTargetLeavesItsGroundOutAndThePrimaryStillDraws() = runTest {
         val transport = TwoStyleTileTransport()
-        val store = FailingUpdatedSecondStyleWriteStore()
+        val store = FailingUpdatedStyleWriteStore()
         val renderer = twoStyleRenderer(transport = transport, store = store)
         try {
             val renderTarget = renderer.mintRenderTarget(FramebufferName(value = 0u))
@@ -101,7 +129,7 @@ class RendererBasemapTileTest {
             )
 
             transport.secondStyleJson = UPDATED_SECOND_STYLE_JSON
-            store.failUpdatedSecondStyleWrites = true
+            store.failUpdatedStyleWrites = true
             val writeFailure = assertFailsWith<RenGException> {
                 renderer.prepare(
                     plan = blendedPlan(frameIndex = 1L, camera = styleCamera()),
@@ -109,7 +137,7 @@ class RendererBasemapTileTest {
                 )
             }
             assertEquals(RenGErrorCode.STORE_WRITE_FAILED, writeFailure.code)
-            store.failUpdatedSecondStyleWrites = false
+            store.failUpdatedStyleWrites = false
 
             val frame = renderer.prepare(
                 plan = blendedPlan(frameIndex = 2L, camera = styleCamera()),
@@ -122,6 +150,45 @@ class RendererBasemapTileTest {
                 "the unavailable target contributes no ground to the blend pass",
             )
             renderer.draw(frame, renderTarget)
+            frame.close()
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun anUnavailablePrimaryWithAnAvailableBlendTargetDrawsNoGroundWithoutCrashing() = runTest {
+        val transport = TwoStyleTileTransport()
+        val store = FailingUpdatedStyleWriteStore()
+        val renderer = twoStyleRenderer(transport = transport, store = store)
+        try {
+            val renderTarget = renderer.mintRenderTarget(framebufferName = FramebufferName(value = 0u))
+            renderer.prepare(plan = blendedPlan(frameIndex = 0L, camera = styleCamera())).close()
+            assertTrue(
+                SECOND_STYLE_URL in transport.requestedUrls(),
+                "the first foreground preparation must successfully compile the configured target",
+            )
+
+            transport.primaryStyleJson = UPDATED_SECOND_STYLE_JSON
+            store.failUpdatedStyleWrites = true
+            val writeFailure = assertFailsWith<RenGException> {
+                renderer.prepare(
+                    plan = blendedPlan(frameIndex = 1L, camera = styleCamera()),
+                    accessMode = ResourceAccessMode.RELOAD,
+                )
+            }
+            assertEquals(expected = RenGErrorCode.STORE_WRITE_FAILED, actual = writeFailure.code)
+            store.failUpdatedStyleWrites = false
+
+            val frame = renderer.prepare(
+                plan = blendedPlan(frameIndex = 2L, camera = styleCamera()),
+                accessMode = ResourceAccessMode.CACHE_ONLY,
+            ) as RenGPreparedFrame
+            assertNull(frame.basemapStyleDigest, "the primary style is unavailable")
+            assertNotNull(frame.blendBasemapStyleDigest, "the target style remains available")
+            assertEquals(emptyList(), frame.groundInstances, "the unavailable primary contributes no ground")
+            assertTrue(frame.blendGroundInstances.isNotEmpty(), "the available target still prepares its tiles")
+            renderer.draw(preparedFrame = frame, renderTarget = renderTarget)
             frame.close()
         } finally {
             renderer.close()
@@ -1461,6 +1528,7 @@ private fun twoStyleRenderer(
     store: Store = RecordingStyleStore(),
     resourceLimits: ResourceLimits = ResourceLimits(),
     diagnosticSink: DiagnosticSink = DiagnosticSink.None,
+    binding: RecordingGlBinding = styleGlBinding(),
 ): RenGRenderer = createRenderer(
     configuration = RendererConfiguration(
         outputPixelSize = OutputPixelSize(width = 64, height = 64),
@@ -1471,12 +1539,15 @@ private fun twoStyleRenderer(
         diagnosticSink = diagnosticSink,
         additionalBasemapStyles = listOf(ResourceLocator(value = SECOND_STYLE_URL)),
     ),
-    binding = styleGlBinding(),
+    binding = binding,
     probe = RenderContextProbe { RenderContextIdentity(value = 1L) },
 ) as RenGRenderer
 
 private class TwoStyleTileTransport : Transport {
     private val recorded = ConcurrentRecorder<String>()
+
+    @Volatile
+    var primaryStyleJson: String = STYLE_WITH_SPRITE_JSON
 
     @Volatile
     var secondStyleJson: String = STYLE_WITH_SPRITE_JSON.replace(
@@ -1492,7 +1563,7 @@ private class TwoStyleTileTransport : Transport {
         return when (url) {
             STYLE_URL -> TransportResponse(
                 statusCode = 200,
-                body = STYLE_WITH_SPRITE_JSON.encodeToByteArray(),
+                body = primaryStyleJson.encodeToByteArray(),
                 metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             SECOND_STYLE_URL -> TransportResponse(
@@ -1514,17 +1585,17 @@ private class TwoStyleTileTransport : Transport {
     }
 }
 
-private class FailingUpdatedSecondStyleWriteStore : Store {
+private class FailingUpdatedStyleWriteStore : Store {
     private val mutex = Mutex()
     private val entries = mutableMapOf<RawResourceKey, StoredRawResource>()
 
-    var failUpdatedSecondStyleWrites: Boolean = false
+    var failUpdatedStyleWrites: Boolean = false
 
     override suspend fun read(key: RawResourceKey): StoredRawResource? = mutex.withLock { entries[key] }
 
     override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
         if (
-            failUpdatedSecondStyleWrites &&
+            failUpdatedStyleWrites &&
             key.resourceClass == ResourceClass.BASEMAP_STYLE &&
             resource.bytes.contentEquals(UPDATED_SECOND_STYLE_JSON.encodeToByteArray())
         ) {

@@ -386,10 +386,6 @@ internal object AndroidGlBinding : GlBinding {
         GLES30.glDepthMask(enabled)
     }
 
-    override fun polygonOffset(factor: Float, units: Float) {
-        GLES30.glPolygonOffset(factor, units)
-    }
-
     override fun depthRangef(near: Float, far: Float) {
         GLES30.glDepthRangef(near, far)
     }

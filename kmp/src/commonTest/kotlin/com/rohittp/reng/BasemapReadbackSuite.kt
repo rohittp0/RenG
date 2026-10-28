@@ -27,6 +27,7 @@ import com.rohittp.reng.internal.gl.compileShaderProgram
 import com.rohittp.reng.internal.gl.littleEndianBytes
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.io.encoding.Base64
 import kotlin.math.abs
@@ -59,10 +60,12 @@ import kotlinx.coroutines.runBlocking
  * - ADR 0027's depth ruling in pixels, under **pitched** cameras: a coplanar altitude-0 `Geometry`
  *   must keep every pixel the ground covers, at every camera in a sweep, and a map-anchored
  *   billboard must be the same size at pitch as it is at pitch 0.
+ * - ADR 0086's one-pass blend ruling under a pitched, overlapping ADR 0065 LOD selection: every
+ *   dense ground sample must be the requested midpoint rather than receiving the target twice.
  *
  * **What it does NOT catch, stated so nobody reads more into a green run than is there:**
- * sub-pixel tile placement; filtering quality; blend correctness at tile edges, which is exactly
- * where it deliberately does not sample; the antimeridian seam and world-copy dedup (the fixture
+ * sub-pixel tile placement; filtering quality; exact coverage on a tile's rasterisation edge; the
+ * antimeridian seam and world-copy dedup (the fixture
  * camera straddles neither); models; and **any regression that preserves the four quadrant means
  * and the four sample colours** — which is why the fixture is asymmetric in both axes, and why "add
  * a fifth sample point" is the cheapest next increment. It stores no baseline and compares no
@@ -153,6 +156,14 @@ internal fun runBasemapReadbackSuite(
                 groundCoverageTrustworthy = rasterisation.isTrustworthy,
             )
         }
+        failures.run("a pitched blend stays uniform across overlapping LOD bands") {
+            assertPitchedBlendStaysUniformAcrossOverlappingLodBands(
+                binding = binding,
+                probe = probe,
+                targetFramebuffer = target,
+                groundCoverageTrustworthy = rasterisation.isTrustworthy,
+            )
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target))
@@ -193,7 +204,121 @@ private class CollectedFailures {
     }
 }
 
-private const val BASEMAP_READBACK_CASE_COUNT: Int = 6
+private const val BASEMAP_READBACK_CASE_COUNT: Int = 7
+
+/**
+ * ADR 0086's one-pass regression: ADR 0065 deliberately lets adjacent LOD bands select tiles whose
+ * areas overlap, and the ordinary ground relies on the finer tile drawing last. A second additive
+ * target-style pass applies the target contribution once per covering tile, turning a requested
+ * half mix into a visible three-quarter band. Every dense interior sample must remain the midpoint.
+ */
+private fun assertPitchedBlendStaysUniformAcrossOverlappingLodBands(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+    targetFramebuffer: Int,
+    groundCoverageTrustworthy: Boolean,
+) {
+    val renderer = createRenderer(
+        configuration = RendererConfiguration(
+            outputPixelSize = OutputPixelSize(width = READBACK_PIXELS, height = READBACK_PIXELS),
+            transport = ReadbackTransport(),
+            store = RecordingStyleStore(),
+            basemapStyle = ResourceLocator(value = BLEND_PRIMARY_STYLE_URL),
+            additionalBasemapStyles = listOf(ResourceLocator(value = BLEND_TARGET_STYLE_URL)),
+        ),
+        binding = binding,
+        probe = probe,
+    )
+    try {
+        val target = renderer.mintRenderTarget(FramebufferName(value = targetFramebuffer.toUInt()))
+        val frame = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = FramePlan(
+                frameIndex = 0,
+                camera = sweepCamera(pitch = 27.0, bearing = 0.0),
+                drawLabels = false,
+                basemap = BasemapSelection(
+                    style = 0,
+                    blend = BasemapBlend(
+                        toStyle = 1,
+                        mask = BlendMask.Uniform(amount = 0.5f),
+                    ),
+                ),
+            ),
+            assertPreparedFrame = ::assertSelectionContainsOverlappingLodInstances,
+        )
+
+        val samples = buildList {
+            for (y in 4 until READBACK_PIXELS step 4) {
+                for (x in 4 until READBACK_PIXELS step 4) add(x to y)
+            }
+        }
+        // Apple's software rasteriser is already measured above to omit parts of the ground's large
+        // off-screen quads. Those ABSENT pixels are not ground and therefore cannot measure ADR 0086's
+        // mix; the trustworthy hardware path still admits every one of the 961 dense samples.
+        val groundSamples = if (groundCoverageTrustworthy) {
+            samples
+        } else {
+            samples.filterNot { (x, y) -> frame.at(x, y).contentEquals(ABSENT) }
+        }
+        assertTrue(
+            groundSamples.isNotEmpty(),
+            "the pitched ADR 0086 regression must rasterise at least one sampled ground pixel",
+        )
+        val mismatches = groundSamples.mapNotNull { (x, y) ->
+            val pixel = frame.at(x, y)
+            if (BLEND_MIDPOINT.indices.all { channel ->
+                    abs(BLEND_MIDPOINT[channel] - pixel[channel]) <= 2
+                }
+            ) {
+                null
+            } else {
+                "($x,$y)=${pixel.describe()}"
+            }
+        }
+        assertTrue(
+            mismatches.isEmpty(),
+            "all ${groundSamples.size} pitched ground samples must be ${BLEND_MIDPOINT.describe()} within 2; " +
+                "${mismatches.size} differed, first: ${mismatches.take(8)}",
+        )
+    } finally {
+        renderer.close()
+    }
+}
+
+private fun assertSelectionContainsOverlappingLodInstances(frame: RenGPreparedFrame) {
+    val instances = frame.groundInstances.map { prepared -> prepared.instance }
+    val lods = instances.map { instance -> instance.lod }.toSet()
+    assertTrue(
+        lods.size >= 2,
+        "the pitched ADR 0086 regression must select at least two LOD bands, selected $lods",
+    )
+    val overlappingPair = instances.indices.firstNotNullOfOrNull { firstIndex ->
+        val first = instances[firstIndex]
+        instances.drop(firstIndex + 1).firstOrNull { second ->
+            first.lod != second.lod && tileAreasOverlap(first = first, second = second)
+        }?.let { second -> first to second }
+    }
+    assertTrue(
+        overlappingPair != null,
+        "the pitched ADR 0086 regression must contain positive-area overlap between different LODs; " +
+            "selected $instances",
+    )
+}
+
+private fun tileAreasOverlap(first: BasemapTileInstance, second: BasemapTileInstance): Boolean {
+    val firstSide = 1.0 / (1L shl first.lod).toDouble()
+    val secondSide = 1.0 / (1L shl second.lod).toDouble()
+    val firstLeft = first.unwrappedX.toDouble() * firstSide
+    val secondLeft = second.unwrappedX.toDouble() * secondSide
+    val firstTop = first.tileY.toDouble() * firstSide
+    val secondTop = second.tileY.toDouble() * secondSide
+    return maxOf(firstLeft, secondLeft) < minOf(firstLeft + firstSide, secondLeft + secondSide) &&
+        maxOf(firstTop, secondTop) < minOf(firstTop + firstSide, secondTop + secondSide)
+}
 
 private fun assertTwoBasemapStylesBlend(
     binding: GlBinding,
@@ -809,6 +934,7 @@ private fun clearAndDraw(
     renderTarget: RenderTarget,
     targetFramebuffer: Int,
     plan: FramePlan,
+    assertPreparedFrame: (RenGPreparedFrame) -> Unit = {},
 ): ReadbackFrame {
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
     binding.disable(GL_SCISSOR_TEST)
@@ -821,8 +947,9 @@ private fun clearAndDraw(
     // prepare() is suspending and reaches the Rentile engine on Dispatchers.Default; draw() is
     // synchronous GL work that must happen on the thread holding the context, so the two are split
     // rather than run inside one runBlocking body.
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = runBlocking { renderer.prepare(plan) } as RenGPreparedFrame
     try {
+        assertPreparedFrame(frame)
         renderer.draw(frame, renderTarget)
     } finally {
         frame.close()

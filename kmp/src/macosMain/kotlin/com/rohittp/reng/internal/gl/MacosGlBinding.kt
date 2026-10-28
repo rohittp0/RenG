@@ -78,7 +78,6 @@ import platform.OpenGL3.glGetBooleanv
 import platform.OpenGL3.glGetError
 import platform.OpenGL3.glGetFloatv
 import platform.OpenGL3.glGetIntegerv
-import platform.OpenGL3.glPolygonOffset
 import platform.OpenGL3.glGetIntegeri_v
 import platform.OpenGL3.glGetProgramInfoLog
 import platform.OpenGL3.glGetProgramiv
@@ -559,10 +558,6 @@ internal object MacosGlBinding : GlBinding {
 
     override fun depthMask(enabled: Boolean) {
         glDepthMask(enabled.asGlBoolean())
-    }
-
-    override fun polygonOffset(factor: Float, units: Float) {
-        glPolygonOffset(factor, units)
     }
 
     override fun depthRangef(near: Float, far: Float) {

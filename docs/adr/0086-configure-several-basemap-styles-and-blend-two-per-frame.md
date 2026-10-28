@@ -59,25 +59,29 @@ Every mask is a per-frame value the consumer sets.
 
 ## Drawing
 
-The ground pass draws the Primary Style's tiles exactly as today. With a blend, it then draws the
-`toStyle`'s tiles a second time over the same tile selection — the selection does not depend on the style
-(the spatial planners only ask whether a style is configured) — with a ground-fragment variant that scales
-its premultiplied output by `m`. Under the ground's `ONE, ONE_MINUS_SRC_ALPHA` that is exactly
-`mix(primary, to, m)` over opaque tiles. The second pass tests `GEQUAL` and writes no depth; it draws the
-same vertices through the same vertex program from the same elevation as the first (the Primary Style's
-terrain, if it has one), so its depth is the first pass's and every fragment passes. A `toStyle` with
-terrain of its own is draped over the Primary Style's for the length of the blend; when a later plan
-selects it as the Primary Style its own terrain applies, a jump this ADR accepts. Labels, terrain, DEM and
-hillshade come from the Primary Style alone.
+A frame without a blend draws its ground exactly as today. A blended frame draws its ground **once**, over
+the same tile selection — the selection does not depend on the style (the spatial planners only ask
+whether a style is configured) — with a mixed ground program: each tile instance samples the Primary
+Style's texture through its own colour window and the `toStyle`'s texture through its own, and writes
+`mix(primary, to, m)` (premultiplied) with the ordinary ground pass's blend, depth and cull state, from the
+Primary Style's elevation (its terrain, if it has one). A `toStyle` with terrain of its own is draped over
+the Primary Style's for the length of the blend; when a later plan selects it as the Primary Style its own
+terrain applies, a jump this ADR accepts. Labels, terrain, DEM and hillshade come from the Primary Style
+alone.
 
-The variant is a new internal program role. The existing ground programs are pinned character for
-character (ADR 0068) and are not edited. The globe ground takes the same variant. Its programs are
-compiled on the first blended frame, not at setup, so a renderer that never blends compiles what it did.
+**Why one pass, not a second additive pass.** The first design drew the `toStyle`'s tiles in a second
+pass whose output was scaled by `m`, so that `ONE, ONE_MINUS_SRC_ALPHA` produced the mix. That is only
+correct if every pixel is covered by exactly one tile, and ADR 0065's LOD bands do not promise that: at a
+pitched camera, a band keeps every tile that touches it, so tiles of neighbouring bands overlap and the
+ordinary pass relies on draw order (the finer tile last) to hide it. The additive pass added `m × to` once
+per covering tile, so a pitched cross-fade drew band-shaped blocks where `to` was added once per covering
+tile — measured on a phone at 27° pitch as 0.75 where 0.5 was asked, and in a two-band readback as 0.875. Mixing inside one draw per tile makes an overlap behave
+exactly as it does without a blend: the last tile drawn wins. It also draws the ground once rather than
+twice, and needs no depth agreement between two programs.
 
-Two separately linked programs are not guaranteed bit-identical vertex output in GLSL ES without
-`invariant`, which the pinned sources cannot gain. Flat ground is unaffected: pass one writes no depth.
-Over terrain, where pass one does write depth, the blend pass draws with a polygon offset of one unit
-toward the camera so a last-bit difference cannot drop its fragments.
+The mixed programs are new internal program roles (flat, shaded and globe). The existing ground programs
+are pinned character for character (ADR 0068) and are not edited. The mixed programs are compiled on the
+first blended frame, not at setup, so a renderer that never blends compiles what it did.
 
 Bloom is untouched: the basemap has never been emissive.
 
@@ -103,7 +107,8 @@ seam arrives, with no other hint.
 
 ## Cost
 
-A blended frame rasterises and uploads up to twice the tiles and draws the ground twice. Outside a blend a
+A blended frame rasterises and uploads up to twice the tiles and samples two textures per ground
+fragment in its one ground draw. Outside a blend a
 frame costs what it did. Two styles' tiles share one GPU budget, so during a blend that budget reaches half
 as far; least-recently-used eviction returns it after.
 

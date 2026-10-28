@@ -42,13 +42,16 @@ class GlobeGroundPipelineTest {
         assertEquals(5, InternalPipelineRole.LABEL.wireValue)
         assertEquals(6, InternalPipelineRole.ICON.wireValue)
         assertEquals(7, InternalPipelineRole.GLOBE_GROUND.wireValue)
-        assertEquals(15, InternalPipelineRole.GROUND_BLEND.wireValue)
+        assertEquals(15, InternalPipelineRole.GROUND_MIXED.wireValue)
     }
 
     @Test fun theGlobeGroundSourcesAreAcceptedShaderProfileSources() {
         assertTrue(GLOBE_GROUND_VERTEX_SOURCE.startsWith("#version 300 es\n"))
         assertTrue(scanShaderProfile(GLOBE_GROUND_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(GLOBE_GROUND_SHADER_PAIR.fragmentSource) != null)
+        assertTrue(scanShaderProfile(GLOBE_GROUND_MIXED_VERTEX_SOURCE) != null)
+        assertTrue(scanShaderProfile(TERRAIN_MIXED_GLOBE_GROUND_VERTEX_SOURCE) != null)
+        assertTrue(scanShaderProfile(TERRAIN_SHADED_MIXED_GLOBE_GROUND_VERTEX_SOURCE) != null)
     }
 
     /**
@@ -390,7 +393,7 @@ class GlobeGroundPipelineTest {
             ).pipeline
         binding.log.clear()
         assertNull(
-            ensureGlobeGroundBlendPrograms(
+            ensureGlobeGroundMixedPrograms(
                 binding = binding,
                 dialect = ShaderDialect.GLES,
                 cache = cache,
@@ -406,17 +409,17 @@ class GlobeGroundPipelineTest {
 
         assertEquals(2, binding.log.count { it.startsWith("deleteVertexArrays") })
         assertEquals(2, binding.log.count { it.startsWith("deleteBuffers(2") }, "vertex and index")
-        // Flat and terrain programs each have ADR 0086's blend variant; all four are owned here.
+        // Flat and terrain programs each have ADR 0086's mixed variant; all four are owned here.
         assertEquals(4, binding.log.count { it.startsWith("deleteProgram") })
         assertTrue(pipeline.grids.isEmpty())
         assertNull(cache.program(pipeline.key))
         assertNull(cache.program(pipeline.terrain.key))
-        assertNull(cache.program(requireNotNull(pipeline.blend).key))
-        assertNull(cache.program(requireNotNull(pipeline.terrainBlend).key))
+        assertNull(cache.program(requireNotNull(pipeline.mixed).key))
+        assertNull(cache.program(requireNotNull(pipeline.terrainMixed).key))
     }
 
     @Test
-    fun globeBlendPassKeepsPrimaryCullingAndOffsetsOnlyTerrain() {
+    fun blendedGlobeDrawsEveryInstanceOnceWithOrdinaryStateAndTextureUnits() {
         val binding = newBinding()
         val cache = GlProgramCache()
         val pipeline = (
@@ -424,7 +427,7 @@ class GlobeGroundPipelineTest {
                 as GlobeGroundPipelineResult.Created
             ).pipeline
         assertNull(
-            ensureGlobeGroundBlendPrograms(
+            ensureGlobeGroundMixedPrograms(
                 binding = binding,
                 dialect = ShaderDialect.GLES,
                 cache = cache,
@@ -433,31 +436,55 @@ class GlobeGroundPipelineTest {
         )
 
         binding.log.clear()
-        drawGlobeGroundBlend(
+        drawGlobeGround(
             binding = binding,
             pipeline = pipeline,
-            tiles = tiles(count = 1),
+            tiles = tiles(count = 2, blendTextureBase = 20),
             unitSphereToClip = FloatArray(16),
             cellsPerTileSide = 4,
-            mask = BlendMask.Uniform(amount = 0.5f),
-            frameWidth = 64f,
-            frameHeight = 64f,
+            blend = GroundBlendFrame(
+                mask = BlendMask.Uniform(amount = 0.5f),
+                frameWidth = 64f,
+                frameHeight = 64f,
+            ),
         )
+        assertEquals(2, binding.log.count { it.startsWith("drawElements") })
+        assertEquals(1, binding.log.count { it == "useProgram(${requireNotNull(pipeline.mixed).program})" })
+        assertTrue(binding.log.contains("enable(${hex(GL_BLEND)})"))
+        assertTrue(binding.log.contains("enable(${hex(GL_DEPTH_TEST)})"))
         assertTrue(binding.log.contains("enable(${hex(GL_CULL_FACE)})"))
-        assertTrue(binding.log.contains("depthFunc(${hex(GL_GEQUAL)})"))
         assertTrue(binding.log.contains("depthMask(false)"))
-        assertFalse(binding.log.any { it.contains("polygonOffset") })
+        assertFalse(binding.log.any { it == "depthFunc(${hex(GL_GEQUAL)})" })
+        assertFalse(binding.log.any { it == "enable(0x8037)" }, "polygon offset is never enabled")
+        assertEquals(
+            listOf(
+                "bindTexture(${hex(GL_TEXTURE_2D)},20)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},1)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},21)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},2)",
+            ),
+            binding.log.filter { it.startsWith("bindTexture(${hex(GL_TEXTURE_2D)},") },
+        )
+        assertEquals("activeTexture(${hex(GL_TEXTURE0)})", binding.log.last { it.startsWith("activeTexture") })
 
         binding.log.clear()
-        drawGlobeGroundBlend(
+        drawGlobeGround(
             binding = binding,
             pipeline = pipeline,
-            tiles = tiles(count = 1),
+            tiles = listOf(
+                ResolvedGlobeGroundTile(
+                    edges = globeGroundTileEdges(lod = 2, tileY = 1, unwrappedX = 0),
+                    texture = 3,
+                    blendTexture = 23,
+                    elevation = GroundTileDem(
+                        demTexture = 44,
+                        window = floatArrayOf(0f, 0f, 1f, 1f),
+                        tileSideMetres = 1_000f,
+                    ),
+                ),
+            ),
             unitSphereToClip = FloatArray(16),
             cellsPerTileSide = 4,
-            mask = BlendMask.Uniform(amount = 0.5f),
-            frameWidth = 64f,
-            frameHeight = 64f,
             elevation = GlobeGroundElevationFrame(
                 dem = GroundDemUniforms(
                     decode = demDecodeCoefficients(DemEncoding.TERRARIUM),
@@ -466,9 +493,19 @@ class GlobeGroundPipelineTest {
                 ),
                 radialMultiplePerMetre = 0.5f,
             ),
+            blend = GroundBlendFrame(
+                mask = BlendMask.Uniform(amount = 0.5f),
+                frameWidth = 64f,
+                frameHeight = 64f,
+            ),
         )
-        assertFalse(binding.log.any { it.contains("polygonOffset") })
-        assertEquals("depthMask(false)", binding.log.last(), "restore the primary pass's exact mask")
+        assertTrue(binding.log.contains("useProgram(${requireNotNull(pipeline.terrainMixed).program})"))
+        assertTrue(binding.log.contains("depthMask(true)"), "mixed terrain keeps the ordinary depth mask")
+        assertTrue(binding.log.contains("activeTexture(${hex(GL_TEXTURE0 + 2)})"))
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},44)"), "the DEM remains on unit 1")
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},23)"), "the target uses unit 2")
+        assertEquals("activeTexture(${hex(GL_TEXTURE0)})", binding.log.last { it.startsWith("activeTexture") })
+        assertFalse(binding.log.any { it == "enable(0x8037)" }, "mixed terrain never enables polygon offset")
     }
 
     /**
@@ -856,10 +893,14 @@ class GlobeGroundPipelineTest {
         )
     }
 
-    private fun tiles(count: Int): List<ResolvedGlobeGroundTile> = List(count) { index ->
+    private fun tiles(
+        count: Int,
+        blendTextureBase: Int? = null,
+    ): List<ResolvedGlobeGroundTile> = List(count) { index ->
         ResolvedGlobeGroundTile(
             edges = globeGroundTileEdges(lod = 2, tileY = 1, unwrappedX = index.toLong()),
             texture = index + 1,
+            blendTexture = blendTextureBase?.plus(index),
         )
     }
 
@@ -872,7 +913,11 @@ class GlobeGroundPipelineTest {
     private fun newBinding(): RecordingGlBinding = RecordingGlBinding().withDeclaredNames(
         GLOBE_GROUND_UNIT_SPHERE_TO_CLIP_UNIFORM_NAME to 3,
         GLOBE_GROUND_TILE_EDGES_UNIFORM_NAME to 5,
+        GLOBE_GROUND_TILE_UV_V_UNIFORM_NAME to 6,
         GROUND_TEXTURE_UNIFORM_NAME to 7,
+        GROUND_BLEND_TEXTURE_UNIFORM_NAME to 8,
+        GROUND_COLOUR_WINDOW_UNIFORM_NAME to 9,
+        GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME to 10,
         GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME to 9,
         GLOBE_GROUND_RADIAL_PER_METRE_UNIFORM_NAME to RADIAL_PER_METRE_LOCATION,
         GROUND_DEM_SAMPLER_UNIFORM_NAME to 21,

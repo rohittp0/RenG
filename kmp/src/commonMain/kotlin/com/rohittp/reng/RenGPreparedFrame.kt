@@ -57,7 +57,7 @@ internal class RenGPreparedFrame(
      * is a function of it and a key cannot be walked back to one.
      */
     internal val basemapStyleDigest: String?,
-    /** The style digest used by the optional second ground pass (ADR 0086). */
+    /** The style digest used by the optional target sample in ADR 0086's mixed ground draw. */
     internal val blendBasemapStyleDigest: String? = null,
     stickers: List<PreparedSticker>,
     geometries: List<PreparedGeometry>,
@@ -101,7 +101,7 @@ internal class RenGPreparedFrame(
     backdrop: PreparedBackdrop? = null,
     /** The frame's screen-space bloom parameters, or `null` when the pass is absent. */
     bloom: Bloom? = null,
-    /** The mask for the optional second ground pass. */
+    /** The mask for the optional mixed ground draw. */
     basemapBlend: BasemapBlend? = null,
     /**
      * This frame's terrain, or `null` when its style declared none, when RenG and the engine did not

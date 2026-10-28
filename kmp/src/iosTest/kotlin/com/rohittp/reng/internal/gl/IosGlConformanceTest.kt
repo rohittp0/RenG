@@ -96,7 +96,7 @@ class IosGlConformanceTest {
         val fixture = EaglOffscreenContext.create()
         try {
             val binding = bindOrFail()
-            assertEquals(94, GlEntryPoint.entries.size)
+            assertEquals(93, GlEntryPoint.entries.size)
 
             val profile = when (val adoption = adoptRenderContext(binding)) {
                 is RenderContextAdoption.Adopted -> adoption.profile

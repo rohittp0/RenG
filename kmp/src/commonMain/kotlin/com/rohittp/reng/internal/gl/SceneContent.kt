@@ -119,6 +119,10 @@ internal class SceneGroundTile(
      * it, and the one that does not says it explicitly.
      */
     val colourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /** ADR 0086's target-style texture paired by identical [instance], or `null` without a blend. */
+    val blendTexture: Int? = null,
+    /** The target style's own provisional window; it is independent of [colourWindow] (ADR 0086). */
+    val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
     /**
      * This tile's own padded DEM texture and the sub-rectangle of it this tile occupies, or `null`
      * when the frame declares no terrain or Rentile returned no DEM for this canonical tile.
@@ -283,8 +287,6 @@ internal class Scene(
     val stickers: List<SceneSticker> = emptyList(),
     val geometries: List<SceneGeometry> = emptyList(),
     val groundTiles: List<SceneGroundTile> = emptyList(),
-    /** The optional second style's tiles over the same selection (ADR 0086). */
-    val blendGroundTiles: List<SceneGroundTile> = emptyList(),
     val basemapBlend: BasemapBlend? = null,
     /**
      * This frame's terrain, or `null` when its style declared none — which is 28 of the corpus's 34
@@ -991,6 +993,13 @@ internal class SceneContent(
      */
     private fun drawGroundPhase(binding: GlBinding) {
         val terrain = scene.terrain
+        val blendFrame = scene.basemapBlend?.let { blend ->
+            GroundBlendFrame(
+                mask = blend.mask,
+                frameWidth = scene.outputPixelSize.width.toFloat(),
+                frameHeight = scene.outputPixelSize.height.toFloat(),
+            )
+        }
         val dem = terrain?.let {
             GroundDemUniforms(
                 decode = it.decode,
@@ -1007,6 +1016,8 @@ internal class SceneContent(
                     ),
                     texture = tile.texture,
                     colourWindow = tile.colourWindow,
+                    blendTexture = tile.blendTexture,
+                    blendColourWindow = tile.blendColourWindow,
                     elevation = tile.elevation?.let { demTile ->
                         MercatorGroundTileDem(
                             dem = groundTileDemOf(demTile, tile.instance.lod),
@@ -1029,6 +1040,8 @@ internal class SceneContent(
                         edges = edges,
                         texture = tile.texture,
                         colourWindow = tile.colourWindow,
+                        blendTexture = tile.blendTexture,
+                        blendColourWindow = tile.blendColourWindow,
                         elevation = tileDem,
                     ),
                 )
@@ -1041,6 +1054,8 @@ internal class SceneContent(
                             // collapsed v lands on the window's own edge, which is the tile's
                             // last row inside the ancestor rather than the ancestor's.
                             colourWindow = tile.colourWindow,
+                            blendTexture = tile.blendTexture,
+                            blendColourWindow = tile.blendColourWindow,
                             uvV = NORTH_POLAR_CAP_UV_V,
                             elevation = tileDem?.let { polarCapDem(it, north = true) },
                         ),
@@ -1052,6 +1067,8 @@ internal class SceneContent(
                             edges = globeGroundPolarCapEdges(edges, north = false),
                             texture = tile.texture,
                             colourWindow = tile.colourWindow,
+                            blendTexture = tile.blendTexture,
+                            blendColourWindow = tile.blendColourWindow,
                             uvV = SOUTH_POLAR_CAP_UV_V,
                             elevation = tileDem?.let { polarCapDem(it, north = false) },
                         ),
@@ -1080,19 +1097,8 @@ internal class SceneContent(
                     // the reconciliation rule live in one place for both projections.
                     cellsPerTileSide = frameGroundCells,
                     elevation = elevation,
+                    blend = blendFrame,
                 )
-                scene.basemapBlend?.let { blend ->
-                    drawGroundBlend(
-                        binding = binding,
-                        pipeline = groundPipeline,
-                        tiles = mercatorTiles(scene.blendGroundTiles, camera),
-                        mask = blend.mask,
-                        frameWidth = scene.outputPixelSize.width.toFloat(),
-                        frameHeight = scene.outputPixelSize.height.toFloat(),
-                        cellsPerTileSide = frameGroundCells,
-                        elevation = elevation,
-                    )
-                }
             }
 
             is ResolvedGlobeCamera -> {
@@ -1127,20 +1133,8 @@ internal class SceneContent(
                     // whole ground and never one per tile.
                     cellsPerTileSide = frameGroundCells,
                     elevation = elevation,
+                    blend = blendFrame,
                 )
-                scene.basemapBlend?.let { blend ->
-                    drawGlobeGroundBlend(
-                        binding = binding,
-                        pipeline = globePipeline,
-                        tiles = globeTiles(scene.blendGroundTiles),
-                        unitSphereToClip = unitSphereToClip,
-                        cellsPerTileSide = frameGroundCells,
-                        mask = blend.mask,
-                        frameWidth = scene.outputPixelSize.width.toFloat(),
-                        frameHeight = scene.outputPixelSize.height.toFloat(),
-                        elevation = elevation,
-                    )
-                }
             }
         }
     }

@@ -51,19 +51,40 @@ internal const val GROUND_FRAGMENT_SOURCE: String =
         "    rengGroundColour = texture(rengGroundTexture, rengGroundUv);\n" +
         "}\n"
 
-/** ADR 0086's second-pass fragment stage; existing ground sources remain byte-for-byte unchanged. */
-internal val GROUND_BLEND_FRAGMENT_SOURCE: String =
+/** ADR 0086's one-pass vertex stage; the pinned ordinary source remains byte-for-byte unchanged. */
+internal const val GROUND_MIXED_VERTEX_SOURCE: String =
+    "#version 300 es\n" +
+        "layout(location = 0) in vec2 rengGroundGrid;\n" +
+        "uniform mat4 rengGroundModelViewProjection;\n" +
+        "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundBlendUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
+        "uniform vec3 rengGroundBlendColourWindow;\n" +
+        "void main() {\n" +
+        "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
+        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+        "rengGroundBlendColourWindow.yz;\n" +
+        "    gl_Position = rengGroundModelViewProjection * vec4(position, 0.0, 1.0);\n" +
+        "}\n"
+
+/** ADR 0086's one-pass mixed fragment stage; both sampled colours are premultiplied. */
+internal val GROUND_MIXED_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
         "uniform sampler2D rengGroundTexture;\n" +
+        "uniform sampler2D rengGroundBlendTexture;\n" +
         "uniform int rengGroundBlendKind;\n" +
         "uniform vec4 rengGroundBlendParams;\n" +
         "uniform vec2 rengGroundBlendFrameSize;\n" +
         "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundBlendUv;\n" +
         "layout(location = 0) out vec4 rengGroundColour;\n" +
         groundBlendMaskGlsl() +
         "void main() {\n" +
-        "    rengGroundColour = texture(rengGroundTexture, rengGroundUv) * rengGroundBlendAmount();\n" +
+        "    vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "    rengGroundColour = mix(primary, target, rengGroundBlendAmount());\n" +
         "}\n"
 
 /**
@@ -111,25 +132,28 @@ internal val GROUND_SHADED_FRAGMENT_SOURCE: String =
         "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
         "}\n"
 
-internal val GROUND_SHADED_BLEND_FRAGMENT_SOURCE: String =
+internal val GROUND_SHADED_MIXED_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
         "uniform sampler2D rengGroundTexture;\n" +
+        "uniform sampler2D rengGroundBlendTexture;\n" +
         "uniform int rengGroundBlendKind;\n" +
         "uniform vec4 rengGroundBlendParams;\n" +
         "uniform vec2 rengGroundBlendFrameSize;\n" +
         "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundBlendUv;\n" +
         "in vec3 rengGroundNormalEnu;\n" +
         "layout(location = 0) out vec4 rengGroundColour;\n" +
         groundBlendMaskGlsl() +
         "void main() {\n" +
-        "    vec4 tile = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "    vec4 tile = mix(primary, target, rengGroundBlendAmount());\n" +
         "    float incidence = max(dot(normalize(rengGroundNormalEnu), " +
         SCENE_LIGHT_DIRECTION_ENU_GLSL + "), 0.0);\n" +
         "    float shade = 1.0 + (incidence - " + SCENE_LIGHT_FLAT_INCIDENCE_GLSL + ") * " +
         SCENE_LIGHT_RELIEF_GAIN_GLSL + ";\n" +
-        "    vec4 shaded = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
-        "    rengGroundColour = shaded * rengGroundBlendAmount();\n" +
+        "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
         "}\n"
 
 private fun groundBlendMaskGlsl(): String =
@@ -159,9 +183,11 @@ internal val GROUND_SHADER_PAIR: ShaderPair =
     ShaderPair(vertexSource = GROUND_VERTEX_SOURCE, fragmentSource = GROUND_FRAGMENT_SOURCE)
 
 internal const val GROUND_COLOUR_WINDOW_UNIFORM_NAME: String = "rengGroundColourWindow"
+internal const val GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME: String = "rengGroundBlendColourWindow"
 
 internal const val GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME: String = "rengGroundModelViewProjection"
 internal const val GROUND_TEXTURE_UNIFORM_NAME: String = "rengGroundTexture"
+internal const val GROUND_BLEND_TEXTURE_UNIFORM_NAME: String = "rengGroundBlendTexture"
 internal const val GROUND_MERCATOR_Y_UNIFORM_NAME: String = "rengGroundMercatorY"
 internal const val GROUND_ELEVATION_SCALE_UNIFORM_NAME: String = "rengGroundElevationScale"
 internal const val GROUND_BLEND_KIND_UNIFORM_NAME: String = "rengGroundBlendKind"
@@ -268,6 +294,46 @@ internal val TERRAIN_GROUND_VERTEX_SOURCE: String = terrainGroundVertexSource(sh
  */
 internal val TERRAIN_SHADED_GROUND_VERTEX_SOURCE: String = terrainGroundVertexSource(shading = true)
 
+/** ADR 0086's displacing mixed vertex stage; the pinned ordinary variants above are not edited. */
+private fun terrainMixedGroundVertexSource(shading: Boolean): String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "layout(location = 0) in vec2 rengGroundGrid;\n" +
+        "uniform mat4 rengGroundModelViewProjection;\n" +
+        "uniform vec2 rengGroundMercatorY;\n" +
+        "uniform float rengGroundElevationScale;\n" +
+        GROUND_ELEVATION_SOURCE +
+        (if (shading) GROUND_NORMAL_SOURCE else "") +
+        "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundBlendUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
+        "uniform vec3 rengGroundBlendColourWindow;\n" +
+        (if (shading) "out vec3 rengGroundNormalEnu;\n" else "") +
+        "void main() {\n" +
+        "    float mercatorY = mix(rengGroundMercatorY.x, rengGroundMercatorY.y, rengGroundGrid.y);\n" +
+        "    float up = rengGroundElevationMetres(rengGroundGrid) * rengGroundElevationScale *\n" +
+        "        cosh(3.141592653589793 * (1.0 - 2.0 * mercatorY));\n" +
+        "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
+        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+        "rengGroundBlendColourWindow.yz;\n" +
+        (
+            if (shading) {
+                "    rengGroundNormalEnu = rengGroundEnuNormal(rengGroundGrid, 1.0 /\n" +
+                    "        cosh(3.141592653589793 * (1.0 - 2.0 * mercatorY)));\n"
+            } else {
+                ""
+            }
+            ) +
+        "    gl_Position = rengGroundModelViewProjection * vec4(position, up, 1.0);\n" +
+        "}\n"
+
+internal val TERRAIN_MIXED_GROUND_VERTEX_SOURCE: String =
+    terrainMixedGroundVertexSource(shading = false)
+
+internal val TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE: String =
+    terrainMixedGroundVertexSource(shading = true)
+
 internal val TERRAIN_GROUND_SHADER_PAIR: ShaderPair =
     ShaderPair(vertexSource = TERRAIN_GROUND_VERTEX_SOURCE, fragmentSource = GROUND_FRAGMENT_SOURCE)
 
@@ -303,12 +369,14 @@ internal class TerrainGroundProgram(
     val elevation: GroundElevationUniformLocations,
 )
 
-internal class GroundBlendProgram(
+internal class GroundMixedProgram(
     val key: ResourceKey,
     val program: Int,
     val modelViewProjectionUniformLocation: Int,
     val colourWindowUniformLocation: Int,
     val textureUniformLocation: Int,
+    val blendColourWindowUniformLocation: Int,
+    val blendTextureUniformLocation: Int,
     val blendKindUniformLocation: Int,
     val blendParamsUniformLocation: Int,
     val blendFrameSizeUniformLocation: Int,
@@ -356,8 +424,8 @@ internal class GroundPipeline(
      */
     val terrain: TerrainGroundProgram,
     val terrainShading: Boolean,
-    var blend: GroundBlendProgram? = null,
-    var terrainBlend: GroundBlendProgram? = null,
+    var mixed: GroundMixedProgram? = null,
+    var terrainMixed: GroundMixedProgram? = null,
     /**
      * Every grid this pipeline has been asked for, keyed by [GroundGrid.cellsPerSide].
      *
@@ -478,70 +546,73 @@ internal fun deleteGroundPipeline(
     deleteGroundGrids(binding, pipeline.grids)
     cache.remove(pipeline.key)?.let { binding.deleteProgram(it) }
     cache.remove(pipeline.terrain.key)?.let { binding.deleteProgram(it) }
-    pipeline.blend?.let { blend -> cache.remove(blend.key)?.let { binding.deleteProgram(it) } }
-    pipeline.terrainBlend?.let { blend -> cache.remove(blend.key)?.let { binding.deleteProgram(it) } }
+    pipeline.mixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
+    pipeline.terrainMixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
 }
 
-/** Compiles ADR 0086's two Mercator variants on the first blended frame. */
-internal fun ensureGroundBlendPrograms(
+/** Compiles ADR 0086's two Mercator mixed variants on the first blended frame. */
+internal fun ensureGroundMixedPrograms(
     binding: GlBinding,
     dialect: ShaderDialect,
     cache: GlProgramCache,
     pipeline: GroundPipeline,
     deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
 ): FailureDescriptor? {
-    if (pipeline.blend != null && pipeline.terrainBlend != null) return null
-    val blendPair = ShaderPair(
-        vertexSource = GROUND_VERTEX_SOURCE,
-        fragmentSource = GROUND_BLEND_FRAGMENT_SOURCE,
+    if (pipeline.mixed != null && pipeline.terrainMixed != null) return null
+    val mixedPair = ShaderPair(
+        vertexSource = GROUND_MIXED_VERTEX_SOURCE,
+        fragmentSource = GROUND_MIXED_FRAGMENT_SOURCE,
     )
-    val blendKey = deriver.internalPipeline(
-        role = InternalPipelineRole.GROUND_BLEND,
-        shaderPair = blendPair,
+    val mixedKey = deriver.internalPipeline(
+        role = InternalPipelineRole.GROUND_MIXED,
+        shaderPair = mixedPair,
     ).key
-    val vertexPlan = scanShaderProfile(GROUND_VERTEX_SOURCE)
-        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, blendKey)
-    val blendFragmentPlan = scanShaderProfile(GROUND_BLEND_FRAGMENT_SOURCE)
-        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, blendKey)
-    if (pipeline.blend == null) {
+    val vertexPlan = scanShaderProfile(GROUND_MIXED_VERTEX_SOURCE)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
+    val mixedFragmentPlan = scanShaderProfile(GROUND_MIXED_FRAGMENT_SOURCE)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
+    if (pipeline.mixed == null) {
         val program = when (
             val result = cache.getOrCompile(
                 binding = binding,
                 dialect = dialect,
-                key = blendKey,
+                key = mixedKey,
                 vertexPlan = vertexPlan,
-                fragmentPlan = blendFragmentPlan,
+                fragmentPlan = mixedFragmentPlan,
             )
         ) {
             is GlProgramResult.Linked -> result.program
             is GlProgramResult.Failed -> return result.failure
         }
-        pipeline.blend = groundBlendProgram(binding = binding, key = blendKey, program = program)
+        pipeline.mixed = groundMixedProgram(binding = binding, key = mixedKey, program = program)
     }
 
-    val terrainPair = if (pipeline.terrainShading) TERRAIN_SHADED_GROUND_SHADER_PAIR else TERRAIN_GROUND_SHADER_PAIR
-    val terrainBlendPair = ShaderPair(
-        vertexSource = terrainPair.vertexSource,
-        fragmentSource = if (pipeline.terrainShading) {
-            GROUND_SHADED_BLEND_FRAGMENT_SOURCE
+    val terrainMixedPair = ShaderPair(
+        vertexSource = if (pipeline.terrainShading) {
+            TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE
         } else {
-            GROUND_BLEND_FRAGMENT_SOURCE
+            TERRAIN_MIXED_GROUND_VERTEX_SOURCE
+        },
+        fragmentSource = if (pipeline.terrainShading) {
+            GROUND_SHADED_MIXED_FRAGMENT_SOURCE
+        } else {
+            GROUND_MIXED_FRAGMENT_SOURCE
         },
     )
-    val terrainBlendKey = deriver.internalPipeline(
-        role = InternalPipelineRole.GROUND_BLEND,
-        shaderPair = terrainBlendPair,
+    val terrainMixedKey = deriver.internalPipeline(
+        role = InternalPipelineRole.GROUND_MIXED,
+        shaderPair = terrainMixedPair,
     ).key
-    val terrainVertexPlan = scanShaderProfile(terrainPair.vertexSource)
-        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainBlendKey)
-    val terrainFragmentPlan = scanShaderProfile(terrainBlendPair.fragmentSource)
-        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainBlendKey)
-    if (pipeline.terrainBlend == null) {
+    val terrainVertexPlan = scanShaderProfile(terrainMixedPair.vertexSource)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainMixedKey)
+    val terrainFragmentPlan = scanShaderProfile(terrainMixedPair.fragmentSource)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainMixedKey)
+    if (pipeline.terrainMixed == null) {
         val program = when (
             val result = cache.getOrCompile(
                 binding = binding,
                 dialect = dialect,
-                key = terrainBlendKey,
+                key = terrainMixedKey,
                 vertexPlan = terrainVertexPlan,
                 fragmentPlan = terrainFragmentPlan,
             )
@@ -549,9 +620,9 @@ internal fun ensureGroundBlendPrograms(
             is GlProgramResult.Linked -> result.program
             is GlProgramResult.Failed -> return result.failure
         }
-        pipeline.terrainBlend = groundBlendProgram(
+        pipeline.terrainMixed = groundMixedProgram(
             binding = binding,
-            key = terrainBlendKey,
+            key = terrainMixedKey,
             program = program,
             terrain = true,
         )
@@ -559,12 +630,12 @@ internal fun ensureGroundBlendPrograms(
     return null
 }
 
-private fun groundBlendProgram(
+private fun groundMixedProgram(
     binding: GlBinding,
     key: ResourceKey,
     program: Int,
     terrain: Boolean = false,
-): GroundBlendProgram = GroundBlendProgram(
+): GroundMixedProgram = GroundMixedProgram(
     key = key,
     program = program,
     modelViewProjectionUniformLocation = binding.getUniformLocation(
@@ -573,6 +644,11 @@ private fun groundBlendProgram(
     ),
     colourWindowUniformLocation = binding.getUniformLocation(program, GROUND_COLOUR_WINDOW_UNIFORM_NAME),
     textureUniformLocation = binding.getUniformLocation(program, GROUND_TEXTURE_UNIFORM_NAME),
+    blendColourWindowUniformLocation = binding.getUniformLocation(
+        program,
+        GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME,
+    ),
+    blendTextureUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_TEXTURE_UNIFORM_NAME),
     blendKindUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_KIND_UNIFORM_NAME),
     blendParamsUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_PARAMS_UNIFORM_NAME),
     blendFrameSizeUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_FRAME_SIZE_UNIFORM_NAME),
@@ -605,6 +681,17 @@ internal class ResolvedGroundTile(
     val elevation: MercatorGroundTileDem? = null,
     /** Which part of [texture] to sample; the whole of it unless this tile is provisional (ADR 0057). */
     val colourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /** ADR 0086's paired target-style texture, present on every tile of a blended frame. */
+    val blendTexture: Int? = null,
+    /** Which part of [blendTexture] to sample when its style is provisional (ADR 0057/0086). */
+    val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+)
+
+/** The frame-wide values consumed by ADR 0086's mixed ground programs. */
+internal class GroundBlendFrame(
+    val mask: BlendMask,
+    val frameWidth: Float,
+    val frameHeight: Float,
 )
 
 /**
@@ -702,13 +789,14 @@ internal class MercatorGroundTileDem(val dem: GroundTileDem, mercatorY: FloatArr
  * UVs, same pixels.
  *
  * **[elevation] is the frame's, and each tile decides for itself whether it uses it.** A frame with
- * no terrain passes `null` and every tile draws through [GroundPipeline.program], which is the
- * program three releases shipped; a terrain frame passes the decode and the metre scale, and each
- * tile with a [ResolvedGroundTile.elevation] draws through [GroundPipeline.terrain] instead. **The
- * two are interleaved in [tiles] order rather than partitioned**, because ADR 0041 lets a single
- * absent DEM make one tile flat among displaced neighbours, and reordering the ground to group the
- * programs would change which of two overlapping alpha edges is composited last — a pixel
- * difference bought for a `useProgram` this pass issues at most a few dozen times.
+ * no terrain and no blend passes `null` and every tile draws through [GroundPipeline.program],
+ * which is the program three releases shipped; a terrain frame passes the decode and the metre
+ * scale, and each tile with a [ResolvedGroundTile.elevation] draws through [GroundPipeline.terrain]
+ * instead. ADR 0086 substitutes the corresponding mixed programs without changing this state or
+ * order. **The two are interleaved in [tiles] order rather than partitioned**, because ADR 0041 lets
+ * a single absent DEM make one tile flat among displaced neighbours, and reordering the ground to
+ * group the programs would change which of two overlapping alpha edges is composited last — a
+ * pixel difference bought for a `useProgram` this pass issues at most a few dozen times.
  */
 internal fun drawGround(
     binding: GlBinding,
@@ -716,8 +804,12 @@ internal fun drawGround(
     tiles: List<ResolvedGroundTile>,
     cellsPerTileSide: Int = 1,
     elevation: MercatorGroundElevationFrame? = null,
+    blend: GroundBlendFrame? = null,
 ) {
     if (tiles.isEmpty()) return
+    require(tiles.all { tile -> (tile.blendTexture != null) == (blend != null) }) {
+        "every tile in an ADR 0086 blended ground carries exactly one paired target texture"
+    }
 
     val grid = groundGrid(binding, pipeline.grids, cellsPerTileSide)
     binding.bindVertexArray(grid.vertexArray)
@@ -739,12 +831,51 @@ internal fun drawGround(
     tiles.forEachIndexed { index, tile ->
         val tileElevation = tileElevations[index]
         val wantsDisplacement = tileElevation != null
+        val mixedProgram = if (blend == null) {
+            null
+        } else {
+            requireNotNull(if (wantsDisplacement) pipeline.terrainMixed else pipeline.mixed) {
+                "mixed programs must be compiled before an ADR 0086 blended ground draw"
+            }
+        }
         if (displacing != wantsDisplacement) {
             displacing = wantsDisplacement
-            if (wantsDisplacement) {
+            if (mixedProgram != null) {
+                val blendFrame = requireNotNull(blend)
+                binding.useProgram(mixedProgram.program)
+                if (mixedProgram.textureUniformLocation >= 0) {
+                    binding.uniform1i(mixedProgram.textureUniformLocation, GROUND_PRIMARY_TEXTURE_UNIT)
+                }
+                if (mixedProgram.blendTextureUniformLocation >= 0) {
+                    binding.uniform1i(
+                        mixedProgram.blendTextureUniformLocation,
+                        groundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
+                    )
+                }
+                bindGroundBlendMask(
+                    binding = binding,
+                    program = mixedProgram,
+                    mask = blendFrame.mask,
+                    frameWidth = blendFrame.frameWidth,
+                    frameHeight = blendFrame.frameHeight,
+                )
+                if (wantsDisplacement) {
+                    if (mixedProgram.elevationScaleUniformLocation >= 0) {
+                        binding.uniform1f(
+                            mixedProgram.elevationScaleUniformLocation,
+                            requireNotNull(elevation).equatorialLogicalPixelsPerMetre,
+                        )
+                    }
+                    bindGroundElevationFrame(
+                        binding = binding,
+                        locations = requireNotNull(mixedProgram.elevation),
+                        dem = requireNotNull(elevation).dem,
+                    )
+                }
+            } else if (wantsDisplacement) {
                 binding.useProgram(pipeline.terrain.program)
                 if (pipeline.terrain.textureUniformLocation >= 0) {
-                    binding.uniform1i(pipeline.terrain.textureUniformLocation, 0)
+                    binding.uniform1i(pipeline.terrain.textureUniformLocation, GROUND_PRIMARY_TEXTURE_UNIT)
                 }
                 if (pipeline.terrain.elevationScaleUniformLocation >= 0) {
                     binding.uniform1f(
@@ -760,12 +891,14 @@ internal fun drawGround(
             } else {
                 binding.useProgram(pipeline.program)
                 if (pipeline.textureUniformLocation >= 0) {
-                    binding.uniform1i(pipeline.textureUniformLocation, 0)
+                    binding.uniform1i(pipeline.textureUniformLocation, GROUND_PRIMARY_TEXTURE_UNIT)
                 }
             }
         }
 
-        val matrixLocation = if (wantsDisplacement) {
+        val matrixLocation = if (mixedProgram != null) {
+            mixedProgram.modelViewProjectionUniformLocation
+        } else if (wantsDisplacement) {
             pipeline.terrain.modelViewProjectionUniformLocation
         } else {
             pipeline.modelViewProjectionUniformLocation
@@ -773,7 +906,9 @@ internal fun drawGround(
         if (matrixLocation >= 0) {
             binding.uniformMatrix4fv(matrixLocation, 1, false, tile.modelViewProjection)
         }
-        val windowLocation = if (wantsDisplacement) {
+        val windowLocation = if (mixedProgram != null) {
+            mixedProgram.colourWindowUniformLocation
+        } else if (wantsDisplacement) {
             pipeline.terrain.colourWindowUniformLocation
         } else {
             pipeline.colourWindowUniformLocation
@@ -788,114 +923,54 @@ internal fun drawGround(
                 tile.colourWindow.offsetV,
             )
         }
-        if (tileElevation != null) {
-            if (pipeline.terrain.mercatorYUniformLocation >= 0) {
-                binding.uniform2f(
-                    pipeline.terrain.mercatorYUniformLocation,
-                    tileElevation.mercatorY[0],
-                    tileElevation.mercatorY[1],
-                )
-            }
-            bindGroundElevationTile(binding, pipeline.terrain.elevation, tileElevation.dem)
-        }
-        binding.activeTexture(GL_TEXTURE0)
-        binding.bindTexture(GL_TEXTURE_2D, tile.texture)
-        binding.drawElements(GL_TRIANGLES, grid.indexCount, GL_UNSIGNED_SHORT, 0)
-    }
-}
-
-/** Draws ADR 0086's target style over the primary ground, testing equal depth and writing none. */
-internal fun drawGroundBlend(
-    binding: GlBinding,
-    pipeline: GroundPipeline,
-    tiles: List<ResolvedGroundTile>,
-    mask: BlendMask,
-    frameWidth: Float,
-    frameHeight: Float,
-    cellsPerTileSide: Int = 1,
-    elevation: MercatorGroundElevationFrame? = null,
-) {
-    if (tiles.isEmpty()) return
-
-    val grid = groundGrid(binding, pipeline.grids, cellsPerTileSide)
-    binding.bindVertexArray(grid.vertexArray)
-    binding.enable(GL_BLEND)
-    binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-    binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-    binding.enable(GL_DEPTH_TEST)
-    binding.depthFunc(GL_GEQUAL)
-    binding.depthMask(false)
-    binding.disable(GL_CULL_FACE)
-    val tileElevations = tiles.map { if (elevation == null) null else it.elevation }
-    val primaryWroteDepth = tileElevations.any { tileElevation -> tileElevation != null }
-    if (primaryWroteDepth) {
-        // ADR 0086: reverse-Z clears to zero and tests GEQUAL, so positive units move the
-        // independently linked blend pass toward the camera.
-        binding.enable(GL_POLYGON_OFFSET_FILL)
-        binding.polygonOffset(factor = 0f, units = 1f)
-    }
-
-    var displacing: Boolean? = null
-    tiles.forEachIndexed { index, tile ->
-        val tileElevation = tileElevations[index]
-        val wantsDisplacement = tileElevation != null
-        val program = requireNotNull(if (wantsDisplacement) pipeline.terrainBlend else pipeline.blend) {
-            "blend programs must be compiled before the blended pass"
-        }
-        if (displacing != wantsDisplacement) {
-            displacing = wantsDisplacement
-            binding.useProgram(program.program)
-            if (program.textureUniformLocation >= 0) binding.uniform1i(program.textureUniformLocation, 0)
-            bindGroundBlendMask(binding, program, mask, frameWidth, frameHeight)
-            if (wantsDisplacement) {
-                if (program.elevationScaleUniformLocation >= 0) {
-                    binding.uniform1f(
-                        program.elevationScaleUniformLocation,
-                        requireNotNull(elevation).equatorialLogicalPixelsPerMetre,
-                    )
-                }
-                bindGroundElevationFrame(
-                    binding = binding,
-                    locations = requireNotNull(program.elevation),
-                    dem = requireNotNull(elevation).dem,
-                )
-            }
-        }
-        if (program.modelViewProjectionUniformLocation >= 0) {
-            binding.uniformMatrix4fv(program.modelViewProjectionUniformLocation, 1, false, tile.modelViewProjection)
-        }
-        if (program.colourWindowUniformLocation >= 0) {
+        if (mixedProgram != null && mixedProgram.blendColourWindowUniformLocation >= 0) {
             binding.uniform3f(
-                program.colourWindowUniformLocation,
-                tile.colourWindow.scale,
-                tile.colourWindow.offsetU,
-                tile.colourWindow.offsetV,
+                mixedProgram.blendColourWindowUniformLocation,
+                tile.blendColourWindow.scale,
+                tile.blendColourWindow.offsetU,
+                tile.blendColourWindow.offsetV,
             )
         }
         if (tileElevation != null) {
-            if (program.mercatorYUniformLocation >= 0) {
+            val mercatorYLocation = mixedProgram?.mercatorYUniformLocation
+                ?: pipeline.terrain.mercatorYUniformLocation
+            if (mercatorYLocation >= 0) {
                 binding.uniform2f(
-                    program.mercatorYUniformLocation,
+                    mercatorYLocation,
                     tileElevation.mercatorY[0],
                     tileElevation.mercatorY[1],
                 )
             }
-            bindGroundElevationTile(binding, requireNotNull(program.elevation), tileElevation.dem)
+            bindGroundElevationTile(
+                binding = binding,
+                locations = mixedProgram?.elevation ?: pipeline.terrain.elevation,
+                tile = tileElevation.dem,
+            )
         }
+        if (mixedProgram != null) {
+            binding.activeTexture(
+                GL_TEXTURE0 + groundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
+            )
+            binding.bindTexture(GL_TEXTURE_2D, requireNotNull(tile.blendTexture))
+        }
+        // Bind the target first so selecting unit zero also establishes the final active unit.
         binding.activeTexture(GL_TEXTURE0)
         binding.bindTexture(GL_TEXTURE_2D, tile.texture)
         binding.drawElements(GL_TRIANGLES, grid.indexCount, GL_UNSIGNED_SHORT, 0)
     }
-    if (primaryWroteDepth) {
-        binding.disable(GL_POLYGON_OFFSET_FILL)
-    }
-    // ADR 0086: restore the first pass's exact mask, including a terrain frame with no DEM tiles.
-    binding.depthMask(primaryWroteDepth)
 }
+
+private const val GROUND_PRIMARY_TEXTURE_UNIT: Int = 0
+private const val GROUND_BLEND_TEXTURE_UNIT: Int = 1
+private const val GROUND_TERRAIN_BLEND_TEXTURE_UNIT: Int = 2
+
+/** Terrain already owns unit 1 for its DEM, so its ADR 0086 target texture uses unit 2. */
+private fun groundBlendTextureUnit(wantsDisplacement: Boolean): Int =
+    if (wantsDisplacement) GROUND_TERRAIN_BLEND_TEXTURE_UNIT else GROUND_BLEND_TEXTURE_UNIT
 
 internal fun bindGroundBlendMask(
     binding: GlBinding,
-    program: GroundBlendProgram,
+    program: GroundMixedProgram,
     mask: BlendMask,
     frameWidth: Float,
     frameHeight: Float,

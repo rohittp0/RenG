@@ -84,8 +84,6 @@ import com.rohittp.reng.internal.gl.deleteCompositePipeline
 import com.rohittp.reng.internal.gl.deleteGlObjects
 import com.rohittp.reng.internal.gl.deleteGlobeGroundPipeline
 import com.rohittp.reng.internal.gl.deleteGroundPipeline
-import com.rohittp.reng.internal.gl.ensureGlobeGroundBlendPrograms
-import com.rohittp.reng.internal.gl.ensureGroundBlendPrograms
 import com.rohittp.reng.internal.gl.deleteIconPipeline
 import com.rohittp.reng.internal.gl.deleteLabelPipeline
 import com.rohittp.reng.internal.gl.deleteModelPipeline
@@ -93,6 +91,8 @@ import com.rohittp.reng.internal.gl.deleteOffscreenSurface
 import com.rohittp.reng.internal.gl.deleteStickerPipeline
 import com.rohittp.reng.internal.gl.demDecodeCoefficients
 import com.rohittp.reng.internal.gl.drawFrame
+import com.rohittp.reng.internal.gl.ensureGlobeGroundMixedPrograms
+import com.rohittp.reng.internal.gl.ensureGroundMixedPrograms
 import com.rohittp.reng.internal.gl.jointMatricesForSkin
 import com.rohittp.reng.internal.gl.modelPrimitiveAllocationBytes
 import com.rohittp.reng.internal.gl.requireResolvedAtDrawTime
@@ -2717,7 +2717,6 @@ internal class RenGRenderer(
                             icon = icon,
                             resolvedCamera = resolvedCamera,
                             sceneGroundTiles = resolved.tiles,
-                            sceneBlendGroundTiles = resolved.blendTiles,
                             textureLeases = textureLeases,
                             gpuAllocationLeases = gpuAllocationLeases,
                             consumerPipelineLeases = consumerPipelineLeases,
@@ -2794,7 +2793,6 @@ internal class RenGRenderer(
         backdropPipeline: BackdropPipeline,
         resolvedCamera: ResolvedFrameCamera,
         sceneGroundTiles: List<SceneGroundTile>,
-        sceneBlendGroundTiles: List<SceneGroundTile>,
         textureLeases: MutableList<TextureLease>,
         gpuAllocationLeases: MutableList<GpuAllocationLease>,
         consumerPipelineLeases: MutableList<ConsumerPipelineLease<*>>,
@@ -2884,8 +2882,11 @@ internal class RenGRenderer(
             stickers = sceneStickers,
             geometries = sceneGeometries,
             groundTiles = sceneGroundTiles,
-            blendGroundTiles = sceneBlendGroundTiles,
-            basemapBlend = frame.basemapBlend,
+            // A blend exists only when both style snapshots became resident. If either is absent,
+            // preserve the ordinary single-style fallback for whichever primary ground is available.
+            basemapBlend = frame.basemapBlend?.takeIf {
+                frame.basemapStyleDigest != null && frame.blendBasemapStyleDigest != null
+            },
             terrain = sceneTerrain(frame),
             models = sceneModels,
             labels = sceneLabels(frame, textureLeases, binding),
@@ -2983,16 +2984,16 @@ internal class RenGRenderer(
             }
         }
 
-        if (sceneBlendGroundTiles.isNotEmpty()) {
-            val blendProgramFailure = when (resolvedCamera) {
-                is ResolvedMercatorCamera -> ensureGroundBlendPrograms(
+        if (sceneGroundTiles.any { tile -> tile.blendTexture != null }) {
+            val mixedProgramFailure = when (resolvedCamera) {
+                is ResolvedMercatorCamera -> ensureGroundMixedPrograms(
                     binding = binding,
                     dialect = profile.dialect,
                     cache = programs,
                     pipeline = ground,
                     deriver = geometryKeyDeriver,
                 )
-                is ResolvedGlobeCamera -> ensureGlobeGroundBlendPrograms(
+                is ResolvedGlobeCamera -> ensureGlobeGroundMixedPrograms(
                     binding = binding,
                     dialect = profile.dialect,
                     cache = programs,
@@ -3000,7 +3001,7 @@ internal class RenGRenderer(
                     deriver = geometryKeyDeriver,
                 )
             }
-            if (blendProgramFailure != null) return blendProgramFailure
+            if (mixedProgramFailure != null) return mixedProgramFailure
         }
 
         val content = SceneContent(
@@ -3232,7 +3233,6 @@ internal class RenGRenderer(
     private sealed interface GroundTilesResult {
         class Resolved(
             val tiles: List<SceneGroundTile>,
-            val blendTiles: List<SceneGroundTile> = emptyList(),
             /** How many of [tiles] were drawn from an ancestor rather than their own texture (ADR 0057). */
             val provisionalTileCount: Int = 0,
         ) : GroundTilesResult
@@ -3294,7 +3294,10 @@ internal class RenGRenderer(
         }
 
         val renderedByKey = frame.basemapTiles.associateBy { it.key }
-        val hasBlend = blendGroundInstances.isNotEmpty()
+        // Both digests are required for a resolvable blend. If either style never became resident,
+        // preserve the ordinary single-style fallback; otherwise ADR 0086 requires the two identical
+        // ADR 0065 instance lists to pair completely.
+        val hasBlend = frame.basemapStyleDigest != null && frame.blendBasemapStyleDigest != null
         val provisionalInstances = if (hasBlend) HashSet<BasemapTileInstance>() else null
         val texturesByKey = HashMap<ResourceKey, Int>(renderedByKey.size)
         val elevationByTile = resolveDemTextures(frame.terrain, groundLeases, binding)
@@ -3437,9 +3440,27 @@ internal class RenGRenderer(
         if (blendResolution is GroundInstanceResolution.Failed) {
             return GroundTilesResult.Failed(failure = blendResolution.failure)
         }
+        // ADR 0086/0065 invariant: both styles resolve the identical ordered instance list so one
+        // mixed draw preserves the ordinary pass's finer-last overlap rule.
+        require(tiles.size == blendTiles.size) {
+            "a blended ground resolves one target tile for every primary tile"
+        }
+        val pairedTiles = tiles.mapIndexed { index, primary ->
+            val target = blendTiles[index]
+            require(primary.instance == target.instance) {
+                "a blended ground pairs the same tile instance at index $index"
+            }
+            SceneGroundTile(
+                instance = primary.instance,
+                texture = primary.texture,
+                colourWindow = primary.colourWindow,
+                blendTexture = target.texture,
+                blendColourWindow = target.colourWindow,
+                elevation = primary.elevation,
+            )
+        }
         return GroundTilesResult.Resolved(
-            tiles = tiles,
-            blendTiles = blendTiles,
+            tiles = pairedTiles,
             provisionalTileCount = requireNotNull(provisionalInstances).size,
         )
     }

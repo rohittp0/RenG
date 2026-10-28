@@ -457,10 +457,6 @@ internal class RecordingGlBinding : GlBinding {
         log += "depthMask($enabled)"
     }
 
-    override fun polygonOffset(factor: Float, units: Float) {
-        log += "polygonOffset($factor,$units)"
-    }
-
     override fun depthRangef(near: Float, far: Float) {
         log += "depthRangef($near,$far)"
     }

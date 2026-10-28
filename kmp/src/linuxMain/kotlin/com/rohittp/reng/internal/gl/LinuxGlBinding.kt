@@ -238,8 +238,6 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
         table[GlEntryPoint.DEPTH_FUNC.ordinal].reinterpret()
     private val depthMaskFn: CPointer<CFunction<(UByte) -> Unit>> =
         table[GlEntryPoint.DEPTH_MASK.ordinal].reinterpret()
-    private val polygonOffsetFn: CPointer<CFunction<(Float, Float) -> Unit>> =
-        table[GlEntryPoint.POLYGON_OFFSET.ordinal].reinterpret()
     private val depthRangefFn: CPointer<CFunction<(Float, Float) -> Unit>> =
         table[GlEntryPoint.DEPTH_RANGEF.ordinal].reinterpret()
     private val cullFaceFn: CPointer<CFunction<(UInt) -> Unit>> =
@@ -619,8 +617,6 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
     override fun depthFunc(function: Int) = depthFuncFn(function.toUInt())
 
     override fun depthMask(enabled: Boolean) = depthMaskFn(enabled.toGlBoolean())
-
-    override fun polygonOffset(factor: Float, units: Float) = polygonOffsetFn(factor, units)
 
     override fun depthRangef(near: Float, far: Float) = depthRangefFn(near, far)
 

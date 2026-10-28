@@ -83,7 +83,6 @@ import platform.gles3.glGetBooleanv
 import platform.gles3.glGetError
 import platform.gles3.glGetFloatv
 import platform.gles3.glGetIntegerv
-import platform.gles3.glPolygonOffset
 import platform.gles3.glGetIntegeri_v
 import platform.gles3.glGetProgramInfoLog
 import platform.gles3.glGetProgramiv
@@ -544,10 +543,6 @@ internal object IosGlBinding : GlBinding {
 
     override fun depthMask(enabled: Boolean) {
         glDepthMask(enabled.toGlBoolean())
-    }
-
-    override fun polygonOffset(factor: Float, units: Float) {
-        glPolygonOffset(factor, units)
     }
 
     override fun depthRangef(near: Float, far: Float) {

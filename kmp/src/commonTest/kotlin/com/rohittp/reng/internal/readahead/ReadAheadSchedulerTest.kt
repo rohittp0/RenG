@@ -26,7 +26,10 @@ class ReadAheadSchedulerTest {
         (from until from + count).map { CanonicalBasemapTile(lod = 12, tileY = it, canonicalX = it) }
 
     private fun window(digest: String, tiles: List<CanonicalBasemapTile>, context: String = digest) =
-        ReadAheadWindow(context = context, styleDigest = digest, tiles = tiles)
+        ReadAheadWindow(
+            context = context,
+            tiles = tiles.map { tile -> ReadAheadTile(styleDigest = digest, tile = tile) },
+        )
 
     private fun newScope() = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -37,7 +40,7 @@ class ReadAheadSchedulerTest {
     fun aWindowIsCappedAtTheMaximumAfterTheWarmedTilesAreRemoved() = runTest {
         val warmed = Recorder<List<CanonicalBasemapTile>>()
         val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
-            warmed.record(cold)
+            warmed.record(cold.map { candidate -> candidate.tile })
             ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
         }
         try {
@@ -64,7 +67,7 @@ class ReadAheadSchedulerTest {
             ReadAheadWarmSummary(fetched = 2, alreadyCached = 0, failed = 0),
         ))
         val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
-            warmed.record(cold)
+            warmed.record(cold.map { candidate -> candidate.tile })
             outcomes.removeFirst()
         }
         try {
@@ -90,7 +93,7 @@ class ReadAheadSchedulerTest {
     fun aDifferentStyleForgetsWhatWasWarmedUnderTheLastOne() = runTest {
         val warmed = Recorder<List<CanonicalBasemapTile>>()
         val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
-            warmed.record(cold)
+            warmed.record(cold.map { candidate -> candidate.tile })
             ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
         }
         try {
@@ -100,6 +103,30 @@ class ReadAheadSchedulerTest {
             scheduler.submit(window("two", two))
             real { scheduler.awaitIdle() }
             assertEquals(listOf(two, two), warmed.snapshot(), "another style names other urls")
+        } finally {
+            scheduler.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun theSameCanonicalTileIsColdOncePerStyleDigest() = runTest {
+        val warmed = Recorder<List<ReadAheadTile>>()
+        val scheduler = ReadAheadScheduler<String>(newScope()) { _, cold ->
+            warmed.record(cold)
+            ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
+        }
+        try {
+            val tile = tiles(count = 1).single()
+            val candidates = listOf(
+                ReadAheadTile(styleDigest = "one", tile = tile),
+                ReadAheadTile(styleDigest = "two", tile = tile),
+            )
+            scheduler.submit(ReadAheadWindow(context = "both", tiles = candidates))
+            real { scheduler.awaitIdle() }
+            scheduler.submit(ReadAheadWindow(context = "both-again", tiles = candidates))
+            real { scheduler.awaitIdle() }
+
+            assertEquals(listOf(candidates), warmed.snapshot())
         } finally {
             scheduler.cancelAndJoin()
         }

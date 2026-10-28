@@ -62,6 +62,7 @@ class DiagnosticsAndFailuresTest {
                 "GROUND_PRESENTED_PROVISIONALLY",
                 "BLOOM_UNAVAILABLE",
                 "BLOOM_EMISSION_PRECISION_REDUCED",
+                "BASEMAP_STYLE_INDEX_OUT_OF_RANGE",
             ),
             DiagnosticCode.entries.map { it.name },
         )

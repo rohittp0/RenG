@@ -10,6 +10,17 @@ import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.rentile.PreparedStyle
 
+/** One configured style compiled and manifested by the first foreground preparation (ADR 0086). */
+internal class AcquiredBasemapStyle(
+    val prepared: PreparedStyle,
+    val manifest: BasemapStyleManifest,
+)
+
+internal class CommittedBasemapStyleUpdate(
+    val index: Int,
+    val acquired: AcquiredBasemapStyle,
+)
+
 /**
  * Everything one `prepare()` acquired through the consumer's adapters: the decoded images the frame's
  * stickers and geometry textures need, and the ground the engine rendered for it. Two results rather
@@ -29,6 +40,10 @@ internal class FrameAcquisition(
      * for a frame prepared earlier and drawn later, is a different style entirely.
      */
     val basemapStyleDigest: String?,
+    /** The blend target's style digest, or `null` when this frame has no basemap blend (ADR 0086). */
+    val blendBasemapStyleDigest: String? = null,
+    val blendPreparedStyle: PreparedStyle? = null,
+    val blendStyleManifest: BasemapStyleManifest? = null,
     /**
      * This frame's engine-derived label candidates, or `null` when the frame asked for no labels, had
      * no style configured, or selected no tile to ask about. The batch is handed on unplaced: placement

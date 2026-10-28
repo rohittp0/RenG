@@ -10,7 +10,7 @@ import platform.posix.dlsym
 private const val EGL_DISPATCH_LIBRARY: String = "libEGL.so.1"
 
 /**
- * Resolves all ninety-three roster entries against the running system's EGL dispatch library.
+ * Resolves every roster entry against the running system's EGL dispatch library.
  *
  * Resolution is eager and total: every name must resolve or the whole binding is
  * [GlBindingResult.Unsupported]. This turns a partially resolvable driver into a setup-time
@@ -45,7 +45,7 @@ private fun Boolean.toGlBoolean(): UByte = if (this) 1u.toUByte() else 0u.toUByt
 private fun UByte.toKotlinBoolean(): Boolean = this.toInt() != 0
 
 /**
- * The ninety-three-entry [GlBinding] over a fully resolved function-pointer table.
+ * The [GlBinding] over a fully resolved function-pointer table.
  *
  * [table] is indexed by [GlEntryPoint.ordinal]; each property below reinterprets exactly one
  * slot to the C signature Kotlin/Native needs to call it, using the standard width mapping:
@@ -238,6 +238,8 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
         table[GlEntryPoint.DEPTH_FUNC.ordinal].reinterpret()
     private val depthMaskFn: CPointer<CFunction<(UByte) -> Unit>> =
         table[GlEntryPoint.DEPTH_MASK.ordinal].reinterpret()
+    private val polygonOffsetFn: CPointer<CFunction<(Float, Float) -> Unit>> =
+        table[GlEntryPoint.POLYGON_OFFSET.ordinal].reinterpret()
     private val depthRangefFn: CPointer<CFunction<(Float, Float) -> Unit>> =
         table[GlEntryPoint.DEPTH_RANGEF.ordinal].reinterpret()
     private val cullFaceFn: CPointer<CFunction<(UInt) -> Unit>> =
@@ -617,6 +619,8 @@ internal class LinuxGlBinding(table: List<COpaquePointer>) : GlBinding {
     override fun depthFunc(function: Int) = depthFuncFn(function.toUInt())
 
     override fun depthMask(enabled: Boolean) = depthMaskFn(enabled.toGlBoolean())
+
+    override fun polygonOffset(factor: Float, units: Float) = polygonOffsetFn(factor, units)
 
     override fun depthRangef(near: Float, far: Float) = depthRangefFn(near, far)
 

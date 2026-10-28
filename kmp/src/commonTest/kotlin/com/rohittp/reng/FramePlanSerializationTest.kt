@@ -98,6 +98,17 @@ class FramePlanSerializationTest {
                     reachLevel = 1,
                     reachGain = 2f,
                 ),
+                basemap = BasemapSelection(
+                    style = 1,
+                    blend = BasemapBlend(
+                        toStyle = 2,
+                        mask = BlendMask.Linear(
+                            angleRadians = 1.25f,
+                            position = 0.75f,
+                            feather = 0.125f,
+                        ),
+                    ),
+                ),
             )
         }
 
@@ -128,7 +139,7 @@ class FramePlanSerializationTest {
         val expectedKeys = listOf(
             // FramePlan
             "frameIndex", "camera", "projectionMode", "drawBasemap", "drawLabels",
-            "stickers", "models", "geometries", "bloom",
+            "stickers", "models", "geometries", "bloom", "basemap",
             // Camera
             "latitude", "unwrappedLongitude", "zoom", "bearing", "pitch",
             // Placement
@@ -148,6 +159,8 @@ class FramePlanSerializationTest {
             // Bloom
             "intensity", "levelWeights", "insideSuppression", "whiteness",
             "highPrecisionEmission", "reachLevel", "reachGain",
+            // BasemapSelection + BasemapBlend + BlendMask.Linear
+            "style", "toStyle", "mask", "angleRadians", "position", "feather",
             // ShaderPair
             "vertexSource", "fragmentSource",
             // ShaderValue
@@ -194,6 +207,49 @@ class FramePlanSerializationTest {
         assertEquals(minimal, json.decodeFromString(FramePlan.serializer(), document))
         val keys = (json.parseToJsonElement(document) as JsonObject).keys
         assertEquals(setOf("frameIndex", "camera"), keys, "a minimal plan wrote more than it had to")
+    }
+
+    @Test
+    fun everyBasemapMaskRoundTripsAndNullIsOmitted() {
+        val masks = listOf<BlendMask>(
+            BlendMask.Uniform(amount = 0.25f),
+            BlendMask.Radial(centreX = -1f, centreY = 2f, radius = 0.5f, feather = 0.1f),
+            BlendMask.Linear(angleRadians = 3f, position = 0.5f, feather = 0.2f),
+        )
+        masks.forEachIndexed { index, mask ->
+            val plan = FramePlan(
+                frameIndex = index.toLong(),
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+                basemap = BasemapSelection(
+                    style = 0,
+                    blend = BasemapBlend(toStyle = 1, mask = mask),
+                ),
+            )
+            assertEquals(
+                plan,
+                json.decodeFromString(FramePlan.serializer(), json.encodeToString(FramePlan.serializer(), plan)),
+            )
+        }
+        val without = json.encodeToString(
+            FramePlan.serializer(),
+            FramePlan(
+                frameIndex = 0,
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+            ),
+        )
+        assertTrue("\"basemap\"" !in without)
     }
 }
 

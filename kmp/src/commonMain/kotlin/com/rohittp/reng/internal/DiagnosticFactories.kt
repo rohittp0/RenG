@@ -262,8 +262,8 @@ internal fun requireAllowedFailureContext(
 
         is FailureRule.Context -> {
             requireNotNull(diagnostic) { "this failure requires a diagnostic" }
-            require(diagnostic.code == DiagnosticCode.FAILURE_CONTEXT) {
-                "failure diagnostics must be failure context"
+            require(diagnostic.code in rule.diagnosticCodes) {
+                "failure diagnostic code is not allowlisted"
             }
             require(diagnostic.severity == DiagnosticSeverity.ERROR) {
                 "failure diagnostics must be errors"
@@ -327,12 +327,15 @@ private sealed interface FailureRule {
 
     data class Context(
         val fields: Set<DiagnosticField?>,
+        val diagnosticCodes: Set<DiagnosticCode> = setOf(DiagnosticCode.FAILURE_CONTEXT),
+        val fieldsByDiagnosticCode: Map<DiagnosticCode, Set<DiagnosticField?>> = emptyMap(),
         val identity: IdentityRequirement = IdentityRequirement.FORBIDDEN,
         val status: PresenceRequirement = PresenceRequirement.FORBIDDEN,
         val numericLimit: PresenceRequirement = PresenceRequirement.FORBIDDEN,
     ) : FailureRule {
         fun matches(diagnostic: Diagnostic): Boolean =
-            fields.any { it?.wireName == diagnostic.fieldName } &&
+            fieldsByDiagnosticCode.getOrElse(diagnostic.code) { fields }
+                .any { it?.wireName == diagnostic.fieldName } &&
                 identity.matches(diagnostic.resourceKey) &&
                 status.matches(diagnostic.statusCode != null) &&
                 numericLimit.matches(diagnostic.limit != null) &&
@@ -408,6 +411,13 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
                     DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
                     DiagnosticField.GEOMETRY_ALTITUDE,
                     DiagnosticField.SHADER_PAIR,
+                ),
+                diagnosticCodes = setOf(
+                    DiagnosticCode.FAILURE_CONTEXT,
+                    DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
+                ),
+                fieldsByDiagnosticCode = mapOf(
+                    DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE to setOf(DiagnosticField.FRAME_INDEX),
                 ),
             )
 

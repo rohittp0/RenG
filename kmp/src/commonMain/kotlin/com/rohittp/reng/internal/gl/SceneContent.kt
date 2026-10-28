@@ -1,8 +1,9 @@
 package com.rohittp.reng.internal.gl
 
-import com.rohittp.reng.Bloom
 import com.rohittp.reng.AltitudeMode
+import com.rohittp.reng.BasemapBlend
 import com.rohittp.reng.BlendMode
+import com.rohittp.reng.Bloom
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
@@ -282,6 +283,9 @@ internal class Scene(
     val stickers: List<SceneSticker> = emptyList(),
     val geometries: List<SceneGeometry> = emptyList(),
     val groundTiles: List<SceneGroundTile> = emptyList(),
+    /** The optional second style's tiles over the same selection (ADR 0086). */
+    val blendGroundTiles: List<SceneGroundTile> = emptyList(),
+    val basemapBlend: BasemapBlend? = null,
     /**
      * This frame's terrain, or `null` when its style declared none — which is 28 of the corpus's 34
      * styles and every frame of three published releases.
@@ -994,31 +998,70 @@ internal class SceneContent(
                 exaggeration = it.exaggeration.toFloat(),
             )
         }
-        when (camera) {
-            is ResolvedMercatorCamera -> drawGround(
-                binding = binding,
-                pipeline = groundPipeline,
-                tiles = scene.groundTiles.map { tile ->
-                    ResolvedGroundTile(
-                        modelViewProjection = composeGroundModelViewProjection(
-                            camera,
-                            resolveBasemapTileQuad(tile.instance, camera),
-                        ),
+        fun mercatorTiles(source: List<SceneGroundTile>, camera: ResolvedMercatorCamera): List<ResolvedGroundTile> =
+            source.map { tile ->
+                ResolvedGroundTile(
+                    modelViewProjection = composeGroundModelViewProjection(
+                        camera,
+                        resolveBasemapTileQuad(tile.instance, camera),
+                    ),
+                    texture = tile.texture,
+                    colourWindow = tile.colourWindow,
+                    elevation = tile.elevation?.let { demTile ->
+                        MercatorGroundTileDem(
+                            dem = groundTileDemOf(demTile, tile.instance.lod),
+                            mercatorY = mercatorTileYEdges(tile.instance.lod, tile.instance.tileY),
+                        )
+                    },
+                )
+            }
+
+        fun globeTiles(source: List<SceneGroundTile>): List<ResolvedGlobeGroundTile> = source.flatMap { tile ->
+            val edges = globeGroundTileEdges(
+                lod = tile.instance.lod,
+                tileY = tile.instance.tileY.toLong(),
+                unwrappedX = tile.instance.unwrappedX,
+            )
+            val tileDem = tile.elevation?.let { groundTileDemOf(it, tile.instance.lod) }
+            buildList {
+                add(
+                    ResolvedGlobeGroundTile(
+                        edges = edges,
                         texture = tile.texture,
                         colourWindow = tile.colourWindow,
-                        elevation = tile.elevation?.let { demTile ->
-                            MercatorGroundTileDem(
-                                dem = groundTileDemOf(demTile, tile.instance.lod),
-                                mercatorY = mercatorTileYEdges(tile.instance.lod, tile.instance.tileY),
-                            )
-                        },
+                        elevation = tileDem,
+                    ),
+                )
+                if (tile.instance.tileY.toLong() == 0L) {
+                    add(
+                        ResolvedGlobeGroundTile(
+                            edges = globeGroundPolarCapEdges(edges, north = true),
+                            texture = tile.texture,
+                            // The cap carries the same window as the tile it hangs from: its
+                            // collapsed v lands on the window's own edge, which is the tile's
+                            // last row inside the ancestor rather than the ancestor's.
+                            colourWindow = tile.colourWindow,
+                            uvV = NORTH_POLAR_CAP_UV_V,
+                            elevation = tileDem?.let { polarCapDem(it, north = true) },
+                        ),
                     )
-                },
-                // Mercator has no curvature claim on the granularity, so terrain's is the whole
-                // answer -- and `groundCellsPerTileSide` is still where it is spent, so the cap and
-                // the reconciliation rule live in one place for both projections.
-                cellsPerTileSide = frameGroundCells,
-                elevation = dem?.let {
+                }
+                if (tile.instance.tileY.toLong() == (1L shl tile.instance.lod) - 1L) {
+                    add(
+                        ResolvedGlobeGroundTile(
+                            edges = globeGroundPolarCapEdges(edges, north = false),
+                            texture = tile.texture,
+                            colourWindow = tile.colourWindow,
+                            uvV = SOUTH_POLAR_CAP_UV_V,
+                            elevation = tileDem?.let { polarCapDem(it, north = false) },
+                        ),
+                    )
+                }
+            }
+        }
+        when (camera) {
+            is ResolvedMercatorCamera -> {
+                val elevation = dem?.let {
                     MercatorGroundElevationFrame(
                         dem = it,
                         // `projectMercator`'s own altitude scale with its `1 / cos(latitude)` term
@@ -1027,68 +1070,37 @@ internal class SceneContent(
                         equatorialLogicalPixelsPerMetre =
                             (camera.worldSizeLogicalPixels / WORLD_CIRCUMFERENCE_METRES).toFloat(),
                     )
-                },
-            )
-
-            is ResolvedGlobeCamera -> drawGlobeGround(
-                binding = binding,
-                pipeline = requireNotNull(globeGroundPipeline) {
-                    "a globe frame carrying ground tiles must be drawn with the globe ground pipeline"
-                },
-                // A top- or bottom-row tile also paints the cap above or below it, because web
-                // Mercator ends at 85.0511 degrees and a sphere shows the hole that leaves. At lod 0
-                // one tile is both rows and draws both caps, which is why these are two independent
-                // conditions rather than a `when`.
-                tiles = scene.groundTiles.flatMap { tile ->
-                    val edges = globeGroundTileEdges(
-                        lod = tile.instance.lod,
-                        tileY = tile.instance.tileY.toLong(),
-                        unwrappedX = tile.instance.unwrappedX,
+                }
+                drawGround(
+                    binding = binding,
+                    pipeline = groundPipeline,
+                    tiles = mercatorTiles(scene.groundTiles, camera),
+                    // Mercator has no curvature claim on the granularity, so terrain's is the whole
+                    // answer -- and `groundCellsPerTileSide` is still where it is spent, so the cap and
+                    // the reconciliation rule live in one place for both projections.
+                    cellsPerTileSide = frameGroundCells,
+                    elevation = elevation,
+                )
+                scene.basemapBlend?.let { blend ->
+                    drawGroundBlend(
+                        binding = binding,
+                        pipeline = groundPipeline,
+                        tiles = mercatorTiles(scene.blendGroundTiles, camera),
+                        mask = blend.mask,
+                        frameWidth = scene.outputPixelSize.width.toFloat(),
+                        frameHeight = scene.outputPixelSize.height.toFloat(),
+                        cellsPerTileSide = frameGroundCells,
+                        elevation = elevation,
                     )
-                    val tileDem = tile.elevation?.let { groundTileDemOf(it, tile.instance.lod) }
-                    buildList {
-                        add(
-                            ResolvedGlobeGroundTile(
-                                edges = edges,
-                                texture = tile.texture,
-                                colourWindow = tile.colourWindow,
-                                elevation = tileDem,
-                            ),
-                        )
-                        if (tile.instance.tileY.toLong() == 0L) {
-                            add(
-                                ResolvedGlobeGroundTile(
-                                    edges = globeGroundPolarCapEdges(edges, north = true),
-                                    texture = tile.texture,
-                                    // The cap carries the same window as the tile it hangs from: its
-                                    // collapsed v lands on the window's own edge, which is the tile's
-                                    // last row inside the ancestor rather than the ancestor's.
-                                    colourWindow = tile.colourWindow,
-                                    uvV = NORTH_POLAR_CAP_UV_V,
-                                    elevation = tileDem?.let { polarCapDem(it, north = true) },
-                                ),
-                            )
-                        }
-                        if (tile.instance.tileY.toLong() == (1L shl tile.instance.lod) - 1L) {
-                            add(
-                                ResolvedGlobeGroundTile(
-                                    edges = globeGroundPolarCapEdges(edges, north = false),
-                                    texture = tile.texture,
-                                    colourWindow = tile.colourWindow,
-                                    uvV = SOUTH_POLAR_CAP_UV_V,
-                                    elevation = tileDem?.let { polarCapDem(it, north = false) },
-                                ),
-                            )
-                        }
-                    }
-                },
-                unitSphereToClip = composeGlobeGroundUnitSphereToClip(camera),
-                // The frame's one granularity: the globe's curvature claim and terrain's, reconciled
-                // by `max` and capped by the grid's own 16-bit-index ceiling. Two meshes sharing an
-                // edge on the sphere must be subdivided identically, so this is one number for the
-                // whole ground and never one per tile.
-                cellsPerTileSide = frameGroundCells,
-                elevation = dem?.let {
+                }
+            }
+
+            is ResolvedGlobeCamera -> {
+                val globePipeline = requireNotNull(globeGroundPipeline) {
+                    "a globe frame carrying ground tiles must be drawn with the globe ground pipeline"
+                }
+                val unitSphereToClip = composeGlobeGroundUnitSphereToClip(camera)
+                val elevation = dem?.let {
                     GlobeGroundElevationFrame(
                         dem = it,
                         // `globeMetresToLogicalPixels(R) / R`, which is `1 / a` and independent of
@@ -1099,8 +1111,37 @@ internal class SceneContent(
                                 camera.radiusLogicalPixels
                             ).toFloat(),
                     )
-                },
-            )
+                }
+                drawGlobeGround(
+                    binding = binding,
+                    pipeline = globePipeline,
+                    // A top- or bottom-row tile also paints the cap above or below it, because web
+                    // Mercator ends at 85.0511 degrees and a sphere shows the hole that leaves. At lod 0
+                    // one tile is both rows and draws both caps, which is why these are two independent
+                    // conditions rather than a `when`.
+                    tiles = globeTiles(scene.groundTiles),
+                    unitSphereToClip = unitSphereToClip,
+                    // The frame's one granularity: the globe's curvature claim and terrain's, reconciled
+                    // by `max` and capped by the grid's own 16-bit-index ceiling. Two meshes sharing an
+                    // edge on the sphere must be subdivided identically, so this is one number for the
+                    // whole ground and never one per tile.
+                    cellsPerTileSide = frameGroundCells,
+                    elevation = elevation,
+                )
+                scene.basemapBlend?.let { blend ->
+                    drawGlobeGroundBlend(
+                        binding = binding,
+                        pipeline = globePipeline,
+                        tiles = globeTiles(scene.blendGroundTiles),
+                        unitSphereToClip = unitSphereToClip,
+                        cellsPerTileSide = frameGroundCells,
+                        mask = blend.mask,
+                        frameWidth = scene.outputPixelSize.width.toFloat(),
+                        frameHeight = scene.outputPixelSize.height.toFloat(),
+                        elevation = elevation,
+                    )
+                }
+            }
         }
     }
 

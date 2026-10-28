@@ -173,7 +173,7 @@ class RendererReadAheadRasterisationTest {
     }
 
     @Test
-    fun aStyleChangeDropsEverythingDrawnForTheOldStyle() = runTest {
+    fun aStyleChangeRefreshesTheCommittedSnapshotAndAdoptedDigestSet() = runTest {
         val transport = PaintedFreshTransport()
         val renderer = renderer(budgetBytes = ROOMY_BUDGET, transport = transport)
         try {
@@ -186,7 +186,11 @@ class RendererReadAheadRasterisationTest {
             transport.styleJson = RESTYLED_JSON
             renderer.prepare(shifted(2L)).close()
 
-            assertEquals(0, renderer.renderedTileCacheTiles, "adopting the new style dropped the old style's tiles")
+            assertEquals(
+                0,
+                renderer.renderedTileCacheTiles,
+                "adopting the refreshed digest drops tiles rendered for the old one",
+            )
             assertEquals(
                 hitsBefore,
                 renderer.queryMetrics()[RenGMetricName.RENDERED_TILE_CACHE_HITS],
@@ -195,7 +199,7 @@ class RendererReadAheadRasterisationTest {
 
             renderer.readAhead(listOf(farShifted(3L)))
             real { renderer.awaitReadAheadIdle() }
-            assertTrue(renderer.renderedTileCacheTiles > 0, "the worker draws for the new style once it is adopted")
+            assertTrue(renderer.renderedTileCacheTiles > 0, "the worker draws for the refreshed style")
         } finally {
             renderer.close()
         }

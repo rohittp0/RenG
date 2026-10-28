@@ -84,6 +84,8 @@ import com.rohittp.reng.internal.gl.deleteCompositePipeline
 import com.rohittp.reng.internal.gl.deleteGlObjects
 import com.rohittp.reng.internal.gl.deleteGlobeGroundPipeline
 import com.rohittp.reng.internal.gl.deleteGroundPipeline
+import com.rohittp.reng.internal.gl.ensureGlobeGroundBlendPrograms
+import com.rohittp.reng.internal.gl.ensureGroundBlendPrograms
 import com.rohittp.reng.internal.gl.deleteIconPipeline
 import com.rohittp.reng.internal.gl.deleteLabelPipeline
 import com.rohittp.reng.internal.gl.deleteModelPipeline
@@ -157,6 +159,7 @@ import com.rohittp.reng.internal.preparation.preparedLabelGeometryCpuBytes
 import com.rohittp.reng.internal.preparation.projectedModelPoseCpuBytes
 import com.rohittp.reng.internal.projection.ResolvedFrameCamera
 import com.rohittp.reng.internal.projection.ResolvedGlobeCamera
+import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.resolveGlobeCamera
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.readahead.ReadAheadCoordinator
@@ -311,6 +314,11 @@ internal class RenGRenderer(
         ownIdentityDeriver = geometryKeyDeriver,
         privateKeys = privateKeyMemo,
     )
+
+    /** Built once: ADR 0086's first foreground attempt must not re-derive every style key per frame. */
+    private val configuredStyleReferences: List<StaticResourceReference.External> =
+        configuration.basemapStylesForCore().map(::externalBasemapStyleReference)
+    private var configuredStyleSetAttempted: Boolean = false
 
     private var offscreenSurface: OffscreenSurface? = initialGlState.offscreenSurface
     private var compositePipeline: CompositePipeline? = initialGlState.compositePipeline
@@ -562,6 +570,7 @@ internal class RenGRenderer(
                 val initialHistory = preparationHistory()
                 val initialStyle = preparedBasemapStyle
                 val initialReadAheadSnapshot = readAheadCoordinator.readAheadSnapshot
+                val initialStyleSetAttempted = configuredStyleSetAttempted
                 var planningPlan = initialHistory.encodedPlan
                 var planningLod = initialHistory.selectedLod
                 val plannedItems = plans.map { plan ->
@@ -575,6 +584,7 @@ internal class RenGRenderer(
                             maximumBasemapTileInstances = configuration.maximumBasemapTileInstances,
                             previousPlan = planningPlan,
                             previousSelectedLod = planningLod,
+                            additionalBasemapStyles = configuration.additionalBasemapStylesForCore(),
                         ),
                     )
                     val planned = when (planningOutcome) {
@@ -594,11 +604,22 @@ internal class RenGRenderer(
                     var history = initialHistory
                     var finalStyle: PreparedStyle? = initialStyle
                     var finalManifest: BasemapStyleManifest? = null
+                    var finalPrimaryStyleIndex: Int? = null
+                    var styleUpdates: Array<CommittedBasemapStyleUpdate?>? = null
+                    var attemptConfiguredStyles = !configuredStyleSetAttempted
+                    var delivery: PreparedInvocationDelivery? = null
                     var committed = false
                     try {
                         for (item in plannedItems) {
                             currentCoroutineContext().ensureActive()
-                            val prepared = prepareItem(item, history, accessMode, priority)
+                            val prepared = prepareItem(
+                                item = item,
+                                history = history,
+                                accessMode = accessMode,
+                                priority = priority,
+                                attemptConfiguredStyles = attemptConfiguredStyles,
+                            )
+                            attemptConfiguredStyles = false
                             try {
                                 provisional.add(prepared.frame)
                             } catch (failure: Throwable) {
@@ -608,29 +629,99 @@ internal class RenGRenderer(
                             history = prepared.nextHistory
                             finalStyle = prepared.preparedStyle
                             finalManifest = prepared.styleManifest
+                            finalPrimaryStyleIndex = prepared.primaryStyleIndex
+
+                            prepared.primedStyles.forEach { update ->
+                                val stagedDigest = styleUpdates?.get(update.index)?.acquired?.prepared?.digest
+                                if (
+                                    stagedDigest != update.acquired.prepared.digest &&
+                                    readAheadCoordinator.committedStyleDigest(update.index) !=
+                                    update.acquired.prepared.digest
+                                ) {
+                                    val updates = styleUpdates ?: arrayOfNulls<CommittedBasemapStyleUpdate>(
+                                        configuredStyleReferences.size,
+                                    ).also { styleUpdates = it }
+                                    updates[update.index] = update
+                                }
+                            }
+                            val primaryIndex = prepared.primaryStyleIndex
+                            val primaryManifest = prepared.styleManifest
+                            val primaryStyle = prepared.preparedStyle
+                            if (primaryIndex != null && primaryManifest != null && primaryStyle != null) {
+                                val stagedDigest = styleUpdates?.get(primaryIndex)?.acquired?.prepared?.digest
+                                if (
+                                    stagedDigest != primaryStyle.digest &&
+                                    readAheadCoordinator.committedStyleDigest(primaryIndex) != primaryStyle.digest
+                                ) {
+                                    val updates = styleUpdates ?: arrayOfNulls<CommittedBasemapStyleUpdate>(
+                                        configuredStyleReferences.size,
+                                    ).also { styleUpdates = it }
+                                    updates[primaryIndex] = CommittedBasemapStyleUpdate(
+                                        index = primaryIndex,
+                                        acquired = AcquiredBasemapStyle(
+                                            prepared = primaryStyle,
+                                            manifest = primaryManifest,
+                                        ),
+                                    )
+                                }
+                            }
+                            val blendIndex = prepared.blendStyleIndex
+                            val blendManifest = prepared.blendStyleManifest
+                            val blendStyle = prepared.blendPreparedStyle
+                            if (blendIndex != null && blendManifest != null && blendStyle != null) {
+                                val stagedDigest = styleUpdates?.get(blendIndex)?.acquired?.prepared?.digest
+                                if (
+                                    stagedDigest != blendStyle.digest &&
+                                    readAheadCoordinator.committedStyleDigest(blendIndex) != blendStyle.digest
+                                ) {
+                                    val updates = styleUpdates ?: arrayOfNulls<CommittedBasemapStyleUpdate>(
+                                        configuredStyleReferences.size,
+                                    ).also { styleUpdates = it }
+                                    updates[blendIndex] = CommittedBasemapStyleUpdate(
+                                        index = blendIndex,
+                                        acquired = AcquiredBasemapStyle(
+                                            prepared = blendStyle,
+                                            manifest = blendManifest,
+                                        ),
+                                    )
+                                }
+                            }
                         }
 
-                        // Allocate the public snapshot and the coordinator's rollback record before
-                        // mutating renderer history. Everything after commit is allocation-free.
-                        val delivery = PreparedInvocationDelivery(
+                        // Allocate the public delivery before mutating renderer history. The
+                        // coordinator returns the exact style-snapshot before-image with publication.
+                        val preparedDelivery = PreparedInvocationDelivery(
                             frames = ArrayList(provisional),
                             initialHistory = initialHistory,
                             initialStyle = initialStyle,
                             initialReadAheadSnapshot = initialReadAheadSnapshot,
+                            initialStyleSetAttempted = initialStyleSetAttempted,
                         )
+                        delivery = preparedDelivery
                         currentCoroutineContext().ensureActive()
                         commitPreparationHistory(history)
                         preparedBasemapStyle = finalStyle
-                        readAheadCoordinator.readAheadSnapshot =
-                            readAheadCoordinator.readAheadSnapshotOf(finalStyle, finalManifest, accessMode, history.selectedLod)
+                        preparedDelivery.readAheadRollback = readAheadCoordinator.publishCommittedStyles(
+                            updates = styleUpdates,
+                            primaryStyleIndex = finalPrimaryStyleIndex,
+                            primaryStyle = finalStyle,
+                            primaryManifest = finalManifest,
+                            accessMode = accessMode,
+                            selectedLod = history.selectedLod,
+                        )
+                        if (initialStyleSetAttempted.not()) configuredStyleSetAttempted = true
                         committed = true
                         currentCoroutineContext().ensureActive()
-                        delivery
+                        preparedDelivery
                     } catch (failure: Throwable) {
                         if (committed) {
                             commitPreparationHistory(initialHistory)
                             preparedBasemapStyle = initialStyle
-                            readAheadCoordinator.readAheadSnapshot = initialReadAheadSnapshot
+                            configuredStyleSetAttempted = initialStyleSetAttempted
+                            readAheadCoordinator.restoreCommittedSnapshot(
+                                snapshot = initialReadAheadSnapshot,
+                                rollback = delivery?.readAheadRollback,
+                            )
                         }
                         disposePreparedFrames(provisional)
                         throw failure
@@ -730,7 +821,11 @@ internal class RenGRenderer(
     private fun rollbackPreparedInvocation(delivery: PreparedInvocationDelivery) {
         commitPreparationHistory(delivery.initialHistory)
         preparedBasemapStyle = delivery.initialStyle
-        readAheadCoordinator.readAheadSnapshot = delivery.initialReadAheadSnapshot
+        configuredStyleSetAttempted = delivery.initialStyleSetAttempted
+        readAheadCoordinator.restoreCommittedSnapshot(
+            snapshot = delivery.initialReadAheadSnapshot,
+            rollback = delivery.readAheadRollback,
+        )
         disposePreparedFrames(delivery.frames)
     }
 
@@ -747,6 +842,7 @@ internal class RenGRenderer(
         history: PreparationHistory,
         accessMode: ResourceAccessMode,
         priority: RenGRenderPriority,
+        attemptConfiguredStyles: Boolean,
     ): PreparedItemResult {
         val plan = item.plan
         val planned = item.planned
@@ -754,6 +850,7 @@ internal class RenGRenderer(
         var prepared: RenGPreparedFrame? = null
         var constructedFrame: RenGPreparedFrame? = null
         var rawTileReservation: RawTileBudget.Reservation? = null
+        var blendRawTileReservation: RawTileBudget.Reservation? = null
         var preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation? = null
         try {
             val cpuReservation = when (
@@ -817,9 +914,21 @@ internal class RenGRenderer(
             // The style is the one traversal entry that is neither a sticker nor a texture: it is
             // acquired, validated, compiled through the engine, written and installed by the resource
             // driver's own basemap-style commit verbs, and never decoded as an image.
-            val styleReference = planned.staticResourceTraversal
+            val externalReferences = planned.staticResourceTraversal
                 .filterIsInstance<StaticResourceReference.External>()
-                .singleOrNull { it.resourceClass == ResourceClass.BASEMAP_STYLE }
+            var primaryStyleReference: StaticResourceReference.External? = null
+            var blendStyleReference: StaticResourceReference.External? = null
+            externalReferences.forEach { reference ->
+                if (reference.resourceClass == ResourceClass.BASEMAP_STYLE) {
+                    if (primaryStyleReference == null) {
+                        primaryStyleReference = reference
+                    } else {
+                        blendStyleReference = reference
+                    }
+                }
+            }
+            val primaryStyleIndex = primaryStyleReference?.let { plan.basemap?.style ?: 0 }
+            val blendStyleIndex = blendStyleReference?.let { plan.basemap?.blend?.toStyle }
 
             // ADR 0068. At most one, and its own class, so it cannot be confused with the sticker
             // images that are paired back up by position above. Only a pattern has one: ADR 0071's
@@ -879,8 +988,21 @@ internal class RenGRenderer(
             } else {
                 emptyList()
             }
+            val primedStyles = if (attemptConfiguredStyles) {
+                attemptConfiguredStyleSet(
+                    primaryStyleIndex = primaryStyleIndex,
+                    blendStyleIndex = blendStyleIndex,
+                    accessMode = accessMode,
+                    priority = priority,
+                    leaseSink = leases,
+                    preparedFrameCpuReservation = cpuReservation,
+                )
+            } else {
+                emptyList()
+            }
             val acquired = acquireFrameResources(
-                styleReference = styleReference,
+                primaryStyleReference = primaryStyleReference,
+                blendStyleReference = blendStyleReference,
                 imageReferences = imageReferences,
                 modelGlbReferences = modelGlbReferences,
                 canonicalTiles = groundCanonicalTiles,
@@ -890,8 +1012,12 @@ internal class RenGRenderer(
                 leaseSink = leases,
                 preparedFrameCpuReservation = cpuReservation,
                 rawReservationSink = { reservation ->
-                    check(rawTileReservation == null) { "one frame can own at most one raw reservation" }
-                    rawTileReservation = reservation
+                    if (rawTileReservation == null) {
+                        rawTileReservation = reservation
+                    } else {
+                        check(blendRawTileReservation == null) { "two styles own at most two raw reservations" }
+                        blendRawTileReservation = reservation
+                    }
                 },
             )
             currentCoroutineContext().ensureActive()
@@ -912,6 +1038,16 @@ internal class RenGRenderer(
                 residentAtSelection = acquired.residentAtSelection,
                 styleDigest = acquired.basemapStyleDigest,
             )
+            val blendGroundInstances = if (acquired.blendBasemapStyleDigest == null) {
+                emptyList()
+            } else {
+                groundTileProvisioner.groundInstances(
+                    instances = planned.spatialPlan.tileSelection?.instances.orEmpty(),
+                    renderedTiles = acquired.basemapTiles,
+                    residentAtSelection = acquired.residentAtSelection,
+                    styleDigest = acquired.blendBasemapStyleDigest,
+                )
+            }
             val terrain = preparedTerrain(acquired)
             // Engine-produced tiles are independently bounded during acquisition. As soon as their
             // exact retained byte arrays are available, charge them before building any more frame
@@ -1123,20 +1259,24 @@ internal class RenGRenderer(
                 drawBasemap = plan.drawBasemap,
                 drawLabels = plan.drawLabels,
                 basemapStyleDigest = acquired.basemapStyleDigest,
+                blendBasemapStyleDigest = acquired.blendBasemapStyleDigest,
                 stickers = stickers,
                 geometries = geometries,
                 models = models,
                 basemapTiles = acquired.basemapTiles,
                 groundInstances = groundInstances,
+                blendGroundInstances = blendGroundInstances,
                 groundSelectedLod = planned.spatialPlan.lodObservation.selectedLod,
                 backdrop = preparedBackdrop,
                 bloom = plan.bloom,
+                basemapBlend = plan.basemap?.blend,
                 terrain = terrain,
                 groundSurface = groundSurface,
                 labels = labels,
                 mapOrder = planned.spatialPlan.mapEntries.map { it.reference },
                 screenOrder = planned.spatialPlan.screenEntries.map { it.reference },
                 rawTileReservation = rawTileReservation,
+                blendRawTileReservation = blendRawTileReservation,
                 preparedFrameCpuReservation = cpuReservation,
                 leases = leases,
             )
@@ -1152,6 +1292,11 @@ internal class RenGRenderer(
                 ),
                 preparedStyle = acquired.preparedStyle,
                 styleManifest = acquired.styleManifest,
+                primaryStyleIndex = primaryStyleIndex,
+                blendPreparedStyle = acquired.blendPreparedStyle,
+                blendStyleManifest = acquired.blendStyleManifest,
+                blendStyleIndex = blendStyleIndex,
+                primedStyles = primedStyles,
             )
             // This is the ownership handoff: every allocation which could still fail happened first,
             // and owner-wide close can now find the frame even if it wins immediately after publication.
@@ -1164,7 +1309,12 @@ internal class RenGRenderer(
                 if (abandonedFrame != null) {
                     frameOwnership.disposePreparedFrame(abandonedFrame)
                 } else {
-                    frameOwnership.releasePreparedFrameOwnership(rawTileReservation, leases, preparedFrameCpuReservation)
+                    frameOwnership.releasePreparedFrameOwnership(
+                        rawTileReservation = rawTileReservation,
+                        blendRawTileReservation = blendRawTileReservation,
+                        leases = leases,
+                        preparedFrameCpuReservation = preparedFrameCpuReservation,
+                    )
                 }
             }
         }
@@ -1479,6 +1629,73 @@ internal class RenGRenderer(
         )
     }
 
+    private fun externalBasemapStyleReference(locator: ResourceLocator): StaticResourceReference.External {
+        val derived = geometryKeyDeriver.external(ResourceClass.BASEMAP_STYLE, locator)
+        return StaticResourceReference.External(
+            resourceClass = ResourceClass.BASEMAP_STYLE,
+            locator = locator,
+            maximumResponseBytes = configuration.resourceLimits.maximumBytesFor(ResourceClass.BASEMAP_STYLE),
+            resourceKey = derived.key,
+            rawKey = requireNotNull(derived.rawKey),
+            privateRentileKey = rentilePrivateKeyResolver.resolve(locator, ResourceClass.BASEMAP_STYLE),
+            canonicalIdentity = derived.identity,
+        )
+    }
+
+    /**
+     * ADR 0086's one-time foreground priming. Named styles are skipped here because this frame's
+     * ordinary acquisition attempts them below; failures of every other style are deliberately
+     * ignored until a frame names that style.
+     */
+    @Suppress("LongParameterList")
+    private suspend fun attemptConfiguredStyleSet(
+        primaryStyleIndex: Int?,
+        blendStyleIndex: Int?,
+        accessMode: ResourceAccessMode,
+        priority: RenGRenderPriority,
+        leaseSink: MutableList<Lease>,
+        preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation,
+    ): List<CommittedBasemapStyleUpdate> {
+        if (configuredStyleReferences.isEmpty()) return emptyList()
+        val acquiredStyles = ArrayList<CommittedBasemapStyleUpdate>(configuredStyleReferences.size)
+        configuredStyleReferences.forEachIndexed { index, reference ->
+            if (index == primaryStyleIndex || index == blendStyleIndex) return@forEachIndexed
+            currentCoroutineContext().ensureActive()
+            try {
+                val acquired = acquireFrameResources(
+                    primaryStyleReference = reference,
+                    blendStyleReference = null,
+                    imageReferences = emptyList(),
+                    modelGlbReferences = emptyList(),
+                    canonicalTiles = emptyList(),
+                    labelTiles = emptyList(),
+                    accessMode = accessMode,
+                    priority = priority,
+                    leaseSink = leaseSink,
+                    preparedFrameCpuReservation = preparedFrameCpuReservation,
+                    rawReservationSink = { error("style-set priming renders no tiles") },
+                    manifestForPriming = true,
+                )
+                val style = acquired.preparedStyle
+                val manifest = acquired.styleManifest
+                if (style != null && manifest != null) {
+                    acquiredStyles += CommittedBasemapStyleUpdate(
+                        index = index,
+                        acquired = AcquiredBasemapStyle(
+                            prepared = style,
+                            manifest = manifest,
+                        ),
+                    )
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: RenGException) {
+                // ADR 0086: an unnamed style's failed first attempt cannot fail this frame.
+            }
+        }
+        return acquiredStyles
+    }
+
     /**
      * One [Model] turned into the [PreparedModel] the draw path consumes: the acquired GLB decoded,
      * its [AnimationTrack]s resolved and sampled, its node hierarchy composed against that pose, and
@@ -1611,13 +1828,14 @@ internal class RenGRenderer(
     }
 
     /**
-     * Acquires everything one frame plan asked for that is not already in hand: the configured basemap
-     * style ([styleReference], when the plan draws one), every traversed external image
+     * Acquires everything one frame plan asked for that is not already in hand: the configured
+     * primary style ([primaryStyleReference]), optional blend target ([blendStyleReference]), every
+     * external image
      * ([imageReferences] — a sticker's, a model's base-colour override, or a geometry consumer
      * texture's), every model GLB ([modelGlbReferences]), and the ground itself ([canonicalTiles]).
      * Returns the decoded images by key plus the rendered ground.
      *
-     * **Two of those are acquired and not decoded here, for two different reasons.** A style is not an
+     * **Two kinds are acquired and not decoded here, for two different reasons.** A style is not an
      * image at all: it is validated, compiled through the engine, written and installed by the resource
      * driver's own basemap-style commit verbs. A GLB is not an image either, and its decode needs the
      * `ResourceLimits` and the failure vocabulary [prepareModel] owns — so this function's job for a
@@ -1650,7 +1868,8 @@ internal class RenGRenderer(
      */
     @Suppress("LongParameterList")
     private suspend fun acquireFrameResources(
-        styleReference: StaticResourceReference.External?,
+        primaryStyleReference: StaticResourceReference.External?,
+        blendStyleReference: StaticResourceReference.External?,
         imageReferences: List<StaticResourceReference.External>,
         modelGlbReferences: List<StaticResourceReference.External>,
         canonicalTiles: List<CanonicalBasemapTile>,
@@ -1668,10 +1887,22 @@ internal class RenGRenderer(
         preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation,
         /** Receives the raw-pixel reservation as soon as it is acquired. */
         rawReservationSink: (RawTileBudget.Reservation) -> Unit,
+        /** First-attempt snapshot materialisation; never set by an ordinary frame (ADR 0086). */
+        manifestForPriming: Boolean = false,
     ): FrameAcquisition {
-        val references = listOfNotNull(styleReference) + imageReferences + modelGlbReferences
+        val references = if (blendStyleReference == null) {
+            listOfNotNull(primaryStyleReference) + imageReferences + modelGlbReferences
+        } else {
+            listOfNotNull(primaryStyleReference, blendStyleReference) + imageReferences + modelGlbReferences
+        }
         if (references.isEmpty()) {
-            return FrameAcquisition(emptyMap(), emptyMap(), emptyList(), null, basemapStyleDigest = null)
+            return FrameAcquisition(
+                decodedImagesByKey = emptyMap(),
+                compressedImagesByKey = emptyMap(),
+                basemapTiles = emptyList(),
+                preparedStyle = null,
+                basemapStyleDigest = null,
+            )
         }
 
         val admitLease: (Lease) -> Unit = { lease ->
@@ -1684,6 +1915,7 @@ internal class RenGRenderer(
             traversalsByItem = listOf(references),
             accessMode = accessMode,
             maximumConcurrentRoutes = minOf(configuration.maximumConcurrentResourceOperations, references.size),
+            primaryBasemapStyleResourceKey = configuredStyleReferences.firstOrNull()?.resourceKey,
         )
         val driven = preparationDriver.leaseSteadyStateResident(
             references = imageReferences + modelGlbReferences,
@@ -1693,7 +1925,8 @@ internal class RenGRenderer(
             registration = fullDefinition,
         )
         val drivenKeys = driven.mapTo(HashSet()) { it.resourceKey }
-        styleReference?.let { drivenKeys += it.resourceKey }
+        primaryStyleReference?.let { reference -> drivenKeys += reference.resourceKey }
+        blendStyleReference?.let { reference -> drivenKeys += reference.resourceKey }
         // The operation drives the style and what the shortcut left, but registers every identity the full
         // set carries, so a bypassed reference still takes part in collision checks. The shortcut bypasses
         // whole keys, so keeping the occurrences of the keys it left drives exactly the references it left.
@@ -1717,6 +1950,9 @@ internal class RenGRenderer(
         var observedStyle: PreparedStyle? = null
         var observedManifest: BasemapStyleManifest? = null
         var basemapStyleDigest: String? = null
+        var blendBasemapStyleDigest: String? = null
+        var observedBlendStyle: PreparedStyle? = null
+        var observedBlendManifest: BasemapStyleManifest? = null
         var terrain: TerrainAcquisitionOutcome? = null
         var terrainExaggeration = 1.0
         var labelCandidates: AcquiredLabelCandidates? = null
@@ -1747,23 +1983,25 @@ internal class RenGRenderer(
                 // here for bytes that are not resident, and paired with routes renderBasemapTiles derives
                 // from the bytes that are. The host declines that, so both halves of the frame are keyed
                 // off this one observation of what is resident.
-                val style = if (styleReference == null) {
+                val style = if (primaryStyleReference == null) {
                     null
                 } else {
                     basemapEngineHost.currentPreparedStyle(
-                        styleKey = styleReference.resourceKey,
-                        contentDigest = residentCache.current(styleReference.resourceKey)?.stored?.contentDigest,
+                        styleKey = primaryStyleReference.resourceKey,
+                        contentDigest = residentCache.current(primaryStyleReference.resourceKey)?.stored?.contentDigest,
                     )
                 }
                 observedStyle = style
-                if (styleReference != null && style != null) {
+                if (primaryStyleReference != null && style != null) {
                     // Both halves read one manifest. It is bound to the style's content digest, so the
                     // second call is a lookup rather than a second parse of a 248 KB document -- see
                     // `BasemapEngineHost.styleManifest`.
-                    val manifest = if (canonicalTiles.isEmpty() && labelTiles.isEmpty()) {
+                    val manifest = if (
+                        !manifestForPriming && canonicalTiles.isEmpty() && labelTiles.isEmpty()
+                    ) {
                         null
                     } else {
-                        completedStyleManifest(styleReference)
+                        completedStyleManifest(primaryStyleReference)
                     }
                     observedManifest = manifest
                     if (manifest != null && canonicalTiles.isNotEmpty()) {
@@ -1794,6 +2032,36 @@ internal class RenGRenderer(
                         // pair -- so the registry holds no manifest and reading it now would answer
                         // `null` for a style that declares one. See [RetainedLabelHandover].
                         spriteAtlas = handover.spriteAtlas
+                    }
+                }
+                if (blendStyleReference != null) {
+                    val blendStyle = basemapEngineHost.currentPreparedStyle(
+                        styleKey = blendStyleReference.resourceKey,
+                        contentDigest = residentCache.current(blendStyleReference.resourceKey)?.stored?.contentDigest,
+                    )
+                    if (blendStyle != null) {
+                        observedBlendStyle = blendStyle
+                        val blendManifest = if (canonicalTiles.isEmpty()) {
+                            null
+                        } else {
+                            completedStyleManifest(blendStyleReference)
+                        }
+                        observedBlendManifest = blendManifest
+                        if (blendManifest != null) {
+                            blendBasemapStyleDigest = blendStyle.digest
+                        }
+                        if (blendManifest != null && blendStyle.digest != basemapStyleDigest) {
+                            val blendTiles = groundTileProvisioner.renderBasemapTiles(
+                                manifest = blendManifest,
+                                style = blendStyle,
+                                canonicalTiles = canonicalTiles,
+                                accessMode = accessMode,
+                                priority = priority,
+                                rawReservationSink = rawReservationSink,
+                                residentAtSelection = residentAtSelection,
+                            )
+                            basemapTiles = basemapTiles + blendTiles
+                        }
                     }
                 }
             }
@@ -1875,15 +2143,18 @@ internal class RenGRenderer(
             decodedByKey[reference.resourceKey] = image
         }
         return FrameAcquisition(
-            decodedByKey,
-            compressedByKey,
-            basemapTiles,
-            observedStyle,
-            basemapStyleDigest,
-            labelCandidates,
-            spriteAtlas,
-            terrain,
-            terrainExaggeration,
+            decodedImagesByKey = decodedByKey,
+            compressedImagesByKey = compressedByKey,
+            basemapTiles = basemapTiles,
+            preparedStyle = observedStyle,
+            basemapStyleDigest = basemapStyleDigest,
+            blendBasemapStyleDigest = blendBasemapStyleDigest,
+            blendPreparedStyle = observedBlendStyle,
+            blendStyleManifest = observedBlendManifest,
+            labelCandidates = labelCandidates,
+            spriteAtlas = spriteAtlas,
+            terrain = terrain,
+            terrainExaggeration = terrainExaggeration,
             styleManifest = observedManifest,
             residentAtSelection = residentAtSelection,
             leasedGenerations = leasedGenerations,
@@ -2446,6 +2717,7 @@ internal class RenGRenderer(
                             icon = icon,
                             resolvedCamera = resolvedCamera,
                             sceneGroundTiles = resolved.tiles,
+                            sceneBlendGroundTiles = resolved.blendTiles,
                             textureLeases = textureLeases,
                             gpuAllocationLeases = gpuAllocationLeases,
                             consumerPipelineLeases = consumerPipelineLeases,
@@ -2522,6 +2794,7 @@ internal class RenGRenderer(
         backdropPipeline: BackdropPipeline,
         resolvedCamera: ResolvedFrameCamera,
         sceneGroundTiles: List<SceneGroundTile>,
+        sceneBlendGroundTiles: List<SceneGroundTile>,
         textureLeases: MutableList<TextureLease>,
         gpuAllocationLeases: MutableList<GpuAllocationLease>,
         consumerPipelineLeases: MutableList<ConsumerPipelineLease<*>>,
@@ -2611,6 +2884,8 @@ internal class RenGRenderer(
             stickers = sceneStickers,
             geometries = sceneGeometries,
             groundTiles = sceneGroundTiles,
+            blendGroundTiles = sceneBlendGroundTiles,
+            basemapBlend = frame.basemapBlend,
             terrain = sceneTerrain(frame),
             models = sceneModels,
             labels = sceneLabels(frame, textureLeases, binding),
@@ -2706,6 +2981,26 @@ internal class RenGRenderer(
                     inverseViewProjection = composeBackdropInverseViewProjection(resolvedCamera),
                 )
             }
+        }
+
+        if (sceneBlendGroundTiles.isNotEmpty()) {
+            val blendProgramFailure = when (resolvedCamera) {
+                is ResolvedMercatorCamera -> ensureGroundBlendPrograms(
+                    binding = binding,
+                    dialect = profile.dialect,
+                    cache = programs,
+                    pipeline = ground,
+                    deriver = geometryKeyDeriver,
+                )
+                is ResolvedGlobeCamera -> ensureGlobeGroundBlendPrograms(
+                    binding = binding,
+                    dialect = profile.dialect,
+                    cache = programs,
+                    pipeline = requireNotNull(globeGround),
+                    deriver = geometryKeyDeriver,
+                )
+            }
+            if (blendProgramFailure != null) return blendProgramFailure
         }
 
         val content = SceneContent(
@@ -2937,11 +3232,17 @@ internal class RenGRenderer(
     private sealed interface GroundTilesResult {
         class Resolved(
             val tiles: List<SceneGroundTile>,
+            val blendTiles: List<SceneGroundTile> = emptyList(),
             /** How many of [tiles] were drawn from an ancestor rather than their own texture (ADR 0057). */
             val provisionalTileCount: Int = 0,
         ) : GroundTilesResult
 
         class Failed(val failure: FailureDescriptor) : GroundTilesResult
+    }
+
+    private sealed interface GroundInstanceResolution {
+        class Resolved(val provisionalTileCount: Int) : GroundInstanceResolution
+        class Failed(val failure: FailureDescriptor) : GroundInstanceResolution
     }
 
     /**
@@ -2987,117 +3288,160 @@ internal class RenGRenderer(
         binding: GlBinding,
     ): GroundTilesResult {
         val groundInstances = frame.groundInstances
-        if (groundInstances.isEmpty()) return GroundTilesResult.Resolved(emptyList())
+        val blendGroundInstances = frame.blendGroundInstances
+        if (groundInstances.isEmpty() && blendGroundInstances.isEmpty()) {
+            return GroundTilesResult.Resolved(tiles = emptyList())
+        }
 
         val renderedByKey = frame.basemapTiles.associateBy { it.key }
-        var provisionalTileCount = 0
+        val hasBlend = blendGroundInstances.isNotEmpty()
+        val provisionalInstances = if (hasBlend) HashSet<BasemapTileInstance>() else null
         val texturesByKey = HashMap<ResourceKey, Int>(renderedByKey.size)
         val elevationByTile = resolveDemTextures(frame.terrain, groundLeases, binding)
         val tiles = ArrayList<SceneGroundTile>(groundInstances.size)
-        for (groundInstance in groundInstances) {
-            val key = groundInstance.resourceKey
-            val cached = texturesByKey[key]
-            val elevation = elevationByTile[canonicalTileOf(groundInstance.instance)]
-            if (cached != null) {
-                tiles += SceneGroundTile(
-                    instance = groundInstance.instance,
-                    texture = cached,
-                    elevation = elevation,
-                )
-                continue
-            }
-            val reused = glObjectRegistry.leaseResident(key)
-            // ADR 0057: a tile this frame's budget declined to rasterise, or whose own resources could
-            // not be acquired under `presentFailedTilesProvisionally`, has no texture and no
-            // rendered bytes, so it is drawn from the nearest resident ancestor, magnified through
-            // the window it occupies there. Tried only when the two ordinary sources have failed,
-            // and never instead of the typed failure below: a tile with no ancestor either is still
-            // RESOURCE_UNAVAILABLE (ADR 0046).
-            val provisional = if (reused != null || renderedByKey.containsKey(key)) {
-                null
-            } else {
-                frame.basemapStyleDigest?.let { digest ->
-                    groundTileProvisioner.residentAncestorOf(digest, canonicalTileOf(groundInstance.instance))
+        fun resolveInstances(
+            instances: List<PreparedGroundInstance>,
+            styleDigest: String?,
+            destination: MutableList<SceneGroundTile>,
+        ): GroundInstanceResolution {
+            var provisionalTileCount = 0
+            for (groundInstance in instances) {
+                val key = groundInstance.resourceKey
+                val cached = texturesByKey[key]
+                val elevation = elevationByTile[canonicalTileOf(groundInstance.instance)]
+                if (cached != null) {
+                    destination += SceneGroundTile(
+                        instance = groundInstance.instance,
+                        texture = cached,
+                        elevation = elevation,
+                    )
+                    continue
                 }
-            }
-            if (provisional != null) {
-                val (ancestorKey, window) = provisional
-                val ancestor = glObjectRegistry.leaseResident(ancestorKey)
-                    ?: return GroundTilesResult.Failed(basemapTileEvictedFailure(key))
-                groundLeases += ancestor.lease
-                provisionalTileCount += 1
-                // Deliberately NOT recorded in `texturesByKey`: that memo is keyed by the tile's own
-                // identity, and two tiles sharing one ancestor need two different windows into it.
-                tiles += SceneGroundTile(
-                    instance = groundInstance.instance,
-                    texture = ancestor.handle.name,
-                    elevation = elevation,
-                    colourWindow = window,
-                )
-                continue
-            }
-            val texture = if (reused != null) {
-                groundLeases += reused.lease
-                reused.handle.name
-            } else {
-                // Not `requireNotNull` any more. Preparation now skips the engine for a tile whose
-                // texture was already resident, so a ground instance names *either* a rendered tile
-                // or a resident texture — and the `leaseResident` above is what distinguishes them.
-                // The one path that reaches here with neither is a texture evicted between this
-                // frame's preparation and its draw, which the byte budget can do to an unleased
-                // entry. That is a frame this renderer cannot honour, and refusing it is right;
-                // crashing the consumer for a cache decision it never made is not (ADR 0046).
-                val rendered = renderedByKey[key]
-                    ?: return GroundTilesResult.Failed(basemapTileEvictedFailure(key))
-                // Exhaustive, with no `else`: a third pixel form must fail to compile here rather
-                // than reach a driver as an unhandled tile (ADR 0044).
-                val uploaded = when (val pixels = rendered.pixels) {
-                    is BasemapTilePixels.Encoded -> {
-                        val image = when (
-                            val decoded = decodePng(
-                                pixels.pngBytes,
-                                configuration.resourceLimits.maximumDecodedImageBytes,
-                                configuration.resourceLimits.maximumImageDecodeWorkingBytes,
+                val reused = glObjectRegistry.leaseResident(key)
+                // ADR 0057: a tile this frame's budget declined to rasterise, or whose own resources could
+                // not be acquired under `presentFailedTilesProvisionally`, has no texture and no
+                // rendered bytes, so it is drawn from the nearest resident ancestor, magnified through
+                // the window it occupies there. Tried only when the two ordinary sources have failed,
+                // and never instead of the typed failure below: a tile with no ancestor either is still
+                // RESOURCE_UNAVAILABLE (ADR 0046).
+                val provisional = if (reused != null || renderedByKey.containsKey(key)) {
+                    null
+                } else {
+                    styleDigest?.let { digest ->
+                        groundTileProvisioner.residentAncestorOf(digest, canonicalTileOf(groundInstance.instance))
+                    }
+                }
+                if (provisional != null) {
+                    val (ancestorKey, window) = provisional
+                    val ancestor = glObjectRegistry.leaseResident(ancestorKey)
+                        ?: return GroundInstanceResolution.Failed(basemapTileEvictedFailure(key))
+                    groundLeases += ancestor.lease
+                    // A blend has the same drawn instance set as its primary. Count the instance
+                    // once even when both styles fall back, so the frame diagnostic cannot exceed
+                    // the number of ground tiles actually drawn (ADR 0086).
+                    if (provisionalInstances == null) {
+                        provisionalTileCount += 1
+                    } else {
+                        provisionalInstances += groundInstance.instance
+                    }
+                    // Deliberately NOT recorded in `texturesByKey`: that memo is keyed by the tile's own
+                    // identity, and two tiles sharing one ancestor need two different windows into it.
+                    destination += SceneGroundTile(
+                        instance = groundInstance.instance,
+                        texture = ancestor.handle.name,
+                        elevation = elevation,
+                        colourWindow = window,
+                    )
+                    continue
+                }
+                val texture = if (reused != null) {
+                    groundLeases += reused.lease
+                    reused.handle.name
+                } else {
+                    // Not `requireNotNull` any more. Preparation now skips the engine for a tile whose
+                    // texture was already resident, so a ground instance names *either* a rendered tile
+                    // or a resident texture — and the `leaseResident` above is what distinguishes them.
+                    // The one path that reaches here with neither is a texture evicted between this
+                    // frame's preparation and its draw, which the byte budget can do to an unleased
+                    // entry. That is a frame this renderer cannot honour, and refusing it is right;
+                    // crashing the consumer for a cache decision it never made is not (ADR 0046).
+                    val rendered = renderedByKey[key]
+                        ?: return GroundInstanceResolution.Failed(basemapTileEvictedFailure(key))
+                    // Exhaustive, with no `else`: a third pixel form must fail to compile here rather
+                    // than reach a driver as an unhandled tile (ADR 0044).
+                    val uploaded = when (val pixels = rendered.pixels) {
+                        is BasemapTilePixels.Encoded -> {
+                            val image = when (
+                                val decoded = decodePng(
+                                    pixels.pngBytes,
+                                    configuration.resourceLimits.maximumDecodedImageBytes,
+                                    configuration.resourceLimits.maximumImageDecodeWorkingBytes,
+                                )
+                            ) {
+                                is PngDecodeResult.Success -> decoded.image
+                                else -> return GroundInstanceResolution.Failed(basemapTileDecodeFailure(key))
+                            }
+                            UploadedGroundTile(
+                                name = uploadTexture(binding, image, TextureContent.IMAGE),
+                                widthPx = image.width,
+                                heightPx = image.height,
                             )
-                        ) {
-                            is PngDecodeResult.Success -> decoded.image
-                            else -> return GroundTilesResult.Failed(basemapTileDecodeFailure(key))
                         }
-                        UploadedGroundTile(
-                            name = uploadTexture(binding, image, TextureContent.IMAGE),
-                            widthPx = image.width,
-                            heightPx = image.height,
+                        // `uploadPremultipliedTexture`, never `uploadTexture`: these bytes are already
+                        // premultiplied and the other entry point would do it twice.
+                        is BasemapTilePixels.Raw -> UploadedGroundTile(
+                            name = uploadPremultipliedTexture(
+                                binding,
+                                pixels.rgba,
+                                pixels.widthPx,
+                                pixels.heightPx,
+                            ),
+                            widthPx = pixels.widthPx,
+                            heightPx = pixels.heightPx,
                         )
                     }
-                    // `uploadPremultipliedTexture`, never `uploadTexture`: these bytes are already
-                    // premultiplied and the other entry point would do it twice.
-                    is BasemapTilePixels.Raw -> UploadedGroundTile(
-                        name = uploadPremultipliedTexture(
-                            binding,
-                            pixels.rgba,
-                            pixels.widthPx,
-                            pixels.heightPx,
-                        ),
-                        widthPx = pixels.widthPx,
-                        heightPx = pixels.heightPx,
+                    groundLeases += glObjectRegistry.registerTexture(
+                        key = key,
+                        handle = GlObjectHandle(type = GlObjectType.TEXTURE, name = uploaded.name),
+                        byteSize = uploaded.widthPx.toLong() * uploaded.heightPx.toLong() *
+                            RGBA_BYTES_PER_PIXEL,
                     )
+                    uploaded.name
                 }
-                groundLeases += glObjectRegistry.registerTexture(
-                    key = key,
-                    handle = GlObjectHandle(GlObjectType.TEXTURE, uploaded.name),
-                    byteSize = uploaded.widthPx.toLong() * uploaded.heightPx.toLong() *
-                        RGBA_BYTES_PER_PIXEL,
+                texturesByKey[key] = texture
+                destination += SceneGroundTile(
+                    instance = groundInstance.instance,
+                    texture = texture,
+                    elevation = elevation,
                 )
-                uploaded.name
             }
-            texturesByKey[key] = texture
-            tiles += SceneGroundTile(
-                instance = groundInstance.instance,
-                texture = texture,
-                elevation = elevation,
+            return GroundInstanceResolution.Resolved(provisionalTileCount = provisionalTileCount)
+        }
+        val primaryResolution = resolveInstances(groundInstances, frame.basemapStyleDigest, tiles)
+        if (primaryResolution is GroundInstanceResolution.Failed) {
+            return GroundTilesResult.Failed(failure = primaryResolution.failure)
+        }
+        if (!hasBlend) {
+            return GroundTilesResult.Resolved(
+                tiles = tiles,
+                provisionalTileCount =
+                    (primaryResolution as GroundInstanceResolution.Resolved).provisionalTileCount,
             )
         }
-        return GroundTilesResult.Resolved(tiles, provisionalTileCount)
+        val blendTiles = ArrayList<SceneGroundTile>(blendGroundInstances.size)
+        val blendResolution = resolveInstances(
+            blendGroundInstances,
+            frame.blendBasemapStyleDigest,
+            blendTiles,
+        )
+        if (blendResolution is GroundInstanceResolution.Failed) {
+            return GroundTilesResult.Failed(failure = blendResolution.failure)
+        }
+        return GroundTilesResult.Resolved(
+            tiles = tiles,
+            blendTiles = blendTiles,
+            provisionalTileCount = requireNotNull(provisionalInstances).size,
+        )
     }
 
     /**

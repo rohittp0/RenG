@@ -1,6 +1,7 @@
 package com.rohittp.reng
 
 import com.rohittp.reng.internal.readahead.ReadAheadSnapshot
+import com.rohittp.reng.internal.readahead.ReadAheadStyleRollback
 import com.rohittp.rentile.PreparedStyle
 
 /**
@@ -12,4 +13,7 @@ internal class PreparedInvocationDelivery(
     val initialHistory: PreparationHistory,
     val initialStyle: PreparedStyle?,
     val initialReadAheadSnapshot: ReadAheadSnapshot?,
-)
+    val initialStyleSetAttempted: Boolean,
+) {
+    var readAheadRollback: ReadAheadStyleRollback? = null
+}

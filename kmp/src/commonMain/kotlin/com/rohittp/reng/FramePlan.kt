@@ -38,6 +38,8 @@ public class FramePlan(
      * Declared last so every earlier positional parameter keeps its meaning.
      */
     bloom: Bloom? = null,
+    /** The configured basemap style or two-style blend drawn by this frame (ADR 0086). */
+    basemap: BasemapSelection? = null,
 ) {
     public val frameIndex: Long
     public val camera: Camera
@@ -64,6 +66,7 @@ public class FramePlan(
         get() = freshListCopy(geometrySnapshot)
     public val backdrop: Backdrop?
     public val bloom: Bloom?
+    public val basemap: BasemapSelection?
 
     init {
         require(frameIndex >= 0L) { "frameIndex must be non-negative" }
@@ -83,6 +86,7 @@ public class FramePlan(
         this.geometrySnapshot = geometryCopy
         this.backdrop = backdrop
         this.bloom = bloom
+        this.basemap = basemap
     }
 
     override fun equals(other: Any?): Boolean =
@@ -96,7 +100,8 @@ public class FramePlan(
             modelSnapshot == other.modelSnapshot &&
             geometrySnapshot == other.geometrySnapshot &&
             backdrop == other.backdrop &&
-            bloom == other.bloom
+            bloom == other.bloom &&
+            basemap == other.basemap
 
     override fun hashCode(): Int {
         var result = frameIndex.hashCode()
@@ -109,6 +114,7 @@ public class FramePlan(
         result = 31 * result + geometrySnapshot.hashCode()
         result = 31 * result + backdrop.hashCode()
         result = 31 * result + bloom.hashCode()
+        result = 31 * result + basemap.hashCode()
         return result
     }
 }
@@ -122,3 +128,5 @@ internal fun FramePlan.geometriesForCore(): List<Geometry> = geometries
 internal fun FramePlan.backdropForCore(): Backdrop? = backdrop
 
 internal fun FramePlan.bloomForCore(): Bloom? = bloom
+
+internal fun FramePlan.basemapForCore(): BasemapSelection? = basemap

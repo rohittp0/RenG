@@ -20,10 +20,8 @@ import com.rohittp.reng.internal.thread.PlatformLock
  * section is a few map operations: pixel arrays arrive already built and are only ever referenced, never
  * copied, under the lock.
  *
- * **One style at a time.** [adoptStyle] is called by `prepare` with the digest of the style it committed
- * and drops entries held for any other. An insertion for a digest other than the adopted one is refused,
- * so a window planned against a style that has since changed cannot repopulate the cache with tiles
- * nothing can hit. Before the first adoption nothing is accepted.
+ * **One configured Style Set at a time.** [adoptStyles] drops entries outside the set and refuses an
+ * insertion whose digest is outside it, while tiles from two configured styles coexist (ADR 0086).
  *
  * [close] ends it: the cache empties and every later insertion is refused, which is what lets
  * `RenGRenderer.close()` promise that a draw that was already finishing leaves no pixels behind.
@@ -41,7 +39,7 @@ internal class RenderedTileCache(private val budgetBytes: Long) {
     // the first entry is always the least recently used.
     private val entries = LinkedHashMap<ResourceKey, Entry>()
     private var heldBytes = 0L
-    private var adoptedStyleDigest: String? = null
+    private var adoptedStyleDigests: Set<String> = emptySet()
     private var closed = false
 
     /** What one [put] did. */
@@ -57,13 +55,21 @@ internal class RenderedTileCache(private val budgetBytes: Long) {
     fun contains(key: ResourceKey): Boolean = lock.withLock { entries.containsKey(key) }
 
     /**
-     * Declares [styleDigest] the style `prepare` has committed and drops every entry held for another,
-     * returning how many were dropped. Idempotent for the digest already adopted.
+     * Declares the configured style digests and drops only entries outside that set (ADR 0086).
      */
-    fun adoptStyle(styleDigest: String): Int = lock.withLock {
+    fun adoptStyles(styleDigests: Set<String>): Int = lock.withLock {
         if (closed) return@withLock 0
-        val dropped = if (adoptedStyleDigest != null && adoptedStyleDigest != styleDigest) dropAll() else 0
-        adoptedStyleDigest = styleDigest
+        if (adoptedStyleDigests == styleDigests) return@withLock 0
+        val dropped = dropEntriesOutside(styleDigests)
+        adoptedStyleDigests = styleDigests.toSet()
+        dropped
+    }
+
+    /** Restores a coordinator-owned immutable before-image without allocating during rollback. */
+    fun restoreAdoptedStyles(styleDigests: Set<String>): Int = lock.withLock {
+        if (closed) return@withLock 0
+        val dropped = dropEntriesOutside(styleDigests)
+        adoptedStyleDigests = styleDigests
         dropped
     }
 
@@ -78,7 +84,7 @@ internal class RenderedTileCache(private val budgetBytes: Long) {
         val size = pixels.rgba.size.toLong()
         if (size <= 0L || size > budgetBytes) return REFUSED
         return lock.withLock {
-            if (closed || adoptedStyleDigest != styleDigest) return@withLock REFUSED
+            if (closed || styleDigest !in adoptedStyleDigests) return@withLock REFUSED
             entries.remove(tile.key)?.let { heldBytes -= it.bytes }
             var evicted = 0
             while (heldBytes + size > budgetBytes) {
@@ -122,15 +128,18 @@ internal class RenderedTileCache(private val budgetBytes: Long) {
 
     /** Empties the cache and forgets the adopted style, returning how many entries went. */
     fun clear(): Int = lock.withLock {
-        adoptedStyleDigest = null
+        adoptedStyleDigests = emptySet()
         dropAll()
     }
+
+    /** Drops every entry while retaining the configured Style Set adopted under ADR 0086. */
+    fun discardEntries(): Int = lock.withLock { dropAll() }
 
     /** Empties the cache and refuses every later insertion. Idempotent. */
     fun close() {
         lock.withLock {
             closed = true
-            adoptedStyleDigest = null
+            adoptedStyleDigests = emptySet()
             dropAll()
         }
     }
@@ -140,6 +149,20 @@ internal class RenderedTileCache(private val budgetBytes: Long) {
         entries.clear()
         heldBytes = 0L
         return count
+    }
+
+    private fun dropEntriesOutside(styleDigests: Set<String>): Int {
+        var dropped = 0
+        val iterator = entries.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next().value
+            if (entry.styleDigest !in styleDigests) {
+                heldBytes -= entry.bytes
+                iterator.remove()
+                dropped += 1
+            }
+        }
+        return dropped
     }
 
     private fun ResourceKey.matches(selector: ResourceSelector): Boolean = when (selector) {

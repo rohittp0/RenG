@@ -4,6 +4,11 @@ import com.rohittp.reng.AltitudeMode
 import com.rohittp.reng.AnchoringMode
 import com.rohittp.reng.AnimationSelector
 import com.rohittp.reng.AnimationTrack
+import com.rohittp.reng.Backdrop
+import com.rohittp.reng.BasemapSelection
+import com.rohittp.reng.BlendMask
+import com.rohittp.reng.BlendMode
+import com.rohittp.reng.Bloom
 import com.rohittp.reng.Camera
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.Geometry
@@ -16,10 +21,8 @@ import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Sticker
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.animationTracksForCore
-import com.rohittp.reng.Backdrop
 import com.rohittp.reng.backdropForCore
-import com.rohittp.reng.Bloom
-import com.rohittp.reng.BlendMode
+import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.bloomForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.modelsForCore
@@ -52,7 +55,14 @@ internal enum class FramePlanSegment(internal val tag: Int) {
 
     /** ADR 0074's bloom, appended so no existing tag moves. */
     BLOOM(10),
+
+    /** ADR 0086's optional selection, omitted entirely when a plan leaves it null. */
+    BASEMAP_SELECTION(11),
 }
+
+private val LEGACY_FRAME_PLAN_SEGMENTS: List<FramePlanSegment> =
+    FramePlanSegment.entries.filter { segment -> segment != FramePlanSegment.BASEMAP_SELECTION }
+private val ABSENT_BASEMAP_SELECTION: CanonicalBytes = CanonicalBinary.optional(null)
 
 internal class EncodedFramePlan(
     internal val identity: HashedCanonicalBytes,
@@ -88,6 +98,7 @@ internal class FramePlanCanonicalEncoder(
         val stickers = plan.stickersForCore()
         val models = plan.modelsForCore()
         val geometries = plan.geometriesForCore()
+        val basemapSelection = plan.basemapForCore()?.let(::encodeBasemapSelection)
         val segmentPayloads = listOf(
             CanonicalBinary.u64(plan.frameIndex),
             encodeCamera(plan.camera),
@@ -101,10 +112,19 @@ internal class FramePlanCanonicalEncoder(
             CanonicalBinary.boolean(plan.drawLabels),
             CanonicalBinary.optional(plan.backdropForCore()?.let(::encodeBackdrop)),
             CanonicalBinary.optional(plan.bloomForCore()?.let(::encodeBloom)),
+            if (basemapSelection == null) {
+                ABSENT_BASEMAP_SELECTION
+            } else {
+                CanonicalBinary.optional(basemapSelection)
+            },
         )
         val root = CanonicalBinary.root(CanonicalRootKind.FRAME) {
-            FramePlanSegment.entries.forEach { segment ->
+            LEGACY_FRAME_PLAN_SEGMENTS.forEach { segment ->
                 field(segment.tag, segmentPayloads[segment.tag - 1])
+            }
+            if (basemapSelection != null) {
+                // Presence is carried by the segment itself, as with Geometry.blend (ADR 0086).
+                field(FramePlanSegment.BASEMAP_SELECTION.tag, basemapSelection)
             }
         }
         return EncodedFramePlan(
@@ -185,6 +205,38 @@ internal class FramePlanCanonicalEncoder(
         }
         if (bloom.reachGain != 1f) {
             field(7, CanonicalBinary.binary64(bloom.reachGain.toDouble()))
+        }
+    }
+
+    private fun encodeBasemapSelection(selection: BasemapSelection): CanonicalBytes = CanonicalBinary.fields {
+        field(1, CanonicalBinary.u64(selection.style.toLong()))
+        selection.blend?.let { blend ->
+            field(2, CanonicalBinary.fields {
+                field(1, CanonicalBinary.u64(blend.toStyle.toLong()))
+                field(2, encodeBlendMask(blend.mask))
+            })
+        }
+    }
+
+    private fun encodeBlendMask(mask: BlendMask): CanonicalBytes = CanonicalBinary.fields {
+        when (mask) {
+            is BlendMask.Uniform -> {
+                field(1, CanonicalBinary.u16(1))
+                field(2, CanonicalBinary.binary64(mask.amount.toDouble()))
+            }
+            is BlendMask.Radial -> {
+                field(1, CanonicalBinary.u16(2))
+                field(2, CanonicalBinary.binary64(mask.centreX.toDouble()))
+                field(3, CanonicalBinary.binary64(mask.centreY.toDouble()))
+                field(4, CanonicalBinary.binary64(mask.radius.toDouble()))
+                field(5, CanonicalBinary.binary64(mask.feather.toDouble()))
+            }
+            is BlendMask.Linear -> {
+                field(1, CanonicalBinary.u16(3))
+                field(2, CanonicalBinary.binary64(mask.angleRadians.toDouble()))
+                field(3, CanonicalBinary.binary64(mask.position.toDouble()))
+                field(4, CanonicalBinary.binary64(mask.feather.toDouble()))
+            }
         }
     }
 

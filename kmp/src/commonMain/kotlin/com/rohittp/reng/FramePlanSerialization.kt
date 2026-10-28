@@ -239,6 +239,135 @@ internal object BloomSerializer : KSerializer<Bloom> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Basemap selection (ADR 0086)
+// ---------------------------------------------------------------------------------------------
+
+@Serializable
+@SerialName("BlendMask.Uniform")
+private class UniformBlendMaskSurrogate(@SerialName("amount") val amount: Float)
+
+internal object UniformBlendMaskSerializer : KSerializer<BlendMask.Uniform> {
+    private val delegate = UniformBlendMaskSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: BlendMask.Uniform) {
+        encoder.encodeSerializableValue(delegate, UniformBlendMaskSurrogate(amount = value.amount))
+    }
+    override fun deserialize(decoder: Decoder): BlendMask.Uniform {
+        val value = decoder.decodeSerializableValue(delegate)
+        return BlendMask.Uniform(amount = value.amount)
+    }
+}
+
+@Serializable
+@SerialName("BlendMask.Radial")
+private class RadialBlendMaskSurrogate(
+    @SerialName("centreX") val centreX: Float,
+    @SerialName("centreY") val centreY: Float,
+    @SerialName("radius") val radius: Float,
+    @SerialName("feather") val feather: Float,
+)
+
+internal object RadialBlendMaskSerializer : KSerializer<BlendMask.Radial> {
+    private val delegate = RadialBlendMaskSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: BlendMask.Radial) {
+        encoder.encodeSerializableValue(
+            delegate,
+            RadialBlendMaskSurrogate(
+                centreX = value.centreX,
+                centreY = value.centreY,
+                radius = value.radius,
+                feather = value.feather,
+            ),
+        )
+    }
+    override fun deserialize(decoder: Decoder): BlendMask.Radial {
+        val value = decoder.decodeSerializableValue(delegate)
+        return BlendMask.Radial(
+            centreX = value.centreX,
+            centreY = value.centreY,
+            radius = value.radius,
+            feather = value.feather,
+        )
+    }
+}
+
+@Serializable
+@SerialName("BlendMask.Linear")
+private class LinearBlendMaskSurrogate(
+    @SerialName("angleRadians") val angleRadians: Float,
+    @SerialName("position") val position: Float,
+    @SerialName("feather") val feather: Float,
+)
+
+internal object LinearBlendMaskSerializer : KSerializer<BlendMask.Linear> {
+    private val delegate = LinearBlendMaskSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: BlendMask.Linear) {
+        encoder.encodeSerializableValue(
+            delegate,
+            LinearBlendMaskSurrogate(
+                angleRadians = value.angleRadians,
+                position = value.position,
+                feather = value.feather,
+            ),
+        )
+    }
+    override fun deserialize(decoder: Decoder): BlendMask.Linear {
+        val value = decoder.decodeSerializableValue(delegate)
+        return BlendMask.Linear(
+            angleRadians = value.angleRadians,
+            position = value.position,
+            feather = value.feather,
+        )
+    }
+}
+
+@Serializable
+@SerialName("BasemapBlend")
+private class BasemapBlendSurrogate(
+    @SerialName("toStyle") val toStyle: Int,
+    @SerialName("mask") val mask: BlendMask,
+)
+
+internal object BasemapBlendSerializer : KSerializer<BasemapBlend> {
+    private val delegate = BasemapBlendSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: BasemapBlend) {
+        encoder.encodeSerializableValue(
+            delegate,
+            BasemapBlendSurrogate(toStyle = value.toStyle, mask = value.mask),
+        )
+    }
+    override fun deserialize(decoder: Decoder): BasemapBlend {
+        val value = decoder.decodeSerializableValue(delegate)
+        return BasemapBlend(toStyle = value.toStyle, mask = value.mask)
+    }
+}
+
+@Serializable
+@SerialName("BasemapSelection")
+private class BasemapSelectionSurrogate(
+    @SerialName("style") val style: Int = 0,
+    @SerialName("blend") val blend: BasemapBlend? = null,
+)
+
+internal object BasemapSelectionSerializer : KSerializer<BasemapSelection> {
+    private val delegate = BasemapSelectionSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: BasemapSelection) {
+        encoder.encodeSerializableValue(
+            delegate,
+            BasemapSelectionSurrogate(style = value.style, blend = value.blend),
+        )
+    }
+    override fun deserialize(decoder: Decoder): BasemapSelection {
+        val value = decoder.decodeSerializableValue(delegate)
+        return BasemapSelection(style = value.style, blend = value.blend)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Sticker
 // ---------------------------------------------------------------------------------------------
 
@@ -550,6 +679,7 @@ private class FramePlanSurrogate(
     @SerialName("geometries") val geometries: List<Geometry> = emptyList(),
     @SerialName("backdrop") val backdrop: Backdrop? = null,
     @SerialName("bloom") val bloom: Bloom? = null,
+    @SerialName("basemap") val basemap: BasemapSelection? = null,
 )
 
 internal object FramePlanSerializer : KSerializer<FramePlan> {
@@ -559,17 +689,34 @@ internal object FramePlanSerializer : KSerializer<FramePlan> {
         encoder.encodeSerializableValue(
             delegate,
             FramePlanSurrogate(
-                value.frameIndex, value.camera, value.projectionMode, value.drawBasemap,
-                value.drawLabels, value.stickers, value.models, value.geometries, value.backdrop,
-                value.bloom,
+                frameIndex = value.frameIndex,
+                camera = value.camera,
+                projectionMode = value.projectionMode,
+                drawBasemap = value.drawBasemap,
+                drawLabels = value.drawLabels,
+                stickers = value.stickers,
+                models = value.models,
+                geometries = value.geometries,
+                backdrop = value.backdrop,
+                bloom = value.bloom,
+                basemap = value.basemap,
             ),
         )
     }
     override fun deserialize(decoder: Decoder): FramePlan {
         val it = decoder.decodeSerializableValue(delegate)
         return FramePlan(
-            it.frameIndex, it.camera, it.projectionMode, it.drawBasemap, it.drawLabels,
-            it.stickers, it.models, it.geometries, it.backdrop, it.bloom,
+            frameIndex = it.frameIndex,
+            camera = it.camera,
+            projectionMode = it.projectionMode,
+            drawBasemap = it.drawBasemap,
+            drawLabels = it.drawLabels,
+            stickers = it.stickers,
+            models = it.models,
+            geometries = it.geometries,
+            backdrop = it.backdrop,
+            bloom = it.bloom,
+            basemap = it.basemap,
         )
     }
 }

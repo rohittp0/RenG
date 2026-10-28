@@ -5,6 +5,8 @@ import com.rohittp.reng.RenGMetricName
 import com.rohittp.reng.RenGRenderPriority
 import com.rohittp.reng.RendererConfiguration
 import com.rohittp.reng.ResourceAccessMode
+import com.rohittp.reng.CommittedBasemapStyleUpdate
+import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.internal.basemap.BasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
@@ -25,9 +27,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
+internal class ReadAheadStyleRollback(
+    internal val before: List<ReadAheadStyleBefore>,
+    internal val adoptedStyleDigests: Set<String>?,
+)
+
+internal class ReadAheadStyleBefore(
+    val index: Int,
+    val snapshot: ReadAheadSnapshot?,
+)
+
 /**
- * The renderer's read-ahead (ADR 0075, ADR 0077): the snapshot `prepare` publishes, the worker that warms and
- * draws ahead of the frames being prepared, and the rendered-tile cache that worker fills.
+ * The renderer's read-ahead (ADRs 0075, 0077, and 0086): committed preparation state, per-style
+ * snapshots, the worker that warms and draws ahead, and the rendered-tile cache that worker fills.
  */
 internal class ReadAheadCoordinator(
     private val configuration: RendererConfiguration,
@@ -59,6 +71,7 @@ internal class ReadAheadCoordinator(
     private var readAheadScheduler: ReadAheadScheduler<ReadAheadRequest>? = null
     private var readAheadClosed: Boolean = false
     private val readAheadLock = PlatformLock()
+    private val styleSnapshots: MutableMap<Int, ReadAheadSnapshot> = mutableMapOf()
 
     /** Whether a read-ahead worker was ever started. For tests only. */
     internal val readAheadWorkerStarted: Boolean
@@ -86,32 +99,56 @@ internal class ReadAheadCoordinator(
      * One read-ahead window: warms the cold tiles' bytes, then draws the window's tiles into
      * [renderedTileCache] while the window's operation is still open (ADR 0077).
      *
-     * Reads only [request]'s snapshot, never the host's unlocked style maps, which belong to the
-     * preparing thread.
+     * Reads only [request]'s immutable per-style snapshots, never the host's unlocked style maps.
      */
     private suspend fun warmReadAheadWindow(
         request: ReadAheadRequest,
-        cold: List<CanonicalBasemapTile>,
+        cold: List<ReadAheadTile>,
     ): ReadAheadWarmSummary {
-        val snapshot = request.snapshot
-        val cache = renderedTileCache
-        val toDraw = if (cache == null) emptyList() else rasterisationCandidates(cache, snapshot.style, request.tiles)
-        if (cold.isEmpty() && toDraw.isEmpty()) return ReadAheadWarmSummary(fetched = 0, alreadyCached = 0, failed = 0)
-        val routed = if (toDraw.isEmpty()) cold else LinkedHashSet<CanonicalBasemapTile>(cold).apply { addAll(toDraw) }.toList()
-        return basemapEngineHost.warmWindow(
-            style = snapshot.style,
-            tiles = cold,
-            routes = tileTimeRoutes(
-                manifest = snapshot.manifest,
-                tiles = routed,
-                accessMode = ResourceAccessMode.NORMAL,
-                limits = configuration.resourceLimits,
-            ),
-            afterWarm = if (cache == null || toDraw.isEmpty()) {
-                null
+        var fetched = 0
+        var alreadyCached = 0
+        var failed = 0
+        val coldSet = cold.toHashSet()
+        for (batch in request.batches) {
+            val snapshot = batch.snapshot
+            val cache = renderedTileCache
+            val styleCold = batch.tiles.filter { tile ->
+                ReadAheadTile(styleDigest = snapshot.style.digest, tile = tile) in coldSet
+            }
+            val toDraw = if (cache == null) {
+                emptyList()
             } else {
-                { rasteriseReadAheadTiles(cache, snapshot.style, toDraw) }
-            },
+                rasterisationCandidates(cache, snapshot.style, batch.tiles)
+            }
+            if (styleCold.isEmpty() && toDraw.isEmpty()) continue
+            val routed = if (toDraw.isEmpty()) {
+                styleCold
+            } else {
+                LinkedHashSet<CanonicalBasemapTile>(styleCold).apply { addAll(toDraw) }.toList()
+            }
+            val summary = basemapEngineHost.warmWindow(
+                style = snapshot.style,
+                tiles = styleCold,
+                routes = tileTimeRoutes(
+                    manifest = snapshot.manifest,
+                    tiles = routed,
+                    accessMode = ResourceAccessMode.NORMAL,
+                    limits = configuration.resourceLimits,
+                ),
+                afterWarm = if (cache == null || toDraw.isEmpty()) {
+                    null
+                } else {
+                    { rasteriseReadAheadTiles(cache, snapshot.style, toDraw) }
+                },
+            )
+            fetched += summary.fetched
+            alreadyCached += summary.alreadyCached
+            failed += summary.failed
+        }
+        return ReadAheadWarmSummary(
+            fetched = fetched,
+            alreadyCached = alreadyCached,
+            failed = failed,
         )
     }
 
@@ -193,6 +230,90 @@ internal class ReadAheadCoordinator(
     ): ReadAheadSnapshot? =
         if (style == null || manifest == null) null else ReadAheadSnapshot(style, manifest, accessMode, selectedLod)
 
+    /** The committed digest at [styleIndex], used to stage only actual changes without allocation. */
+    internal fun committedStyleDigest(styleIndex: Int): String? = readAheadLock.withLock {
+        styleSnapshots[styleIndex]?.style?.digest
+    }
+
+    /** Publishes changed named styles and the final frame's read-ahead cursor (ADR 0086). */
+    internal fun publishCommittedStyles(
+        updates: Array<CommittedBasemapStyleUpdate?>?,
+        primaryStyleIndex: Int?,
+        primaryStyle: PreparedStyle?,
+        primaryManifest: BasemapStyleManifest?,
+        accessMode: ResourceAccessMode,
+        selectedLod: Int?,
+    ): ReadAheadStyleRollback? = readAheadLock.withLock {
+        if (readAheadClosed) {
+            readAheadSnapshot = null
+            return@withLock null
+        }
+        val before = updates?.let { ArrayList<ReadAheadStyleBefore>() }
+        val adoptedBefore = if (updates != null && renderedTileCache != null) {
+            styleSnapshots.values.mapTo(linkedSetOf()) { snapshot -> snapshot.style.digest }
+        } else {
+            null
+        }
+        updates?.forEach { update ->
+            if (update == null) return@forEach
+            val previous = styleSnapshots[update.index]
+            if (previous?.style?.digest == update.acquired.prepared.digest) return@forEach
+            before?.add(ReadAheadStyleBefore(index = update.index, snapshot = previous))
+            styleSnapshots[update.index] = ReadAheadSnapshot(
+                style = update.acquired.prepared,
+                manifest = update.acquired.manifest,
+                accessMode = accessMode,
+                selectedLod = null,
+            )
+        }
+        if (before?.isNotEmpty() == true) adoptCommittedStyleDigests()
+        readAheadSnapshot = if (primaryStyleIndex == null || primaryStyle == null || primaryManifest == null) {
+            null
+        } else {
+            ReadAheadSnapshot(
+                style = primaryStyle,
+                manifest = primaryManifest,
+                accessMode = accessMode,
+                selectedLod = selectedLod,
+            )
+        }
+        if (before?.isNotEmpty() == true) {
+            ReadAheadStyleRollback(before = before, adoptedStyleDigests = adoptedBefore)
+        } else {
+            null
+        }
+    }
+
+    /** Restores the before-image when a committed delivery is cancelled before reaching its caller. */
+    internal fun restoreCommittedSnapshot(
+        snapshot: ReadAheadSnapshot?,
+        rollback: ReadAheadStyleRollback?,
+    ) = readAheadLock.withLock {
+        val before = rollback?.before
+        if (before != null) {
+            var index = before.lastIndex
+            while (index >= 0) {
+                val entry = before[index]
+                if (entry.snapshot == null) {
+                    styleSnapshots.remove(entry.index)
+                } else {
+                    styleSnapshots[entry.index] = entry.snapshot
+                }
+                index -= 1
+            }
+            rollback.adoptedStyleDigests?.let { digests ->
+                renderedTileCache?.restoreAdoptedStyles(digests)
+            }
+        }
+        readAheadSnapshot = snapshot
+    }
+
+    private fun adoptCommittedStyleDigests() {
+        val cache = renderedTileCache ?: return
+        val digests = styleSnapshots.values.mapTo(linkedSetOf()) { snapshot -> snapshot.style.digest }
+        cache.adoptStyles(digests)
+    }
+
     internal fun readAhead(plans: List<FramePlan>) {
         if (plans.isEmpty() || basemapEngineHost.isClosed) return
         val snapshot = readAheadSnapshot ?: return
@@ -201,7 +322,7 @@ internal class ReadAheadCoordinator(
         // The same spatial step prepare runs, minus everything that touches state: no frame identity
         // is registered and no history moves. The LOD chain is prepareBatch's own -- each plan's
         // selected LOD is the next one's previous -- starting from the last committed one.
-        val wanted = LinkedHashSet<CanonicalBasemapTile>()
+        val wantedByStyle = LinkedHashMap<Int, LinkedHashSet<CanonicalBasemapTile>>()
         var lod = snapshot.selectedLod
         for (plan in plans) {
             val outcome = try {
@@ -224,20 +345,51 @@ internal class ReadAheadCoordinator(
             val spatial = outcome.value
             lod = spatial.lodObservation.selectedLod
             // The ground draw's own gate: labels acquire their vector tiles on their own path.
-            if (plan.drawBasemap) spatial.tileSelection?.canonicalResources?.let(wanted::addAll)
+            if (plan.drawBasemap) {
+                val selection = plan.basemapForCore()
+                val styleIndices = buildList {
+                    add(selection?.style ?: 0)
+                    selection?.blend?.let { blend -> add(blend.toStyle) }
+                }
+                spatial.tileSelection?.canonicalResources?.let { tiles ->
+                    styleIndices.forEach { styleIndex ->
+                        wantedByStyle.getOrPut(styleIndex) { LinkedHashSet() }.addAll(tiles)
+                    }
+                }
+            }
         }
 
-        // Tiles already resident on the GPU need nothing. The residency registry and the tile-key memo
-        // are locked, so this is safe from any thread, as `readAhead` documents.
-        val cold = wanted.filter { tile ->
-            glObjectRegistry.resident(basemapEngineHost.renderedTileKey(snapshot.style, tile)) == null
+        val configuredStyleIndices = configuration.basemapStylesForCore().indices
+        val batches = readAheadLock.withLock {
+            wantedByStyle.mapNotNull { (styleIndex, wanted) ->
+                if (styleIndex !in configuredStyleIndices) return@mapNotNull null
+                val styleSnapshot = styleSnapshots[styleIndex] ?: return@mapNotNull null
+                val cold = wanted.filter { tile ->
+                    glObjectRegistry.resident(
+                        basemapEngineHost.renderedTileKey(styleSnapshot.style, tile),
+                    ) == null
+                }
+                if (cold.isEmpty()) {
+                    null
+                } else {
+                    StyleReadAheadRequest(
+                        styleIndex = styleIndex,
+                        snapshot = styleSnapshot,
+                        tiles = cold,
+                    )
+                }
+            }
         }
-        if (cold.isEmpty()) return
+        if (batches.isEmpty()) return
+        val candidates = batches.flatMap { batch ->
+            batch.tiles.map { tile ->
+                ReadAheadTile(styleDigest = batch.snapshot.style.digest, tile = tile)
+            }
+        }
         submitReadAhead(
             ReadAheadWindow(
-                context = ReadAheadRequest(snapshot, cold),
-                styleDigest = snapshot.style.digest,
-                tiles = cold,
+                context = ReadAheadRequest(batches = batches),
+                tiles = candidates,
             ),
         )
     }
@@ -255,6 +407,7 @@ internal class ReadAheadCoordinator(
         readAheadSnapshot = null
         readAheadLock.withLock {
             readAheadClosed = true
+            styleSnapshots.clear()
             readAheadScheduler?.cancel()
         }
         // After the worker is cancelled, so nothing is inserting. Closed rather than merely

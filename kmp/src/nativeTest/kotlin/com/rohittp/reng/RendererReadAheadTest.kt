@@ -22,6 +22,55 @@ import kotlinx.coroutines.withTimeout
 class RendererReadAheadTest {
 
     @Test
+    fun aBlendHintWarmsTheNamedTargetWithoutCompilingItOnTheWorker() = runTest {
+        val transport = TwoStyleReadAheadTransport()
+        val renderer = createRenderer(
+            configuration = RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = 64, height = 64),
+                transport = transport,
+                store = PersistentStore(),
+                basemapStyle = ResourceLocator(value = STYLE_URL),
+                additionalBasemapStyles = listOf(ResourceLocator(value = READ_AHEAD_SECOND_STYLE_URL)),
+            ),
+            binding = styleGlBinding(),
+            probe = com.rohittp.reng.internal.gl.RenderContextProbe {
+                com.rohittp.reng.internal.gl.RenderContextIdentity(value = 1L)
+            },
+        ) as RenGRenderer
+        renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+        val styleRequestsAfterForeground = transport.secondStyleRequests()
+        assertEquals(0, transport.secondStyleTileRequests())
+
+        val shifted = shiftedPlan(frameIndex = 1L)
+        renderer.readAhead(
+            listOf(
+                FramePlan(
+                    frameIndex = shifted.frameIndex,
+                    camera = shifted.camera,
+                    drawBasemap = true,
+                    drawLabels = false,
+                    basemap = BasemapSelection(
+                        style = 0,
+                        blend = BasemapBlend(
+                            toStyle = 1,
+                            mask = BlendMask.Uniform(amount = 0.5f),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        real { renderer.awaitReadAheadIdle() }
+
+        assertTrue(transport.secondStyleTileRequests() > 0, "the hint must warm its toStyle")
+        assertEquals(
+            styleRequestsAfterForeground,
+            transport.secondStyleRequests(),
+            "read-ahead warms only styles the foreground already compiled",
+        )
+        renderer.close()
+    }
+
+    @Test
     fun preparingFramesTheWindowWarmedMakesNoTileRequestAtTheTransport() = runTest {
         val transport = FreshTileTransport()
         val store = PersistentStore()
@@ -186,6 +235,53 @@ private class FreshTileTransport : Transport {
             )
             else -> {
                 if (url.startsWith("https://tiles.example/")) mutex.withLock { tiles += 1 }
+                TransportResponse(
+                    statusCode = 200,
+                    body = STYLE_TEST_PNG,
+                    metadata = TransportResponseMetadata(
+                        contentType = "image/png",
+                        freshUntilEpochMillis = FAR_FUTURE_EPOCH_MILLIS,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private const val READ_AHEAD_SECOND_STYLE_URL: String = "https://styles.example/read-ahead-second.json"
+private val READ_AHEAD_SECOND_TILE_PREFIX: String = EDITED_STYLE_TILE_TEMPLATE.substringBefore("{z}")
+
+private class TwoStyleReadAheadTransport : Transport {
+    private val mutex = Mutex()
+    private var secondStyles = 0
+    private var secondTiles = 0
+
+    suspend fun secondStyleRequests(): Int = mutex.withLock { secondStyles }
+    suspend fun secondStyleTileRequests(): Int = mutex.withLock { secondTiles }
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_WITH_SPRITE_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            READ_AHEAD_SECOND_STYLE_URL -> {
+                mutex.withLock { secondStyles += 1 }
+                TransportResponse(
+                    statusCode = 200,
+                    body = EDITED_STYLE_WITH_SPRITE_JSON.encodeToByteArray(),
+                    metadata = TransportResponseMetadata(contentType = "application/json"),
+                )
+            }
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> {
+                if (url.startsWith(READ_AHEAD_SECOND_TILE_PREFIX)) mutex.withLock { secondTiles += 1 }
                 TransportResponse(
                     statusCode = 200,
                     body = STYLE_TEST_PNG,

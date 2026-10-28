@@ -182,8 +182,7 @@ internal class GroundTileProvisioner(
         // be fetched again, so it neither reads nor keeps what was drawn from the old ones.
         val cache = renderedTileCache
         if (cache != null) {
-            if (accessMode == ResourceAccessMode.RELOAD) cache.clear()
-            cache.adoptStyle(style.digest)
+            if (accessMode == ResourceAccessMode.RELOAD) cache.discardEntries()
         }
         val takeFromCache = if (accessMode == ResourceAccessMode.RELOAD) null else cache
         val cachedKeys = ArrayList<ResourceKey>()

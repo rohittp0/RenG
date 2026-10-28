@@ -81,6 +81,7 @@ internal enum class GlEntryPoint(internal val cName: String) {
     BLEND_COLOR("glBlendColor"),
     DEPTH_FUNC("glDepthFunc"),
     DEPTH_MASK("glDepthMask"),
+    POLYGON_OFFSET("glPolygonOffset"),
     DEPTH_RANGEF("glDepthRangef"),
     CULL_FACE("glCullFace"),
     FRONT_FACE("glFrontFace"),

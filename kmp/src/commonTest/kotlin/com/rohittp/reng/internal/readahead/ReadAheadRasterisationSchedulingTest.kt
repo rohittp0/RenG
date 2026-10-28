@@ -27,6 +27,12 @@ class ReadAheadRasterisationSchedulingTest {
     private fun tiles(count: Int): List<CanonicalBasemapTile> =
         (0 until count).map { CanonicalBasemapTile(lod = 12, tileY = it, canonicalX = it) }
 
+    private fun window(context: String, tiles: List<CanonicalBasemapTile>): ReadAheadWindow<String> =
+        ReadAheadWindow(
+            context = context,
+            tiles = tiles.map { tile -> ReadAheadTile(styleDigest = "style", tile = tile) },
+        )
+
     private fun newScope() = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private suspend fun <T> real(block: suspend () -> T): T =
@@ -37,15 +43,15 @@ class ReadAheadRasterisationSchedulingTest {
         for (draws in listOf(false, true)) {
             val calls = Collected<List<CanonicalBasemapTile>>()
             val scheduler = ReadAheadScheduler<String>(newScope(), warmWhenNothingIsCold = draws) { _, cold ->
-                calls.add(cold)
+                calls.add(cold.map { candidate -> candidate.tile })
                 ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
             }
             try {
                 val two = tiles(2)
-                scheduler.submit(ReadAheadWindow("ctx", "style", two))
+                scheduler.submit(window(context = "ctx", tiles = two))
                 real { scheduler.awaitIdle() }
                 // The same tiles again: every one is warmed now, so nothing is cold.
-                scheduler.submit(ReadAheadWindow("ctx", "style", two))
+                scheduler.submit(window(context = "ctx", tiles = two))
                 real { scheduler.awaitIdle() }
 
                 assertEquals(
@@ -77,7 +83,7 @@ class ReadAheadRasterisationSchedulingTest {
             }
             ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
         }
-        scheduler.submit(ReadAheadWindow("first", "style", tiles(3)))
+        scheduler.submit(window(context = "first", tiles = tiles(3)))
         real { entered.await() }
 
         // What `close()` does: cancel and do not wait. Then wait here, to see that it did stop.
@@ -86,7 +92,7 @@ class ReadAheadRasterisationSchedulingTest {
         real { scheduler.cancelAndJoin() }
 
         // A hint after close is accepted and never starts: no stray work for it to wake.
-        scheduler.submit(ReadAheadWindow("second", "style", tiles(2)))
+        scheduler.submit(window(context = "second", tiles = tiles(2)))
         withContext(Dispatchers.Default) { kotlinx.coroutines.delay(100) }
         assertEquals(listOf("first"), started.snapshot(), "nothing runs after the worker is cancelled")
         assertTrue(unwound.isCompleted, "the window's cleanup ran, which is where a batch is closed")
@@ -101,9 +107,9 @@ class ReadAheadRasterisationSchedulingTest {
             neverReleased.await()
             ReadAheadWarmSummary(fetched = cold.size, alreadyCached = 0, failed = 0)
         }
-        scheduler.submit(ReadAheadWindow("running", "style", tiles(2)))
+        scheduler.submit(window(context = "running", tiles = tiles(2)))
         real { entered.await() }
-        scheduler.submit(ReadAheadWindow("queued", "style", tiles(3)))
+        scheduler.submit(window(context = "queued", tiles = tiles(3)))
 
         // Someone is already waiting when the cancel arrives: it must be released, not left hanging on a
         // queue that will never drain.
@@ -124,7 +130,7 @@ class ReadAheadRasterisationSchedulingTest {
         }
         real { scheduler.awaitIdle() }
         scheduler.cancelAndJoin()
-        scheduler.submit(ReadAheadWindow("late", "style", tiles(1)))
+        scheduler.submit(window(context = "late", tiles = tiles(1)))
         real { scheduler.awaitIdle() }
         real { scheduler.awaitIdle() }
     }

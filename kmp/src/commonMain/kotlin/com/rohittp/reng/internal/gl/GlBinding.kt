@@ -137,6 +137,7 @@ internal interface GlBinding {
     fun blendColor(red: Float, green: Float, blue: Float, alpha: Float)
     fun depthFunc(function: Int)
     fun depthMask(enabled: Boolean)
+    fun polygonOffset(factor: Float, units: Float)
     fun depthRangef(near: Float, far: Float)
     fun cullFace(mode: Int)
     fun frontFace(mode: Int)

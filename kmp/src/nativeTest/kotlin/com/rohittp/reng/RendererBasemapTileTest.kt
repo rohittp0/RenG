@@ -44,6 +44,90 @@ import kotlinx.coroutines.withContext
  */
 class RendererBasemapTileTest {
 
+    @Test
+    fun twoStyleAncestorFallbackIsAppliedPerStyle() = runTest {
+        val sink = RecordingProvisionalSink()
+        val renderer = twoStyleRenderer(
+            transport = TwoStyleTileTransport(),
+            resourceLimits = ResourceLimits(maximumTilesRasterisedPerFrame = 0),
+            diagnosticSink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(value = 0u))
+
+        val coarse = renderer.prepare(blendedPlan(frameIndex = 0L, camera = coarseBasemapPlan(0L).camera))
+        renderer.draw(coarse, target)
+        coarse.close()
+        val renderedAfterCoarse = renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED]
+
+        val fine = renderer.prepare(blendedPlan(frameIndex = 1L, camera = styleCamera())) as RenGPreparedFrame
+        assertEquals(renderedAfterCoarse, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
+        assertEquals(fine.groundInstances.size, fine.blendGroundInstances.size)
+        assertTrue(fine.groundInstances.isNotEmpty())
+        assertTrue(
+            fine.groundInstances.map { it.resourceKey }.toSet()
+                .intersect(fine.blendGroundInstances.map { it.resourceKey }.toSet())
+                .isEmpty(),
+            "each style derives and falls back through its own keyed tile set",
+        )
+        renderer.draw(fine, target)
+        assertTrue(sink.provisional.single().actual!! <= fine.groundInstances.size.toLong())
+        fine.close()
+        renderer.close()
+    }
+
+    @Test
+    fun closingABlendedFrameReleasesBothStylesRawReservations() = runTest {
+        val renderer = twoStyleRenderer(transport = TwoStyleTileTransport())
+        val frame = renderer.prepare(blendedPlan(frameIndex = 0L, camera = styleCamera())) as RenGPreparedFrame
+
+        assertTrue(frame.rawTileBytes > 4L * TILE_TEXTURE_BYTES, "both styles retain raw tile pixels")
+        assertEquals(frame.rawTileBytes, renderer.inFlightRawTileBytes)
+        frame.close()
+        assertEquals(0L, renderer.inFlightRawTileBytes)
+        renderer.close()
+    }
+
+    @Test
+    fun anUnavailableBlendTargetLeavesItsGroundOutAndThePrimaryStillDraws() = runTest {
+        val transport = TwoStyleTileTransport()
+        val store = FailingUpdatedSecondStyleWriteStore()
+        val renderer = twoStyleRenderer(transport = transport, store = store)
+        try {
+            val renderTarget = renderer.mintRenderTarget(FramebufferName(value = 0u))
+            renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+            assertTrue(
+                SECOND_STYLE_URL in transport.requestedUrls(),
+                "the first foreground preparation must successfully compile the configured target",
+            )
+
+            transport.secondStyleJson = UPDATED_SECOND_STYLE_JSON
+            store.failUpdatedSecondStyleWrites = true
+            val writeFailure = assertFailsWith<RenGException> {
+                renderer.prepare(
+                    plan = blendedPlan(frameIndex = 1L, camera = styleCamera()),
+                    accessMode = ResourceAccessMode.RELOAD,
+                )
+            }
+            assertEquals(RenGErrorCode.STORE_WRITE_FAILED, writeFailure.code)
+            store.failUpdatedSecondStyleWrites = false
+
+            val frame = renderer.prepare(
+                plan = blendedPlan(frameIndex = 2L, camera = styleCamera()),
+                accessMode = ResourceAccessMode.CACHE_ONLY,
+            ) as RenGPreparedFrame
+            assertTrue(frame.groundInstances.isNotEmpty(), "the available primary still prepares ground")
+            assertEquals(
+                emptyList(),
+                frame.blendGroundInstances,
+                "the unavailable target contributes no ground to the blend pass",
+            )
+            renderer.draw(frame, renderTarget)
+            frame.close()
+        } finally {
+            renderer.close()
+        }
+    }
+
     /**
      * The whole path in one assertion set: the frame's four selected ground tiles come back as raw
      * premultiplied pixels, each named by [basemapTileKey] over the style digest, the canonical tile,
@@ -1012,7 +1096,7 @@ class RendererBasemapTileTest {
     }
 
     @Test
-    fun aFrameThatDrawsNeitherBasemapNorLabelsRendersNoGroundAndAcquiresNothing() = runTest {
+    fun aFirstFrameThatDrawsNeitherBasemapNorLabelsStillCompilesTheStyleSet() = runTest {
         val transport = TileTransport()
         val renderer = styleRenderer(transport)
 
@@ -1026,7 +1110,16 @@ class RendererBasemapTileTest {
         ) as RenGPreparedFrame
 
         assertEquals(emptyList(), frame.basemapTiles, "neither switch renders no ground")
-        assertEquals(emptyList(), transport.requestedUrls(), "and acquires nothing at all")
+        assertEquals(
+            setOf(STYLE_URL, SPRITE_JSON_URL, SPRITE_IMAGE_URL),
+            transport.requestedUrls().toSet(),
+            "ADR 0086 compiles the configured Style Set on the first foreground preparation",
+        )
+        assertEquals(
+            emptyList(),
+            transport.requestedUrls().filter { it.startsWith("https://tiles.example/") },
+            "compiling the Style Set does not rasterise ground while both draw switches are off",
+        )
     }
 
     /**
@@ -1350,6 +1443,97 @@ internal class TileTransport(
     }
 }
 
+private const val SECOND_STYLE_URL: String = "https://styles.example/second.json"
+
+private fun blendedPlan(frameIndex: Long, camera: Camera): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = camera,
+    drawBasemap = true,
+    drawLabels = false,
+    basemap = BasemapSelection(
+        style = 0,
+        blend = BasemapBlend(toStyle = 1, mask = BlendMask.Uniform(amount = 0.5f)),
+    ),
+)
+
+private fun twoStyleRenderer(
+    transport: Transport,
+    store: Store = RecordingStyleStore(),
+    resourceLimits: ResourceLimits = ResourceLimits(),
+    diagnosticSink: DiagnosticSink = DiagnosticSink.None,
+): RenGRenderer = createRenderer(
+    configuration = RendererConfiguration(
+        outputPixelSize = OutputPixelSize(width = 64, height = 64),
+        transport = transport,
+        store = store,
+        basemapStyle = ResourceLocator(value = STYLE_URL),
+        resourceLimits = resourceLimits,
+        diagnosticSink = diagnosticSink,
+        additionalBasemapStyles = listOf(ResourceLocator(value = SECOND_STYLE_URL)),
+    ),
+    binding = styleGlBinding(),
+    probe = RenderContextProbe { RenderContextIdentity(value = 1L) },
+) as RenGRenderer
+
+private class TwoStyleTileTransport : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    @Volatile
+    var secondStyleJson: String = STYLE_WITH_SPRITE_JSON.replace(
+        STYLE_TILE_TEMPLATE,
+        "https://tiles.example/edited/{z}/{x}/{y}.png",
+    )
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_WITH_SPRITE_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SECOND_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = secondStyleJson.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
+    }
+}
+
+private class FailingUpdatedSecondStyleWriteStore : Store {
+    private val mutex = Mutex()
+    private val entries = mutableMapOf<RawResourceKey, StoredRawResource>()
+
+    var failUpdatedSecondStyleWrites: Boolean = false
+
+    override suspend fun read(key: RawResourceKey): StoredRawResource? = mutex.withLock { entries[key] }
+
+    override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
+        if (
+            failUpdatedSecondStyleWrites &&
+            key.resourceClass == ResourceClass.BASEMAP_STYLE &&
+            resource.bytes.contentEquals(UPDATED_SECOND_STYLE_JSON.encodeToByteArray())
+        ) {
+            throw IllegalStateException("consumer store is out of space")
+        }
+        mutex.withLock { entries[key] = resource }
+    }
+}
+
 /** [STYLE_TILE_TEMPLATE] edited, so the same style url serves a genuinely different ground source. */
 internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/edited/{z}/{x}/{y}.png"
 
@@ -1359,6 +1543,13 @@ internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/e
  */
 internal val EDITED_STYLE_WITH_SPRITE_JSON: String =
     STYLE_WITH_SPRITE_JSON.replace(STYLE_TILE_TEMPLATE, EDITED_STYLE_TILE_TEMPLATE)
+
+private const val UPDATED_SECOND_STYLE_TILE_TEMPLATE: String =
+    "https://tiles.example/second-updated/{z}/{x}/{y}.png"
+private val UPDATED_SECOND_STYLE_JSON: String = EDITED_STYLE_WITH_SPRITE_JSON.replace(
+    EDITED_STYLE_TILE_TEMPLATE,
+    UPDATED_SECOND_STYLE_TILE_TEMPLATE,
+)
 
 /**
  * A [TileTransport] whose style document is **edited between frames**: the first request for

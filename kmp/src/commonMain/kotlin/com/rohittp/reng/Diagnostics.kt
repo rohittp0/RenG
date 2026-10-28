@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.isAllowedDiagnosticFieldName
 import com.rohittp.reng.internal.isAllowedDiagnosticFieldStage
 
@@ -64,6 +65,9 @@ public enum class DiagnosticCode {
      * reports nothing. Appended last, so no existing constant's ordinal moves.
      */
     BLOOM_EMISSION_PRECISION_REDUCED,
+
+    /** A Frame Plan named a style outside its renderer's configured Style Set (ADR 0086). */
+    BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
 }
 
 @ConsistentCopyVisibility
@@ -252,6 +256,20 @@ public data class Diagnostic internal constructor(
                     fieldName == null && resourceClass == null && resourceKey == null &&
                         statusCode == null && limit == null,
                 ) { "bloom-emission-precision diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE -> {
+                require(severity == DiagnosticSeverity.ERROR) {
+                    "basemap-style-index diagnostics are errors"
+                }
+                require(stage == PipelineStage.FRAME_PLANNING) {
+                    "basemap-style-index diagnostics occur during frame planning"
+                }
+                require(
+                    fieldName == DiagnosticField.FRAME_INDEX.wireName &&
+                        resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "basemap-style-index diagnostics carry only frameIndex context" }
             }
         }
     }

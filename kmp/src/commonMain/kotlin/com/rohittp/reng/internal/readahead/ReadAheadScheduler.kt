@@ -28,11 +28,11 @@ internal const val MAX_READ_AHEAD_TILES: Int = 64
 private const val MAXIMUM_WARMED_TILES: Int = 4096
 
 /**
- * Everything the worker may know about the renderer, captured at the end of one successful `prepare`
- * (ADR 0075). An immutable snapshot rather than a view of live renderer state: the host's manifest
- * and remembered-key maps are unlocked and belong to the preparing thread, so the worker reads only
- * this. [selectedLod] is the LOD the last committed `prepare` selected, from which a hint's LOD
- * chain starts exactly as `prepareBatch`'s does.
+ * An immutable view of one compiled configured style (ADRs 0075 and 0086). It is published only by
+ * a committed foreground `prepare`. The host's
+ * manifest and remembered-key maps are unlocked and belong to the operation that produced them, so
+ * the worker reads only this. [selectedLod] is populated for the committed Primary Style snapshot,
+ * from which a hint's LOD chain starts exactly as `prepareBatch`'s does.
  */
 internal class ReadAheadSnapshot(
     val style: PreparedStyle,
@@ -40,29 +40,41 @@ internal class ReadAheadSnapshot(
     val accessMode: ResourceAccessMode,
     val selectedLod: Int?,
 ) {
-    fun withSelectedLod(lod: Int?): ReadAheadSnapshot = ReadAheadSnapshot(style, manifest, accessMode, lod)
+    fun withSelectedLod(lod: Int?): ReadAheadSnapshot = ReadAheadSnapshot(
+        style = style,
+        manifest = manifest,
+        accessMode = accessMode,
+        selectedLod = lod,
+    )
 }
 
 /**
- * What the renderer's window needs beyond the cold list the scheduler computes (ADR 0077): the
- * [snapshot] it was planned against, and every [tiles] the hint named that are not GPU-resident, in
- * cursor order. The scheduler's cold list leaves out tiles an earlier window already warmed, but a tile
- * warmed by one window may still be undrawn, so the drawing works from this list instead.
+ * What the renderer's window needs beyond the cold list the scheduler computes: one batch per style
+ * the plans name (ADRs 0077 and 0086).
  */
 internal class ReadAheadRequest(
+    val batches: List<StyleReadAheadRequest>,
+)
+
+internal class StyleReadAheadRequest(
+    val styleIndex: Int,
     val snapshot: ReadAheadSnapshot,
     val tiles: List<CanonicalBasemapTile>,
 )
 
+/** One scheduler candidate; ADR 0086 makes the style digest part of warmed identity. */
+internal data class ReadAheadTile(
+    val styleDigest: String,
+    val tile: CanonicalBasemapTile,
+)
+
 /**
- * One hint's worth of work: the candidate tiles in cursor order, the [styleDigest] they are warmed
- * under, and the [context] the warm needs -- in the renderer, the [ReadAheadSnapshot] it was planned
- * against. Generic over that context so the scheduler can be exercised without an engine.
+ * One hint's worth of work: the style-qualified candidate [tiles] in cursor order and the [context]
+ * the warm needs. Generic over that context so the scheduler can be exercised without an engine.
  */
 internal class ReadAheadWindow<C : Any>(
     val context: C,
-    val styleDigest: String,
-    val tiles: List<CanonicalBasemapTile>,
+    val tiles: List<ReadAheadTile>,
 )
 
 /**
@@ -91,7 +103,7 @@ internal class ReadAheadScheduler<C : Any>(
      * window, and an operation is only opened by [warm].
      */
     private val warmWhenNothingIsCold: Boolean = false,
-    private val warm: suspend (C, List<CanonicalBasemapTile>) -> ReadAheadWarmSummary,
+    private val warm: suspend (C, List<ReadAheadTile>) -> ReadAheadWarmSummary,
 ) {
     private class State<C : Any>(
         val pending: ReadAheadWindow<C>?,
@@ -102,10 +114,10 @@ internal class ReadAheadScheduler<C : Any>(
 
     private val state = MutableStateFlow(State<C>(pending = null, running = false))
 
-    // Worker-only. A tile joins it when its whole window finished without a failure, because the
-    // engine reports one summary per window rather than one outcome per tile.
-    private val warmed = HashSet<CanonicalBasemapTile>()
-    private var warmedStyleDigest: String? = null
+    // Worker-only. ADR 0086: a canonical tile warmed for one style is still cold for another style.
+    // A pair joins only when its whole window finished without a failure, because the engine reports
+    // one summary per window rather than one outcome per tile.
+    private val warmed = HashSet<ReadAheadTile>()
 
     private val worker: Job = scope.launch { runWorker() }
 
@@ -173,13 +185,8 @@ internal class ReadAheadScheduler<C : Any>(
     }
 
     private suspend fun process(window: ReadAheadWindow<C>) {
-        if (warmedStyleDigest != window.styleDigest) {
-            // A different style names different urls, so nothing warmed under the old one is known.
-            warmed.clear()
-            warmedStyleDigest = window.styleDigest
-        }
         if (warmed.size > MAXIMUM_WARMED_TILES) warmed.clear()
-        val cold = ArrayList<CanonicalBasemapTile>(minOf(window.tiles.size, maximumTiles))
+        val cold = ArrayList<ReadAheadTile>(minOf(window.tiles.size, maximumTiles))
         for (tile in window.tiles) {
             if (cold.size == maximumTiles) break
             if (tile !in warmed) cold += tile

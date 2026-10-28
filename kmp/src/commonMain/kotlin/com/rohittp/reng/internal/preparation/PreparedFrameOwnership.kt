@@ -114,7 +114,12 @@ internal class PreparedFrameOwnership(
      * replacement frame cannot be admitted while raw pixels or resident generations remain retained.
      */
     internal fun releasePreparedFrameOwnership(payload: PreparedFrameClosePayload) {
-        releasePreparedFrameOwnership(payload.rawTileReservation, payload.leases, payload.preparedFrameCpuReservation)
+        releasePreparedFrameOwnership(
+            rawTileReservation = payload.rawTileReservation,
+            blendRawTileReservation = payload.blendRawTileReservation,
+            leases = payload.leases,
+            preparedFrameCpuReservation = payload.preparedFrameCpuReservation,
+        )
     }
 
     /**
@@ -124,12 +129,18 @@ internal class PreparedFrameOwnership(
      */
     internal fun releasePreparedFrameOwnership(
         rawTileReservation: RawTileBudget.Reservation?,
+        blendRawTileReservation: RawTileBudget.Reservation?,
         leases: List<Lease>,
         preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation?,
     ) {
         try {
             try {
                 rawTileReservation?.release()
+            } catch (_: Throwable) {
+                // Continue draining resident generations.
+            }
+            try {
+                blendRawTileReservation?.release()
             } catch (_: Throwable) {
                 // Continue draining resident generations.
             }

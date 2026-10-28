@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.freshListCopy
 import kotlin.jvm.JvmInline
 
 @JvmInline
@@ -41,6 +42,7 @@ public class RendererConfiguration(
     maximumConcurrentTileRasterisations: Int = 1,
     maximumReadAheadRasterisedTileBytes: Long = 0L,
     presentFailedTilesProvisionally: Boolean = false,
+    additionalBasemapStyles: List<ResourceLocator> = emptyList(),
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -163,6 +165,10 @@ public class RendererConfiguration(
      * inside the engine stays disabled either way (ADR 0016).
      */
     public val presentFailedTilesProvisionally: Boolean
+    private val additionalBasemapStyleSnapshot: List<ResourceLocator>
+    private val basemapStyleSetSnapshot: List<ResourceLocator>
+    public val additionalBasemapStyles: List<ResourceLocator>
+        get() = freshListCopy(additionalBasemapStyleSnapshot)
 
     init {
         require(maximumBasemapTileInstances in 1..4096) {
@@ -186,6 +192,13 @@ public class RendererConfiguration(
         require(maximumReadAheadRasterisedTileBytes in 0L..MAXIMUM_READ_AHEAD_RASTERISED_TILE_BYTES) {
             "maximumReadAheadRasterisedTileBytes must be within 0 through 1073741824"
         }
+        require(basemapStyle != null || additionalBasemapStyles.isEmpty()) {
+            "additionalBasemapStyles requires basemapStyle"
+        }
+        val configuredBasemapStyles = listOfNotNull(basemapStyle) + additionalBasemapStyles
+        require(configuredBasemapStyles.distinct().size == configuredBasemapStyles.size) {
+            "the basemap Style Set must not contain duplicate locators"
+        }
 
         this.outputPixelSize = outputPixelSize
         this.transport = transport
@@ -202,7 +215,13 @@ public class RendererConfiguration(
         this.maximumConcurrentTileRasterisations = maximumConcurrentTileRasterisations
         this.maximumReadAheadRasterisedTileBytes = maximumReadAheadRasterisedTileBytes
         this.presentFailedTilesProvisionally = presentFailedTilesProvisionally
+        this.additionalBasemapStyleSnapshot = ArrayList(additionalBasemapStyles)
+        this.basemapStyleSetSnapshot = ArrayList(configuredBasemapStyles)
     }
+
+    internal fun basemapStylesForCore(): List<ResourceLocator> = basemapStyleSetSnapshot
+
+    internal fun additionalBasemapStylesForCore(): List<ResourceLocator> = additionalBasemapStyleSnapshot
 }
 
 public sealed interface Renderer : AutoCloseable {

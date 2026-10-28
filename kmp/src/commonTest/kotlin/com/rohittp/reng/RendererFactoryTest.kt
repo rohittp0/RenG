@@ -1789,17 +1789,12 @@ private class BinWriter {
 private fun bin(write: BinWriter.() -> Unit): ByteArray = BinWriter().apply(write).build()
 
 /**
- * The programs `createInternalGlState` compiles at setup: composite, sticker, ground and — since
- * ADR 0034's phase 5 — label and icon. Phase 5 draws two textures and therefore needs two programs;
- * a sprite atlas carries coverage where a glyph atlas carries a distance field, so one program
- * cannot read both.
- */
-/**
  * The composite, sticker, ground, label and icon programs — **plus the ground's displacing twin**,
  * which Cycle E-terrain compiles beside the flat one so that a frame with no terrain runs the exact
  * program three releases shipped rather than a displacing one disabled by a zero uniform.
  *
  * The globe ground's two are not here: that pipeline is compiled on the first globe frame that
- * carries ground, and this renderer draws none.
+ * carries ground, and this renderer draws none. ADR 0086's blend variants are likewise absent until
+ * the first blended frame.
  */
 private const val INTERNAL_PIPELINE_PROGRAMS: Int = 7

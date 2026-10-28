@@ -89,7 +89,7 @@ class AndroidGlConformanceTest {
      * as a silent wrong answer somewhere later.
      */
     @Test fun everyRosterEntryPointResolvesOnThisDriver() {
-        assertEquals(93, GlEntryPoint.entries.size)
+        assertEquals(94, GlEntryPoint.entries.size)
         withCurrentContext { binding ->
             val adoption = adoptRenderContext(binding)
             val adopted = adoption as? RenderContextAdoption.Adopted

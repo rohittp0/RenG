@@ -201,9 +201,11 @@ internal class BasemapEngineHost(
         }
     }
 
-    private var compiledStyle: CompiledStyleBinding? = null
+    /** One retained compilation per configured style key (ADR 0086). */
+    private val compiledStyles: MutableMap<ResourceKey, CompiledStyleBinding> = mutableMapOf()
 
-    private var derivedManifest: StyleManifestBinding? = null
+    /** One retained manifest per configured style key (ADR 0086). */
+    private val derivedManifests: MutableMap<ResourceKey, StyleManifestBinding> = mutableMapOf()
 
     private val styleManifestMemo = StyleManifestMemo()
 
@@ -549,22 +551,22 @@ internal class BasemapEngineHost(
         val lease = cache.observeAndTakeLease(styleKey)
             ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
 
-        val existing = compiledStyle
+        val existing = compiledStyles[styleKey]
         if (existing != null && existing.styleKey == styleKey && existing.contentDigest == contentDigest) {
             cache.releaseLease(existing.lease)
             // The TileJSON documents travel with the compilation they were fetched for: no compilation,
             // no `resolveTileJson` call, so this invocation observed nothing to replace them with.
-            compiledStyle = CompiledStyleBinding(
-                styleKey,
-                contentDigest,
-                lease,
-                existing.prepared,
-                existing.tileJsonDocuments,
+            compiledStyles[styleKey] = CompiledStyleBinding(
+                styleKey = styleKey,
+                contentDigest = contentDigest,
+                lease = lease,
+                prepared = existing.prepared,
+                tileJsonDocuments = existing.tileJsonDocuments,
             )
             return existing.prepared
         }
 
-        releaseCompiledStyle()
+        releaseCompiledStyle(styleKey)
         // The lease is taken before compilation, and released again if compilation fails, so a style that
         // will not compile does not pin a generation for the renderer's whole life. It is a residency
         // claim on the style key, not the source of the bytes below: those are the caller's, which is the
@@ -583,7 +585,13 @@ internal class BasemapEngineHost(
             cache.releaseLease(lease)
             throw failure
         }
-        compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, prepared, harvestTileJsonDocuments())
+        compiledStyles[styleKey] = CompiledStyleBinding(
+            styleKey = styleKey,
+            contentDigest = contentDigest,
+            lease = lease,
+            prepared = prepared,
+            tileJsonDocuments = harvestTileJsonDocuments(),
+        )
         return prepared
     }
 
@@ -619,8 +627,8 @@ internal class BasemapEngineHost(
      * degrades every `url`-form source rather than composing a url from a superseded document.
      */
     fun tileJsonDocuments(styleKey: ResourceKey, contentDigest: String?): Map<String, BasemapTileJsonOutcome> =
-        compiledStyle
-            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+        compiledStyles[styleKey]
+            ?.takeIf { contentDigest != null && it.contentDigest == contentDigest }
             ?.tileJsonDocuments
             .orEmpty()
 
@@ -651,8 +659,8 @@ internal class BasemapEngineHost(
      * two that can disagree. A `null` [contentDigest] (nothing resident under this key) matches nothing.
      */
     fun currentPreparedStyle(styleKey: ResourceKey, contentDigest: String?): PreparedStyle? =
-        compiledStyle
-            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+        compiledStyles[styleKey]
+            ?.takeIf { contentDigest != null && it.contentDigest == contentDigest }
             ?.prepared
 
     /**
@@ -709,18 +717,24 @@ internal class BasemapEngineHost(
             ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
         val contentDigest = lease.generation.stored.contentDigest
 
-        val existing = derivedManifest
+        val existing = derivedManifests[styleKey]
         if (existing != null &&
             existing.styleKey == styleKey &&
             existing.baseUri == baseUri &&
             existing.contentDigest == contentDigest
         ) {
             cache.releaseLease(existing.lease)
-            derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, existing.manifest)
+            derivedManifests[styleKey] = StyleManifestBinding(
+                styleKey = styleKey,
+                baseUri = baseUri,
+                contentDigest = contentDigest,
+                lease = lease,
+                manifest = existing.manifest,
+            )
             return BasemapStyleManifestOutcome.Derived(existing.manifest)
         }
 
-        releaseStyleManifest()
+        releaseStyleManifest(styleKey)
         // The leased generation's own bytes rather than the caller's copy, which here are the same
         // document: this method's one caller reads `stored` from ResidentCache.current() after the
         // driver's visibility install. See the KDoc -- the compilation beside this one runs before that
@@ -730,7 +744,13 @@ internal class BasemapEngineHost(
             cache.releaseLease(lease)
             return outcome
         }
-        derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, outcome.manifest)
+        derivedManifests[styleKey] = StyleManifestBinding(
+            styleKey = styleKey,
+            baseUri = baseUri,
+            contentDigest = contentDigest,
+            lease = lease,
+            manifest = outcome.manifest,
+        )
         return outcome
     }
 
@@ -1284,8 +1304,8 @@ internal class BasemapEngineHost(
     override fun close() {
         if (closed) return
         closed = true
-        releaseCompiledStyle()
-        releaseStyleManifest()
+        releaseCompiledStyles()
+        releaseStyleManifests()
         activeOperation = null
         // Cleared before the engine closes, so that a Rentile callback still on its way -- a warm flight
         // a foreground acquisition had joined -- finds no operation and is refused before it can reach
@@ -1296,14 +1316,22 @@ internal class BasemapEngineHost(
 
     // ---- internals -------------------------------------------------------------------------------
 
-    private fun releaseCompiledStyle() {
-        compiledStyle?.let { binding -> cache.releaseLease(binding.lease) }
-        compiledStyle = null
+    private fun releaseCompiledStyle(styleKey: ResourceKey) {
+        compiledStyles.remove(styleKey)?.let { binding -> cache.releaseLease(binding.lease) }
     }
 
-    private fun releaseStyleManifest() {
-        derivedManifest?.let { binding -> cache.releaseLease(binding.lease) }
-        derivedManifest = null
+    private fun releaseCompiledStyles() {
+        compiledStyles.values.forEach { binding -> cache.releaseLease(binding.lease) }
+        compiledStyles.clear()
+    }
+
+    private fun releaseStyleManifest(styleKey: ResourceKey) {
+        derivedManifests.remove(styleKey)?.let { binding -> cache.releaseLease(binding.lease) }
+    }
+
+    private fun releaseStyleManifests() {
+        derivedManifests.values.forEach { binding -> cache.releaseLease(binding.lease) }
+        derivedManifests.clear()
     }
 
     private fun requireOpen() {

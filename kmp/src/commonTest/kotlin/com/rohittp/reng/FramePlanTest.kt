@@ -30,6 +30,7 @@ class FramePlanTest {
         assertEquals(emptyList(), plan.models)
         assertEquals(emptyList(), plan.geometries)
         assertEquals(null, plan.bloom)
+        assertEquals(null, plan.basemap)
     }
 
     /**
@@ -82,6 +83,64 @@ class FramePlanTest {
         assertNotEquals(first, different)
         assertNotEquals(first.hashCode(), different.hashCode())
         assertEquals(first.bloom, first.bloomForCore())
+    }
+
+    @Test
+    fun basemapParticipatesInEqualityHashingAndCoreAccess() {
+        val selection = BasemapSelection(
+            style = 1,
+            blend = BasemapBlend(toStyle = 2, mask = BlendMask.Uniform(amount = 0.5f)),
+        )
+        val absent = FramePlan(frameIndex = 0, camera = camera())
+        val first = FramePlan(frameIndex = 0, camera = camera(), basemap = selection)
+        val equal = FramePlan(frameIndex = 0, camera = camera(), basemap = selection)
+        val different = FramePlan(
+            frameIndex = 0,
+            camera = camera(),
+            basemap = BasemapSelection(style = 2),
+        )
+
+        assertNotEquals(absent, first)
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertNotEquals(first, different)
+        assertNotEquals(first.hashCode(), different.hashCode())
+        assertEquals(selection, first.basemapForCore())
+    }
+
+    @Test
+    fun basemapValuesValidateEveryFiniteRangeAndDistinctTarget() {
+        assertFailsWith<IllegalArgumentException> {
+            BasemapSelection(
+                style = 1,
+                blend = BasemapBlend(toStyle = 1, mask = BlendMask.Uniform(amount = 0.5f)),
+            )
+        }
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.01f, 1.01f).forEach { amount ->
+            assertFailsWith<IllegalArgumentException> { BlendMask.Uniform(amount = amount) }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = Float.NaN, centreY = 0f, radius = 0f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = Float.NEGATIVE_INFINITY, radius = 0f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = 0f, radius = -0.01f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = 0f, radius = 0f, feather = -0.01f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = Float.NaN, position = 0.5f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = 0f, position = 1.01f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = 0f, position = 0.5f, feather = -0.01f)
+        }
+        assertEquals(0f, BlendMask.Uniform(amount = -0.0f).amount)
     }
 
     @Test

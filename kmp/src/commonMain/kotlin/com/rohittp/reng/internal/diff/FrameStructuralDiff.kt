@@ -48,5 +48,6 @@ internal object FrameStructuralDiffer {
         FramePlanSegment.DRAW_LABELS,
         FramePlanSegment.BACKDROP,
         FramePlanSegment.BLOOM,
+        FramePlanSegment.BASEMAP_SELECTION,
     )
 }

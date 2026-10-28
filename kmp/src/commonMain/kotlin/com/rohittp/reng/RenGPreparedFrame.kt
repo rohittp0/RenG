@@ -57,6 +57,8 @@ internal class RenGPreparedFrame(
      * is a function of it and a key cannot be walked back to one.
      */
     internal val basemapStyleDigest: String?,
+    /** The style digest used by the optional second ground pass (ADR 0086). */
+    internal val blendBasemapStyleDigest: String? = null,
     stickers: List<PreparedSticker>,
     geometries: List<PreparedGeometry>,
     /**
@@ -85,6 +87,8 @@ internal class RenGPreparedFrame(
      * when [basemapTiles] is empty.
      */
     groundInstances: List<PreparedGroundInstance> = emptyList(),
+    /** The same tile selection keyed for [blendBasemapStyleDigest] (ADR 0086). */
+    blendGroundInstances: List<PreparedGroundInstance> = emptyList(),
     /**
      * The LOD `observeMercatorLod` chose for this frame, which is **not** the same thing as the LOD
      * of any particular ground tile since ADR 0065: the ground is banded, and a band's level is an
@@ -97,6 +101,8 @@ internal class RenGPreparedFrame(
     backdrop: PreparedBackdrop? = null,
     /** The frame's screen-space bloom parameters, or `null` when the pass is absent. */
     bloom: Bloom? = null,
+    /** The mask for the optional second ground pass. */
+    basemapBlend: BasemapBlend? = null,
     /**
      * This frame's terrain, or `null` when its style declared none, when RenG and the engine did not
      * name the same source, or when the acquisition failed — the last two being ADR 0041's two
@@ -144,6 +150,7 @@ internal class RenGPreparedFrame(
     mapOrder: List<DrawnThingReference> = emptyList(),
     screenOrder: List<DrawnThingReference> = emptyList(),
     rawTileReservation: RawTileBudget.Reservation? = null,
+    blendRawTileReservation: RawTileBudget.Reservation? = null,
     preparedFrameCpuReservation: PreparedFrameCpuBudget.Reservation,
     /**
      * Every resident-cache lease this frame's own preparation took, which `close()` releases exactly once.
@@ -162,10 +169,13 @@ internal class RenGPreparedFrame(
     private var modelSnapshot: List<PreparedModel> = ArrayList(models)
     private var basemapTileSnapshot: List<RenderedBasemapTile> = ArrayList(basemapTiles)
     private var groundInstanceSnapshot: List<PreparedGroundInstance> = ArrayList(groundInstances)
+    private var blendGroundInstanceSnapshot: List<PreparedGroundInstance> =
+        if (blendGroundInstances.isEmpty()) emptyList() else ArrayList(blendGroundInstances)
     private var mapOrderSnapshot: List<DrawnThingReference> = ArrayList(mapOrder)
     private var screenOrderSnapshot: List<DrawnThingReference> = ArrayList(screenOrder)
     private var backdropSnapshot: PreparedBackdrop? = backdrop
     private var bloomSnapshot: Bloom? = bloom
+    private var basemapBlendSnapshot: BasemapBlend? = basemapBlend
     private var terrainSnapshot: PreparedTerrain? = terrain
     private var groundSurfaceSnapshot: GroundSurface? = groundSurface
     private var labelSnapshot: PreparedLabelFrame? = labels
@@ -183,6 +193,7 @@ internal class RenGPreparedFrame(
     private var closePayload: PreparedFrameClosePayload? = PreparedFrameClosePayload(
         leases = ArrayList(leases),
         rawTileReservation = rawTileReservation,
+        blendRawTileReservation = blendRawTileReservation,
         preparedFrameCpuReservation = preparedFrameCpuReservation,
     )
 
@@ -196,10 +207,14 @@ internal class RenGPreparedFrame(
     internal val groundInstances: List<PreparedGroundInstance> get() = ownershipLock.withLock {
         groundInstanceSnapshot
     }
+    internal val blendGroundInstances: List<PreparedGroundInstance> get() = ownershipLock.withLock {
+        blendGroundInstanceSnapshot
+    }
     internal val mapOrder: List<DrawnThingReference> get() = ownershipLock.withLock { mapOrderSnapshot }
     internal val screenOrder: List<DrawnThingReference> get() = ownershipLock.withLock { screenOrderSnapshot }
     internal val backdrop: PreparedBackdrop? get() = ownershipLock.withLock { backdropSnapshot }
     internal val bloom: Bloom? get() = ownershipLock.withLock { bloomSnapshot }
+    internal val basemapBlend: BasemapBlend? get() = ownershipLock.withLock { basemapBlendSnapshot }
     internal val terrain: PreparedTerrain? get() = ownershipLock.withLock { terrainSnapshot }
     internal val groundSurface: GroundSurface? get() = ownershipLock.withLock { groundSurfaceSnapshot }
     internal val labels: PreparedLabelFrame? get() = ownershipLock.withLock { labelSnapshot }
@@ -220,8 +235,10 @@ internal class RenGPreparedFrame(
     }
 
     init {
-        require(rawTileReservation?.bytes == rawTileBytes || (rawTileReservation == null && rawTileBytes == 0L)) {
-            "raw tile reservation must exactly cover the frame's raw pixels"
+        val reservedRawTileBytes = (rawTileReservation?.bytes ?: 0L) +
+            (blendRawTileReservation?.bytes ?: 0L)
+        require(reservedRawTileBytes == rawTileBytes) {
+            "raw tile reservations must exactly cover the frame's raw pixels"
         }
     }
 
@@ -243,10 +260,12 @@ internal class RenGPreparedFrame(
         modelSnapshot = emptyList()
         basemapTileSnapshot = emptyList()
         groundInstanceSnapshot = emptyList()
+        blendGroundInstanceSnapshot = emptyList()
         mapOrderSnapshot = emptyList()
         screenOrderSnapshot = emptyList()
         backdropSnapshot = null
         bloomSnapshot = null
+        basemapBlendSnapshot = null
         terrainSnapshot = null
         groundSurfaceSnapshot = null
         labelSnapshot = null

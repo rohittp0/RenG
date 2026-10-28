@@ -8,4 +8,9 @@ internal data class PreparedItemResult(
     val nextHistory: PreparationHistory,
     val preparedStyle: PreparedStyle?,
     val styleManifest: BasemapStyleManifest?,
+    val primaryStyleIndex: Int?,
+    val blendPreparedStyle: PreparedStyle?,
+    val blendStyleManifest: BasemapStyleManifest?,
+    val blendStyleIndex: Int?,
+    val primedStyles: List<CommittedBasemapStyleUpdate>,
 )

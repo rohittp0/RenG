@@ -5,6 +5,7 @@ import com.rohittp.reng.AnchoringMode
 import com.rohittp.reng.AnimationSelector
 import com.rohittp.reng.AnimationTrack
 import com.rohittp.reng.Backdrop
+import com.rohittp.reng.BasemapSelection
 import com.rohittp.reng.Bloom
 import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Camera
@@ -157,6 +158,9 @@ class FramePlanCanonicalEncodingTest {
                 backdrop = Backdrop.Pattern(ResourceLocator("patterns/grid.png")),
             ),
             FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(intensity = 2f)),
+            FramePlanSegment.BASEMAP_SELECTION to representativeFieldsPlan(
+                basemap = BasemapSelection(style = 0),
+            ),
         )
         val baseEncoded = encoder.encode(base)
 
@@ -411,7 +415,7 @@ class FramePlanCanonicalEncodingTest {
 
         val after = encoder.encode(plan)
         assertEquals(before, after)
-        assertEquals(10, before.segmentPayloads.size)
+        assertEquals(11, before.segmentPayloads.size)
         assertContentEquals(CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray(), before.identity.canonicalBytes.bytes)
     }
 
@@ -511,6 +515,7 @@ class FramePlanCanonicalEncodingTest {
         geometries: List<Geometry> = listOf(geometry("vertex-a")),
         backdrop: Backdrop? = null,
         bloom: Bloom? = null,
+        basemap: BasemapSelection? = null,
     ): FramePlan = FramePlan(
         frameIndex = frameIndex,
         camera = camera,
@@ -522,6 +527,7 @@ class FramePlanCanonicalEncodingTest {
         geometries = geometries,
         backdrop = backdrop,
         bloom = bloom,
+        basemap = basemap,
     )
 
     private fun sticker(locator: String): Sticker = Sticker(
@@ -658,6 +664,7 @@ class FramePlanCanonicalEncodingTest {
             FramePlanSegment.DRAW_LABELS,
             FramePlanSegment.BACKDROP,
             FramePlanSegment.BLOOM,
+            FramePlanSegment.BASEMAP_SELECTION,
         )
     }
 }

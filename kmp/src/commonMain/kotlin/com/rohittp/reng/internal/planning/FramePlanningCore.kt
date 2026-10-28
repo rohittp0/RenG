@@ -1,20 +1,27 @@
 package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.Backdrop
+import com.rohittp.reng.Diagnostic
+import com.rohittp.reng.DiagnosticCode
+import com.rohittp.reng.DiagnosticSeverity
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.ProjectionMode
+import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RawResourceKey
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
+import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.backdropForCore
+import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
+import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
@@ -37,7 +44,16 @@ internal data class FramePlanningRequest(
     val maximumBasemapTileInstances: Int,
     val previousPlan: EncodedFramePlan?,
     val previousSelectedLod: Int?,
+    val additionalBasemapStyles: List<ResourceLocator> = emptyList(),
 ) {
+    val basemapStyleCount: Int = if (basemapStyle == null) 0 else 1 + additionalBasemapStyles.size
+
+    fun basemapStyleAt(index: Int): ResourceLocator? = when {
+        index == 0 -> basemapStyle
+        index > 0 -> additionalBasemapStyles.getOrNull(index - 1)
+        else -> null
+    }
+
     init {
         require(maximumBasemapTileInstances > 0) { "maximumBasemapTileInstances must be positive" }
         require(previousSelectedLod == null || previousSelectedLod in MINIMUM_MERCATOR_LOD..MAXIMUM_MERCATOR_LOD) {
@@ -123,8 +139,28 @@ internal class PlannedFrameCore(
             reference is StaticResourceReference.External &&
                 reference.resourceClass == ResourceClass.BASEMAP_STYLE
         }
-        require(basemapStyleRoutes <= 1) {
-            "at most one basemap style may be traversed"
+        require(basemapStyleRoutes <= 2) {
+            "at most two basemap styles may be traversed"
+        }
+        if (basemapStyleRoutes == 2) {
+            var firstStyleKey: ResourceKey? = null
+            var distinctStyleRoutes = 0
+            staticResourceTraversalSnapshot.forEach { reference ->
+                if (
+                    reference is StaticResourceReference.External &&
+                    reference.resourceClass == ResourceClass.BASEMAP_STYLE
+                ) {
+                    if (firstStyleKey == null) {
+                        firstStyleKey = reference.resourceKey
+                        distinctStyleRoutes += 1
+                    } else if (reference.resourceKey != firstStyleKey) {
+                        distinctStyleRoutes += 1
+                    }
+                }
+            }
+            require(distinctStyleRoutes == basemapStyleRoutes) {
+                "a basemap style may be traversed at most once"
+            }
         }
         require(basemapStyleRoutes == 0 || spatialPlan.tileSelection != null) {
             "a traversed basemap style requires a planned tile selection"
@@ -206,12 +242,31 @@ internal class FramePlanningCore(
 ) {
     internal fun plan(request: FramePlanningRequest): FramePlanningOutcome {
         val plan = request.plan
+        val selection = plan.basemapForCore()
+        if (selection != null && (
+                selection.style !in 0 until request.basemapStyleCount ||
+                    selection.blend?.toStyle?.let { it !in 0 until request.basemapStyleCount } == true
+                )
+        ) {
+            return FramePlanningOutcome.Failure(
+                FailureDescriptor(
+                    code = RenGErrorCode.INVALID_VALUE,
+                    stage = PipelineStage.FRAME_PLANNING,
+                    diagnostic = Diagnostic(
+                        code = DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
+                        severity = DiagnosticSeverity.ERROR,
+                        stage = PipelineStage.FRAME_PLANNING,
+                        fieldName = DiagnosticField.FRAME_INDEX.wireName,
+                    ),
+                ),
+            )
+        }
         val spatialOutcome = planSpatial(
             plan,
             request.outputPixelSize,
             request.previousSelectedLod,
             request.maximumBasemapTileInstances,
-            request.basemapStyle != null,
+            request.basemapStyleCount > 0,
             shaderProfileMemo,
         )
         if (spatialOutcome is SpatialOutcome.Failure) {
@@ -257,14 +312,24 @@ internal class FramePlanningCore(
             )
         }
 
-        val basemapStyle = request.basemapStyle
+        val selection = plan.basemapForCore()
+        val primaryStyleIndex = selection?.style ?: 0
         // E-labels task 8b: labels come *from* the style, so the style is traversed when either draw
         // switch is set, not when `drawBasemap` alone is. The condition is deliberately the same
         // expression `planMercatorSpatial` gates its tile selection on: [PlannedFrameCore]'s own
         // "a traversed basemap style requires a planned tile selection" invariant fails closed if the
         // two ever drift apart, so widening one without the other is caught rather than shipped.
-        if ((plan.drawBasemap || plan.drawLabels) && basemapStyle != null) {
-            external(basemapStyle, ResourceClass.BASEMAP_STYLE)
+        if (plan.drawBasemap || plan.drawLabels) {
+            request.basemapStyleAt(primaryStyleIndex)?.let { style ->
+                external(style, ResourceClass.BASEMAP_STYLE)
+            }
+        }
+        if (plan.drawBasemap) {
+            selection?.blend?.let { blend ->
+                request.basemapStyleAt(blend.toStyle)?.let { style ->
+                    external(style, ResourceClass.BASEMAP_STYLE)
+                }
+            }
         }
         for (sticker in plan.stickersForCore()) {
             external(sticker.image, ResourceClass.STICKER_IMAGE)

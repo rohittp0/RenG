@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.Camera
+import com.rohittp.reng.BlendMask
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.planning.SpatialOutcome
@@ -41,6 +42,7 @@ class GlobeGroundPipelineTest {
         assertEquals(5, InternalPipelineRole.LABEL.wireValue)
         assertEquals(6, InternalPipelineRole.ICON.wireValue)
         assertEquals(7, InternalPipelineRole.GLOBE_GROUND.wireValue)
+        assertEquals(15, InternalPipelineRole.GROUND_BLEND.wireValue)
     }
 
     @Test fun theGlobeGroundSourcesAreAcceptedShaderProfileSources() {
@@ -386,6 +388,16 @@ class GlobeGroundPipelineTest {
             createGlobeGroundPipeline(binding, ShaderDialect.GLES, cache)
                 as GlobeGroundPipelineResult.Created
             ).pipeline
+        binding.log.clear()
+        assertNull(
+            ensureGlobeGroundBlendPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+        )
+        assertEquals(2, binding.log.count { it.startsWith("createProgram") })
         drawGlobeGround(binding, pipeline, tiles(1), FloatArray(16), cellsPerTileSide = 4)
         drawGlobeGround(binding, pipeline, tiles(1), FloatArray(16), cellsPerTileSide = 32)
         binding.log.clear()
@@ -394,11 +406,69 @@ class GlobeGroundPipelineTest {
 
         assertEquals(2, binding.log.count { it.startsWith("deleteVertexArrays") })
         assertEquals(2, binding.log.count { it.startsWith("deleteBuffers(2") }, "vertex and index")
-        // Two, not one: the displacing program is compiled beside the flat one (Cycle E-terrain).
-        assertEquals(2, binding.log.count { it.startsWith("deleteProgram") })
+        // Flat and terrain programs each have ADR 0086's blend variant; all four are owned here.
+        assertEquals(4, binding.log.count { it.startsWith("deleteProgram") })
         assertTrue(pipeline.grids.isEmpty())
         assertNull(cache.program(pipeline.key))
         assertNull(cache.program(pipeline.terrain.key))
+        assertNull(cache.program(requireNotNull(pipeline.blend).key))
+        assertNull(cache.program(requireNotNull(pipeline.terrainBlend).key))
+    }
+
+    @Test
+    fun globeBlendPassKeepsPrimaryCullingAndOffsetsOnlyTerrain() {
+        val binding = newBinding()
+        val cache = GlProgramCache()
+        val pipeline = (
+            createGlobeGroundPipeline(binding, ShaderDialect.GLES, cache)
+                as GlobeGroundPipelineResult.Created
+            ).pipeline
+        assertNull(
+            ensureGlobeGroundBlendPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+        )
+
+        binding.log.clear()
+        drawGlobeGroundBlend(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = tiles(count = 1),
+            unitSphereToClip = FloatArray(16),
+            cellsPerTileSide = 4,
+            mask = BlendMask.Uniform(amount = 0.5f),
+            frameWidth = 64f,
+            frameHeight = 64f,
+        )
+        assertTrue(binding.log.contains("enable(${hex(GL_CULL_FACE)})"))
+        assertTrue(binding.log.contains("depthFunc(${hex(GL_GEQUAL)})"))
+        assertTrue(binding.log.contains("depthMask(false)"))
+        assertFalse(binding.log.any { it.contains("polygonOffset") })
+
+        binding.log.clear()
+        drawGlobeGroundBlend(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = tiles(count = 1),
+            unitSphereToClip = FloatArray(16),
+            cellsPerTileSide = 4,
+            mask = BlendMask.Uniform(amount = 0.5f),
+            frameWidth = 64f,
+            frameHeight = 64f,
+            elevation = GlobeGroundElevationFrame(
+                dem = GroundDemUniforms(
+                    decode = demDecodeCoefficients(DemEncoding.TERRARIUM),
+                    interiorSizePx = 512,
+                    exaggeration = 1f,
+                ),
+                radialMultiplePerMetre = 0.5f,
+            ),
+        )
+        assertFalse(binding.log.any { it.contains("polygonOffset") })
+        assertEquals("depthMask(false)", binding.log.last(), "restore the primary pass's exact mask")
     }
 
     /**

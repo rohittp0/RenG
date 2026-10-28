@@ -26,10 +26,14 @@ import kotlin.test.assertTrue
  */
 class RenderedTileCacheTest {
 
-    private fun tile(index: Int, bytes: Int = TILE_BYTES): RenderedBasemapTile {
+    private fun tile(index: Int, bytes: Int = TILE_BYTES, styleDigest: String = STYLE): RenderedBasemapTile {
         val canonical = CanonicalBasemapTile(lod = 6, tileY = index, canonicalX = index * 3)
         return RenderedBasemapTile(
-            key = basemapTileKey(STYLE, canonical, OutputPixelSize(16, 16)),
+            key = basemapTileKey(
+                styleDigest,
+                canonical,
+                OutputPixelSize(width = 16, height = 16),
+            ),
             tile = canonical,
             pixels = BasemapTilePixels.Raw(ByteArray(bytes) { (index + it).toByte() }, 16, bytes / 64),
             contentKey = "content-$index",
@@ -38,7 +42,7 @@ class RenderedTileCacheTest {
     }
 
     private fun cache(tiles: Int): RenderedTileCache =
-        RenderedTileCache(budgetBytes = tiles.toLong() * TILE_BYTES).also { it.adoptStyle(STYLE) }
+        RenderedTileCache(budgetBytes = tiles.toLong() * TILE_BYTES).also { it.adoptStyles(setOf(STYLE)) }
 
     @Test
     fun theBudgetEvictsTheLeastRecentlyUsedTileFirst() {
@@ -100,8 +104,12 @@ class RenderedTileCacheTest {
         cache.put(STYLE, tile(1))
         cache.put(STYLE, tile(2))
 
-        assertEquals(0, cache.adoptStyle(STYLE), "adopting the style already adopted drops nothing")
-        assertEquals(2, cache.adoptStyle("another-style"), "adopting a different one drops what the old one held")
+        assertEquals(0, cache.adoptStyles(setOf(STYLE)), "adopting the style already adopted drops nothing")
+        assertEquals(
+            2,
+            cache.adoptStyles(setOf("another-style")),
+            "adopting a different one drops what the old one held",
+        )
         assertEquals(0, cache.size)
         assertEquals(0L, cache.bytes)
 
@@ -109,6 +117,29 @@ class RenderedTileCacheTest {
         assertFalse(cache.put(STYLE, tile(3)).stored, "a tile for a style no longer adopted is refused")
         assertEquals(0, cache.size)
         assertTrue(cache.put("another-style", tile(3)).stored)
+    }
+
+    @Test
+    fun anAdoptedStyleSetKeepsItsTwoStylesAndDropsOnlyOutsiders() {
+        val firstStyle = "first-style"
+        val secondStyle = "second-style"
+        val thirdStyle = "third-style"
+        val cache = RenderedTileCache(budgetBytes = 4L * TILE_BYTES)
+        cache.adoptStyles(setOf(firstStyle, secondStyle))
+        val first = tile(index = 1, styleDigest = firstStyle)
+        val second = tile(index = 1, styleDigest = secondStyle)
+        val third = tile(index = 1, styleDigest = thirdStyle)
+
+        assertTrue(cache.put(firstStyle, first).stored)
+        assertTrue(cache.put(secondStyle, second).stored)
+        assertFalse(cache.put(thirdStyle, third).stored)
+        assertEquals(2, cache.size)
+
+        assertEquals(1, cache.adoptStyles(setOf(secondStyle, thirdStyle)))
+        assertFalse(cache.contains(first.key))
+        assertTrue(cache.contains(second.key))
+        assertTrue(cache.put(thirdStyle, third).stored)
+        assertEquals(2, cache.size)
     }
 
     @Test
@@ -168,9 +199,19 @@ class RenderedTileCacheTest {
         cache.close()
         assertEquals(0, cache.size)
         assertFalse(cache.put(STYLE, tile(2)).stored, "a draw already finishing when close ran leaves nothing behind")
-        assertFalse(cache.adoptStyle(STYLE) > 0)
+        assertFalse(cache.adoptStyles(setOf(STYLE)) > 0)
         assertFalse(cache.put(STYLE, tile(3)).stored, "adopting after close does not reopen it")
         cache.close()
+    }
+
+    @Test
+    fun discardingEntriesForReloadRetainsTheAdoptedStyleSet() {
+        val cache = cache(tiles = 2)
+        cache.put(STYLE, tile(1))
+
+        assertEquals(1, cache.discardEntries())
+        assertEquals(0, cache.size)
+        assertTrue(cache.put(STYLE, tile(2)).stored)
     }
 
     @Test

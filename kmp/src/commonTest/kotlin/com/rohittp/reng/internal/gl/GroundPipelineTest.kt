@@ -1,7 +1,10 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BlendMask
+import com.rohittp.reng.basemapBlendAmount
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import com.rohittp.reng.internal.terrain.DemEncoding
+import kotlin.math.PI
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -25,6 +28,7 @@ class GroundPipelineTest {
         assertEquals(1, InternalPipelineRole.COMPOSITE.wireValue)
         assertEquals(2, InternalPipelineRole.STICKER.wireValue)
         assertEquals(3, InternalPipelineRole.GROUND.wireValue)
+        assertEquals(15, InternalPipelineRole.GROUND_BLEND.wireValue)
     }
 
     @Test fun theGroundSourcesAreAcceptedShaderProfileSources() {
@@ -32,6 +36,96 @@ class GroundPipelineTest {
         assertTrue(GROUND_FRAGMENT_SOURCE.startsWith("#version 300 es\n"))
         assertTrue(scanShaderProfile(GROUND_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(GROUND_BLEND_FRAGMENT_SOURCE) != null)
+    }
+
+    @Test
+    fun blendMaskMathMatchesTheAdrAtCentresCornersAndSweepDirections() {
+        val width = 100f
+        val height = 100f
+        fun amount(mask: BlendMask, x: Float, y: Float): Float = basemapBlendAmount(
+            mask = mask,
+            pixelX = x,
+            pixelY = y,
+            frameWidth = width,
+            frameHeight = height,
+        )
+
+        val cornersAndCentre = listOf(
+            0.5f to 0.5f,
+            99.5f to 0.5f,
+            0.5f to 99.5f,
+            99.5f to 99.5f,
+            50f to 50f,
+        )
+        cornersAndCentre.forEach { (x, y) ->
+            assertEquals(0.5f, amount(BlendMask.Uniform(amount = 0.5f), x, y))
+        }
+        assertEquals(
+            1f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0f),
+                50f,
+                50f,
+            ),
+        )
+        assertEquals(
+            0f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0f),
+                0f,
+                0f,
+            ),
+        )
+        assertEquals(
+            0.5f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.5f, feather = 0.2f),
+                50f + 0.4f * kotlin.math.sqrt(20_000f),
+                50f,
+            ),
+            0.0001f,
+        )
+        assertEquals(
+            1f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.5f, feather = 0.2f),
+                50f,
+                50f,
+            ),
+        )
+        assertEquals(
+            0f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0.05f),
+                0.5f,
+                0.5f,
+            ),
+        )
+
+        listOf(0f, (PI / 2).toFloat(), PI.toFloat(), (3 * PI / 2).toFloat()).forEach { angle ->
+            cornersAndCentre.forEach { (x, y) ->
+                assertEquals(
+                    0f,
+                    amount(BlendMask.Linear(angleRadians = angle, position = 0f, feather = 0f), x, y),
+                )
+                assertEquals(
+                    1f,
+                    amount(BlendMask.Linear(angleRadians = angle, position = 1f, feather = 0f), x, y),
+                )
+            }
+        }
+        val half = { angle: Float, x: Float, y: Float ->
+            amount(BlendMask.Linear(angleRadians = angle, position = 0.5f, feather = 0f), x, y)
+        }
+        assertEquals(1f, half(0f, 25f, 50f))
+        assertEquals(0f, half(0f, 75f, 50f))
+        assertEquals(1f, half((PI / 2).toFloat(), 50f, 75f))
+        assertEquals(0f, half((PI / 2).toFloat(), 50f, 25f))
+        assertEquals(1f, half(PI.toFloat(), 75f, 50f))
+        assertEquals(0f, half(PI.toFloat(), 25f, 50f))
+        assertEquals(1f, half((3 * PI / 2).toFloat(), 50f, 25f))
+        assertEquals(0f, half((3 * PI / 2).toFloat(), 50f, 75f))
     }
 
     /**
@@ -132,6 +226,17 @@ class GroundPipelineTest {
         val pipeline = (
             createGroundPipeline(binding, ShaderDialect.GLES, cache) as GroundPipelineResult.Created
             ).pipeline
+        binding.log.clear()
+        assertNull(
+            ensureGroundBlendPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+            "the first blended frame must compile both variants",
+        )
+        assertEquals(2, binding.log.count { it.startsWith("createProgram") })
         drawGround(binding, pipeline, listOf(resolvedTile()), cellsPerTileSide = 4)
         drawGround(binding, pipeline, listOf(resolvedTile()), cellsPerTileSide = 32)
         binding.log.clear()
@@ -140,13 +245,84 @@ class GroundPipelineTest {
 
         assertEquals(2, binding.log.count { it.startsWith("deleteVertexArrays") })
         assertEquals(2, binding.log.count { it.startsWith("deleteBuffers(2") }, "vertex and index")
-        // Two, not one: Cycle E-terrain compiles the displacing program beside the flat one, and a
-        // pipeline that deleted only the program it drew last frame would leak the other for the
-        // renderer's whole life.
-        assertEquals(2, binding.log.count { it.startsWith("deleteProgram") })
+        // Flat and terrain programs each have ADR 0086's blend variant; all four are owned here.
+        assertEquals(4, binding.log.count { it.startsWith("deleteProgram") })
         assertTrue(pipeline.grids.isEmpty())
         assertNull(cache.program(pipeline.key))
         assertNull(cache.program(pipeline.terrain.key))
+        assertNull(cache.program(requireNotNull(pipeline.blend).key))
+        assertNull(cache.program(requireNotNull(pipeline.terrainBlend).key))
+    }
+
+    @Test
+    fun blendPassUsesPrimaryStateAndOffsetsOnlyTerrainTowardTheReverseZCamera() {
+        val binding = newBinding()
+        val cache = GlProgramCache()
+        val pipeline = (
+            createGroundPipeline(binding, ShaderDialect.GLES, cache) as GroundPipelineResult.Created
+            ).pipeline
+        assertNull(
+            ensureGroundBlendPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+        )
+
+        binding.log.clear()
+        drawGroundBlend(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(resolvedTile()),
+            mask = BlendMask.Uniform(amount = 0.5f),
+            frameWidth = 64f,
+            frameHeight = 64f,
+        )
+        assertTrue(binding.log.contains("depthFunc(${hex(GL_GEQUAL)})"))
+        assertTrue(binding.log.contains("depthMask(false)"))
+        assertTrue(
+            binding.log.contains(
+                "blendFuncSeparate(${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)}," +
+                    "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)})",
+            ),
+        )
+        assertTrue(binding.log.contains("disable(${hex(GL_CULL_FACE)})"))
+        assertFalse(binding.log.any { it.contains("polygonOffset") || it == "enable(${hex(GL_POLYGON_OFFSET_FILL)})" })
+
+        binding.log.clear()
+        drawGroundBlend(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(resolvedTile()),
+            mask = BlendMask.Uniform(amount = 0.5f),
+            frameWidth = 64f,
+            frameHeight = 64f,
+            elevation = elevationFrame(),
+        )
+        assertFalse(
+            binding.log.any { it.contains("polygonOffset") || it == "enable(${hex(GL_POLYGON_OFFSET_FILL)})" },
+            "a terrain frame whose selected tile has no DEM wrote no primary depth",
+        )
+        assertEquals("depthMask(false)", binding.log.last(), "restore the primary pass's exact mask")
+
+        binding.log.clear()
+        drawGroundBlend(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(demTile(texture = 11, demTexture = 21)),
+            mask = BlendMask.Uniform(amount = 0.5f),
+            frameWidth = 64f,
+            frameHeight = 64f,
+            elevation = elevationFrame(),
+        )
+        val firstDraw = binding.log.indexOfFirst { it.startsWith("drawElements") }
+        val enableOffset = binding.log.indexOf("enable(${hex(GL_POLYGON_OFFSET_FILL)})")
+        val disableOffset = binding.log.indexOf("disable(${hex(GL_POLYGON_OFFSET_FILL)})")
+        assertTrue(enableOffset in 0 until firstDraw)
+        assertTrue(binding.log.contains("polygonOffset(0.0,1.0)"), "positive units move toward reverse-Z camera")
+        assertTrue(disableOffset > firstDraw)
+        assertTrue(binding.log.last() == "depthMask(true)", "restore pass one's terrain depth mask")
     }
 
     /**

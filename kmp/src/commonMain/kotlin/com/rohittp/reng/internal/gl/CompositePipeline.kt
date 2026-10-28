@@ -51,6 +51,9 @@ internal enum class InternalPipelineRole(internal val wireValue: Int) {
      * consumer pipeline cache's eviction delete RenG's live one. Appended, so nothing moves.
      */
     CONSUMER_BACKDROP(14),
+
+    /** ADR 0086's second ground pass. Appended so no existing identity moves. */
+    GROUND_BLEND(15),
 }
 
 /**

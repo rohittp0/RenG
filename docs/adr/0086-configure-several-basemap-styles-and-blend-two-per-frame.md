@@ -71,14 +71,26 @@ selects it as the Primary Style its own terrain applies, a jump this ADR accepts
 hillshade come from the Primary Style alone.
 
 The variant is a new internal program role. The existing ground programs are pinned character for
-character (ADR 0068) and are not edited. The globe ground takes the same variant.
+character (ADR 0068) and are not edited. The globe ground takes the same variant. Its programs are
+compiled on the first blended frame, not at setup, so a renderer that never blends compiles what it did.
+
+Two separately linked programs are not guaranteed bit-identical vertex output in GLSL ES without
+`invariant`, which the pinned sources cannot gain. Flat ground is unaffected: pass one writes no depth.
+Over terrain, where pass one does write depth, the blend pass draws with a polygon offset of one unit
+toward the camera so a last-bit difference cannot drop its fragments.
 
 Bloom is untouched: the basemap has never been emissive.
 
 ## Acquisition, caching and read-ahead
 
 Each style in the set is compiled once and kept, keyed by its style key, rather than one compiled-style
-slot. A frame acquires tiles for the styles its selection names: one normally, two during a blend. The
+slot. The first foreground preparation compiles the whole Style Set, so the read-ahead never compiles a
+style: it only warms tiles of styles that are already compiled, on the worker it already had, and a
+foreground preparation never waits behind a read-ahead's style fetch. A blend target whose
+compilation is unavailable is treated exactly as an unavailable Primary Style already is (the frame
+prepares with that style's ground absent, as ADR 0004's renderer did); nothing about a single-style
+frame's failure behaviour changes. A style that fails the first attempt is attempted again only when a
+frame names it. A frame acquires tiles for the styles its selection names: one normally, two during a blend. The
 planner's "at most one basemap style may be traversed" becomes "at most two, and only the styles the
 selection names". Rendered tile keys already carry the style digest (ADR 0069), so two styles' tiles never
 collide in the GPU registry. Ancestor fallback and the provisional-failed-tile rule (ADR 0057) apply per

@@ -104,14 +104,14 @@ internal fun runBasemapReadbackSuite(
     )
     val transport = ReadbackTransport()
     val renderer = createRenderer(
-        RendererConfiguration(
-            outputPixelSize = OutputPixelSize(READBACK_PIXELS, READBACK_PIXELS),
+        configuration = RendererConfiguration(
+            outputPixelSize = OutputPixelSize(width = READBACK_PIXELS, height = READBACK_PIXELS),
             transport = transport,
             store = RecordingStyleStore(),
             basemapStyle = ResourceLocator(STYLE_URL),
         ),
-        binding,
-        probe,
+        binding = binding,
+        probe = probe,
     )
     val failures = CollectedFailures()
     try {
@@ -144,6 +144,14 @@ internal fun runBasemapReadbackSuite(
         }
         failures.run("a map-anchored billboard is the same size at every pitch") {
             assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(binding, renderer, renderTarget, target)
+        }
+        failures.run("two basemap styles blend with uniform, linear, and radial masks") {
+            assertTwoBasemapStylesBlend(
+                binding = binding,
+                probe = probe,
+                targetFramebuffer = target,
+                groundCoverageTrustworthy = rasterisation.isTrustworthy,
+            )
         }
     } finally {
         renderer.close()
@@ -185,7 +193,193 @@ private class CollectedFailures {
     }
 }
 
-private const val BASEMAP_READBACK_CASE_COUNT: Int = 5
+private const val BASEMAP_READBACK_CASE_COUNT: Int = 6
+
+private fun assertTwoBasemapStylesBlend(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+    targetFramebuffer: Int,
+    groundCoverageTrustworthy: Boolean,
+) {
+    val renderer = createRenderer(
+        configuration = RendererConfiguration(
+            outputPixelSize = OutputPixelSize(width = READBACK_PIXELS, height = READBACK_PIXELS),
+            transport = ReadbackTransport(),
+            store = RecordingStyleStore(),
+            basemapStyle = ResourceLocator(value = BLEND_PRIMARY_STYLE_URL),
+            additionalBasemapStyles = listOf(ResourceLocator(value = BLEND_TARGET_STYLE_URL)),
+        ),
+        binding = binding,
+        probe = probe,
+    )
+    try {
+        val target = renderer.mintRenderTarget(FramebufferName(value = targetFramebuffer.toUInt()))
+        fun plan(frameIndex: Long, mask: BlendMask? = null): FramePlan = FramePlan(
+            frameIndex = frameIndex,
+            camera = styleCamera(),
+            drawLabels = false,
+            basemap = mask?.let {
+                BasemapSelection(
+                    style = 0,
+                    blend = BasemapBlend(toStyle = 1, mask = it),
+                )
+            },
+        )
+        val primary = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(frameIndex = 0),
+        )
+        val uniformZero = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(frameIndex = 1, mask = BlendMask.Uniform(amount = 0f)),
+        )
+        listOf(8 to 8, 64 to 64, 119 to 119).forEach { (x, y) ->
+            assertEquals(primary.at(x, y).toList(), uniformZero.at(x, y).toList())
+        }
+
+        val uniformHalf = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(frameIndex = 2, mask = BlendMask.Uniform(amount = 0.5f)),
+        )
+        assertPixelWithin(BLEND_MIDPOINT, uniformHalf.at(64, 64), tolerance = 2, context = "uniform centre")
+
+        val linear = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(
+                frameIndex = 3,
+                mask = BlendMask.Linear(angleRadians = 0f, position = 0.5f, feather = 0f),
+            ),
+        )
+        assertPixelWithin(BLEND_TARGET, linear.at(8, 64), tolerance = 2, context = "linear left")
+        assertPixelWithin(BLEND_PRIMARY, linear.at(119, 64), tolerance = 2, context = "linear right")
+
+        val radial = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(
+                frameIndex = 4,
+                mask = BlendMask.Radial(
+                    centreX = 0.5f,
+                    centreY = 0.5f,
+                    radius = 0.1f,
+                    feather = 0f,
+                ),
+            ),
+        )
+        assertPixelWithin(BLEND_TARGET, radial.at(64, 64), tolerance = 2, context = "radial centre")
+        assertPixelWithin(BLEND_PRIMARY, radial.at(8, 8), tolerance = 2, context = "radial exterior")
+
+        val verticalLinear = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(
+                frameIndex = 5,
+                mask = BlendMask.Linear(
+                    angleRadians = (kotlin.math.PI / 2.0).toFloat(),
+                    position = 0.5f,
+                    feather = 0f,
+                ),
+            ),
+        )
+        if (groundCoverageTrustworthy) {
+            // ADR 0086: compare whole regions so a misplaced edge cannot pass on one lucky pixel.
+            assertRegionContains(
+                expected = BLEND_PRIMARY,
+                frame = verticalLinear,
+                xRange = 8 until 120,
+                yRange = 8 until 56,
+                tolerance = 2,
+                context = "vertical top",
+            )
+            assertRegionContains(
+                expected = BLEND_TARGET,
+                frame = verticalLinear,
+                xRange = 8 until 120,
+                yRange = 72 until 120,
+                tolerance = 2,
+                context = "vertical bottom",
+            )
+        }
+
+        val topRadial = clearAndDraw(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = target,
+            targetFramebuffer = targetFramebuffer,
+            plan = plan(
+                frameIndex = 6,
+                mask = BlendMask.Radial(
+                    centreX = 0.5f,
+                    centreY = 0.25f,
+                    radius = 0.1f,
+                    feather = 0f,
+                ),
+            ),
+        )
+        assertPixelWithin(BLEND_TARGET, topRadial.at(64, 32), tolerance = 2, context = "top radial centre")
+        if (groundCoverageTrustworthy) {
+            assertRegionContains(
+                expected = BLEND_PRIMARY,
+                frame = topRadial,
+                xRange = 8 until 120,
+                yRange = 72 until 120,
+                tolerance = 2,
+                context = "top radial exterior",
+            )
+        } else {
+            println(
+                "RenG basemap readback SKIPPED [blend region coverage]: this driver does not " +
+                    "rasterise the ground's own quads, so region counts would measure the driver " +
+                    "rather than ADR 0086's blend edge. Point and colour assertions still ran.",
+            )
+        }
+    } finally {
+        renderer.close()
+    }
+}
+
+private fun assertPixelWithin(expected: IntArray, actual: IntArray, tolerance: Int, context: String) {
+    assertTrue(
+        expected.indices.all { channel -> abs(expected[channel] - actual[channel]) <= tolerance },
+        "$context: expected ${expected.describe()} within $tolerance, actual ${actual.describe()}",
+    )
+}
+
+private fun assertRegionContains(
+    expected: IntArray,
+    frame: ReadbackFrame,
+    xRange: IntRange,
+    yRange: IntRange,
+    tolerance: Int,
+    context: String,
+) {
+    val regionPixels = xRange.count() * yRange.count()
+    val requiredMatches = regionPixels - MAXIMUM_ABSENT_INTERIOR_PIXELS
+    val matching = frame.count(xRange = xRange, yRange = yRange) { pixel ->
+        expected.indices.all { channel -> abs(expected[channel] - pixel[channel]) <= tolerance }
+    }
+    assertTrue(
+        matching >= requiredMatches,
+        "$context has $matching of $regionPixels pixels within $tolerance of ${expected.describe()}; " +
+            "at least $requiredMatches are required",
+    )
+}
 
 /**
  * The positive case. Four named samples, one per on-screen quadrant, plus the quadrant-mean ordering
@@ -518,9 +712,13 @@ private class ReadbackFrame(val bytes: ByteArray) {
     }
 
     fun count(predicate: (IntArray) -> Boolean): Int {
+        return count(xRange = INTERIOR, yRange = INTERIOR, predicate = predicate)
+    }
+
+    fun count(xRange: IntRange, yRange: IntRange, predicate: (IntArray) -> Boolean): Int {
         var total = 0
-        for (y in INTERIOR) {
-            for (x in INTERIOR) {
+        for (y in yRange) {
+            for (x in xRange) {
                 if (predicate(at(x, y))) total += 1
             }
         }
@@ -1123,6 +1321,18 @@ private val READBACK_STYLE_JSON: String =
         """"layers":[{"id":"bg","type":"background","paint":{"background-color":"#000000"}},""" +
         """{"id":"r","type":"raster","source":"s"}]}"""
 
+private const val BLEND_PRIMARY_STYLE_URL: String = "https://styles.example/blend-primary.json"
+private const val BLEND_TARGET_STYLE_URL: String = "https://styles.example/blend-target.json"
+private val BLEND_PRIMARY: IntArray = intArrayOf(32, 64, 96, 255)
+private val BLEND_TARGET: IntArray = intArrayOf(224, 160, 64, 255)
+private val BLEND_MIDPOINT: IntArray = intArrayOf(128, 112, 80, 255)
+private val BLEND_PRIMARY_STYLE_JSON: ByteArray =
+    """{"version":8,"sources":{},"layers":[{"id":"bg","type":"background","paint":{"background-color":"#204060"}}]}"""
+        .encodeToByteArray()
+private val BLEND_TARGET_STYLE_JSON: ByteArray =
+    """{"version":8,"sources":{},"layers":[{"id":"bg","type":"background","paint":{"background-color":"#e0a040"}}]}"""
+        .encodeToByteArray()
+
 /**
  * Serves the style, one distinctly-textured PNG per fixture tile url, the two sticker images, and
  * [HORIZON_FILLER_TILE_PNG] for any other tile inside the fixture's own url template.
@@ -1139,6 +1349,16 @@ internal class ReadbackTransport : Transport {
             url == STYLE_URL -> TransportResponse(
                 statusCode = 200,
                 body = READBACK_STYLE_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            url == BLEND_PRIMARY_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = BLEND_PRIMARY_STYLE_JSON,
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            url == BLEND_TARGET_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = BLEND_TARGET_STYLE_JSON,
                 metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             else -> TransportResponse(

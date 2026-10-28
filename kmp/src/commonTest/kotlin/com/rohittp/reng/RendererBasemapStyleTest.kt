@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.gl.GL_MAX_COLOR_ATTACHMENTS
 import com.rohittp.reng.internal.gl.GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 import com.rohittp.reng.internal.gl.GL_MAX_TEXTURE_SIZE
@@ -14,6 +15,7 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import kotlin.io.encoding.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
@@ -36,6 +38,121 @@ import kotlinx.coroutines.test.runTest
  * three files.
  */
 class RendererBasemapStyleTest {
+
+    @Test
+    fun additionalStylesRequireAnIndexZeroStyle() {
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = 64, height = 64),
+                transport = StyleTransport(),
+                store = RecordingStyleStore(),
+                basemapStyle = null,
+                additionalBasemapStyles = listOf(
+                    ResourceLocator(value = "https://example.test/second.json"),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun theConfiguredStyleSetRefusesDuplicateLocators() {
+        val duplicate = ResourceLocator(value = "https://example.test/duplicate.json")
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = 64, height = 64),
+                transport = StyleTransport(),
+                store = RecordingStyleStore(),
+                basemapStyle = duplicate,
+                additionalBasemapStyles = listOf(duplicate),
+            )
+        }
+    }
+
+    @Test
+    fun aStyleIndexOutsideTheConfiguredSetIsAPlanningDiagnostic() = runTest {
+        val selections = listOf(
+            BasemapSelection(style = -1),
+            BasemapSelection(style = 1),
+            BasemapSelection(
+                style = 0,
+                blend = BasemapBlend(toStyle = -1, mask = BlendMask.Uniform(amount = 0.5f)),
+            ),
+            BasemapSelection(
+                style = 0,
+                blend = BasemapBlend(toStyle = 1, mask = BlendMask.Uniform(amount = 0.5f)),
+            ),
+        )
+        selections.forEach { selection ->
+            val renderer = styleRenderer(StyleTransport())
+            try {
+                val failure = kotlin.test.assertFailsWith<RenGException> {
+                    renderer.prepare(
+                        FramePlan(
+                            frameIndex = 0,
+                            camera = styleCamera(),
+                            basemap = selection,
+                        ),
+                    )
+                }
+                assertEquals(RenGErrorCode.INVALID_VALUE, failure.code)
+                assertEquals(PipelineStage.FRAME_PLANNING, failure.stage)
+                assertEquals(
+                    listOf(DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE),
+                    failure.diagnostics.map { it.code },
+                )
+                assertEquals(DiagnosticField.FRAME_INDEX.wireName, failure.diagnostics.single().fieldName)
+            } finally {
+                renderer.close()
+            }
+        }
+    }
+
+    @Test
+    fun anUnnamedStyleFailureIsIgnoredUntilAFrameNamesAndRetriesIt() = runTest {
+        val transport = BestEffortStyleSetTransport()
+        val renderer = createRenderer(
+            configuration = RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = 64, height = 64),
+                transport = transport,
+                store = RecordingStyleStore(),
+                basemapStyle = ResourceLocator(value = STYLE_URL),
+                additionalBasemapStyles = listOf(ResourceLocator(value = BROKEN_STYLE_URL)),
+            ),
+            binding = styleGlBinding(),
+            probe = RenderContextProbe { RenderContextIdentity(value = 1L) },
+        )
+        try {
+            renderer.prepare(
+                FramePlan(
+                    frameIndex = 0L,
+                    camera = styleCamera(),
+                    drawBasemap = false,
+                    drawLabels = false,
+                ),
+            ).close()
+            val requestsAfterPriming = transport.brokenStyleRequests()
+            assertTrue(requestsAfterPriming > 0)
+
+            val failure = kotlin.test.assertFailsWith<RenGException> {
+                renderer.prepare(
+                    FramePlan(
+                        frameIndex = 1L,
+                        camera = styleCamera(),
+                        drawBasemap = false,
+                        drawLabels = true,
+                        basemap = BasemapSelection(style = 1),
+                    ),
+                )
+            }
+            assertEquals(RenGErrorCode.INVALID_TRANSPORT_RESPONSE, failure.code)
+            assertTrue(
+                transport.brokenStyleRequests() > requestsAfterPriming,
+                "the named style is attempted again",
+            )
+        } finally {
+            renderer.close()
+        }
+    }
 
     @Test
     fun aStyleThatWillNotParseIsATypedRenGFailureRatherThanAnEngineOne() = runTest {
@@ -64,7 +181,7 @@ class RendererBasemapStyleTest {
     }
 
     @Test
-    fun aPlanThatDrawsNeitherBasemapNorLabelsAcquiresNoStyleAtAll() = runTest {
+    fun theFirstForegroundPreparationCompilesTheStyleSetEvenWhenItDrawsNoBasemap() = runTest {
         val transport = StyleTransport()
         val renderer = styleRenderer(transport)
 
@@ -78,9 +195,9 @@ class RendererBasemapStyleTest {
         )
 
         assertEquals(
-            emptyList(),
-            transport.requestedUrls(),
-            "a frame that asks for neither the basemap nor its labels acquires nothing",
+            STYLE_URL,
+            transport.requestedUrls().first(),
+            "ADR 0086 compiles the whole Style Set in the first foreground preparation",
         )
     }
 
@@ -240,6 +357,41 @@ internal class StyleTransport(
             STYLE_URL -> TransportResponse(
                 statusCode = 200,
                 body = styleJson.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = SPRITE_ATLAS_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
+    }
+}
+
+private const val BROKEN_STYLE_URL: String = "https://styles.example/broken.json"
+
+private class BestEffortStyleSetTransport : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    suspend fun brokenStyleRequests(): Int = recorded.snapshot().count { url -> url == BROKEN_STYLE_URL }
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_WITH_SPRITE_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            BROKEN_STYLE_URL -> TransportResponse(
+                statusCode = 404,
+                body = ByteArray(0),
                 metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             SPRITE_JSON_URL -> TransportResponse(

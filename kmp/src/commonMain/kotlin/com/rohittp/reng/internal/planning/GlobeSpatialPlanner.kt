@@ -119,6 +119,13 @@ internal fun planGlobeSpatial(
         shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
+    // ADR 0087, for the reason the Mercator planner gives. A ground rectangle is not resolved: under
+    // a globe `rengStickerGroundUv()` answers off-rectangle everywhere and nothing reads its corners.
+    for (sticker in plan.stickersForCore()) {
+        val shader = sticker.shader ?: continue
+        shaderProfileMemo.profileOf(shader.fragmentSource) ?: return shaderProfileFailure()
+    }
+
     return SpatialOutcome.Success(
         FrameSpatialPlan(
             camera = camera,

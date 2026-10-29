@@ -53,6 +53,12 @@ class FramePlanSerializationTest {
                         image = ResourceLocator("sticker://one.png"),
                         opacity = 0.75f,
                         blend = BlendMode.SCREEN,
+                        shader = StickerShader(
+                            fragmentSource = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n",
+                            uniforms = mapOf("uPopLine" to ShaderValue.Vec4(0.1f, 0.2f, 0.3f, 0.4f)),
+                            textures = mapOf("uDistance" to ResourceLocator("texture://distance.png")),
+                            ground = GroundRectangle(Vector3(48.5, -38.0, 12.0), Vector3(44.5, -36.5, -4.0)),
+                        ),
                     ),
                 ),
                 models = listOf(
@@ -148,7 +154,9 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image", "opacity", "blend",
+            "placement", "image", "opacity", "blend", "shader",
+            // StickerShader + GroundRectangle (its corners share Geometry's key names)
+            "ground",
             // Model
             "glb", "texture", "animationTracks", "opacity",
             // AnimationTrack + AnimationSelector
@@ -296,5 +304,75 @@ class BackdropSerializationTest {
                 """{"image":"p.png","shaderPair":{"vertexSource":"v","fragmentSource":"f"}}""",
             )
         }
+    }
+}
+
+/** ADR 0087: a sticker's program over the wire, and what an older sticker document still means. */
+class StickerShaderSerializationTest {
+    private val json = Json
+
+    @Test
+    fun aStickerWithAndWithoutAProgramRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("sticker.png"))
+        val bare = plain.copy(shader = StickerShader(SOURCE))
+        val full = plain.copy(
+            shader = StickerShader(
+                SOURCE,
+                uniforms = mapOf("uSide" to ShaderValue.Integer(1)),
+                textures = mapOf("uDistance" to ResourceLocator("distance.png")),
+                ground = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0)),
+            ),
+        )
+        for (sticker in listOf(plain, bare, full)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"shader\"" !in json.encodeToString(plain), "an absent program must not be written")
+        assertTrue("\"ground\"" !in json.encodeToString(bare), "an absent rectangle must not be written")
+    }
+
+    /** A sticker document written before the field existed carries no `shader`, and means no program. */
+    @Test
+    fun aDocumentWrittenBeforeTheFieldExistedStillReadsAsAPlainSticker() {
+        val document = json.encodeToString(Sticker(PLACEMENT, ResourceLocator("sticker.png"), 0.5f))
+        val decoded = json.decodeFromString<Sticker>(document)
+
+        assertEquals(null, decoded.shader)
+        assertEquals(Sticker(PLACEMENT, ResourceLocator("sticker.png"), 0.5f), decoded)
+    }
+
+    /** Decoding runs the constructors, so a reserved name or an inverted rectangle is refused. */
+    @Test
+    fun aDocumentTheConstructorsWouldRefuseIsRefused() {
+        val valid = json.encodeToString(
+            Sticker(
+                PLACEMENT,
+                ResourceLocator("sticker.png"),
+                shader = StickerShader(
+                    SOURCE,
+                    uniforms = mapOf("uTint" to ShaderValue.Scalar(1f)),
+                    ground = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0)),
+                ),
+            ),
+        )
+        val refusals = listOf(
+            valid.replace("\"uTint\"", "\"rengStickerTint\""),
+            valid.replace("\"x\":1.0,\"y\":-1.0", "\"x\":-2.0,\"y\":-1.0"),
+        )
+        for (document in refusals) {
+            assertTrue(document != valid, "a refusal fixture did not change the document")
+            assertFailsWith<IllegalArgumentException> { json.decodeFromString<Sticker>(document) }
+        }
+    }
+
+    private companion object {
+        const val SOURCE: String = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n"
+        val PLACEMENT: Placement = Placement(
+            positionMode = AnchoringMode.SCREEN,
+            position = Vector3(1.0, 2.0, 0.0),
+            rotationMode = AnchoringMode.SCREEN,
+            rotation = Vector3(0.0, 0.0, 0.0),
+            scaleMode = AnchoringMode.SCREEN,
+            scale = 1.0,
+        )
     }
 }

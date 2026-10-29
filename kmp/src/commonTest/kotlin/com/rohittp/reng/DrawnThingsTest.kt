@@ -429,3 +429,125 @@ class BackdropTest {
         )
     }
 }
+
+/** ADR 0087's public surface: what a `StickerShader` and its `GroundRectangle` accept and refuse. */
+class StickerShaderTest {
+
+    /** The whole `rengSticker` prefix is RenG's, including names it does not use yet. */
+    @Test
+    fun aConsumerMayNotClaimAnyNameUnderRengsStickerPrefix() {
+        assertFailsWith<IllegalArgumentException> {
+            StickerShader(SOURCE, uniforms = mapOf("rengStickerOpacity" to ShaderValue.Scalar(1f)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            StickerShader(SOURCE, uniforms = mapOf("rengStickerSomethingLater" to ShaderValue.Scalar(1f)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            StickerShader(SOURCE, textures = mapOf("rengStickerTexture" to ResourceLocator("a")))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            StickerShader(SOURCE, uniforms = mapOf("uResolution" to ShaderValue.Scalar(1f)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            StickerShader(SOURCE, textures = mapOf("uFrameIndex" to ResourceLocator("a")))
+        }
+        StickerShader(SOURCE, uniforms = mapOf("rengStickeOpacity" to ShaderValue.Scalar(1f)))
+        StickerShader(SOURCE, uniforms = mapOf("myRengStickerTint" to ShaderValue.Scalar(1f)))
+    }
+
+    /** The image holds unit zero, so a program gets one consumer texture fewer than a Geometry. */
+    @Test
+    fun aProgramMayDeclareFourteenTexturesAndNotFifteen() {
+        fun textures(count: Int) = (0 until count).associate { "uMask$it" to ResourceLocator("mask$it.png") }
+        StickerShader(SOURCE, textures = textures(14))
+        assertFailsWith<IllegalArgumentException> { StickerShader(SOURCE, textures = textures(15)) }
+    }
+
+    @Test
+    fun theSourceMustBeNonBlankUnicodeScalars() {
+        assertFailsWith<IllegalArgumentException> { StickerShader("") }
+        assertFailsWith<IllegalArgumentException> { StickerShader("  \n") }
+        assertFailsWith<IllegalArgumentException> { StickerShader("#version 300 es\n\uD800") }
+    }
+
+    /** A Geometry's corner rules, exactly. */
+    @Test
+    fun aGroundRectangleRequiresStrictNorthWestBoundsAndAtMostOneWorldSpan() {
+        GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0))
+        GroundRectangle(Vector3(90.0, -180.0, 0.0), Vector3(-90.0, 180.0, 0.0))
+        assertFailsWith<IllegalArgumentException> {
+            GroundRectangle(Vector3(-1.0, -1.0, 0.0), Vector3(1.0, 1.0, 0.0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GroundRectangle(Vector3(1.0, 1.0, 0.0), Vector3(-1.0, -1.0, 0.0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GroundRectangle(Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GroundRectangle(Vector3(1.0, -180.5, 0.0), Vector3(-1.0, 180.0, 0.0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GroundRectangle(Vector3(91.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0))
+        }
+    }
+
+    @Test
+    fun aStickerShaderNeverPrintsItsSourceValuesOrTextures() {
+        val rendered = Sticker(
+            placement = PLACEMENT,
+            image = ResourceLocator("sticker.png"),
+            shader = StickerShader(
+                "#version 300 es\nSECRET_FRAGMENT",
+                uniforms = mapOf("uSecretTint" to ShaderValue.Scalar(1f)),
+                textures = mapOf("uMask" to ResourceLocator("secret/mask.png")),
+                ground = GROUND,
+            ),
+        ).toString()
+
+        assertFalse(rendered.contains("SECRET_FRAGMENT"), rendered)
+        assertFalse(rendered.contains("uSecretTint"), rendered)
+        assertFalse(rendered.contains("secret/mask.png"), rendered)
+        assertTrue(rendered.contains("StickerShader(fragmentSource=<redacted>"), rendered)
+    }
+
+    @Test
+    fun equalityAndHashAreByValueAcrossEveryField() {
+        val one = StickerShader(SOURCE, mapOf("uTint" to ShaderValue.Scalar(1f)), mapOf("uMask" to ResourceLocator("m")), GROUND)
+        val same = StickerShader(SOURCE, mapOf("uTint" to ShaderValue.Scalar(1f)), mapOf("uMask" to ResourceLocator("m")), GROUND)
+        assertEquals(one, same)
+        assertEquals(one.hashCode(), same.hashCode())
+        assertNotEquals(one, StickerShader("$SOURCE ", one.uniforms, one.textures, GROUND))
+        assertNotEquals(one, StickerShader(SOURCE, mapOf("uTint" to ShaderValue.Scalar(2f)), one.textures, GROUND))
+        assertNotEquals(one, StickerShader(SOURCE, one.uniforms, mapOf("uMask" to ResourceLocator("n")), GROUND))
+        assertNotEquals(one, StickerShader(SOURCE, one.uniforms, one.textures, null))
+    }
+
+    /** Appended last: every earlier component keeps its number, and the default is no program. */
+    @Test
+    fun theShaderIsTheStickersFifthComponentAndDefaultsToNone() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("sticker.png"), 0.5f, BlendMode.SCREEN)
+        assertEquals(null, plain.shader)
+        val shaded = plain.copy(shader = StickerShader(SOURCE))
+        val (placement, image, opacity, blend, shader) = shaded
+        assertEquals(PLACEMENT, placement)
+        assertEquals(ResourceLocator("sticker.png"), image)
+        assertEquals(0.5f, opacity)
+        assertEquals(BlendMode.SCREEN, blend)
+        assertEquals(StickerShader(SOURCE), shader)
+        assertNotEquals(plain, shaded)
+    }
+
+    private companion object {
+        const val SOURCE: String = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n"
+        val GROUND: GroundRectangle = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0))
+        val PLACEMENT: Placement = Placement(
+            positionMode = AnchoringMode.SCREEN,
+            position = Vector3(1.0, 2.0, 0.0),
+            rotationMode = AnchoringMode.SCREEN,
+            rotation = Vector3(0.0, 0.0, 0.0),
+            scaleMode = AnchoringMode.SCREEN,
+            scale = 1.0,
+        )
+    }
+}

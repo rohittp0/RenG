@@ -109,6 +109,17 @@ internal fun planMercatorSpatial(
         shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
+    // ADR 0087. A sticker program's source is scanned here for the backdrop's reason, and its ground
+    // rectangle resolved through the Geometry's own corner path, so a rectangle the camera cannot
+    // carry fails as the consumer's INVALID_VALUE at FRAME_PLANNING rather than at draw.
+    for (sticker in plan.stickersForCore()) {
+        val shader = sticker.shader ?: continue
+        shaderProfileMemo.profileOf(shader.fragmentSource) ?: return shaderProfileFailure()
+        val ground = shader.ground ?: continue
+        val corners = resolveMercatorRectangleCorners(ground.topLeft, ground.bottomRight, camera)
+        if (corners is SpatialOutcome.Failure) return corners
+    }
+
     return SpatialOutcome.Success(
         FrameSpatialPlan(
             camera = camera,

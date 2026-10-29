@@ -378,6 +378,7 @@ private class StickerSurrogate(
     @SerialName("image") val image: ResourceLocator,
     @SerialName("opacity") val opacity: Float = 1f,
     @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
+    @SerialName("shader") val shader: StickerShader? = null,
 )
 
 internal object StickerSerializer : KSerializer<Sticker> {
@@ -386,12 +387,59 @@ internal object StickerSerializer : KSerializer<Sticker> {
     override fun serialize(encoder: Encoder, value: Sticker) {
         encoder.encodeSerializableValue(
             delegate,
-            StickerSurrogate(value.placement, value.image, value.opacity, value.blend),
+            StickerSurrogate(value.placement, value.image, value.opacity, value.blend, value.shader),
         )
     }
     override fun deserialize(decoder: Decoder): Sticker {
         val it = decoder.decodeSerializableValue(delegate)
-        return Sticker(it.placement, it.image, it.opacity, it.blend)
+        return Sticker(it.placement, it.image, it.opacity, it.blend, it.shader)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// StickerShader and GroundRectangle (ADR 0087)
+// ---------------------------------------------------------------------------------------------
+
+@Serializable
+@SerialName("StickerShader")
+private class StickerShaderSurrogate(
+    @SerialName("fragmentSource") val fragmentSource: String,
+    @SerialName("uniforms") val uniforms: Map<String, ShaderValue> = emptyMap(),
+    @SerialName("textures") val textures: Map<String, ResourceLocator> = emptyMap(),
+    @SerialName("ground") val ground: GroundRectangle? = null,
+)
+
+internal object StickerShaderSerializer : KSerializer<StickerShader> {
+    private val delegate = StickerShaderSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: StickerShader) {
+        encoder.encodeSerializableValue(
+            delegate,
+            StickerShaderSurrogate(value.fragmentSource, value.uniforms, value.textures, value.ground),
+        )
+    }
+    override fun deserialize(decoder: Decoder): StickerShader {
+        val it = decoder.decodeSerializableValue(delegate)
+        return StickerShader(it.fragmentSource, it.uniforms, it.textures, it.ground)
+    }
+}
+
+@Serializable
+@SerialName("GroundRectangle")
+private class GroundRectangleSurrogate(
+    @SerialName("topLeft") val topLeft: Vector3,
+    @SerialName("bottomRight") val bottomRight: Vector3,
+)
+
+internal object GroundRectangleSerializer : KSerializer<GroundRectangle> {
+    private val delegate = GroundRectangleSurrogate.serializer()
+    override val descriptor: SerialDescriptor = delegate.descriptor
+    override fun serialize(encoder: Encoder, value: GroundRectangle) {
+        encoder.encodeSerializableValue(delegate, GroundRectangleSurrogate(value.topLeft, value.bottomRight))
+    }
+    override fun deserialize(decoder: Decoder): GroundRectangle {
+        val it = decoder.decodeSerializableValue(delegate)
+        return GroundRectangle(it.topLeft, it.bottomRight)
     }
 }
 

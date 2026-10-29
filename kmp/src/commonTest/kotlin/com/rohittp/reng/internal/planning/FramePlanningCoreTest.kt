@@ -17,7 +17,9 @@ import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.Sticker
+import com.rohittp.reng.StickerShader
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
@@ -190,6 +192,98 @@ class FramePlanningCoreTest {
 
         assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "shaderPair")
         assertEquals(emptyList(), resolver.calls)
+    }
+
+    /** ADR 0087: a sticker program that is not a Shader Profile fails where a Geometry's does. */
+    @Test
+    fun aStickerProgramThatIsNotAShaderProfileFailsAtThePlanningBarrier() {
+        for (projectionMode in ProjectionMode.entries) {
+            val resolver = RecordingPrivateKeyResolver()
+            val outcome = planningCore(resolver).plan(
+                request(
+                    plan = framePlan(
+                        projectionMode = projectionMode,
+                        stickers = listOf(
+                            Sticker(screenPlacement(), ResourceLocator("s"), shader = StickerShader("missing directive")),
+                        ),
+                    ),
+                    basemapStyle = ResourceLocator("style-document"),
+                ),
+            )
+            assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "shaderPair")
+            assertEquals(emptyList(), resolver.calls)
+        }
+    }
+
+    /**
+     * ADR 0087: a ground rectangle resolves through the Geometry's own corner path at planning, so one
+     * the Mercator camera cannot carry fails there with the Geometry's own field, not at draw.
+     */
+    @Test
+    fun aStickerGroundRectangleBeyondMercatorsLatitudeFailsAtPlanning() {
+        val resolver = RecordingPrivateKeyResolver()
+        val outcome = planningCore(resolver).plan(
+            request(
+                plan = framePlan(
+                    stickers = listOf(
+                        Sticker(
+                            screenPlacement(),
+                            ResourceLocator("s"),
+                            shader = StickerShader(
+                                validShader("sticker"),
+                                ground = GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0)),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "geometry.latitude")
+        assertEquals(emptyList(), resolver.calls)
+    }
+
+    /**
+     * ADR 0087: a sticker program's textures traverse under MODEL_TEXTURE in name order, right after
+     * that sticker's image -- and every sticker image still traverses once, in order, so pairing the
+     * images back to stickers by position after filtering to STICKER_IMAGE still holds.
+     */
+    @Test
+    fun stickerProgramTexturesAreTraversedSortedByNameRightAfterTheirSticker() {
+        val limits = ResourceLimits(maximumModelTextureBytes = 8_192L)
+        val planned = planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(
+                plan = framePlan(
+                    drawBasemap = false,
+                    drawLabels = false,
+                    stickers = listOf(
+                        Sticker(
+                            screenPlacement(),
+                            ResourceLocator("sticker-one"),
+                            shader = StickerShader(
+                                validShader("sticker"),
+                                textures = mapOf(
+                                    "uZeta" to ResourceLocator("zeta-texture"),
+                                    "uAlpha" to ResourceLocator("alpha-texture"),
+                                ),
+                            ),
+                        ),
+                        sticker("sticker-two"),
+                    ),
+                ),
+                resourceLimits = limits,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                expectedExternal("sticker-one", ResourceClass.STICKER_IMAGE, limits),
+                expectedExternal("alpha-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("zeta-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("sticker-two", ResourceClass.STICKER_IMAGE, limits),
+            ),
+            planned.staticResourceTraversal,
+        )
     }
 
     @Test

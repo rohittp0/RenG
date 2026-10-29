@@ -5,6 +5,7 @@ import com.rohittp.reng.BasemapBlend
 import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Bloom
 import com.rohittp.reng.Geometry
+import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
 import com.rohittp.reng.PipelineStage
@@ -55,6 +56,20 @@ internal class SceneSticker(
     val imageHeightPixels: Int = 1,
     val opacity: Float = 1f,
     val blend: BlendMode = BlendMode.OVER,
+    /** The consumer program it is drawn with, or `null` for the plain sticker (ADR 0087). */
+    val shader: SceneStickerShader? = null,
+)
+
+/**
+ * A sticker's consumer program as a [SceneContent] receives it: compiled and leased, its uniforms the
+ * `prepare()`-time snapshot, its textures already uploaded, and its ground rectangle still geographic --
+ * resolved against the camera at draw time, as the sticker's own [Placement] is (ADR 0087).
+ */
+internal class SceneStickerShader(
+    val pipeline: ConsumerStickerPipeline,
+    val uniforms: Map<String, ShaderValue>,
+    val textures: Map<String, Int>,
+    val ground: GroundRectangle?,
 )
 
 /**
@@ -1312,8 +1327,22 @@ internal class SceneContent(
             texture = sticker.texture,
             opacity = sticker.opacity,
             blend = sticker.blend,
+            shader = sticker.shader?.let(::resolvedStickerShader),
         )
     }
+
+    /**
+     * [shader] with its ground rectangle turned into this frame's window-to-ground homography. The
+     * same for both regimes, because the homography maps a window pixel and knows nothing of the
+     * sticker drawn there.
+     */
+    private fun resolvedStickerShader(shader: SceneStickerShader): ResolvedStickerShader =
+        ResolvedStickerShader(
+            pipeline = shader.pipeline,
+            uniforms = shader.uniforms,
+            textures = shader.textures,
+            windowToGround = stickerWindowToGround(camera, shader.ground),
+        )
 
     /** One screen-composited sticker's draw instance; see [mapAnchoredSticker] for the regime cross-check. */
     private fun screenCompositedSticker(sticker: SceneSticker): ResolvedSticker {
@@ -1329,6 +1358,7 @@ internal class SceneContent(
             texture = sticker.texture,
             opacity = sticker.opacity,
             blend = sticker.blend,
+            shader = sticker.shader?.let(::resolvedStickerShader),
         )
     }
 }

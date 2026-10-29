@@ -6,7 +6,9 @@ import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.gl.BACKDROP_RESERVED_NAME_PREFIX
 import com.rohittp.reng.internal.gl.GEOMETRY_RESERVED_NAME_PREFIX
 import com.rohittp.reng.internal.gl.MAXIMUM_CONSUMER_TEXTURES
+import com.rohittp.reng.internal.gl.MAXIMUM_STICKER_SHADER_TEXTURES
 import com.rohittp.reng.internal.gl.RESERVED_SHADER_NAMES
+import com.rohittp.reng.internal.gl.STICKER_RESERVED_NAME_PREFIX
 import com.rohittp.reng.internal.requireFiniteFloat
 import com.rohittp.reng.internal.requireUnicodeScalars
 
@@ -222,6 +224,15 @@ public data class Sticker(
     public val image: ResourceLocator,
     public val opacity: Float = 1f,
     public val blend: BlendMode = BlendMode.OVER,
+    /**
+     * A fragment program this sticker is drawn with instead of RenG's own, or `null` for the plain
+     * image (ADR 0087). Its placement, quad, blend and depth state are the plain sticker's either way;
+     * only the colour each fragment writes is the consumer's.
+     *
+     * Declared last so the append-only data-class ABI gives it `component5` without moving any
+     * existing component.
+     */
+    public val shader: StickerShader? = null,
 ) {
     init {
         require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
@@ -232,6 +243,104 @@ public data class Sticker(
         }
     }
 }
+
+/**
+ * A consumer fragment program a [Sticker] is drawn with (ADR 0087).
+ *
+ * [fragmentSource] is a complete GLSL ES 3.00 fragment shader in the Shader Profile -- its first
+ * directive line `#version 300 es`, its own `main`, and its own `out vec4` at location zero, which it
+ * writes **premultiplied**. RenG inserts a fixed preamble on the line after the directive and changes
+ * nothing else; the preamble declares a default `precision highp float`, and gives the program:
+ *
+ * - `vec4 rengStickerColour()` -- the sticker's image sample times its opacity, premultiplied: exactly
+ *   what the plain sticker writes, for a PNG and an ETC2 image alike. A program whose `main` writes
+ *   only this draws the same pixels as the sticker without a shader.
+ * - `in vec2 rengStickerUv` -- the sticker's own texture coordinate, `(0, 0)` at the image's top-left
+ *   texel and `(1, 1)` at its bottom-right.
+ * - `vec2 rengStickerGroundUv()` -- where in [ground] the ground visible under this fragment lies: `u`
+ *   from the west edge (0) to the east (1), `v` from the north edge (0) to the south (1), linear in
+ *   Mercator exactly as a [Geometry]'s texture coordinate is. It is answered for the window pixel, not
+ *   for the sticker, so a billboard, a sticker lying on the map and a screen-composited sticker all
+ *   read the ground beneath them. Values outside `[0, 1]` are ground outside the rectangle; where the
+ *   fragment's line of sight never meets the rectangle's plane -- above its horizon -- it is
+ *   `vec2(-1.0)`. With no [ground], and under a globe camera, it is `vec2(-1.0)` everywhere.
+ *
+ * Every preamble name begins `rengSticker`, and so does anything RenG adds later, which is why that
+ * prefix is refused for [uniforms] and [textures], as are the names reserved for RenG's own shader
+ * interface. A source may not use `#extension`, because a directive must precede the preamble's
+ * declarations.
+ *
+ * [uniforms] and [textures] bind by name, in name order, exactly as a [Geometry]'s do, and every
+ * texture uploads bit-exact as data, sampled nearest and clamped. The image holds unit zero, so the
+ * textures take units one onwards and at most fourteen are allowed rather than a Geometry's fifteen.
+ *
+ * Not a `data class`, because a generated `toString` would print the shader source.
+ */
+@kotlinx.serialization.Serializable(with = StickerShaderSerializer::class)
+public class StickerShader(
+    public val fragmentSource: String,
+    public val uniforms: Map<String, ShaderValue> = emptyMap(),
+    public val textures: Map<String, ResourceLocator> = emptyMap(),
+    public val ground: GroundRectangle? = null,
+) {
+    init {
+        requireUnicodeScalars(fragmentSource, "fragmentSource", nonBlank = true)
+        require(uniforms.keys.none(::isReservedStickerShaderName)) {
+            "a sticker shader uniform must not use a name reserved for RenG's own shader interface"
+        }
+        require(textures.keys.none(::isReservedStickerShaderName)) {
+            "a sticker shader texture must not use a name reserved for RenG's own shader interface"
+        }
+        require(textures.size <= MAXIMUM_STICKER_SHADER_TEXTURES) {
+            "a sticker shader may declare at most $MAXIMUM_STICKER_SHADER_TEXTURES consumer textures"
+        }
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is StickerShader &&
+            fragmentSource == other.fragmentSource &&
+            uniforms == other.uniforms &&
+            textures == other.textures &&
+            ground == other.ground
+
+    override fun hashCode(): Int {
+        var result = fragmentSource.hashCode()
+        result = 31 * result + uniforms.hashCode()
+        result = 31 * result + textures.hashCode()
+        result = 31 * result + (ground?.hashCode() ?: 0)
+        return result
+    }
+
+    override fun toString(): String =
+        "StickerShader(fragmentSource=<redacted>, uniforms=<redacted>, textures=<redacted>, ground=$ground)"
+}
+
+/**
+ * A geographic rectangle on the ground, by a [Geometry]'s corner convention: [topLeft] and
+ * [bottomRight] are `Vector3(latitude, unwrappedLongitude, altitudeMetres)`, the top-left strictly
+ * north and west of the bottom-right, the span at most 360 degrees of longitude, and the northern
+ * edge at [topLeft]'s altitude and the southern at [bottomRight]'s. Altitudes are absolute.
+ */
+@kotlinx.serialization.Serializable(with = GroundRectangleSerializer::class)
+public data class GroundRectangle(
+    public val topLeft: Vector3,
+    public val bottomRight: Vector3,
+) {
+    init {
+        require(topLeft.x in -90.0..90.0) { "topLeft latitude must be within the supported range" }
+        require(bottomRight.x in -90.0..90.0) { "bottomRight latitude must be within the supported range" }
+        require(topLeft.x > bottomRight.x) { "topLeft latitude must be north of bottomRight latitude" }
+        require(topLeft.y < bottomRight.y) { "topLeft longitude must be west of bottomRight longitude" }
+        require(bottomRight.y - topLeft.y <= 360.0) { "rectangle longitude span must not exceed 360 degrees" }
+    }
+}
+
+/**
+ * Whether [name] is RenG's rather than a consumer's in a [StickerShader]: a documented interface
+ * name, or anything under the `rengSticker` prefix every name of the sticker preamble uses (ADR 0087).
+ */
+private fun isReservedStickerShaderName(name: String): Boolean =
+    name in RESERVED_SHADER_NAMES || name.startsWith(STICKER_RESERVED_NAME_PREFIX)
 
 @kotlinx.serialization.Serializable
 public sealed interface AnimationSelector {

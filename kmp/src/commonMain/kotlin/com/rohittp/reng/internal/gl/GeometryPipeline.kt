@@ -526,12 +526,21 @@ internal class ConsumerNameOrder {
  *
  * The `activeTexture`/`bindTexture` pair runs even when the sampler is undeclared: the unit is
  * consumed either way, so skipping it would shift every later texture's unit.
+ *
+ * Textures take units [firstUnit] onwards: zero for a Geometry and a backdrop, which hold no texture
+ * of RenG's, and one for a consumer sticker program, whose image holds unit zero (ADR 0087).
+ *
+ * Every unit a texture is bound to also has its sampler object cleared, so the texture's own
+ * parameters apply: a consumer texture is data uploaded for `GL_NEAREST`, and a `GL_LINEAR` sampler a
+ * host left on the unit (Skia on a shared context does) would filter a packed value into nonsense.
+ * The capture region saves the host's sampler and restores it after the frame (ADR 0055).
  */
 internal fun bindConsumerValues(
     binding: GlBinding,
     program: ConsumerValueProgram,
     uniforms: Map<String, ShaderValue>,
     textures: Map<String, Int>,
+    firstUnit: Int = 0,
 ) {
     val shadow = program.consumerShadow
     if (uniforms.isNotEmpty()) {
@@ -547,11 +556,13 @@ internal fun bindConsumerValues(
 
     if (textures.isNotEmpty()) {
         val names = program.textureNameOrder.of(textures.keys)
-        for (unitIndex in names.indices) {
-            val name = names[unitIndex]
+        for (index in names.indices) {
+            val name = names[index]
+            val unitIndex = firstUnit + index
             val samplerLocation = program.consumerLocation(binding, name)
             binding.activeTexture(GL_TEXTURE0 + unitIndex)
             binding.bindTexture(GL_TEXTURE_2D, textures.getValue(name))
+            binding.bindSampler(unitIndex, 0)
             if (samplerLocation >= 0) {
                 binding.uniform1i(samplerLocation, unitIndex)
                 shadow?.setSampler(name, unitIndex)

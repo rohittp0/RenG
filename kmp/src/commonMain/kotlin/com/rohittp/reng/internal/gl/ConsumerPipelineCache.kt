@@ -16,7 +16,7 @@ internal class ConsumerPipelineLease<T : Any> internal constructor(
 }
 
 /**
- * One count-bounded LRU shared by Geometry and consumer Backdrop pipelines.
+ * One count-bounded LRU shared by Geometry, consumer Backdrop and consumer Sticker pipelines (ADR 0087).
  *
  * Entries are leased for the complete draw that uses them. The cache may temporarily exceed its
  * steady limit when a single draw needs more entries, but releases trim it before the draw returns.
@@ -31,6 +31,10 @@ internal class ConsumerPipelineCache(private val maximumEntries: Int) {
         }
 
         class Backdrop(val pipeline: ConsumerBackdropPipeline) : Value {
+            override val key: ResourceKey get() = pipeline.key
+        }
+
+        class Sticker(val pipeline: ConsumerStickerPipeline) : Value {
             override val key: ResourceKey get() = pipeline.key
         }
     }
@@ -67,6 +71,20 @@ internal class ConsumerPipelineCache(private val maximumEntries: Int) {
         pipeline: ConsumerBackdropPipeline,
     ): ConsumerPipelineLease<ConsumerBackdropPipeline> {
         register(Value.Backdrop(pipeline))
+        return ConsumerPipelineLease(pipeline.key, pipeline)
+    }
+
+    internal fun leaseSticker(key: ResourceKey): ConsumerPipelineLease<ConsumerStickerPipeline>? {
+        val entry = entries[key] ?: return null
+        val pipeline = (entry.value as? Value.Sticker)?.pipeline ?: return null
+        takeLease(key, entry)
+        return ConsumerPipelineLease(key, pipeline)
+    }
+
+    internal fun registerSticker(
+        pipeline: ConsumerStickerPipeline,
+    ): ConsumerPipelineLease<ConsumerStickerPipeline> {
+        register(Value.Sticker(pipeline))
         return ConsumerPipelineLease(pipeline.key, pipeline)
     }
 
@@ -126,12 +144,14 @@ internal class ConsumerPipelineCache(private val maximumEntries: Int) {
     private fun Value.valueIdentity(): Any = when (this) {
         is Value.Geometry -> pipeline
         is Value.Backdrop -> pipeline
+        is Value.Sticker -> pipeline
     }
 
     private fun delete(binding: GlBinding, programs: GlProgramCache, value: Value) {
         when (value) {
             is Value.Geometry -> deleteGeometryPipeline(binding, programs, value.pipeline)
             is Value.Backdrop -> deleteConsumerBackdropPipeline(binding, programs, value.pipeline)
+            is Value.Sticker -> deleteConsumerStickerPipeline(binding, programs, value.pipeline)
         }
     }
 }

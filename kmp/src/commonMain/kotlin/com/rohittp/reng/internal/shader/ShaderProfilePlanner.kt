@@ -71,6 +71,33 @@ internal fun scanShaderProfile(source: String): ShaderProfilePlan? {
     return null
 }
 
+/**
+ * Whether any physical line of [source] begins, after ASCII spaces and tabs, with `#extension`.
+ *
+ * ADR 0087 refuses one in a sticker program: RenG inserts declarations straight after the directive,
+ * and an `#extension` must precede every declaration. Deliberately by line rather than by token, so a
+ * directive hidden behind a line continuation or inside a block comment is refused too -- a false
+ * refusal costs a consumer a comment; a false acceptance costs them a driver-dependent compile error.
+ */
+internal fun containsExtensionDirective(source: String): Boolean {
+    var lineStart = 0
+    while (lineStart <= source.length) {
+        val lineEnd = source.findPhysicalLineEnd(lineStart)
+        var index = lineStart
+        while (index < lineEnd && source[index].isAsciiProfileWhitespace()) index += 1
+        if (source.startsWithAt(index, "#")) {
+            index += 1
+            while (index < lineEnd && source[index].isAsciiProfileWhitespace()) index += 1
+            if (source.startsWithAt(index, EXTENSION_KEYWORD)) return true
+        }
+        if (lineEnd == source.length) return false
+        lineStart = source.indexAfterLineTerminator(lineEnd)
+    }
+    return false
+}
+
+private const val EXTENSION_KEYWORD: String = "extension"
+
 private fun String.findPhysicalLineEnd(start: Int): Int {
     var index = start
     while (index < length && this[index] != '\n' && this[index] != '\r') index += 1

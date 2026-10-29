@@ -17,7 +17,9 @@ import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.Sticker
+import com.rohittp.reng.StickerShader
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
@@ -190,6 +192,112 @@ class FramePlanningCoreTest {
 
         assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "shaderPair")
         assertEquals(emptyList(), resolver.calls)
+    }
+
+    /**
+     * ADR 0087: a sticker program that is not a Shader Profile, or that carries an `#extension` the
+     * preamble would land in front of, fails at the planning barrier in both projections, naming the
+     * sticker's own field.
+     */
+    @Test
+    fun aStickerProgramThatIsNotAShaderProfileOrCarriesAnExtensionFailsAtThePlanningBarrier() {
+        val refused = listOf(
+            "missing directive",
+            "#version 300 es\n#extension GL_EXT_shader_framebuffer_fetch : require\nvoid main() {}\n",
+            "#version 300 es\n  #  extension GL_OES_standard_derivatives : enable\nvoid main() {}\n",
+        )
+        for (projectionMode in ProjectionMode.entries) {
+            for (source in refused) {
+                val resolver = RecordingPrivateKeyResolver()
+                val outcome = planningCore(resolver).plan(
+                    request(
+                        plan = framePlan(
+                            projectionMode = projectionMode,
+                            stickers = listOf(
+                                Sticker(screenPlacement(), ResourceLocator("s"), shader = StickerShader(source)),
+                            ),
+                        ),
+                        basemapStyle = ResourceLocator("style-document"),
+                    ),
+                )
+                assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "sticker.shader.fragmentSource")
+                assertEquals(emptyList(), resolver.calls)
+            }
+        }
+    }
+
+    /**
+     * ADR 0087: a ground rectangle a Mercator camera cannot carry does not fail the frame in either
+     * projection; the sticker draws without ground and the draw reports it.
+     */
+    @Test
+    fun aStickerGroundRectangleBeyondMercatorsLatitudePlansInBothProjections() {
+        for (projectionMode in ProjectionMode.entries) {
+            planSuccess(
+                planningCore(RecordingPrivateKeyResolver()),
+                request(
+                    plan = framePlan(
+                        projectionMode = projectionMode,
+                        drawBasemap = false,
+                        drawLabels = false,
+                        stickers = listOf(
+                            Sticker(
+                                screenPlacement(),
+                                ResourceLocator("s"),
+                                shader = StickerShader(
+                                    validShader("sticker"),
+                                    ground = GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0)),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * ADR 0087: a sticker program's textures traverse under MODEL_TEXTURE in name order, right after
+     * that sticker's image -- and every sticker image still traverses once, in order, so pairing the
+     * images back to stickers by position after filtering to STICKER_IMAGE still holds.
+     */
+    @Test
+    fun stickerProgramTexturesAreTraversedSortedByNameRightAfterTheirSticker() {
+        val limits = ResourceLimits(maximumModelTextureBytes = 8_192L)
+        val planned = planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(
+                plan = framePlan(
+                    drawBasemap = false,
+                    drawLabels = false,
+                    stickers = listOf(
+                        Sticker(
+                            screenPlacement(),
+                            ResourceLocator("sticker-one"),
+                            shader = StickerShader(
+                                validShader("sticker"),
+                                textures = mapOf(
+                                    "uZeta" to ResourceLocator("zeta-texture"),
+                                    "uAlpha" to ResourceLocator("alpha-texture"),
+                                ),
+                            ),
+                        ),
+                        sticker("sticker-two"),
+                    ),
+                ),
+                resourceLimits = limits,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                expectedExternal("sticker-one", ResourceClass.STICKER_IMAGE, limits),
+                expectedExternal("alpha-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("zeta-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("sticker-two", ResourceClass.STICKER_IMAGE, limits),
+            ),
+            planned.staticResourceTraversal,
+        )
     }
 
     @Test

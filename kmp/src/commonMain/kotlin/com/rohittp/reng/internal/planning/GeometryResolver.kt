@@ -39,12 +39,36 @@ internal class ResolvedGeometry(
 internal fun resolveGeometry(
     geometry: Geometry,
     camera: ResolvedMercatorCamera,
-): SpatialOutcome<ResolvedGeometry> {
+): SpatialOutcome<ResolvedGeometry> =
+    when (val corners = resolveMercatorRectangleCorners(geometry.topLeft, geometry.bottomRight, camera)) {
+        is SpatialOutcome.Failure -> corners
+        is SpatialOutcome.Success -> SpatialOutcome.Success(
+            ResolvedGeometry(
+                cornersClockwiseFromTopLeft = corners.value,
+                shaderPair = geometry.shaderPair,
+            ),
+        )
+    }
+
+/**
+ * A geographic rectangle's four corners in camera-relative logical pixels, clockwise from the
+ * top-left, by [com.rohittp.reng.Geometry]'s corner convention: the northern edge at [topLeft]'s
+ * altitude, the southern at [bottomRight]'s.
+ *
+ * [resolveGeometry]'s whole body, shared with a `StickerShader`'s ground rectangle (ADR 0087), so the
+ * rectangle a sticker program reads `rengStickerGroundUv()` against is the one a Geometry over the
+ * same corners would draw, by construction rather than by a second derivation that agrees today.
+ */
+internal fun resolveMercatorRectangleCorners(
+    topLeft: Vector3,
+    bottomRight: Vector3,
+    camera: ResolvedMercatorCamera,
+): SpatialOutcome<List<DoubleVector3>> {
     val geographicCorners = listOf(
-        geometry.topLeft,
-        Vector3(geometry.topLeft.x, geometry.bottomRight.y, geometry.topLeft.z),
-        geometry.bottomRight,
-        Vector3(geometry.bottomRight.x, geometry.topLeft.y, geometry.bottomRight.z),
+        topLeft,
+        Vector3(topLeft.x, bottomRight.y, topLeft.z),
+        bottomRight,
+        Vector3(bottomRight.x, topLeft.y, bottomRight.z),
     )
     val resolvedCorners = ArrayList<DoubleVector3>(geographicCorners.size)
 
@@ -69,12 +93,7 @@ internal fun resolveGeometry(
         resolvedCorners += (logicalOutcome as SpatialOutcome.Success).value
     }
 
-    return SpatialOutcome.Success(
-        ResolvedGeometry(
-            cornersClockwiseFromTopLeft = resolvedCorners,
-            shaderPair = geometry.shaderPair,
-        ),
-    )
+    return SpatialOutcome.Success(resolvedCorners)
 }
 
 /**

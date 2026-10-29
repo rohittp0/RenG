@@ -55,6 +55,21 @@ internal class SceneSticker(
     val imageHeightPixels: Int = 1,
     val opacity: Float = 1f,
     val blend: BlendMode = BlendMode.OVER,
+    /** The consumer program it is drawn with, or `null` for the plain sticker (ADR 0087). */
+    val shader: SceneStickerShader? = null,
+)
+
+/**
+ * A sticker's consumer program as a [SceneContent] receives it: compiled and leased, its uniforms the
+ * `prepare()`-time snapshot, its textures already uploaded, and its ground rectangle already resolved
+ * against this frame's camera -- by whoever assembles the scene, which is also who can report a
+ * rectangle the camera could not carry (ADR 0087).
+ */
+internal class SceneStickerShader(
+    val pipeline: ConsumerStickerPipeline,
+    val uniforms: Map<String, ShaderValue>,
+    val textures: Map<String, Int>,
+    val ground: StickerGroundMapping = StickerGroundMapping.NONE,
 )
 
 /**
@@ -1312,8 +1327,21 @@ internal class SceneContent(
             texture = sticker.texture,
             opacity = sticker.opacity,
             blend = sticker.blend,
+            shader = sticker.shader?.let(::resolvedStickerShader),
         )
     }
+
+    /**
+     * [shader] as its draw takes it. The same for both regimes, because the ground mapping maps a
+     * window pixel and knows nothing of the sticker drawn there.
+     */
+    private fun resolvedStickerShader(shader: SceneStickerShader): ResolvedStickerShader =
+        ResolvedStickerShader(
+            pipeline = shader.pipeline,
+            uniforms = shader.uniforms,
+            textures = shader.textures,
+            ground = shader.ground,
+        )
 
     /** One screen-composited sticker's draw instance; see [mapAnchoredSticker] for the regime cross-check. */
     private fun screenCompositedSticker(sticker: SceneSticker): ResolvedSticker {
@@ -1329,6 +1357,7 @@ internal class SceneContent(
             texture = sticker.texture,
             opacity = sticker.opacity,
             blend = sticker.blend,
+            shader = sticker.shader?.let(::resolvedStickerShader),
         )
     }
 }

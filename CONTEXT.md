@@ -353,6 +353,24 @@ capability of the context, chosen before the upload, and never a recovery from o
 No mip level is ever generated for it. Backdrop and model-texture images stay PNG-only.
 _Avoid_: KTX, texture file, GIF frame, compressed PNG
 
+**Sticker Shader**:
+A consumer fragment program a **Sticker** may be drawn with instead of RenG's own (ADR 0087): a complete
+**Shader Profile** fragment shader writing premultiplied colour, with uniforms and data textures (at most
+fourteen, units one onwards) and an optional **Ground Rectangle**. RenG inserts a preamble after its
+directive -- the one injected include RenG makes -- giving `rengStickerColour()` (the plain sticker's colour),
+`rengStickerUv` (image orientation, top-left origin), `rengStickerGroundUv()` (the Ground Rectangle's
+Mercator-linear coordinate under the fragment's window pixel, on the flat plane at its declared
+altitudes, `vec2(-1.0)` above its horizon) and `rengStickerHasGround()` (per frame: false without a
+rectangle, under a globe, and when a Mercator camera cannot carry it -- which degrades the sticker
+rather than failing the frame). Placement, blend and depth are the plain sticker's. Names under
+`rengSticker` are reserved and `#extension` is refused.
+_Avoid_: Sticker material, mask, effect, region mask
+
+**Ground Rectangle**:
+A geographic rectangle on the ground, by a **Geometry**'s corner convention and validation, that a
+**Sticker Shader** reads ground coordinates against. It draws nothing itself.
+_Avoid_: Bounds, extent, region
+
 **Model**:
 A **Placement** paired with one GLB mesh locator, an optional base-colour texture override, and its
 **Animation Track** states. Its authored GLB origin, axes, and local units are preserved unchanged before
@@ -419,7 +437,7 @@ The `vertexSource` and `fragmentSource` shader sources a **Geometry** is painted
 _Avoid_: Program, material, effect
 
 **Consumer Pipeline Residency**:
-The renderer-local, count-bounded LRU shared by compiled Geometry and consumer Backdrop shader pipelines. Every
+The renderer-local, count-bounded LRU shared by compiled Geometry, consumer Backdrop and **Sticker Shader** pipelines. Every
 pipeline used by a draw is leased until that complete draw returns, including failure cleanup; releasing the last
 lease immediately deletes least-recently-used unleased entries above the configured retained limit. Frame planning
 rejects more than the configured number of distinct consumer pipeline keys before acquisition or GL work.

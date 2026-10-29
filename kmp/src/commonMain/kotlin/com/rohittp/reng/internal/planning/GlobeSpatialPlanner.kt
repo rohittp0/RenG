@@ -119,6 +119,10 @@ internal fun planGlobeSpatial(
         shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
+    // ADR 0087, for the reason the Mercator planner gives. Under a globe no program has ground, so
+    // nothing reads a rectangle's corners.
+    checkStickerShaderSources(plan, shaderProfileMemo)?.let { return it }
+
     return SpatialOutcome.Success(
         FrameSpatialPlan(
             camera = camera,

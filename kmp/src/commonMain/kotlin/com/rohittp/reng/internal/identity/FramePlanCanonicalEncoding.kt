@@ -19,6 +19,7 @@ import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.Sticker
+import com.rohittp.reng.StickerShader
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.animationTracksForCore
 import com.rohittp.reng.backdropForCore
@@ -26,6 +27,8 @@ import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.bloomForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.modelsForCore
+import com.rohittp.reng.internal.gl.InternalPipelineRole
+import com.rohittp.reng.internal.gl.consumerStickerShaderPair
 import com.rohittp.reng.stickersForCore
 
 /**
@@ -247,6 +250,34 @@ internal class FramePlanCanonicalEncoder(
             field(3, CanonicalBinary.fields {
                 field(1, CanonicalBinary.binary64(sticker.opacity.toDouble()))
                 field(2, CanonicalBinary.u16(sticker.blend.wireValue))
+            })
+        }
+        // ADR 0087. Present only with a program, so every sticker encoded before the field existed
+        // keeps its bytes and its plan its Frame Identity.
+        sticker.shader?.let { shader -> field(4, encodeStickerShader(shader)) }
+    }
+
+    /**
+     * The program by its pipeline key's stable id (ADR 0081: a program is named by digest, never by its
+     * source), then the values and textures exactly as a Geometry's encode, then the ground rectangle
+     * when there is one -- its absence is the absence of tag 4.
+     */
+    private fun encodeStickerShader(shader: StickerShader): CanonicalBytes = CanonicalBinary.fields {
+        field(
+            1,
+            CanonicalBinary.exactUtf8(
+                programKeys.internalPipeline(
+                    InternalPipelineRole.CONSUMER_STICKER,
+                    consumerStickerShaderPair(shader.fragmentSource),
+                ).key.stableId,
+            ),
+        )
+        field(2, encodeUniforms(shader.uniforms))
+        field(3, encodeTextures(shader.textures))
+        shader.ground?.let { ground ->
+            field(4, CanonicalBinary.fields {
+                field(1, encodeVector(ground.topLeft))
+                field(2, encodeVector(ground.bottomRight))
             })
         }
     }

@@ -66,6 +66,7 @@ final enum class com.rohittp.reng/DiagnosticCode : kotlin/Enum<com.rohittp.reng/
     enum entry LABEL_CONTENT_EXCLUDED // com.rohittp.reng/DiagnosticCode.LABEL_CONTENT_EXCLUDED|null[0]
     enum entry RESIDENT_GPU_TEXTURES_OVER_BUDGET // com.rohittp.reng/DiagnosticCode.RESIDENT_GPU_TEXTURES_OVER_BUDGET|null[0]
     enum entry RESOURCE_RELOADED_AFTER_FREE // com.rohittp.reng/DiagnosticCode.RESOURCE_RELOADED_AFTER_FREE|null[0]
+    enum entry STICKER_GROUND_UNAVAILABLE // com.rohittp.reng/DiagnosticCode.STICKER_GROUND_UNAVAILABLE|null[0]
     enum entry TERRAIN_COVERAGE_INCOMPLETE // com.rohittp.reng/DiagnosticCode.TERRAIN_COVERAGE_INCOMPLETE|null[0]
     enum entry TERRAIN_UNAVAILABLE // com.rohittp.reng/DiagnosticCode.TERRAIN_UNAVAILABLE|null[0]
 
@@ -847,6 +848,26 @@ final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
     }
 }
 
+final class com.rohittp.reng/GroundRectangle { // com.rohittp.reng/GroundRectangle|null[0]
+    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3) // com.rohittp.reng/GroundRectangle.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3){}[0]
+
+    final val bottomRight // com.rohittp.reng/GroundRectangle.bottomRight|{}bottomRight[0]
+        final fun <get-bottomRight>(): com.rohittp.reng/Vector3 // com.rohittp.reng/GroundRectangle.bottomRight.<get-bottomRight>|<get-bottomRight>(){}[0]
+    final val topLeft // com.rohittp.reng/GroundRectangle.topLeft|{}topLeft[0]
+        final fun <get-topLeft>(): com.rohittp.reng/Vector3 // com.rohittp.reng/GroundRectangle.topLeft.<get-topLeft>|<get-topLeft>(){}[0]
+
+    final fun component1(): com.rohittp.reng/Vector3 // com.rohittp.reng/GroundRectangle.component1|component1(){}[0]
+    final fun component2(): com.rohittp.reng/Vector3 // com.rohittp.reng/GroundRectangle.component2|component2(){}[0]
+    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ...): com.rohittp.reng/GroundRectangle // com.rohittp.reng/GroundRectangle.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3){}[0]
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/GroundRectangle.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/GroundRectangle.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/GroundRectangle.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/GroundRectangle.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/GroundRectangle> // com.rohittp.reng/GroundRectangle.Companion.serializer|serializer(){}[0]
+    }
+}
+
 final class com.rohittp.reng/MetricReport { // com.rohittp.reng/MetricReport|null[0]
     final val counters // com.rohittp.reng/MetricReport.counters|{}counters[0]
         final fun <get-counters>(): kotlin.collections/Map<com.rohittp.reng/RenGMetricName, kotlin/Long> // com.rohittp.reng/MetricReport.counters.<get-counters>|<get-counters>(){}[0]
@@ -1192,7 +1213,7 @@ final class com.rohittp.reng/ShaderPair { // com.rohittp.reng/ShaderPair|null[0]
 }
 
 final class com.rohittp.reng/Sticker { // com.rohittp.reng/Sticker|null[0]
-    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, kotlin/Float = ..., com.rohittp.reng/BlendMode = ...) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode){}[0]
+    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ...) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?){}[0]
 
     final val blend // com.rohittp.reng/Sticker.blend|{}blend[0]
         final fun <get-blend>(): com.rohittp.reng/BlendMode // com.rohittp.reng/Sticker.blend.<get-blend>|<get-blend>(){}[0]
@@ -1202,18 +1223,42 @@ final class com.rohittp.reng/Sticker { // com.rohittp.reng/Sticker|null[0]
         final fun <get-opacity>(): kotlin/Float // com.rohittp.reng/Sticker.opacity.<get-opacity>|<get-opacity>(){}[0]
     final val placement // com.rohittp.reng/Sticker.placement|{}placement[0]
         final fun <get-placement>(): com.rohittp.reng/Placement // com.rohittp.reng/Sticker.placement.<get-placement>|<get-placement>(){}[0]
+    final val shader // com.rohittp.reng/Sticker.shader|{}shader[0]
+        final fun <get-shader>(): com.rohittp.reng/StickerShader? // com.rohittp.reng/Sticker.shader.<get-shader>|<get-shader>(){}[0]
 
     final fun component1(): com.rohittp.reng/Placement // com.rohittp.reng/Sticker.component1|component1(){}[0]
     final fun component2(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Sticker.component2|component2(){}[0]
     final fun component3(): kotlin/Float // com.rohittp.reng/Sticker.component3|component3(){}[0]
     final fun component4(): com.rohittp.reng/BlendMode // com.rohittp.reng/Sticker.component4|component4(){}[0]
-    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ..., kotlin/Float = ..., com.rohittp.reng/BlendMode = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode){}[0]
+    final fun component5(): com.rohittp.reng/StickerShader? // com.rohittp.reng/Sticker.component5|component5(){}[0]
+    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ..., kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Sticker.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Sticker.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Sticker.toString|toString(){}[0]
 
     final object Companion { // com.rohittp.reng/Sticker.Companion|null[0]
         final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/Sticker> // com.rohittp.reng/Sticker.Companion.serializer|serializer(){}[0]
+    }
+}
+
+final class com.rohittp.reng/StickerShader { // com.rohittp.reng/StickerShader|null[0]
+    constructor <init>(kotlin/String, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/GroundRectangle? = ...) // com.rohittp.reng/StickerShader.<init>|<init>(kotlin.String;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.GroundRectangle?){}[0]
+
+    final val fragmentSource // com.rohittp.reng/StickerShader.fragmentSource|{}fragmentSource[0]
+        final fun <get-fragmentSource>(): kotlin/String // com.rohittp.reng/StickerShader.fragmentSource.<get-fragmentSource>|<get-fragmentSource>(){}[0]
+    final val ground // com.rohittp.reng/StickerShader.ground|{}ground[0]
+        final fun <get-ground>(): com.rohittp.reng/GroundRectangle? // com.rohittp.reng/StickerShader.ground.<get-ground>|<get-ground>(){}[0]
+    final val textures // com.rohittp.reng/StickerShader.textures|{}textures[0]
+        final fun <get-textures>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/StickerShader.textures.<get-textures>|<get-textures>(){}[0]
+    final val uniforms // com.rohittp.reng/StickerShader.uniforms|{}uniforms[0]
+        final fun <get-uniforms>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/StickerShader.uniforms.<get-uniforms>|<get-uniforms>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/StickerShader.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/StickerShader.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/StickerShader.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/StickerShader.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/StickerShader> // com.rohittp.reng/StickerShader.Companion.serializer|serializer(){}[0]
     }
 }
 

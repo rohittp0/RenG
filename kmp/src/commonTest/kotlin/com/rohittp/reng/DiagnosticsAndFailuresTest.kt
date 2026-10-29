@@ -63,6 +63,7 @@ class DiagnosticsAndFailuresTest {
                 "BLOOM_UNAVAILABLE",
                 "BLOOM_EMISSION_PRECISION_REDUCED",
                 "BASEMAP_STYLE_INDEX_OUT_OF_RANGE",
+                "STICKER_GROUND_UNAVAILABLE",
             ),
             DiagnosticCode.entries.map { it.name },
         )
@@ -79,6 +80,7 @@ class DiagnosticsAndFailuresTest {
                 "geometry.unwrappedLongitude", "geometry.altitude", "basemapTileInstances",
                 "responseBodyBytes", "resource", "animationSelector",
                 "shaderPair", "renderTarget", "preparedFrameCpuBytes",
+                "sticker.shader.fragmentSource", "sticker.shader.ground",
             ),
             DiagnosticField.entries.map { it.wireName },
         )

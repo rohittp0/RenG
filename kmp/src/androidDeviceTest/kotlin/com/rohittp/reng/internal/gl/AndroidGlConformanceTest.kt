@@ -23,6 +23,8 @@ import com.rohittp.reng.runBloomPerElementReadbackSuite
 import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
 import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
 import com.rohittp.reng.runStickerOpacityReadbackSuite
+import com.rohittp.reng.STICKER_SHADER_READBACK_PIXELS
+import com.rohittp.reng.runStickerShaderReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.TERRAIN_FRAME_READBACK_PIXELS
@@ -279,6 +281,19 @@ class AndroidGlConformanceTest {
             binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
             binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
             runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /** ADR 0087: a sticker drawn with a consumer fragment program, against the frames it must equal. */
+    @Test fun theStickerShaderReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
         } finally {
             fixture.destroy()
         }

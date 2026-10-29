@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
+import com.rohittp.reng.internal.stickerGroundUnavailableDiagnostic
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.cache.ResidentGeneration
@@ -32,6 +33,7 @@ import com.rohittp.reng.internal.gl.CompositePipeline
 import com.rohittp.reng.internal.gl.ConsumerBackdropPipelineResult
 import com.rohittp.reng.internal.gl.ConsumerPipelineCache
 import com.rohittp.reng.internal.gl.ConsumerPipelineLease
+import com.rohittp.reng.internal.gl.ConsumerStickerPipelineResult
 import com.rohittp.reng.internal.gl.ContentTextureCache
 import com.rohittp.reng.internal.gl.GeometryPipelineResult
 import com.rohittp.reng.internal.gl.GlBinding
@@ -65,6 +67,7 @@ import com.rohittp.reng.internal.gl.SceneGeometry
 import com.rohittp.reng.internal.gl.SceneGroundTile
 import com.rohittp.reng.internal.gl.SceneModel
 import com.rohittp.reng.internal.gl.SceneSticker
+import com.rohittp.reng.internal.gl.SceneStickerShader
 import com.rohittp.reng.internal.gl.SceneTerrain
 import com.rohittp.reng.internal.gl.SceneTileDem
 import com.rohittp.reng.internal.gl.StickerPipeline
@@ -74,7 +77,10 @@ import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.UploadedPrimitive
 import com.rohittp.reng.internal.gl.allModelShaderVariants
 import com.rohittp.reng.internal.gl.composeBackdropInverseViewProjection
+import com.rohittp.reng.internal.gl.consumerStickerShaderPair
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
+import com.rohittp.reng.internal.gl.createConsumerStickerPipeline
+import com.rohittp.reng.internal.gl.stickerGroundMapping
 import com.rohittp.reng.internal.gl.createGeometryPipeline
 import com.rohittp.reng.internal.gl.createGlobeGroundPipeline
 import com.rohittp.reng.internal.gl.createModelPipeline
@@ -774,6 +780,19 @@ internal class RenGRenderer(
                             .key,
                     )
                 }
+                // ADR 0087: a consumer sticker program shares the same residency, so it counts too.
+                plan.stickers.forEach { sticker ->
+                    sticker.shader?.let { shader ->
+                        add(
+                            geometryKeyDeriver
+                                .internalPipeline(
+                                    InternalPipelineRole.CONSUMER_STICKER,
+                                    consumerStickerShaderPair(shader.fragmentSource),
+                                )
+                                .key,
+                        )
+                    }
+                }
             }
             if (consumerPipelineKeys.size > configuration.maximumConsumerPipelinesPerFrame) {
                 throw renGFailure(
@@ -950,7 +969,18 @@ internal class RenGRenderer(
                     ?.map { (name, locator) -> name to externalImageReference(locator) }
                     .orEmpty()
 
+            // ADR 0087: a sticker program's consumer textures, recomputed per sticker in name order
+            // for the reason the backdrop's are -- MODEL_TEXTURE entries cannot be read back by
+            // position. Empty for a sticker without a program.
+            val stickerShaderTextureReferences: List<List<Pair<String, StaticResourceReference.External>>> =
+                plan.stickers.map { sticker ->
+                    sticker.shader?.textures?.entries?.sortedBy { it.key }
+                        ?.map { (name, locator) -> name to externalImageReference(locator) }
+                        .orEmpty()
+                }
+
             val imageReferences = stickerImageReferences +
+                stickerShaderTextureReferences.flatten().map { it.second } +
                 listOfNotNull(backdropReference) +
                 backdropTextureReferences.map { it.second } +
                 modelTextureReferences.filterNotNull() +
@@ -1118,7 +1148,7 @@ internal class RenGRenderer(
                 )
             }
 
-            val stickers = plan.stickers.zip(stickerImageReferences) { sticker, reference ->
+            val stickers = plan.stickers.zip(stickerImageReferences).mapIndexed { index, (sticker, reference) ->
                 PreparedSticker(
                     placement = sticker.placement,
                     resourceKey = reference.resourceKey,
@@ -1129,6 +1159,24 @@ internal class RenGRenderer(
                         },
                     opacity = sticker.opacity,
                     blend = sticker.blend,
+                    // Snapshotted here for the reason [PreparedGeometry] gives: until this
+                    // `.toMap()` the uniform map is the consumer's own reference.
+                    shader = sticker.shader?.let { shader ->
+                        PreparedStickerShader(
+                            fragmentSource = shader.fragmentSource,
+                            uniforms = shader.uniforms.toMap(),
+                            consumerTextures = stickerShaderTextureReferences[index].associate { (name, texture) ->
+                                name to PreparedGeometryTexture(
+                                    resourceKey = texture.resourceKey,
+                                    generationId = generationIdFor(texture.resourceKey),
+                                    image = requireNotNull(decodedByKey[texture.resourceKey]) {
+                                        "a successful sticker-shader acquisition must decode every traversed image"
+                                    },
+                                )
+                            },
+                            ground = shader.ground,
+                        )
+                    },
                 )
             }
 
@@ -2830,6 +2878,7 @@ internal class RenGRenderer(
         /** The captured binding (ADR 0054), shadowing the renderer's own for this draw. */
         binding: GlBinding,
     ): FailureDescriptor? {
+        var stickersWithoutGround = 0
         val sceneStickers = frame.stickers.map { preparedSticker ->
             val texture = when (val image = preparedSticker.image) {
                 is DecodedImage -> contentTextures.cachedTexture(
@@ -2849,6 +2898,44 @@ internal class RenGRenderer(
                     binding = binding,
                 )
             }
+            // ADR 0087. Leased and memoised by source exactly as a geometry's program is, and its
+            // textures uploaded as a geometry's are: bit-exact data, sampled nearest.
+            val sceneShader = preparedSticker.shader?.let { shader ->
+                val key = geometryKeyDeriver
+                    .internalPipeline(
+                        InternalPipelineRole.CONSUMER_STICKER,
+                        consumerStickerShaderPair(shader.fragmentSource),
+                    )
+                    .key
+                val pipelineLease = consumerPipelines.leaseSticker(key) ?: when (
+                    val result = createConsumerStickerPipeline(
+                        binding, profile.dialect, programs, shader.fragmentSource, geometryKeyDeriver,
+                    )
+                ) {
+                    is ConsumerStickerPipelineResult.Created -> consumerPipelines.registerSticker(result.pipeline)
+                    is ConsumerStickerPipelineResult.Failed -> return result.failure
+                }
+                consumerPipelineLeases += pipelineLease
+                SceneStickerShader(
+                    pipeline = pipelineLease.value,
+                    uniforms = shader.uniforms,
+                    textures = shader.consumerTextures.mapValues { (_, consumerTexture) ->
+                        contentTextures.cachedTexture(
+                            key = consumerTexture.resourceKey,
+                            generationId = consumerTexture.generationId,
+                            image = consumerTexture.image,
+                            content = TextureContent.DATA,
+                            leases = gpuAllocationLeases,
+                            binding = binding,
+                        )
+                    },
+                    // ADR 0087: resolved against this frame's camera here, where a rectangle the camera
+                    // cannot carry is reported rather than failing the frame.
+                    ground = stickerGroundMapping(resolvedCamera, shader.ground).also { mapping ->
+                        if (mapping.unavailable) stickersWithoutGround += 1
+                    },
+                )
+            }
             SceneSticker(
                 placement = preparedSticker.placement,
                 texture = texture,
@@ -2856,8 +2943,10 @@ internal class RenGRenderer(
                 imageHeightPixels = preparedSticker.image.height,
                 opacity = preparedSticker.opacity,
                 blend = preparedSticker.blend,
+                shader = sceneShader,
             )
         }
+        if (stickersWithoutGround > 0) stagedDiagnostics += stickerGroundUnavailableDiagnostic(stickersWithoutGround)
 
         val sceneGeometries = ArrayList<SceneGeometry>(frame.geometries.size)
         for (preparedGeometry in frame.geometries) {

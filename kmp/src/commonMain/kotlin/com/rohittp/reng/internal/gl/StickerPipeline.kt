@@ -2,8 +2,10 @@ package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.BlendMode
 import com.rohittp.reng.PipelineStage
+import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.shader.scanShaderProfile
@@ -46,6 +48,101 @@ internal val STICKER_SHADER_PAIR: ShaderPair =
 internal const val STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME: String = "rengStickerModelViewProjection"
 internal const val STICKER_TEXTURE_UNIFORM_NAME: String = "rengStickerTexture"
 internal const val STICKER_OPACITY_UNIFORM_NAME: String = "rengStickerOpacity"
+
+/**
+ * The window-pixel-to-ground-rectangle homography a consumer sticker program reads through
+ * `rengStickerGroundUv()` (ADR 0087), as a `mat4` acting on `vec4(gl_FragCoord.xy, 0.0, 1.0)` whose
+ * `xy / w` is the rectangle's texture coordinate. A `mat4` rather than a `mat3` only because
+ * [GlBinding] carries no `glUniformMatrix3fv`, and one projective map in the `z = 0` slice of a 4x4 is
+ * the same nine numbers.
+ */
+internal const val STICKER_WINDOW_TO_GROUND_UNIFORM_NAME: String = "rengStickerWindowToGround"
+
+/**
+ * The whole window pixel the homography above is relative to (ADR 0087), subtracted from
+ * `gl_FragCoord.xy` before the matrix applies so no frame-sized term enters the `Float` product.
+ */
+internal const val STICKER_GROUND_ORIGIN_UNIFORM_NAME: String = "rengStickerGroundOrigin"
+
+/** `1.0` when this frame gives the program a ground rectangle, `0.0` otherwise (ADR 0087). */
+internal const val STICKER_GROUND_PRESENT_UNIFORM_NAME: String = "rengStickerGroundPresent"
+
+/**
+ * The prefix every name of [STICKER_SHADER_PREAMBLE] shares, reserved against a `StickerShader`'s
+ * uniform and texture names (ADR 0087) on ADR 0071's reasoning: a name RenG adds later under it
+ * cannot collide with one a consumer already uses.
+ */
+internal const val STICKER_RESERVED_NAME_PREFIX: String = "rengSticker"
+
+/**
+ * The most consumer textures a `StickerShader` may declare: [MAXIMUM_CONSUMER_TEXTURES] less the one
+ * unit the sticker's own image holds, so a sticker program keeps exactly the headroom below GLES 3.0's
+ * sixteen guaranteed units that a Geometry's does.
+ */
+internal const val MAXIMUM_STICKER_SHADER_TEXTURES: Int = MAXIMUM_CONSUMER_TEXTURES - 1
+
+/** The unit a consumer sticker program's first texture lands on; unit zero is the image's. */
+internal const val STICKER_FIRST_CONSUMER_TEXTURE_UNIT: Int = 1
+
+/**
+ * What RenG inserts after a consumer sticker program's `#version` line (ADR 0087), and the whole of
+ * the interface it promises that program.
+ *
+ * `rengStickerColour()` is [STICKER_FRAGMENT_SOURCE]'s expression verbatim, so a program returning it
+ * draws the plain sticker's pixels; the readback suite holds it to bit-identity. The ground arm
+ * subtracts the whole-pixel origin first -- exact in `Float` -- and divides only where the homogeneous
+ * `w` is positive, which is exactly where the fragment's line of sight meets the rectangle's plane in
+ * front of the camera; everywhere else -- and wherever the uniform is the zero matrix, which is what a
+ * frame without ground binds -- it answers `vec2(-1.0)`, a point outside the rectangle.
+ * `rengStickerHasGround()` is per frame, not per pixel: it says whether there is a rectangle to read
+ * at all, so a consumer can tell "no ground this frame" from "this pixel is off the rectangle".
+ *
+ * Every line ends in LF and no line is a directive, so inserting it leaves the source a Shader
+ * Profile whose directive is still the consumer's own first one.
+ */
+internal const val STICKER_SHADER_PREAMBLE: String =
+    "precision highp float;\n" +
+        "uniform sampler2D rengStickerTexture;\n" +
+        "uniform float rengStickerOpacity;\n" +
+        "uniform mat4 rengStickerWindowToGround;\n" +
+        "uniform vec2 rengStickerGroundOrigin;\n" +
+        "uniform float rengStickerGroundPresent;\n" +
+        "in vec2 rengStickerUv;\n" +
+        "vec4 rengStickerColour() {\n" +
+        "    return texture(rengStickerTexture, rengStickerUv) * rengStickerOpacity;\n" +
+        "}\n" +
+        "bool rengStickerHasGround() {\n" +
+        "    return rengStickerGroundPresent > 0.5;\n" +
+        "}\n" +
+        "vec2 rengStickerGroundUv() {\n" +
+        "    vec2 rengStickerWindow = gl_FragCoord.xy - rengStickerGroundOrigin;\n" +
+        "    vec4 rengStickerGround = rengStickerWindowToGround * vec4(rengStickerWindow, 0.0, 1.0);\n" +
+        "    return rengStickerGround.w > 0.0\n" +
+        "        ? rengStickerGround.xy / rengStickerGround.w\n" +
+        "        : vec2(-1.0);\n" +
+        "}\n"
+
+/**
+ * [fragmentSource] with [STICKER_SHADER_PREAMBLE] inserted on the line after its `#version 300 es`
+ * directive, or `null` when it is not a Shader Profile at all.
+ *
+ * Inserted after the directive line's own span and before its terminator, so the directive keeps its
+ * terminator and desktop substitution still replaces exactly that one line.
+ */
+internal fun composeStickerFragmentSource(fragmentSource: String): String? {
+    val plan = scanShaderProfile(fragmentSource) ?: return null
+    val end = plan.directiveEndExclusiveUtf16
+    return fragmentSource.substring(0, end) + "\n" + STICKER_SHADER_PREAMBLE.removeSuffix("\n") +
+        fragmentSource.substring(end)
+}
+
+/**
+ * The pair a consumer sticker program is keyed by under [InternalPipelineRole.CONSUMER_STICKER]: RenG's
+ * own vertex stage and the consumer's fragment source as written. The preamble is not in it because it
+ * is a constant of this build, as the vertex stage is.
+ */
+internal fun consumerStickerShaderPair(fragmentSource: String): ShaderPair =
+    ShaderPair(vertexSource = STICKER_VERTEX_SOURCE, fragmentSource = fragmentSource)
 
 /** A unit quad (side length 1, centred on the origin) with texture coordinates spanning `[0, 1]`. */
 internal val STICKER_QUAD: FloatArray = floatArrayOf(
@@ -132,6 +229,108 @@ internal fun deleteStickerPipeline(
 }
 
 /**
+ * A sticker drawn with a fragment program the consumer wrote (ADR 0087), over RenG's own vertex stage.
+ *
+ * It owns no quad: a consumer program's vertex stage is [STICKER_VERTEX_SOURCE], whose attributes are
+ * bound by layout location, so it draws from the plain [StickerPipeline]'s vertex array exactly as the
+ * plain program does. [consumerLocations] memoises as [GeometryPipeline]'s does, and for its reason.
+ */
+internal class ConsumerStickerPipeline(
+    val key: ResourceKey,
+    val program: Int,
+    val modelViewProjectionUniformLocation: Int,
+    val textureUniformLocation: Int,
+    val opacityUniformLocation: Int,
+    val windowToGroundUniformLocation: Int,
+    val groundOriginUniformLocation: Int = -1,
+    val groundPresentUniformLocation: Int = -1,
+) : ConsumerValueProgram {
+    private val consumerLocations: MutableMap<String, Int> = HashMap()
+
+    override val uniformNameOrder: ConsumerNameOrder = ConsumerNameOrder()
+    override val textureNameOrder: ConsumerNameOrder = ConsumerNameOrder()
+
+    override fun consumerLocation(binding: GlBinding, name: String): Int {
+        consumerLocations[name]?.let { return it }
+        val location = binding.getUniformLocation(program, name)
+        if (location >= 0) consumerLocations[name] = location
+        return location
+    }
+}
+
+internal sealed interface ConsumerStickerPipelineResult {
+    data class Created(val pipeline: ConsumerStickerPipeline) : ConsumerStickerPipelineResult
+
+    data class Failed(val failure: FailureDescriptor) : ConsumerStickerPipelineResult
+}
+
+/**
+ * Compiles [fragmentSource], with [STICKER_SHADER_PREAMBLE] inserted, against RenG's sticker vertex
+ * stage, reporting a failure as the consumer's -- a syntax error in their program must not read as
+ * RenG's GPU failing (ADR 0071's reasoning, which applies unchanged).
+ */
+internal fun createConsumerStickerPipeline(
+    binding: GlBinding,
+    dialect: ShaderDialect,
+    cache: GlProgramCache,
+    fragmentSource: String,
+    deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
+): ConsumerStickerPipelineResult {
+    val key = deriver
+        .internalPipeline(InternalPipelineRole.CONSUMER_STICKER, consumerStickerShaderPair(fragmentSource))
+        .key
+    val vertexPlan = scanShaderProfile(STICKER_VERTEX_SOURCE)
+        ?: return ConsumerStickerPipelineResult.Failed(glOperationFailure(PipelineStage.GPU_RESOURCE, key))
+    val fragmentPlan = composeStickerFragmentSource(fragmentSource)?.let(::scanShaderProfile)
+        ?: return ConsumerStickerPipelineResult.Failed(
+            shaderProgramFailure(RenGErrorCode.SHADER_COMPILE_FAILED, key, consumerAuthored = true),
+        )
+
+    val program = when (
+        val result = cache.getOrCompile(
+            binding, dialect, key, vertexPlan, fragmentPlan, consumerAuthored = true,
+        )
+    ) {
+        is GlProgramResult.Linked -> result.program
+        is GlProgramResult.Failed -> return ConsumerStickerPipelineResult.Failed(result.failure)
+    }
+
+    return ConsumerStickerPipelineResult.Created(
+        ConsumerStickerPipeline(
+            key = key,
+            program = program,
+            modelViewProjectionUniformLocation =
+                binding.getUniformLocation(program, STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME),
+            textureUniformLocation = binding.getUniformLocation(program, STICKER_TEXTURE_UNIFORM_NAME),
+            opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
+            windowToGroundUniformLocation =
+                binding.getUniformLocation(program, STICKER_WINDOW_TO_GROUND_UNIFORM_NAME),
+            groundOriginUniformLocation = binding.getUniformLocation(program, STICKER_GROUND_ORIGIN_UNIFORM_NAME),
+            groundPresentUniformLocation = binding.getUniformLocation(program, STICKER_GROUND_PRESENT_UNIFORM_NAME),
+        ),
+    )
+}
+
+internal fun deleteConsumerStickerPipeline(
+    binding: GlBinding,
+    cache: GlProgramCache,
+    pipeline: ConsumerStickerPipeline,
+) {
+    cache.remove(pipeline.key)?.let { binding.deleteProgram(it) }
+}
+
+/**
+ * A consumer sticker program and what it is drawn with this frame: the uniform snapshot `prepare()`
+ * took, each texture's uploaded name, and this frame's [StickerGroundMapping] (ADR 0087).
+ */
+internal class ResolvedStickerShader(
+    val pipeline: ConsumerStickerPipeline,
+    val uniforms: Map<String, ShaderValue>,
+    val textures: Map<String, Int>,
+    val ground: StickerGroundMapping,
+)
+
+/**
  * One sticker instance ready to draw: its already-resolved per-instance model-view-projection matrix
  * (column-major, matching [GlBinding.uniformMatrix4fv]) and its already-uploaded GL texture name.
  *
@@ -145,6 +344,8 @@ internal class ResolvedSticker(
     val texture: Int,
     val opacity: Float = 1f,
     val blend: BlendMode = BlendMode.OVER,
+    /** The consumer program it is drawn with instead of the plain one, or `null` (ADR 0087). */
+    val shader: ResolvedStickerShader? = null,
 )
 
 /**
@@ -226,6 +427,9 @@ internal fun beginStickerPass(binding: GlBinding, pipeline: StickerPipeline) {
     binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
     binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
     binding.activeTexture(GL_TEXTURE0)
+    // The image's own sampler state, not a sampler object the host left on unit 0 (ADR 0055 saves
+    // and restores it). A consumer sticker program's units 1 onwards are cleared as they are bound.
+    binding.bindSampler(0, 0)
     if (pipeline.textureUniformLocation >= 0) {
         binding.uniform1i(pipeline.textureUniformLocation, 0)
     }
@@ -237,6 +441,11 @@ internal fun beginStickerPass(binding: GlBinding, pipeline: StickerPipeline) {
  * differ only in the matrix they were composed with and the depth state around them.
  */
 internal fun drawOneSticker(binding: GlBinding, pipeline: StickerPipeline, sticker: ResolvedSticker) {
+    val shader = sticker.shader
+    if (shader != null) {
+        drawOneConsumerSticker(binding, pipeline, sticker, shader)
+        return
+    }
     if (pipeline.modelViewProjectionUniformLocation >= 0) {
         binding.uniformMatrix4fv(
             pipeline.modelViewProjectionUniformLocation,
@@ -250,6 +459,55 @@ internal fun drawOneSticker(binding: GlBinding, pipeline: StickerPipeline, stick
         binding.uniform1f(pipeline.opacityUniformLocation, sticker.opacity)
     }
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+}
+
+/**
+ * [drawOneSticker] for a sticker with a consumer program (ADR 0087): the same quad, matrix, image and
+ * opacity, through the consumer's program, with its values bound and its textures on units one
+ * onwards.
+ *
+ * It leaves exactly the state [beginStickerPass] established -- the plain program bound and unit zero
+ * active -- so the callers, which bind that pass once and then draw stickers in a loop, need not know
+ * which of their stickers carried a program. Blend and depth state it never touches, which is what
+ * keeps a consumer sticker composited exactly as a plain one.
+ */
+private fun drawOneConsumerSticker(
+    binding: GlBinding,
+    pipeline: StickerPipeline,
+    sticker: ResolvedSticker,
+    shader: ResolvedStickerShader,
+) {
+    val consumer = shader.pipeline
+    binding.useProgram(consumer.program)
+    if (consumer.modelViewProjectionUniformLocation >= 0) {
+        binding.uniformMatrix4fv(consumer.modelViewProjectionUniformLocation, 1, false, sticker.modelViewProjection)
+    }
+    if (consumer.opacityUniformLocation >= 0) {
+        binding.uniform1f(consumer.opacityUniformLocation, sticker.opacity)
+    }
+    if (consumer.windowToGroundUniformLocation >= 0) {
+        binding.uniformMatrix4fv(consumer.windowToGroundUniformLocation, 1, false, shader.ground.windowToGround)
+    }
+    if (consumer.groundOriginUniformLocation >= 0) {
+        binding.uniform2f(consumer.groundOriginUniformLocation, shader.ground.originX, shader.ground.originY)
+    }
+    if (consumer.groundPresentUniformLocation >= 0) {
+        binding.uniform1f(consumer.groundPresentUniformLocation, if (shader.ground.present) 1f else 0f)
+    }
+    bindConsumerValues(
+        binding = binding,
+        program = consumer,
+        uniforms = shader.uniforms,
+        textures = shader.textures,
+        firstUnit = STICKER_FIRST_CONSUMER_TEXTURE_UNIT,
+    )
+    binding.activeTexture(GL_TEXTURE0)
+    if (consumer.textureUniformLocation >= 0) {
+        binding.uniform1i(consumer.textureUniformLocation, 0)
+    }
+    binding.bindTexture(GL_TEXTURE_2D, sticker.texture)
+    binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+    binding.useProgram(pipeline.program)
 }
 
 internal fun applyPremultipliedBlendMode(binding: GlBinding, blend: BlendMode) {

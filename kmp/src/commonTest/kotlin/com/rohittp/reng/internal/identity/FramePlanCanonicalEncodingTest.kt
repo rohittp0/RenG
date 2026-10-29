@@ -17,7 +17,9 @@ import com.rohittp.reng.ProjectionMode
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.ShaderValue
+import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.Sticker
+import com.rohittp.reng.StickerShader
 import com.rohittp.reng.Vector3
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -720,6 +722,112 @@ class BackdropCanonicalEncodingTest {
 
     private fun planWith(backdrop: Backdrop?): FramePlan =
         FramePlan(frameIndex = 1L, camera = Camera(1.0, 2.0, 3.0, 4.0, 5.0), backdrop = backdrop)
+}
+
+/** ADR 0087: a sticker's program in the canonical encoding. */
+class StickerShaderCanonicalEncodingTest {
+    private val encoder = FramePlanCanonicalEncoder()
+
+    /**
+     * Tag 4 is written only when there is a program, so a sticker without one -- every sticker
+     * encoded before the field existed -- keeps its exact bytes. The tracked representative identity
+     * in [FramePlanCanonicalEncodingTest] pins those bytes; this pins that the field adds nothing to
+     * them while absent.
+     */
+    @Test
+    fun aStickerWithoutAProgramEncodesAsItDidBeforeTheFieldExisted() {
+        val plain = encoder.encode(planWith(sticker(shader = null)))
+        val shaded = encoder.encode(planWith(sticker(shader = shader())))
+        val plainHex = plain.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex()
+        val shadedHex = shaded.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex()
+
+        assertEquals(
+            plain.segmentPayloads.filterIndexed { index, _ -> index != FramePlanSegment.STICKERS.index },
+            shaded.segmentPayloads.filterIndexed { index, _ -> index != FramePlanSegment.STICKERS.index },
+        )
+        // The shaded sticker is the plain one's fields with tag 4 appended, inside the same list.
+        val plainFields = plainHex.dropListAndStickerFraming()
+        val shadedFields = shadedHex.dropListAndStickerFraming()
+        assertTrue(shadedFields.startsWith(plainFields), shadedFields)
+        assertTrue(shadedFields.removePrefix(plainFields).startsWith("0004"), shadedFields)
+    }
+
+    /** Every part of a program is part of the frame, so two that differ anywhere are two frames. */
+    @Test
+    fun everyDistinctProgramReachesADistinctFrameIdentity() {
+        val identities = listOf(
+            null,
+            shader(),
+            shader(source = "$SOURCE\n"),
+            shader(uniforms = mapOf("uTint" to ShaderValue.Scalar(2f))),
+            shader(uniforms = emptyMap()),
+            shader(textures = mapOf("uMask" to ResourceLocator("other.png"))),
+            shader(textures = mapOf("uOtherMask" to ResourceLocator("mask.png"))),
+            shader(ground = null),
+            shader(ground = GroundRectangle(Vector3(2.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0))),
+            shader(ground = GroundRectangle(Vector3(1.0, -1.0, 5.0), Vector3(-1.0, 1.0, 0.0))),
+        ).map { encoder.encode(planWith(sticker(it))).identity.digest.lowercaseHex }
+
+        assertEquals(identities.size, identities.toSet().size, identities.toString())
+    }
+
+    /** A program is named by its pipeline key's digest (ADR 0081), never by its source. */
+    @Test
+    fun theSourceNeverReachesTheEncoding() {
+        val secret = "#version 300 es\nout vec4 c; void main() { c = vec4(0.0); } // SECRETMARKER\n"
+        val bytes = encoder.encode(planWith(sticker(shader(source = secret)))).identity.canonicalBytes.bytes
+        assertFalse(bytes.decodeToString().contains("SECRETMARKER"))
+    }
+
+    /** Map iteration order is not content, so it moves nothing. */
+    @Test
+    fun uniformAndTextureMapOrderDoesNotChangeTheFrameIdentity() {
+        val forward = shader(
+            uniforms = linkedMapOf("uA" to ShaderValue.Scalar(1f), "uB" to ShaderValue.Scalar(2f)),
+            textures = linkedMapOf("uMaskA" to ResourceLocator("a.png"), "uMaskB" to ResourceLocator("b.png")),
+        )
+        val backward = shader(
+            uniforms = linkedMapOf("uB" to ShaderValue.Scalar(2f), "uA" to ShaderValue.Scalar(1f)),
+            textures = linkedMapOf("uMaskB" to ResourceLocator("b.png"), "uMaskA" to ResourceLocator("a.png")),
+        )
+        assertEquals(
+            encoder.encode(planWith(sticker(forward))).identity,
+            encoder.encode(planWith(sticker(backward))).identity,
+        )
+    }
+
+    /**
+     * The one sticker's fields: past the list's `u32` count and the element's `u32` length, which
+     * is all a one-element list puts in front of them (the element length differs between the two).
+     */
+    private fun String.dropListAndStickerFraming(): String = drop(16)
+
+    private fun shader(
+        source: String = SOURCE,
+        uniforms: Map<String, ShaderValue> = mapOf("uTint" to ShaderValue.Scalar(1f)),
+        textures: Map<String, ResourceLocator> = mapOf("uMask" to ResourceLocator("mask.png")),
+        ground: GroundRectangle? = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0)),
+    ): StickerShader = StickerShader(source, uniforms, textures, ground)
+
+    private fun sticker(shader: StickerShader?): Sticker = Sticker(
+        placement = Placement(
+            AnchoringMode.MAP,
+            Vector3(0.0, 0.0, 0.0),
+            AnchoringMode.SCREEN,
+            Vector3(0.0, 0.0, 0.0),
+            AnchoringMode.SCREEN,
+            1.0,
+        ),
+        image = ResourceLocator("sticker.png"),
+        shader = shader,
+    )
+
+    private fun planWith(sticker: Sticker): FramePlan =
+        FramePlan(frameIndex = 1L, camera = Camera(1.0, 2.0, 3.0, 4.0, 5.0), stickers = listOf(sticker))
+
+    private companion object {
+        const val SOURCE: String = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n"
+    }
 }
 
 private val FramePlanSegment.index: Int

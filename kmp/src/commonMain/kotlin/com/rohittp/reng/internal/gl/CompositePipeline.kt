@@ -54,6 +54,13 @@ internal enum class InternalPipelineRole(internal val wireValue: Int) {
 
     /** ADR 0086's one-pass mixed ground programs. Appended so no existing identity moves. */
     GROUND_MIXED(15),
+
+    /**
+     * ADR 0087's consumer sticker programs, keyed by RenG's sticker vertex stage and the consumer's
+     * fragment source. Its own role for [CONSUMER_BACKDROP]'s reason: no consumer source can then name
+     * RenG's own sticker program. Appended so no existing identity moves.
+     */
+    CONSUMER_STICKER(16),
 }
 
 /**

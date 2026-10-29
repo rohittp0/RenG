@@ -333,6 +333,14 @@ internal class FramePlanningCore(
         }
         for (sticker in plan.stickersForCore()) {
             external(sticker.image, ResourceClass.STICKER_IMAGE)
+            // ADR 0087: a sticker program's textures are consumer data exactly as a Geometry's are,
+            // so they traverse under MODEL_TEXTURE in name order. Safe among the sticker images,
+            // which RenGRenderer pairs back by position only after filtering to STICKER_IMAGE.
+            sticker.shader?.let { shader ->
+                for ((_, locator) in shader.textures.entries.sortedBy { it.key }) {
+                    external(locator, ResourceClass.MODEL_TEXTURE)
+                }
+            }
         }
         // ADR 0068. Its own class rather than STICKER_IMAGE: RenGRenderer pairs that class's
         // references with plan.stickers by index, and a backdrop among them is an off-by-one in

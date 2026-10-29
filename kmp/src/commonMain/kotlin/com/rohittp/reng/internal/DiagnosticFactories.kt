@@ -34,6 +34,12 @@ internal enum class DiagnosticField(internal val wireName: String) {
     SHADER_PAIR("shaderPair"),
     RENDER_TARGET("renderTarget"),
     PREPARED_FRAME_CPU_BYTES("preparedFrameCpuBytes"),
+
+    /** ADR 0087: a sticker program's source, refused at planning. Appended, so nothing moves. */
+    STICKER_SHADER_FRAGMENT_SOURCE("sticker.shader.fragmentSource"),
+
+    /** ADR 0087: a sticker program's ground rectangle, which a draw could not carry. */
+    STICKER_SHADER_GROUND("sticker.shader.ground"),
 }
 
 internal fun failureContextDiagnostic(
@@ -90,6 +96,21 @@ internal fun groundPresentedProvisionallyDiagnostic(tileCount: Int): Diagnostic 
         stage = PipelineStage.DRAW,
         limit = 0L,
         actual = tileCount.toLong(),
+    )
+
+/**
+ * [count] of this frame's sticker programs declared a ground rectangle the frame's Mercator camera
+ * cannot carry -- beyond its latitude limit or world-copy bounds -- and drew without one (ADR 0087):
+ * `rengStickerHasGround()` false and `rengStickerGroundUv()` off-rectangle everywhere.
+ */
+internal fun stickerGroundUnavailableDiagnostic(count: Int): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.STICKER_GROUND_UNAVAILABLE,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+        fieldName = DiagnosticField.STICKER_SHADER_GROUND.wireName,
+        limit = 0L,
+        actual = count.toLong(),
     )
 
 internal fun bloomUnavailableDiagnostic(): Diagnostic =
@@ -297,6 +318,7 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
         DiagnosticField.GEOMETRY_ALTITUDE,
         DiagnosticField.BASEMAP_TILE_INSTANCES,
         DiagnosticField.SHADER_PAIR,
+        DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
     ),
     PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
     PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
@@ -314,7 +336,7 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
     // resident -- see `RenGRenderer.performDraw`. Naming the tile is the whole value of the
     // failure; without this entry the only reportable shape would be a bare GPU_OPERATION_FAILED,
     // which sends a consumer to inspect GL state for a fault that is in their resource limits.
-    PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE),
+    PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE, DiagnosticField.STICKER_SHADER_GROUND),
     // The label stage carries the same bare `resource` field the route failures do, and for the same
     // reason: the only failure allowlisted here is one about a source RenG could not route, and it
     // has no identity to name. Nothing about a label -- its text, its layer, its script -- is a
@@ -411,6 +433,7 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
                     DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
                     DiagnosticField.GEOMETRY_ALTITUDE,
                     DiagnosticField.SHADER_PAIR,
+                    DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
                 ),
                 diagnosticCodes = setOf(
                     DiagnosticCode.FAILURE_CONTEXT,

@@ -38,6 +38,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -820,6 +821,49 @@ class RendererFactoryTest {
     }
 
     @Test
+    fun aTextureSharedByAStickerProgramAndAGeometryIsStillDecodedForTheSticker() = runTest {
+        // ADR 0087 + 0088: a sticker program reads its textures from prepare's decoded images, so a key a
+        // Geometry also binds must stay on the eager path; were it treated as Geometry-only, prepare would
+        // find no decoded image for the sticker and fail.
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding().apply { declaredNames = mapOf("uMask" to 66) },
+            fixedProbe(),
+        )
+        val shared = ResourceLocator("https://example.invalid/shared-mask.png")
+        val frame = renderer.prepare(
+            FramePlan(
+                frameIndex = 0L,
+                camera = testCamera(),
+                stickers = listOf(
+                    Sticker(
+                        placement = testPlacement(),
+                        image = ResourceLocator("https://example.invalid/a.png"),
+                        shader = StickerShader(
+                            fragmentSource = "#version 300 es\nuniform sampler2D uMask;\nout vec4 colour;\n" +
+                                "void main() { colour = texture(uMask, vec2(0.5)); }\n",
+                            textures = mapOf("uMask" to shared),
+                        ),
+                    ),
+                ),
+                geometries = listOf(
+                    Geometry(
+                        topLeft = Vector3(x = 1.0, y = -1.0, z = 10.0),
+                        bottomRight = Vector3(x = -1.0, y = 1.0, z = 0.0),
+                        shaderPair = minimalGeometryShaderPair(),
+                        textures = mapOf("uMask" to shared),
+                    ),
+                ),
+            ),
+        ) as RenGPreparedFrame
+
+        val geometryTexture = frame.geometries.single().consumerTextures.getValue("uMask")
+        assertNotNull(geometryTexture.encodedPngBytes, "the Geometry side still decodes only on a GPU miss")
+        val residency = renderer.queryResources(ResourceSelector.ByClass(ResourceClass.MODEL_TEXTURE))
+        assertTrue(residency.totals.decodedCpuBytes > 0L, "the sticker program's shared texture must be decoded")
+    }
+
+    @Test
     fun aGeometryTextureDecodeFailureAtUploadIsTypedAndSanitized() = runTest {
         val renderer = createRenderer(
             testConfiguration(transport = CountingTransport()),
@@ -841,7 +885,7 @@ class RendererFactoryTest {
             ),
         ) as RenGPreparedFrame
         val preparedTexture = frame.geometries.single().consumerTextures.getValue("uMask")
-        // The operation's DECODE_PNG gate and prepare-time prescan have already admitted these bytes.
+        // The operation's DECODE_PNG gate and prepare's IHDR read have already admitted these bytes.
         // This test-only mutation now reaches the otherwise defensive upload failure.
         requireNotNull(preparedTexture.encodedPngBytes)[0] = 0
 

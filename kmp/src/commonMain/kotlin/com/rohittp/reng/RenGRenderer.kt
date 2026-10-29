@@ -979,21 +979,20 @@ internal class RenGRenderer(
                         .orEmpty()
                 }
 
-            val imageReferences = stickerImageReferences +
+            // Every image consumer except Geometry decodes in prepare and reads `decodedByKey`, so every one
+            // of them belongs in this one list: imageReferences and the eager keys below are both built from
+            // it, and a consumer added here can never be left out of the eager set (ADR 0088).
+            val eagerlyDecodedImageReferences = stickerImageReferences +
                 stickerShaderTextureReferences.flatten().map { it.second } +
                 listOfNotNull(backdropReference) +
                 backdropTextureReferences.map { it.second } +
-                modelTextureReferences.filterNotNull() +
+                modelTextureReferences.filterNotNull()
+            val imageReferences = eagerlyDecodedImageReferences +
                 geometryTextureReferencesByGeometry.flatten().map { it.second }
-            // MODEL_TEXTURE is shared by Geometry consumer textures, model overrides and shader
-            // backdrops. Only keys used exclusively by Geometry may take the lazy decode path; a
+            // MODEL_TEXTURE is shared by Geometry consumer textures, sticker programs, model overrides and
+            // shader backdrops. Only keys used exclusively by Geometry may take the lazy decode path; a
             // shared key must still be decoded eagerly for its non-Geometry occurrence.
-            val eagerlyDecodedImageKeys = (
-                stickerImageReferences +
-                    listOfNotNull(backdropReference) +
-                    backdropTextureReferences.map { it.second } +
-                    modelTextureReferences.filterNotNull()
-                ).mapTo(HashSet()) { it.resourceKey }
+            val eagerlyDecodedImageKeys = eagerlyDecodedImageReferences.mapTo(HashSet()) { it.resourceKey }
             val lazyGeometryTextureKeys = geometryTextureReferencesByGeometry
                 .flatten()
                 .mapTo(HashSet()) { it.second.resourceKey }

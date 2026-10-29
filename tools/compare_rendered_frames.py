@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare frames rendered by this working tree against frames rendered by `main`.
 
-Cycle K, and ADR 0043: the comparison is **exact**. Not because exactness is easy, but because a
+The comparison is **exact**. Not because exactness is easy, but because a
 tolerance wide enough to survive a *different machine* is far wider than any regression this project
 has ever produced -- the software rasteriser's own defect is 3,005 wrong pixels of 15,876, roughly
 three thousand times the signal a real change emits in the same frame. Comparing two commits on one

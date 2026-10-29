@@ -458,11 +458,12 @@ detect the things it existed to detect.
 them: same driver, same libm, same rasteriser, so RenG's own source is the only variable left and the
 comparison can be exact. What J promised — "RenG still draws what it drew" — is what K delivers; what J
 also implied, that a stored image says RenG draws *correctly*, is what no automated corpus was ever going
-to deliver, and K assigns it to a human baseline review instead (ADR 0043).
+to deliver, and K assigns it to a human baseline review instead.
 
 Two consequences. `publish.yml` gains **no** step: a release is cut from `main`, where a comparison against
-`main` is degenerate, so the gate lives on pull requests only. And Rentile's two credential-bearing corpus
-gates still have no RenG analogue and are still deliberately not ported.
+`main` is degenerate, and the comparison remains a developer-run branch review tool rather than a CI gate.
+Rentile's two credential-bearing corpus gates still have no RenG analogue and are still deliberately not
+ported.
 
 ## K — Frame Plan corpus and branch comparison
 
@@ -478,6 +479,5 @@ parser and the decomposition gains a cycle." Both happened.
 
 The harness then takes a config and a plan file instead of nine flags, a corpus of named plans crosses
 those configs, and `tools/compare_rendered_frames.py` renders this working tree against a temporary
-worktree at `main` and compares frame by frame with no tolerance. `ci.yml` runs it on pull requests that
-bump major or minor, and says out loud that its verdict is a statement about change, never about
-correctness.
+worktree at `main` and compares frame by frame with no tolerance. It is run locally when a branch is
+expected to change rendered output; its verdict is a statement about change, never about correctness.

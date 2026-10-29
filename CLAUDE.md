@@ -534,7 +534,7 @@ both halves were wrong for this repository: a stored baseline is a claim about a
 that makes one survivable across machines is ~3,000x wider than the signal a real regression emits — the
 `0.3.0` failure measured that exact number, 3,005 wrong pixels of 15,876 on `Apple Software Renderer`.
 K compares **two commits on one machine**, where driver, libm and rasteriser are all constant and RenG's
-source is the only variable, so the comparison is exact (**ADR 0043**).
+source is the only variable, so the comparison is exact.
 
 **A `FramePlan` is now a document (ADR 0042).** Twenty-three public types gained `serializer()`;
 `kmp/api/kmp.klib.api` grew by **97 lines and lost none**, every added line a `Companion` or a `serializer()`

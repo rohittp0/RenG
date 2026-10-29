@@ -716,7 +716,7 @@ class RendererFactoryTest {
         )
     }
 
-    // ---- Task 9b item 4: a Geometry consumer texture is fetched, decoded, and bound ------------------
+    // ---- Geometry consumer textures: resident encoded bytes, decode only on a GPU miss --------------
 
     @Test
     fun aGeometryConsumerTextureRoundTripsThroughPrepareAndDraw() = runTest {
@@ -724,26 +724,135 @@ class RendererFactoryTest {
         val binding = validGlesBinding().apply { declaredNames = mapOf("uMask" to samplerLocation) }
         val transport = CountingTransport()
         val renderer = createRenderer(testConfiguration(transport = transport), binding, fixedProbe())
-        val geometry = Geometry(
-            topLeft = Vector3(1.0, -1.0, 10.0),
-            bottomRight = Vector3(-1.0, 1.0, 0.0),
-            shaderPair = minimalGeometryShaderPair(),
-            textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+        var decodeCalls = 0
+        (renderer as RenGRenderer).geometryTextureDecodeObserver = { decodeCalls += 1 }
+        fun plan(frameIndex: Long): FramePlan = FramePlan(
+            frameIndex = frameIndex,
+            camera = testCamera(),
+            geometries = listOf(
+                Geometry(
+                    topLeft = Vector3(x = 1.0, y = -1.0, z = 10.0),
+                    bottomRight = Vector3(x = -1.0, y = 1.0, z = 0.0),
+                    shaderPair = minimalGeometryShaderPair(),
+                    textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+                ),
+            ),
         )
-        val plan = FramePlan(frameIndex = 0L, camera = testCamera(), geometries = listOf(geometry))
 
-        val frame = renderer.prepare(plan)
+        val first = renderer.prepare(plan(frameIndex = 0L)) as RenGPreparedFrame
         assertEquals(1, transport.executeCalls, "prepare() must fetch the geometry's own consumer texture")
+        assertEquals(0, decodeCalls, "prepare() must not decode a Geometry texture")
+
+        val selector = ResourceSelector.ByClass(ResourceClass.MODEL_TEXTURE)
+        val beforeDraw = renderer.queryResources(selector)
+        assertEquals(onePixelPng.size.toLong(), beforeDraw.cpuResidency.residentBytes)
+        assertEquals(onePixelPng.size.toLong(), beforeDraw.totals.rawBytes)
+        assertEquals(0L, beforeDraw.totals.decodedCpuBytes)
+        val firstTexture = first.geometries.single().consumerTextures.getValue("uMask")
+        assertNull(firstTexture.image)
+        assertContentEquals(onePixelPng, firstTexture.encodedPngBytes)
+        assertEquals(2, firstTexture.width)
+        assertEquals(2, firstTexture.height)
 
         val target = renderer.mintRenderTarget(FramebufferName(0u))
         binding.log.clear()
-        renderer.draw(frame, target)
+        renderer.draw(first, target)
 
+        assertEquals(1, decodeCalls, "the first GPU upload must decode once")
         assertTrue(binding.log.any { it.startsWith("genTextures") }, "the consumer texture must be uploaded")
         assertTrue(
             binding.log.contains("uniform1i($samplerLocation,0)"),
             "the sampler must be bound to a texture unit: ${binding.log}",
         )
+
+        val second = renderer.prepare(plan(frameIndex = 1L)) as RenGPreparedFrame
+        val secondTexture = second.geometries.single().consumerTextures.getValue("uMask")
+        assertEquals(firstTexture.generationId, secondTexture.generationId)
+        renderer.draw(second, target)
+        assertEquals(1, decodeCalls, "a GPU hit on the second frame must not decode")
+
+        renderer.notifyGpuObjectsGone()
+        renderer.adoptCurrentRenderContext()
+        val replacementTarget = renderer.mintRenderTarget(FramebufferName(0u))
+        renderer.draw(second, replacementTarget)
+        assertEquals(2, decodeCalls, "the first upload after context loss must decode again")
+        assertEquals(0L, renderer.queryResources(selector).totals.decodedCpuBytes)
+    }
+
+    @Test
+    fun geometryTextureRawBytesFitWithoutEvictionAndKeepOneGenerationAcrossFrames() = runTest {
+        val transport = CountingTransport()
+        val limits = ResourceLimits(maximumResidentCpuResourceBytes = onePixelPng.size.toLong())
+        val renderer = createRenderer(
+            testConfiguration(transport = transport, resourceLimits = limits),
+            validGlesBinding().apply { declaredNames = mapOf("uMask" to 66) },
+            fixedProbe(),
+        )
+        val planGeometry = Geometry(
+            topLeft = Vector3(x = 1.0, y = -1.0, z = 10.0),
+            bottomRight = Vector3(x = -1.0, y = 1.0, z = 0.0),
+            shaderPair = minimalGeometryShaderPair(),
+            textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val generationIds = ArrayList<com.rohittp.reng.internal.cache.ResidentGenerationId>()
+
+        repeat(4) { frameIndex ->
+            val frame = renderer.prepare(
+                FramePlan(
+                    frameIndex = frameIndex.toLong(),
+                    camera = testCamera(),
+                    geometries = listOf(planGeometry),
+                ),
+            ) as RenGPreparedFrame
+            generationIds += frame.geometries.single().consumerTextures.getValue("uMask").generationId
+            renderer.draw(frame, target)
+            frame.close()
+        }
+
+        val report = renderer.queryResources(ResourceSelector.ByClass(ResourceClass.MODEL_TEXTURE))
+        assertEquals(1, generationIds.distinct().size, "the resident generation must stay stable")
+        assertEquals(1, report.entries.single().residentGenerationCount)
+        assertEquals(onePixelPng.size.toLong(), report.cpuResidency.residentBytes)
+        assertEquals(0L, report.totals.decodedCpuBytes)
+        assertEquals(0L, report.cpuResidency.evictedKeyCount)
+        assertEquals(1, transport.executeCalls, "a stable resident generation must not be fetched again")
+    }
+
+    @Test
+    fun aGeometryTextureDecodeFailureAtUploadIsTypedAndSanitized() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding().apply { declaredNames = mapOf("uMask" to 66) },
+            fixedProbe(),
+        )
+        val frame = renderer.prepare(
+            FramePlan(
+                frameIndex = 0L,
+                camera = testCamera(),
+                geometries = listOf(
+                    Geometry(
+                        topLeft = Vector3(x = 1.0, y = -1.0, z = 10.0),
+                        bottomRight = Vector3(x = -1.0, y = 1.0, z = 0.0),
+                        shaderPair = minimalGeometryShaderPair(),
+                        textures = mapOf("uMask" to ResourceLocator("https://example.invalid/mask.png")),
+                    ),
+                ),
+            ),
+        ) as RenGPreparedFrame
+        val preparedTexture = frame.geometries.single().consumerTextures.getValue("uMask")
+        // The operation's DECODE_PNG gate and prepare-time prescan have already admitted these bytes.
+        // This test-only mutation now reaches the otherwise defensive upload failure.
+        requireNotNull(preparedTexture.encodedPngBytes)[0] = 0
+
+        val failure = assertFailsWith<RenGException> {
+            renderer.draw(frame, renderer.mintRenderTarget(FramebufferName(0u)))
+        }
+
+        assertEquals(RenGErrorCode.RESOURCE_DECODE_FAILED, failure.code)
+        assertEquals(PipelineStage.RESOURCE_DECODING, failure.stage)
+        assertEquals(ResourceClass.MODEL_TEXTURE, failure.diagnostics.single().resourceClass)
+        assertEquals(preparedTexture.resourceKey, failure.diagnostics.single().resourceKey)
     }
 
     // ---- Task 16: a Model is acquired, decoded, posed, uploaded and drawn ---------------------------
@@ -1512,7 +1621,11 @@ private class CountingTransport : Transport {
 
     override suspend fun execute(request: TransportRequest): TransportResponse {
         executeCalls += 1
-        return TransportResponse(statusCode = 200, body = onePixelPng)
+        return TransportResponse(
+            statusCode = 200,
+            body = onePixelPng,
+            metadata = TransportResponseMetadata(freshUntilEpochMillis = Long.MAX_VALUE),
+        )
     }
 }
 

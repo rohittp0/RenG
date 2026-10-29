@@ -23,22 +23,55 @@ internal class ContentTextureCache(
     internal fun cachedTexture(
         key: ResourceKey,
         generationId: ResidentGenerationId,
-        image: DecodedImage,
+        image: DecodedImage?,
         content: TextureContent,
         leases: MutableList<GpuAllocationLease>,
         binding: GlBinding,
         sampler: TextureSamplerState = defaultSamplerStateFor(content),
         subresource: GpuSubresource = GpuSubresource.Texture,
-    ): Int = leaseOrUploadTexture(
+    ): Int {
+        val decodedImage = requireNotNull(image) { "an eager content texture must carry decoded pixels" }
+        return leaseOrUploadTexture(
+            identity = GpuResourceIdentity(
+                ownerKey = key,
+                generationId = generationId,
+                subresource = subresource,
+                uploadVariant = GpuUploadVariant(content, sampler),
+            ),
+            leases = leases,
+            textureBytes = { textureAllocationBytes(decodedImage.width, decodedImage.height, sampler) },
+            upload = { uploadTexture(binding, decodedImage, content, sampler) },
+        )
+    }
+
+    /**
+     * Geometry-texture variant whose encoded bytes are decoded only inside the genuine GPU-miss
+     * upload path. A rejected decode returns `null` without registering a partial allocation.
+     */
+    internal fun cachedGeometryTexture(
+        key: ResourceKey,
+        generationId: ResidentGenerationId,
+        encodedPngBytes: ByteArray,
+        width: Int,
+        height: Int,
+        content: TextureContent,
+        leases: MutableList<GpuAllocationLease>,
+        binding: GlBinding,
+        decode: (ByteArray) -> DecodedImage?,
+        sampler: TextureSamplerState = defaultSamplerStateFor(content),
+    ): Int? = leaseOrUploadTextureOrNull(
         identity = GpuResourceIdentity(
             ownerKey = key,
             generationId = generationId,
-            subresource = subresource,
+            subresource = GpuSubresource.Texture,
             uploadVariant = GpuUploadVariant(content, sampler),
         ),
         leases = leases,
-        textureBytes = { textureAllocationBytes(image.width, image.height, sampler) },
-        upload = { uploadTexture(binding, image, content, sampler) },
+        textureBytes = { textureAllocationBytes(width, height, sampler) },
+        upload = {
+            val image = decode(encodedPngBytes) ?: return@leaseOrUploadTextureOrNull null
+            uploadTexture(binding, image, content, sampler)
+        },
     )
 
     /**
@@ -81,6 +114,27 @@ internal class ContentTextureCache(
             return resident.payload as Int
         }
         val name = upload()
+        leases += glObjectRegistry.registerAllocation(
+            identity = identity,
+            handles = listOf(GlObjectHandle(GlObjectType.TEXTURE, name)),
+            textureBytes = textureBytes(),
+            bufferBytes = 0L,
+            payload = name,
+        )
+        return name
+    }
+
+    private fun leaseOrUploadTextureOrNull(
+        identity: GpuResourceIdentity,
+        leases: MutableList<GpuAllocationLease>,
+        textureBytes: () -> Long,
+        upload: () -> Int?,
+    ): Int? {
+        glObjectRegistry.leaseAllocation(identity)?.let { resident ->
+            leases += resident.lease
+            return resident.payload as Int
+        }
+        val name = upload() ?: return null
         leases += glObjectRegistry.registerAllocation(
             identity = identity,
             handles = listOf(GlObjectHandle(GlObjectType.TEXTURE, name)),

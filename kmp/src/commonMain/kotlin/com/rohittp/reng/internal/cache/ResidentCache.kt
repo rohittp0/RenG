@@ -22,7 +22,8 @@ import com.rohittp.reng.internal.thread.PlatformLock
 internal data class ResidentGenerationId(val value: Long)
 
 /**
- * One resident copy of a [ResourceKey]'s raw bytes and, for image classes, its decoded pixels. A
+ * One resident copy of a [ResourceKey]'s raw bytes and, for eagerly decoded image classes, its
+ * decoded pixels. Geometry consumer textures retain encoded PNG only and decode on a GPU miss. A
  * generation is an identity, not a value: [ResidentCache.install] never interns by content, so two
  * installs of byte-identical bytes still produce two distinct, independently-leased generations — see
  * [ResidentCache] for why a retired generation is never resurrected. Raw bytes are retained for as long
@@ -57,8 +58,8 @@ internal class ResidentGeneration(
      *
      * `byteSnapshot` is the internal no-copy accessor, so `.size` is a field read rather than the
      * array copy `bytes` would make — this is computed for every install and must not be the
-     * expensive one. The decoded half is always zero in production today, because every install
-     * passes `decoded = null`; it is included so the figure stays right the day one does not.
+     * expensive one. Every install starts with `decoded = null`; sticker, backdrop and model texture
+     * paths can attach decoded pixels later, while Geometry consumer textures deliberately never do.
      */
     var byteSize: Long = stored.byteSnapshot.size.toLong() + (decoded?.byteCount ?: 0).toLong()
         private set

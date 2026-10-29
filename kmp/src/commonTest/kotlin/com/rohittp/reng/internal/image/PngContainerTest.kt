@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 // Every fixture below is generated once via CPython's zlib/struct modules and pasted as a byte
 // literal, so every target's test task asserts against the exact same bytes rather than
@@ -42,6 +43,16 @@ class PngContainerTest {
         val scan = assertIs<PngScan.Admitted>(scanPng(rgb8TwoByTwo))
         assertEquals(PngHeader(2, 2, 8, 2, 0), scan.header)
         assertEquals(1, scan.imageDataRanges.size)
+    }
+
+    @Test
+    fun readsTheHeaderSizeWithoutWalkingTheChunks() {
+        assertEquals(PngDimensions(width = 2, height = 2), pngHeaderDimensions(rgb8TwoByTwo))
+        // scanPng rejects this one for a later chunk's CRC; the header read never looks past IHDR (ADR 0088).
+        assertEquals(PngReject.CHUNK_CRC, rejectionOf(rgb8WithBadAncillaryCrc))
+        assertEquals(PngDimensions(width = 2, height = 2), pngHeaderDimensions(rgb8WithBadAncillaryCrc))
+        assertNull(pngHeaderDimensions(rgb8TwoByTwo.copyOf().also { it[1] = 0 }), "a broken signature has no size")
+        assertNull(pngHeaderDimensions(rgb8TwoByTwo.copyOf(20)), "a truncated IHDR has no size")
     }
 
     @Test

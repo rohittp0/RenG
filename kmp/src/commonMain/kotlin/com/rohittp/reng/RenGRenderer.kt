@@ -122,6 +122,7 @@ import com.rohittp.reng.internal.image.PngPrescan
 import com.rohittp.reng.internal.image.decodePng
 import com.rohittp.reng.internal.image.isEtc2Container
 import com.rohittp.reng.internal.image.parseEtc2Container
+import com.rohittp.reng.internal.image.pngHeaderDimensions
 import com.rohittp.reng.internal.image.prescanPng
 import com.rohittp.reng.internal.label.LabelFadeState
 import com.rohittp.reng.internal.label.LabelGroundElevation
@@ -954,6 +955,19 @@ internal class RenGRenderer(
                 backdropTextureReferences.map { it.second } +
                 modelTextureReferences.filterNotNull() +
                 geometryTextureReferencesByGeometry.flatten().map { it.second }
+            // MODEL_TEXTURE is shared by Geometry consumer textures, model overrides and shader
+            // backdrops. Only keys used exclusively by Geometry may take the lazy decode path; a
+            // shared key must still be decoded eagerly for its non-Geometry occurrence.
+            val eagerlyDecodedImageKeys = (
+                stickerImageReferences +
+                    listOfNotNull(backdropReference) +
+                    backdropTextureReferences.map { it.second } +
+                    modelTextureReferences.filterNotNull()
+                ).mapTo(HashSet()) { it.resourceKey }
+            val lazyGeometryTextureKeys = geometryTextureReferencesByGeometry
+                .flatten()
+                .mapTo(HashSet()) { it.second.resourceKey }
+                .apply { removeAll(eagerlyDecodedImageKeys) }
             // Post-world-copy-dedup by construction: `canonicalResources` is what BasemapTileSelector
             // emits separately from `instances` precisely so N visible copies of one tile are one
             // acquisition, one engine render and one identity. Since E-labels task 8b the selection is
@@ -1019,6 +1033,7 @@ internal class RenGRenderer(
                         blendRawTileReservation = reservation
                     }
                 },
+                lazyGeometryTextureKeys = lazyGeometryTextureKeys,
             )
             currentCoroutineContext().ensureActive()
             val decodedByKey = acquired.decodedImagesByKey
@@ -1119,17 +1134,24 @@ internal class RenGRenderer(
 
             // Task 9b item 3: both of Geometry's live Map references are snapshotted right here,
             // synchronously, before this suspend function ever returns -- uniforms via .toMap(),
-            // textures by replacing every ResourceLocator with its already-fetched, already-decoded
-            // content. Neither snapshot can be affected by a consumer mutating their own map after
-            // prepare() returns.
+            // textures by replacing every ResourceLocator with its already-fetched resident bytes
+            // and IHDR dimensions. Neither snapshot can be affected by a consumer mutating their own
+            // map after prepare() returns.
             val geometries = plan.geometries.mapIndexed { index, geometry ->
                 val consumerTextures = geometryTextureReferencesByGeometry[index].associate { (name, reference) ->
+                    val generation = requireNotNull(acquired.leasedGenerations[reference.resourceKey]) {
+                        "a successful resource operation must leave this frame a lease on its generation"
+                    }
+                    val encodedPngBytes = generation.stored.byteSnapshot
+                    // The header alone, never `prescanPng`: that CRC-checks the whole PNG, and this runs
+                    // for every geometry texture on every frame. The gate admitted these bytes at install.
+                    val size = pngHeaderDimensions(encodedPngBytes) ?: throw imageDecodeFailure(reference)
                     name to PreparedGeometryTexture(
                         resourceKey = reference.resourceKey,
-                        generationId = generationIdFor(reference.resourceKey),
-                        image = requireNotNull(decodedByKey[reference.resourceKey]) {
-                            "a successful geometry-texture acquisition must decode every traversed image"
-                        },
+                        generationId = generation.id,
+                        encodedPngBytes = encodedPngBytes,
+                        width = size.width,
+                        height = size.height,
                     )
                 }
                 PreparedGeometry(
@@ -1603,6 +1625,9 @@ internal class RenGRenderer(
         )
     }
 
+    /** Per-renderer test seam; production leaves it null and pays only a nullable-call check on misses. */
+    internal var geometryTextureDecodeObserver: (() -> Unit)? = null
+
     /**
      * Derives the same [StaticResourceReference.External] shape
      * `FramePlanningCore.staticResourceTraversal()`'s own `external(...)` helper produces for a
@@ -1835,11 +1860,13 @@ internal class RenGRenderer(
      * texture's), every model GLB ([modelGlbReferences]), and the ground itself ([canonicalTiles]).
      * Returns the decoded images by key plus the rendered ground.
      *
-     * **Two kinds are acquired and not decoded here, for two different reasons.** A style is not an
+     * **Three kinds are acquired and not decoded here, for different reasons.** A style is not an
      * image at all: it is validated, compiled through the engine, written and installed by the resource
      * driver's own basemap-style commit verbs. A GLB is not an image either, and its decode needs the
      * `ResourceLimits` and the failure vocabulary [prepareModel] owns — so this function's job for a
-     * model ends at leaving its bytes resident, which is exactly what [prepareModel] then reads.
+     * model ends at leaving its bytes resident, which is exactly what [prepareModel] then reads. A
+     * Geometry consumer texture keeps its leased PNG bytes and IHDR dimensions for decode only when
+     * its draw misses the GPU cache.
      *
      * Returns nothing and performs no adapter call at all when there is nothing to acquire, which is
      * what keeps `prepare()` on a plan with no stickers, no models, no geometry consumer textures, and
@@ -1889,6 +1916,8 @@ internal class RenGRenderer(
         rawReservationSink: (RawTileBudget.Reservation) -> Unit,
         /** First-attempt snapshot materialisation; never set by an ordinary frame (ADR 0086). */
         manifestForPriming: Boolean = false,
+        /** MODEL_TEXTURE keys used only by Geometry; validated and leased, but not decoded here. */
+        lazyGeometryTextureKeys: Set<ResourceKey> = emptySet(),
     ): FrameAcquisition {
         val references = if (blendStyleReference == null) {
             listOfNotNull(primaryStyleReference) + imageReferences + modelGlbReferences
@@ -2092,6 +2121,7 @@ internal class RenGRenderer(
             currentCoroutineContext().ensureActive()
             val generation = leasedGenerations[reference.resourceKey]
                 ?: error("a successful resource operation must leave this frame a lease on its content")
+            if (reference.resourceKey in lazyGeometryTextureKeys) continue
             // ADR 0084. Told by magic bytes alone, as the class gate told it, and only for the one class
             // whose gate admits it: any other class's container falls through to the PNG decode below and
             // fails there. Nothing is decoded and nothing is attached -- the image is a view of the bytes
@@ -2841,13 +2871,39 @@ internal class RenGRenderer(
             }
             consumerPipelineLeases += pipelineLease
             val consumerTextures = preparedGeometry.consumerTextures.mapValues { (_, texture) ->
-                contentTextures.cachedTexture(
+                contentTextures.cachedGeometryTexture(
                     key = texture.resourceKey,
                     generationId = texture.generationId,
-                    image = texture.image,
+                    encodedPngBytes = requireNotNull(texture.encodedPngBytes) {
+                        "a prepared Geometry texture must retain its leased generation bytes"
+                    },
+                    width = texture.width,
+                    height = texture.height,
                     content = TextureContent.DATA,
                     leases = gpuAllocationLeases,
                     binding = binding,
+                    decode = { encodedPngBytes ->
+                        geometryTextureDecodeObserver?.invoke()
+                        when (
+                            val decoded = decodePng(
+                                encodedPngBytes,
+                                configuration.resourceLimits.maximumDecodedImageBytes,
+                                configuration.resourceLimits.maximumImageDecodeWorkingBytes,
+                            )
+                        ) {
+                            is PngDecodeResult.Success -> decoded.image
+                            else -> null
+                        }
+                    },
+                ) ?: return FailureDescriptor(
+                    code = RenGErrorCode.RESOURCE_DECODE_FAILED,
+                    stage = PipelineStage.RESOURCE_DECODING,
+                    diagnostic = failureContextDiagnostic(
+                        stage = PipelineStage.RESOURCE_DECODING,
+                        fieldName = DiagnosticField.RESOURCE,
+                        resourceClass = ResourceClass.MODEL_TEXTURE,
+                        resourceKey = texture.resourceKey,
+                    ),
                 )
             }
             sceneGeometries += SceneGeometry(

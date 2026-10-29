@@ -17,6 +17,7 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.ShaderDialect
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -114,6 +115,48 @@ internal fun runStickerOpacityReadbackSuite(
                 )
             }
         }
+
+        failures.run("geometry texture decodes only on GPU misses") {
+            var decodeCalls = 0
+            (renderer as RenGRenderer).geometryTextureDecodeObserver = { decodeCalls += 1 }
+
+            val first = clearDrawAndReadSticker(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = renderTarget,
+                targetFramebuffer = target,
+                plan = geometryTextureFramePlan(frameIndex = 100L),
+            )
+            assertContentEquals(STICKER_SOURCE, first, "the first Geometry texture upload must draw its texel")
+            assertEquals(1, decodeCalls, "the first draw must decode for its GPU upload")
+
+            val second = clearDrawAndReadSticker(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = renderTarget,
+                targetFramebuffer = target,
+                plan = geometryTextureFramePlan(frameIndex = 101L),
+            )
+            assertContentEquals(STICKER_SOURCE, second, "the GPU-hit frame must draw the same texel")
+            assertEquals(1, decodeCalls, "the second frame's GPU hit must not decode")
+
+            renderer.notifyGpuObjectsGone()
+            renderer.adoptCurrentRenderContext()
+            val replacementTarget = renderer.mintRenderTarget(FramebufferName(target.toUInt()))
+            val afterContextLoss = clearDrawAndReadSticker(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = replacementTarget,
+                targetFramebuffer = target,
+                plan = geometryTextureFramePlan(frameIndex = 102L),
+            )
+            assertContentEquals(
+                STICKER_SOURCE,
+                afterContextLoss,
+                "the first frame after context loss must redraw the decoded texel",
+            )
+            assertEquals(2, decodeCalls, "context loss must make the next GPU upload decode again")
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target))
@@ -156,6 +199,24 @@ private fun stickerOpacityFramePlan(
             topLeft = Vector3(-54.4, -136.0, 0.0),
             bottomRight = Vector3(-55.6, -134.0, 0.0),
             shaderPair = ShaderPair(STICKER_BACKGROUND_VERTEX, STICKER_BACKGROUND_FRAGMENT),
+        ),
+    ),
+)
+
+private fun geometryTextureFramePlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(latitude = -55.0, unwrappedLongitude = -135.0, zoom = 4.0, bearing = 0.0, pitch = 0.0),
+    drawBasemap = false,
+    drawLabels = false,
+    geometries = listOf(
+        Geometry(
+            topLeft = Vector3(x = -54.4, y = -136.0, z = 0.0),
+            bottomRight = Vector3(x = -55.6, y = -134.0, z = 0.0),
+            shaderPair = ShaderPair(
+                vertexSource = GEOMETRY_TEXTURE_VERTEX,
+                fragmentSource = GEOMETRY_TEXTURE_FRAGMENT,
+            ),
+            textures = mapOf("uData" to ResourceLocator(GEOMETRY_TEXTURE_URL)),
         ),
     ),
 )
@@ -251,6 +312,7 @@ private class StickerOpacityTransport : Transport {
     override suspend fun execute(request: TransportRequest): TransportResponse {
         val (body, contentType) = when (request.locator.value) {
             STICKER_OPACITY_URL -> STICKER_OPACITY_PNG to "image/png"
+            GEOMETRY_TEXTURE_URL -> STICKER_OPACITY_PNG to "image/png"
             ETC2_PREMULTIPLIED_URL -> ETC2_PREMULTIPLIED to "image/x-reng-etc2"
             ETC2_MIP_URL -> ETC2_MIP_CHAIN to "image/x-reng-etc2"
             else -> error("unexpected sticker locator")
@@ -258,7 +320,10 @@ private class StickerOpacityTransport : Transport {
         return TransportResponse(
             statusCode = 200,
             body = body,
-            metadata = TransportResponseMetadata(contentType = contentType),
+            metadata = TransportResponseMetadata(
+                contentType = contentType,
+                freshUntilEpochMillis = Long.MAX_VALUE,
+            ),
         )
     }
 }
@@ -331,6 +396,21 @@ private val STICKER_BACKGROUND_FRAGMENT: String =
         "precision highp float;\n" +
         "out vec4 colour;\n" +
         "void main() { colour = vec4(0.125490196, 0.376470588, 0.627450980, 1.0); }\n"
+
+private const val GEOMETRY_TEXTURE_URL: String = "https://stickers.example/geometry.png"
+
+private val GEOMETRY_TEXTURE_VERTEX: String =
+    "#version 300 es\n" +
+        "in vec3 aPosition;\n" +
+        "uniform mat4 uModelViewProjection;\n" +
+        "void main() { gl_Position = uModelViewProjection * vec4(aPosition, 1.0); }\n"
+
+private val GEOMETRY_TEXTURE_FRAGMENT: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform sampler2D uData;\n" +
+        "out vec4 colour;\n" +
+        "void main() { colour = texture(uData, vec2(0.5)); }\n"
 
 private val STICKER_OPACITY_PNG: ByteArray = byteArrayOf(
     -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,

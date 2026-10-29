@@ -194,52 +194,66 @@ class FramePlanningCoreTest {
         assertEquals(emptyList(), resolver.calls)
     }
 
-    /** ADR 0087: a sticker program that is not a Shader Profile fails where a Geometry's does. */
+    /**
+     * ADR 0087: a sticker program that is not a Shader Profile, or that carries an `#extension` the
+     * preamble would land in front of, fails at the planning barrier in both projections, naming the
+     * sticker's own field.
+     */
     @Test
-    fun aStickerProgramThatIsNotAShaderProfileFailsAtThePlanningBarrier() {
+    fun aStickerProgramThatIsNotAShaderProfileOrCarriesAnExtensionFailsAtThePlanningBarrier() {
+        val refused = listOf(
+            "missing directive",
+            "#version 300 es\n#extension GL_EXT_shader_framebuffer_fetch : require\nvoid main() {}\n",
+            "#version 300 es\n  #  extension GL_OES_standard_derivatives : enable\nvoid main() {}\n",
+        )
         for (projectionMode in ProjectionMode.entries) {
-            val resolver = RecordingPrivateKeyResolver()
-            val outcome = planningCore(resolver).plan(
-                request(
-                    plan = framePlan(
-                        projectionMode = projectionMode,
-                        stickers = listOf(
-                            Sticker(screenPlacement(), ResourceLocator("s"), shader = StickerShader("missing directive")),
+            for (source in refused) {
+                val resolver = RecordingPrivateKeyResolver()
+                val outcome = planningCore(resolver).plan(
+                    request(
+                        plan = framePlan(
+                            projectionMode = projectionMode,
+                            stickers = listOf(
+                                Sticker(screenPlacement(), ResourceLocator("s"), shader = StickerShader(source)),
+                            ),
                         ),
+                        basemapStyle = ResourceLocator("style-document"),
                     ),
-                    basemapStyle = ResourceLocator("style-document"),
-                ),
-            )
-            assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "shaderPair")
-            assertEquals(emptyList(), resolver.calls)
+                )
+                assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "sticker.shader.fragmentSource")
+                assertEquals(emptyList(), resolver.calls)
+            }
         }
     }
 
     /**
-     * ADR 0087: a ground rectangle resolves through the Geometry's own corner path at planning, so one
-     * the Mercator camera cannot carry fails there with the Geometry's own field, not at draw.
+     * ADR 0087: a ground rectangle a Mercator camera cannot carry does not fail the frame in either
+     * projection; the sticker draws without ground and the draw reports it.
      */
     @Test
-    fun aStickerGroundRectangleBeyondMercatorsLatitudeFailsAtPlanning() {
-        val resolver = RecordingPrivateKeyResolver()
-        val outcome = planningCore(resolver).plan(
-            request(
-                plan = framePlan(
-                    stickers = listOf(
-                        Sticker(
-                            screenPlacement(),
-                            ResourceLocator("s"),
-                            shader = StickerShader(
-                                validShader("sticker"),
-                                ground = GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0)),
+    fun aStickerGroundRectangleBeyondMercatorsLatitudePlansInBothProjections() {
+        for (projectionMode in ProjectionMode.entries) {
+            planSuccess(
+                planningCore(RecordingPrivateKeyResolver()),
+                request(
+                    plan = framePlan(
+                        projectionMode = projectionMode,
+                        drawBasemap = false,
+                        drawLabels = false,
+                        stickers = listOf(
+                            Sticker(
+                                screenPlacement(),
+                                ResourceLocator("s"),
+                                shader = StickerShader(
+                                    validShader("sticker"),
+                                    ground = GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0)),
+                                ),
                             ),
                         ),
                     ),
                 ),
-            ),
-        )
-        assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "geometry.latitude")
-        assertEquals(emptyList(), resolver.calls)
+            )
+        }
     }
 
     /**

@@ -45,7 +45,11 @@ implementation choice, and a function hides it. Handing over functions rather th
 what lets RenG promise that a pass-through program draws the plain sticker's pixels, and keep that
 promise. Geometry and the backdrop keep ADR 0008's rule; this exception is the sticker program's alone.
 
-A source may not use `#extension`: a directive must precede the preamble's declarations.
+A source may not carry `#extension`: a directive must precede the preamble's declarations. Frame
+planning refuses any physical line beginning `#extension` (after spaces, tabs and a `#` with spaces)
+as `INVALID_VALUE` naming `sticker.shader.fragmentSource`, the field a source that is not a Shader
+Profile fails with too. By line rather than by token, so one hidden in a block comment is refused as
+well: a false refusal costs a comment, a false acceptance a driver-dependent compile error.
 
 ## The interface a program sees
 
@@ -53,9 +57,11 @@ A source may not use `#extension`: a directive must precede the preamble's decla
     in vec2 rengStickerUv;                 // (0,0) at the image's top-left texel, (1,1) bottom-right
     vec4 rengStickerColour();              // image sample * opacity, premultiplied: the plain sticker
     vec2 rengStickerGroundUv();            // the ground rectangle's coordinate under this fragment
+    bool rengStickerHasGround();           // whether this frame gives the program a rectangle at all
 
 plus the uniforms behind them (`rengStickerTexture`, `rengStickerOpacity`,
-`rengStickerWindowToGround`), which are reserved and the program must not declare.
+`rengStickerWindowToGround`, `rengStickerGroundOrigin`, `rengStickerGroundPresent`), which are
+reserved and the program must not declare.
 
 `rengStickerColour()` is the plain fragment shader's expression verbatim, for a PNG and an ETC2 image
 alike, since both reach the same sampler. A program whose `main` writes only it reads back
@@ -66,8 +72,19 @@ lies: `u` from the west edge (0) to the east (1), `v` from the north edge (0) to
 Mercator exactly as a Geometry's `aTexCoord` is. Because it is answered for the window pixel and not for
 the sticker, it means the same thing for a billboard, a sticker lying on the map, and a
 screen-composited sticker. Values outside `[0, 1]` are ground outside the rectangle. Where the line of
-sight never meets the rectangle's plane -- above its horizon -- it returns `vec2(-1.0)`. With no
-`ground`, and under a globe camera, it returns `vec2(-1.0)` everywhere.
+sight never meets the rectangle's plane -- above its horizon -- it returns `vec2(-1.0)`.
+
+It answers for the **flat plane** through the rectangle's declared absolute altitudes. It does not
+follow terrain: where the ground is displaced (ADR 0039) the visible ground is not that plane, and a
+mask along a mountainous border shows parallax against the drawn relief. Keep the result `highp`:
+`mediump` is half precision on mobile GPUs and truncates a coordinate to about three decimal digits.
+
+`rengStickerHasGround()` is per frame, not per pixel. It is false with no `ground`, under a globe
+camera, and when the frame's Mercator camera cannot carry the rectangle; true otherwise -- including
+at a pixel above the horizon, which reads `vec2(-1.0)` from `rengStickerGroundUv()` while the frame
+still has ground. Wherever it is false, `rengStickerGroundUv()` is `vec2(-1.0)` everywhere. A mask
+needs the distinction: "no ground information this frame" usually means draw the image whole, while
+"this pixel is off the rectangle" means cut it.
 
 Blend and depth state are the plain sticker's, untouched: the map regime tests depth and writes none
 (ADR 0027), the screen stack composites without a depth test (ADR 0024), and the sticker's own
@@ -84,7 +101,8 @@ texture, and lets everything above a line in the sticker's own space pop out:
     out vec4 colour;
     void main() {
         vec4 image = rengStickerColour();
-        vec2 ground = rengStickerGroundUv();
+        if (!rengStickerHasGround()) { colour = image; return; }
+        highp vec2 ground = rengStickerGroundUv();
         bool onRectangle = all(greaterThanEqual(ground, vec2(0.0))) && all(lessThanEqual(ground, vec2(1.0)));
         bool inside = onRectangle && texture(uDistance, ground).r > 0.5;
         colour = (inside || rengStickerUv.y < uPopLine) ? image : vec4(0.0);
@@ -104,27 +122,66 @@ The corners come through `resolveMercatorRectangleCorners`, which is `resolveGeo
 extracted rather than a second derivation, so the rectangle a program reads against is by construction
 the one a Geometry over the same corners draws. Everything up to the single narrowing is `Double` and
 camera-relative; the matrix is built with its columns normalised and scaled to a largest element of
-one, which changes no answer because a homography means the same thing at any positive scale. What
-reaches the shader is window pixels in and a texture coordinate out, both small, so the shader's error
-is a few `Float` ulps of the coordinate -- the order of a Geometry's own interpolated `aTexCoord`. No
+one, which changes no answer because a homography means the same thing at any positive scale. No
 absolute Mercator coordinate is ever narrowed.
 
-It is uploaded as a `mat4` acting on `vec4(gl_FragCoord.xy, 0, 1)`, the 3x3 in rows and columns 0, 1
-and 3, only because `GlBinding` has no `glUniformMatrix3fv`; the nine numbers are the same.
+**The map is relative to a whole-pixel origin near the rectangle.** The shader evaluates in `Float`,
+and against raw `gl_FragCoord` the coordinate of a small rectangle near the far edge of a large frame
+is a number of order one computed from terms the size of the frame that cancel. A review estimated
+1e-3 to 1e-2 of the coordinate on a 4K-16K frame; `StickerGroundTest` measures 1.5e-3 of a **pixel**
+for a 24-pixel rectangle at the edges of a 16384-pixel frame (about 6e-5 of the coordinate) -- smaller
+than estimated, because the error is a few ulps of the frame coordinate in pixel terms whatever the
+rectangle's size, but enough to flip a nearest-sampled texel that a Geometry over the same rectangle
+would not, so it is removed rather than argued about.
+So RenG builds the map relative to the window pixel nearest the rectangle's projected centre, clamped
+into the frame (the frame's centre if the rectangle's centre is behind the camera), and uploads that
+origin as `rengStickerGroundOrigin`. The preamble's `gl_FragCoord.xy - origin` is exact in `Float` --
+half-integers below 2^24 minus an integer -- and around the rectangle every term of the product is
+then the size of the coordinate itself. `StickerGroundTest` evaluates the shader's arithmetic at every
+pixel of that rectangle at each edge and corner of the frame and holds it within 1e-4 of a pixel of the
+`Double` map (measured 1.3e-6), with the uncentred map as a control that must do measurably worse.
 
-The rectangle is resolved at frame planning as well as at draw, so a rectangle the Mercator camera
-cannot carry fails as `INVALID_VALUE` at `FRAME_PLANNING` with the Geometry's own field. A source that
-is not a Shader Profile fails there too, with `shaderPair`, as a backdrop's does; a compile or link
-failure is reported as the consumer's (ADR 0071).
+What remains is the coordinate's own resolution: one `Float` spans the whole rectangle, so the larger
+the rectangle on screen, the coarser a pixel's share of it. At zoom 18 and pitch 45, over a 1920x1080
+frame, a 40-degree rectangle reads to within 1.07 pixels (bounded below 2 in `StickerGroundTest`) and a
+170-degree one to 5.4. Consumers should keep the rectangle tight around what the program reads.
 
-## Under a globe it is off-rectangle everywhere
+It is uploaded as a `mat4` acting on `vec4(gl_FragCoord.xy - origin, 0, 1)`, the 3x3 in rows and
+columns 0, 1 and 3, only because `GlBinding` has no `glUniformMatrix3fv`; the nine numbers are the same.
+
+## A rectangle the camera cannot carry degrades, it does not fail
+
+A rectangle beyond Mercator's latitude limit (85.0511 degrees) or its world-copy bounds cannot be
+resolved by a Mercator camera. Failing the frame for it would be wrong twice over: a sticker draws
+correctly without its ground, and the same plan would succeed under a globe and fail under Mercator,
+so a globe-to-Mercator transition could fail mid-export. So it is resolved at draw only, and when the
+camera cannot carry it the sticker draws with no ground -- `rengStickerHasGround()` false, the zero
+matrix -- and the draw reports `DiagnosticCode.STICKER_GROUND_UNAVAILABLE`, a warning with field
+`sticker.shader.ground` and the count of such stickers as `actual`. A globe frame reports nothing:
+having no ground there is the contract, not a fault.
+
+A source that is not a Shader Profile still fails at `FRAME_PLANNING` as `INVALID_VALUE`, in both
+projections, naming `sticker.shader.fragmentSource`; a compile or link failure is reported as the
+consumer's (ADR 0071).
+
+## Sampler objects are cleared on every unit a sticker program binds
+
+A sticker program's textures are data uploaded for `GL_NEAREST`; a `GL_LINEAR` sampler object a host
+left on one of its units (Skia on a shared context does) would filter a packed 16-bit value into
+nonsense. So the sticker pass binds sampler 0 on unit 0 for the image, and the shared consumer-value
+binder binds sampler 0 on every unit it binds a consumer texture to -- which changes Geometry and the
+shader backdrop the same way, for the same reason. The capture region saves each unit's sampler before
+the first write and restores it after the frame (ADR 0055), so the host's state is untouched.
+
+## Under a globe there is no ground
 
 The globe's ground is a sphere, and no homography maps a sphere. ADR 0072 handed the backdrop a matrix
 and let the consumer choose the tangent-plane approximation; that works for a pattern, whose error
 toward the limb is cosmetic. A mask is not cosmetic -- a coastline cut a few pixels wrong reads as a
 defect -- so rather than a plane that is silently wrong away from the anchor, a globe frame binds the
-zero matrix and `rengStickerGroundUv()` answers `vec2(-1.0)` for every fragment. The sticker still
-draws; the program sees no rectangle. The globe planner still scans the source and resolves no corners.
+zero matrix: `rengStickerHasGround()` is false and `rengStickerGroundUv()` answers `vec2(-1.0)` for
+every fragment. The sticker still draws. The globe planner still checks the source and resolves no
+corners.
 
 ## Identity and serialization
 

@@ -263,12 +263,24 @@ public data class Sticker(
  *   for the sticker, so a billboard, a sticker lying on the map and a screen-composited sticker all
  *   read the ground beneath them. Values outside `[0, 1]` are ground outside the rectangle; where the
  *   fragment's line of sight never meets the rectangle's plane -- above its horizon -- it is
- *   `vec2(-1.0)`. With no [ground], and under a globe camera, it is `vec2(-1.0)` everywhere.
+ *   `vec2(-1.0)`. It answers for the **flat plane** at the rectangle's declared absolute altitudes:
+ *   under terrain displacement it does not follow the draped ground, so a mask along a mountainous
+ *   border shows parallax. Keep the value in `highp`; `mediump` is half precision on mobile GPUs and
+ *   truncates it. Its resolution is one `Float` across the whole rectangle, so keep the rectangle
+ *   tight around what the program reads: at zoom 18 a 40-degree rectangle is good to about a pixel
+ *   and a 170-degree one to about five.
+ * - `bool rengStickerHasGround()` -- whether this frame gives the program a rectangle at all: false
+ *   with no [ground], under a globe camera, and when a Mercator camera cannot carry the rectangle
+ *   (beyond its latitude limit or world-copy bounds; the sticker still draws and the frame reports
+ *   [DiagnosticCode.STICKER_GROUND_UNAVAILABLE]). Where it is false, `rengStickerGroundUv()` is
+ *   `vec2(-1.0)` everywhere. It is per frame, not per pixel: a pixel above the horizon of a frame that
+ *   has ground still reads true. A mask can use it to tell "no ground this frame" from "this pixel is
+ *   off the rectangle".
  *
  * Every preamble name begins `rengSticker`, and so does anything RenG adds later, which is why that
  * prefix is refused for [uniforms] and [textures], as are the names reserved for RenG's own shader
- * interface. A source may not use `#extension`, because a directive must precede the preamble's
- * declarations.
+ * interface. A source may not carry `#extension`, because a directive must precede the preamble's
+ * declarations; frame planning refuses one, naming `sticker.shader.fragmentSource`.
  *
  * [uniforms] and [textures] bind by name, in name order, exactly as a [Geometry]'s do, and every
  * texture uploads bit-exact as data, sampled nearest and clamped. The image holds unit zero, so the

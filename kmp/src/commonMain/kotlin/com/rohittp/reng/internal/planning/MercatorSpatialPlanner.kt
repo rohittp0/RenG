@@ -18,6 +18,7 @@ import com.rohittp.reng.internal.projection.clippedPhysicalPixelFootprint
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
+import com.rohittp.reng.internal.shader.containsExtensionDirective
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -109,16 +110,10 @@ internal fun planMercatorSpatial(
         shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
-    // ADR 0087. A sticker program's source is scanned here for the backdrop's reason, and its ground
-    // rectangle resolved through the Geometry's own corner path, so a rectangle the camera cannot
-    // carry fails as the consumer's INVALID_VALUE at FRAME_PLANNING rather than at draw.
-    for (sticker in plan.stickersForCore()) {
-        val shader = sticker.shader ?: continue
-        shaderProfileMemo.profileOf(shader.fragmentSource) ?: return shaderProfileFailure()
-        val ground = shader.ground ?: continue
-        val corners = resolveMercatorRectangleCorners(ground.topLeft, ground.bottomRight, camera)
-        if (corners is SpatialOutcome.Failure) return corners
-    }
+    // ADR 0087. A sticker program's source is scanned here for the backdrop's reason. Its ground
+    // rectangle is deliberately not resolved: one the camera cannot carry degrades that sticker to
+    // no ground at draw rather than failing the frame.
+    checkStickerShaderSources(plan, shaderProfileMemo)?.let { return it }
 
     return SpatialOutcome.Success(
         FrameSpatialPlan(
@@ -168,6 +163,30 @@ internal fun screenPositionedModelFailure(): SpatialOutcome.Failure = SpatialOut
         ),
     ),
 )
+
+/**
+ * ADR 0087: every sticker program's source must be a Shader Profile and carry no `#extension`, or the
+ * frame fails as the consumer's INVALID_VALUE at FRAME_PLANNING naming `sticker.shader.fragmentSource`.
+ * Shared by both planners, so a frame refused under one projection is refused under the other.
+ */
+internal fun checkStickerShaderSources(plan: FramePlan, shaderProfileMemo: ShaderProfileMemo): SpatialOutcome.Failure? {
+    for (sticker in plan.stickersForCore()) {
+        val source = sticker.shader?.fragmentSource ?: continue
+        if (shaderProfileMemo.profileOf(source) == null || containsExtensionDirective(source)) {
+            return SpatialOutcome.Failure(
+                FailureDescriptor(
+                    code = RenGErrorCode.INVALID_VALUE,
+                    stage = PipelineStage.FRAME_PLANNING,
+                    diagnostic = failureContextDiagnostic(
+                        stage = PipelineStage.FRAME_PLANNING,
+                        fieldName = DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
+                    ),
+                ),
+            )
+        }
+    }
+    return null
+}
 
 internal fun shaderProfileFailure(): SpatialOutcome.Failure = SpatialOutcome.Failure(
     FailureDescriptor(

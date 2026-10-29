@@ -338,7 +338,7 @@ class StickerPipelineTest {
             createConsumerStickerPipeline(binding, ShaderDialect.GLES, GlProgramCache(), CONSUMER_SOURCE)
                 as ConsumerStickerPipelineResult.Created
             ).pipeline
-        val windowToGround = FloatArray(16) { it.toFloat() }
+        val ground = StickerGroundMapping(FloatArray(16) { it.toFloat() }, 12f, 34f, present = true)
         binding.log.clear()
 
         drawStickers(
@@ -351,7 +351,7 @@ class StickerPipelineTest {
                             pipeline = consumer,
                             uniforms = mapOf("uTint" to ShaderValue.Scalar(0.25f)),
                             textures = mapOf("uMaskB" to 52, "uMaskA" to 51),
-                            windowToGround = windowToGround,
+                            ground = ground,
                         ),
                     ),
                     resolvedSticker(texture = 42),
@@ -370,12 +370,16 @@ class StickerPipelineTest {
                 "uniformMatrix4fv($MODEL_VIEW_PROJECTION_LOCATION,1,false)",
                 "uniform1f($OPACITY_LOCATION,0.5)",
                 "uniformMatrix4fv($WINDOW_TO_GROUND_LOCATION,1,false)",
+                "uniform2f($GROUND_ORIGIN_LOCATION,12.0,34.0)",
+                "uniform1f($GROUND_PRESENT_LOCATION,1.0)",
                 "uniform1f($TINT_LOCATION,0.25)",
                 "activeTexture(0x84C1)",
                 "bindTexture(0xDE1,51)",
+                "bindSampler(1,0)",
                 "uniform1i($MASK_A_LOCATION,1)",
                 "activeTexture(0x84C2)",
                 "bindTexture(0xDE1,52)",
+                "bindSampler(2,0)",
                 "uniform1i($MASK_B_LOCATION,2)",
                 "activeTexture(0x84C0)",
                 "uniform1i($TEXTURE_LOCATION,0)",
@@ -384,7 +388,7 @@ class StickerPipelineTest {
             ),
             consumerDraw,
         )
-        assertContentEquals(windowToGround, binding.uniformMatrix4fvValues[WINDOW_TO_GROUND_LOCATION])
+        assertContentEquals(ground.windowToGround, binding.uniformMatrix4fvValues[WINDOW_TO_GROUND_LOCATION])
         val afterConsumer = binding.log.drop(binding.log.indexOfFirst { it.startsWith("drawArrays") } + 1)
         assertEquals("useProgram(${plain.program})", afterConsumer.first())
         // The plain sticker after it binds its image on unit zero, which the consumer left active.
@@ -407,6 +411,8 @@ class StickerPipelineTest {
         STICKER_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
         STICKER_OPACITY_UNIFORM_NAME to OPACITY_LOCATION,
         STICKER_WINDOW_TO_GROUND_UNIFORM_NAME to WINDOW_TO_GROUND_LOCATION,
+        STICKER_GROUND_ORIGIN_UNIFORM_NAME to GROUND_ORIGIN_LOCATION,
+        STICKER_GROUND_PRESENT_UNIFORM_NAME to GROUND_PRESENT_LOCATION,
         "uTint" to TINT_LOCATION,
         "uMaskA" to MASK_A_LOCATION,
         "uMaskB" to MASK_B_LOCATION,
@@ -441,6 +447,8 @@ class StickerPipelineTest {
         const val TINT_LOCATION: Int = 12
         const val MASK_A_LOCATION: Int = 13
         const val MASK_B_LOCATION: Int = 14
+        const val GROUND_ORIGIN_LOCATION: Int = 15
+        const val GROUND_PRESENT_LOCATION: Int = 16
         const val CONSUMER_SOURCE: String =
             "#version 300 es\nuniform float uTint;\nout vec4 c;\nvoid main() { c = rengStickerColour() * uTint; }\n"
     }

@@ -5,7 +5,6 @@ import com.rohittp.reng.BasemapBlend
 import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Bloom
 import com.rohittp.reng.Geometry
-import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
 import com.rohittp.reng.PipelineStage
@@ -62,14 +61,15 @@ internal class SceneSticker(
 
 /**
  * A sticker's consumer program as a [SceneContent] receives it: compiled and leased, its uniforms the
- * `prepare()`-time snapshot, its textures already uploaded, and its ground rectangle still geographic --
- * resolved against the camera at draw time, as the sticker's own [Placement] is (ADR 0087).
+ * `prepare()`-time snapshot, its textures already uploaded, and its ground rectangle already resolved
+ * against this frame's camera -- by whoever assembles the scene, which is also who can report a
+ * rectangle the camera could not carry (ADR 0087).
  */
 internal class SceneStickerShader(
     val pipeline: ConsumerStickerPipeline,
     val uniforms: Map<String, ShaderValue>,
     val textures: Map<String, Int>,
-    val ground: GroundRectangle?,
+    val ground: StickerGroundMapping = StickerGroundMapping.NONE,
 )
 
 /**
@@ -1332,16 +1332,15 @@ internal class SceneContent(
     }
 
     /**
-     * [shader] with its ground rectangle turned into this frame's window-to-ground homography. The
-     * same for both regimes, because the homography maps a window pixel and knows nothing of the
-     * sticker drawn there.
+     * [shader] as its draw takes it. The same for both regimes, because the ground mapping maps a
+     * window pixel and knows nothing of the sticker drawn there.
      */
     private fun resolvedStickerShader(shader: SceneStickerShader): ResolvedStickerShader =
         ResolvedStickerShader(
             pipeline = shader.pipeline,
             uniforms = shader.uniforms,
             textures = shader.textures,
-            windowToGround = stickerWindowToGround(camera, shader.ground),
+            ground = shader.ground,
         )
 
     /** One screen-composited sticker's draw instance; see [mapAnchoredSticker] for the regime cross-check. */

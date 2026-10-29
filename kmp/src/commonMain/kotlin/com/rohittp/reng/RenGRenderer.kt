@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.completeBasemapStyleManifest
 import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.basemapNotConfiguredDiagnostic
+import com.rohittp.reng.internal.stickerGroundUnavailableDiagnostic
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.cache.ResidentGeneration
@@ -79,6 +80,7 @@ import com.rohittp.reng.internal.gl.composeBackdropInverseViewProjection
 import com.rohittp.reng.internal.gl.consumerStickerShaderPair
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
 import com.rohittp.reng.internal.gl.createConsumerStickerPipeline
+import com.rohittp.reng.internal.gl.stickerGroundMapping
 import com.rohittp.reng.internal.gl.createGeometryPipeline
 import com.rohittp.reng.internal.gl.createGlobeGroundPipeline
 import com.rohittp.reng.internal.gl.createModelPipeline
@@ -2846,6 +2848,7 @@ internal class RenGRenderer(
         /** The captured binding (ADR 0054), shadowing the renderer's own for this draw. */
         binding: GlBinding,
     ): FailureDescriptor? {
+        var stickersWithoutGround = 0
         val sceneStickers = frame.stickers.map { preparedSticker ->
             val texture = when (val image = preparedSticker.image) {
                 is DecodedImage -> contentTextures.cachedTexture(
@@ -2896,7 +2899,11 @@ internal class RenGRenderer(
                             binding = binding,
                         )
                     },
-                    ground = shader.ground,
+                    // ADR 0087: resolved against this frame's camera here, where a rectangle the camera
+                    // cannot carry is reported rather than failing the frame.
+                    ground = stickerGroundMapping(resolvedCamera, shader.ground).also { mapping ->
+                        if (mapping.unavailable) stickersWithoutGround += 1
+                    },
                 )
             }
             SceneSticker(
@@ -2909,6 +2916,7 @@ internal class RenGRenderer(
                 shader = sceneShader,
             )
         }
+        if (stickersWithoutGround > 0) stagedDiagnostics += stickerGroundUnavailableDiagnostic(stickersWithoutGround)
 
         val sceneGeometries = ArrayList<SceneGeometry>(frame.geometries.size)
         for (preparedGeometry in frame.geometries) {

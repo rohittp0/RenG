@@ -8,7 +8,12 @@ import com.rohittp.reng.internal.gl.GL_FRAMEBUFFER_COMPLETE
 import com.rohittp.reng.internal.gl.GL_PACK_ALIGNMENT
 import com.rohittp.reng.internal.gl.GL_READ_FRAMEBUFFER
 import com.rohittp.reng.internal.gl.GL_RGBA
+import com.rohittp.reng.internal.gl.GL_LINEAR
 import com.rohittp.reng.internal.gl.GL_RGBA8
+import com.rohittp.reng.internal.gl.GL_SAMPLER_BINDING
+import com.rohittp.reng.internal.gl.GL_TEXTURE0
+import com.rohittp.reng.internal.gl.GL_TEXTURE_MAG_FILTER
+import com.rohittp.reng.internal.gl.GL_TEXTURE_MIN_FILTER
 import com.rohittp.reng.internal.gl.GL_SCISSOR_TEST
 import com.rohittp.reng.internal.gl.GL_TEXTURE_2D
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_BYTE
@@ -53,12 +58,14 @@ internal fun runStickerShaderReadbackSuite(
     dialect: ShaderDialect,
 ) {
     val target = createStickerShaderReadbackTarget(binding)
+    val diagnostics = ArrayList<Diagnostic>()
     val renderer = createRenderer(
         RendererConfiguration(
             outputPixelSize = OutputPixelSize(STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS),
             transport = StickerShaderTransport(),
             store = RecordingStyleStore(),
             basemapStyle = null,
+            diagnosticSink = DiagnosticSink { diagnostics += it },
         ),
         binding,
         probe,
@@ -111,6 +118,58 @@ internal fun runStickerShaderReadbackSuite(
                     compared += 1
                 }
                 assertEquals(QUADRANT_COLOURS.size, compared)
+            }
+        }
+
+        HAS_GROUND_CASES.forEach { case ->
+            failures.run("has ground ${case.name}") {
+                diagnostics.clear()
+                val frame = drawFrame(hasGroundPlan(frameIndex++, case))
+                val seen = frame.pixelAt(64, 64)
+                val expected = if (case.expected) HAS_GROUND_COLOUR else NO_GROUND_COLOUR
+                val warnings = diagnostics.filter { it.code == DiagnosticCode.STICKER_GROUND_UNAVAILABLE }
+                println(
+                    "RenG sticker shader readback: dialect=$dialect case=has ground ${case.name} " +
+                        "pixel=${seen.contentToString()} warnings=${warnings.map { it.actual }}",
+                )
+                assertTrue(
+                    seen.indices.all { abs(seen[it] - expected[it]) <= 2 },
+                    "rengStickerHasGround() must be ${case.expected}, read ${seen.contentToString()}",
+                )
+                if (case.reportsUnavailable) {
+                    assertEquals(1, warnings.size, "an uncarried rectangle must be reported once")
+                    assertEquals("sticker.shader.ground", warnings.single().fieldName)
+                    assertEquals(1L, warnings.single().actual)
+                } else {
+                    assertEquals(0, warnings.size, "only an uncarried rectangle is reported")
+                }
+            }
+        }
+
+        failures.run("a host sampler object on a consumer unit") {
+            // A host's GL_LINEAR sampler object on unit 1, where the program's data texture lands. If
+            // it applied, sampling the two-texel field at u = 0.4 would blend 30% of the white texel in.
+            val names = IntArray(1)
+            binding.genSamplers(1, names)
+            val hostSampler = names[0]
+            binding.samplerParameteri(hostSampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            binding.samplerParameteri(hostSampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            binding.bindSampler(1, hostSampler)
+            try {
+                val frame = drawFrame(dataSamplingPlan(frameIndex++))
+                val seen = frame.pixelAt(64, 64)
+                binding.activeTexture(GL_TEXTURE0 + 1)
+                val bound = IntArray(1).also { binding.getIntegerv(GL_SAMPLER_BINDING, it) }.single()
+                binding.activeTexture(GL_TEXTURE0)
+                println(
+                    "RenG sticker shader readback: dialect=$dialect case=host sampler " +
+                        "pixel=${seen.contentToString()} hostSamplerAfter=${bound == hostSampler}",
+                )
+                assertTrue(seen[0] <= 2 && seen[3] == 255, "a data texture must sample nearest, read ${seen.contentToString()}")
+                assertEquals(hostSampler, bound, "the host's sampler object must be back on unit 1 after the frame")
+            } finally {
+                binding.bindSampler(1, 0)
+                binding.deleteSamplers(1, names)
             }
         }
 
@@ -221,9 +280,80 @@ private const val BACKGROUND_FRAGMENT: String =
         "out vec4 colour;\n" +
         "void main() { colour = vec4(0.125490196, 0.376470588, 0.627450980, 1.0); }\n"
 
+/** Red where the frame gives the program ground, green where it does not, whatever the pixel. */
+private const val HAS_GROUND_FRAGMENT: String =
+    "#version 300 es\n" +
+        "out vec4 colour;\n" +
+        "void main() {\n" +
+        "    colour = rengStickerHasGround() ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 1.0, 0.0, 1.0);\n" +
+        "}\n"
+
+/** Samples a two-texel data field just inside its first (black) texel; nearest reads 0, linear 77. */
+private const val DATA_SAMPLING_FRAGMENT: String =
+    "#version 300 es\n" +
+        "uniform sampler2D uData;\n" +
+        "out vec4 colour;\n" +
+        "void main() { colour = vec4(texture(uData, vec2(0.4, 0.5)).rgb, 1.0); }\n"
+
+private fun dataSamplingPlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(CENTRE_LATITUDE, CENTRE_LONGITUDE, 9.0, 0.0, 0.0),
+    drawBasemap = false,
+    drawLabels = false,
+    stickers = listOf(
+        Sticker(
+            placement = billboardPlacement(AnchoringMode.SCREEN, 10.0),
+            image = ResourceLocator(QUADRANT_URL),
+            shader = StickerShader(DATA_SAMPLING_FRAGMENT, textures = mapOf("uData" to ResourceLocator(DATA_URL))),
+        ),
+    ),
+)
+
+private val HAS_GROUND_COLOUR: IntArray = intArrayOf(255, 0, 0, 255)
+private val NO_GROUND_COLOUR: IntArray = intArrayOf(0, 255, 0, 255)
+
 // ---------------------------------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------------------------------
+
+private class HasGroundCase(
+    val name: String,
+    val projectionMode: ProjectionMode,
+    val ground: GroundRectangle?,
+    val expected: Boolean,
+    val reportsUnavailable: Boolean = false,
+)
+
+/** Beyond Mercator's latitude limit: a rectangle a Mercator frame cannot carry, and a globe ignores. */
+private val UNCARRIED_RECTANGLE: GroundRectangle =
+    GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0))
+
+/** A getter, because [GROUND_RECTANGLE] is declared below and top-level values initialise in order. */
+private val HAS_GROUND_CASES: List<HasGroundCase> get() = listOf(
+    HasGroundCase("mercator with a rectangle", ProjectionMode.MERCATOR, GROUND_RECTANGLE, expected = true),
+    HasGroundCase("mercator without one", ProjectionMode.MERCATOR, null, expected = false),
+    HasGroundCase("globe with a rectangle", ProjectionMode.GLOBE, GROUND_RECTANGLE, expected = false),
+    HasGroundCase(
+        "mercator with an uncarried rectangle", ProjectionMode.MERCATOR, UNCARRIED_RECTANGLE,
+        expected = false, reportsUnavailable = true,
+    ),
+    HasGroundCase("globe with an uncarried rectangle", ProjectionMode.GLOBE, UNCARRIED_RECTANGLE, expected = false),
+)
+
+private fun hasGroundPlan(frameIndex: Long, case: HasGroundCase): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(CENTRE_LATITUDE, CENTRE_LONGITUDE, 9.0, 0.0, 0.0),
+    projectionMode = case.projectionMode,
+    drawBasemap = false,
+    drawLabels = false,
+    stickers = listOf(
+        Sticker(
+            placement = billboardPlacement(AnchoringMode.SCREEN, 10.0),
+            image = ResourceLocator(QUADRANT_URL),
+            shader = StickerShader(HAS_GROUND_FRAGMENT, ground = case.ground),
+        ),
+    ),
+)
 
 private const val CENTRE_LATITUDE: Double = 10.0
 private const val CENTRE_LONGITUDE: Double = 20.0
@@ -523,6 +653,7 @@ private class StickerShaderTransport : Transport {
         val (body, contentType) = when (request.locator.value) {
             QUADRANT_URL -> QUADRANT_PNG to "image/png"
             ETC2_URL -> ETC2_CONTAINER to "image/x-reng-etc2"
+            DATA_URL -> DATA_PNG to "image/png"
             else -> error("unexpected sticker locator")
         }
         return TransportResponse(
@@ -535,6 +666,14 @@ private class StickerShaderTransport : Transport {
 
 private const val QUADRANT_URL: String = "https://stickers.example/quadrants.png"
 private const val ETC2_URL: String = "https://stickers.example/translucent.reng-etc2"
+private const val DATA_URL: String = "https://stickers.example/two-texel-field.png"
+
+/** Two opaque texels, black then white: a field a linear filter would blend. */
+private val DATA_PNG: ByteArray = rgbaPng(
+    width = 2,
+    height = 1,
+    rgba = byteArrayOf(0, 0, 0, -1, -1, -1, -1, -1),
+)
 
 /** Top-left red, top-right green, bottom-left blue, bottom-right white, opaque, as RGBA bytes. */
 private val QUADRANT_COLOURS: List<IntArray> = listOf(

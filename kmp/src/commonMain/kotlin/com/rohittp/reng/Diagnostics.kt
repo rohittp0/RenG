@@ -68,6 +68,14 @@ public enum class DiagnosticCode {
 
     /** A Frame Plan named a style outside its renderer's configured Style Set (ADR 0086). */
     BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
+
+    /**
+     * `actual` sticker programs declared a ground rectangle this frame's Mercator camera cannot carry --
+     * beyond its latitude limit or world-copy bounds -- and drew without one: `rengStickerHasGround()`
+     * is false for them (ADR 0087). The frame still drew. A globe frame, where no program has ground,
+     * does not report it. Appended last, so no existing constant's ordinal moves.
+     */
+    STICKER_GROUND_UNAVAILABLE,
 }
 
 @ConsistentCopyVisibility
@@ -256,6 +264,22 @@ public data class Diagnostic internal constructor(
                     fieldName == null && resourceClass == null && resourceKey == null &&
                         statusCode == null && limit == null,
                 ) { "bloom-emission-precision diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.STICKER_GROUND_UNAVAILABLE -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "sticker-ground diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "a sticker program's ground is resolved during draw"
+                }
+                require(
+                    fieldName == "sticker.shader.ground" && resourceClass == null && resourceKey == null &&
+                        statusCode == null,
+                ) { "sticker-ground diagnostics name the ground field and nothing else" }
+                require(limit == 0L && actual!! > 0L) {
+                    "sticker-ground diagnostics carry a positive count of stickers drawn without ground"
+                }
             }
 
             DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE -> {

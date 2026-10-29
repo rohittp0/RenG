@@ -358,10 +358,12 @@ A consumer fragment program a **Sticker** may be drawn with instead of RenG's ow
 **Shader Profile** fragment shader writing premultiplied colour, with uniforms and data textures (at most
 fourteen, units one onwards) and an optional **Ground Rectangle**. RenG inserts a preamble after its
 directive -- the one injected include RenG makes -- giving `rengStickerColour()` (the plain sticker's colour),
-`rengStickerUv` (image orientation, top-left origin) and `rengStickerGroundUv()` (the Ground Rectangle's
-Mercator-linear coordinate under the fragment's window pixel, `vec2(-1.0)` above its horizon, without a
-rectangle, and under a globe). Placement, blend and depth are the plain sticker's. Names under
-`rengSticker` are reserved.
+`rengStickerUv` (image orientation, top-left origin), `rengStickerGroundUv()` (the Ground Rectangle's
+Mercator-linear coordinate under the fragment's window pixel, on the flat plane at its declared
+altitudes, `vec2(-1.0)` above its horizon) and `rengStickerHasGround()` (per frame: false without a
+rectangle, under a globe, and when a Mercator camera cannot carry it -- which degrades the sticker
+rather than failing the frame). Placement, blend and depth are the plain sticker's. Names under
+`rengSticker` are reserved and `#extension` is refused.
 _Avoid_: Sticker material, mask, effect, region mask
 
 **Ground Rectangle**:

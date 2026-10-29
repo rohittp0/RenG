@@ -59,6 +59,15 @@ internal const val STICKER_OPACITY_UNIFORM_NAME: String = "rengStickerOpacity"
 internal const val STICKER_WINDOW_TO_GROUND_UNIFORM_NAME: String = "rengStickerWindowToGround"
 
 /**
+ * The whole window pixel the homography above is relative to (ADR 0087), subtracted from
+ * `gl_FragCoord.xy` before the matrix applies so no frame-sized term enters the `Float` product.
+ */
+internal const val STICKER_GROUND_ORIGIN_UNIFORM_NAME: String = "rengStickerGroundOrigin"
+
+/** `1.0` when this frame gives the program a ground rectangle, `0.0` otherwise (ADR 0087). */
+internal const val STICKER_GROUND_PRESENT_UNIFORM_NAME: String = "rengStickerGroundPresent"
+
+/**
  * The prefix every name of [STICKER_SHADER_PREAMBLE] shares, reserved against a `StickerShader`'s
  * uniform and texture names (ADR 0087) on ADR 0071's reasoning: a name RenG adds later under it
  * cannot collide with one a consumer already uses.
@@ -81,10 +90,12 @@ internal const val STICKER_FIRST_CONSUMER_TEXTURE_UNIT: Int = 1
  *
  * `rengStickerColour()` is [STICKER_FRAGMENT_SOURCE]'s expression verbatim, so a program returning it
  * draws the plain sticker's pixels; the readback suite holds it to bit-identity. The ground arm
- * divides only where the homogeneous `w` is positive, which is exactly where the fragment's line of
- * sight meets the rectangle's plane in front of the camera; everywhere else -- and wherever the
- * uniform is the zero matrix, which is what a sticker without a ground rectangle or a globe frame
- * binds -- it answers `vec2(-1.0)`, a point outside the rectangle.
+ * subtracts the whole-pixel origin first -- exact in `Float` -- and divides only where the homogeneous
+ * `w` is positive, which is exactly where the fragment's line of sight meets the rectangle's plane in
+ * front of the camera; everywhere else -- and wherever the uniform is the zero matrix, which is what a
+ * frame without ground binds -- it answers `vec2(-1.0)`, a point outside the rectangle.
+ * `rengStickerHasGround()` is per frame, not per pixel: it says whether there is a rectangle to read
+ * at all, so a consumer can tell "no ground this frame" from "this pixel is off the rectangle".
  *
  * Every line ends in LF and no line is a directive, so inserting it leaves the source a Shader
  * Profile whose directive is still the consumer's own first one.
@@ -94,12 +105,18 @@ internal const val STICKER_SHADER_PREAMBLE: String =
         "uniform sampler2D rengStickerTexture;\n" +
         "uniform float rengStickerOpacity;\n" +
         "uniform mat4 rengStickerWindowToGround;\n" +
+        "uniform vec2 rengStickerGroundOrigin;\n" +
+        "uniform float rengStickerGroundPresent;\n" +
         "in vec2 rengStickerUv;\n" +
         "vec4 rengStickerColour() {\n" +
         "    return texture(rengStickerTexture, rengStickerUv) * rengStickerOpacity;\n" +
         "}\n" +
+        "bool rengStickerHasGround() {\n" +
+        "    return rengStickerGroundPresent > 0.5;\n" +
+        "}\n" +
         "vec2 rengStickerGroundUv() {\n" +
-        "    vec4 rengStickerGround = rengStickerWindowToGround * vec4(gl_FragCoord.xy, 0.0, 1.0);\n" +
+        "    vec2 rengStickerWindow = gl_FragCoord.xy - rengStickerGroundOrigin;\n" +
+        "    vec4 rengStickerGround = rengStickerWindowToGround * vec4(rengStickerWindow, 0.0, 1.0);\n" +
         "    return rengStickerGround.w > 0.0\n" +
         "        ? rengStickerGround.xy / rengStickerGround.w\n" +
         "        : vec2(-1.0);\n" +
@@ -225,6 +242,8 @@ internal class ConsumerStickerPipeline(
     val textureUniformLocation: Int,
     val opacityUniformLocation: Int,
     val windowToGroundUniformLocation: Int,
+    val groundOriginUniformLocation: Int = -1,
+    val groundPresentUniformLocation: Int = -1,
 ) : ConsumerValueProgram {
     private val consumerLocations: MutableMap<String, Int> = HashMap()
 
@@ -286,6 +305,8 @@ internal fun createConsumerStickerPipeline(
             opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
             windowToGroundUniformLocation =
                 binding.getUniformLocation(program, STICKER_WINDOW_TO_GROUND_UNIFORM_NAME),
+            groundOriginUniformLocation = binding.getUniformLocation(program, STICKER_GROUND_ORIGIN_UNIFORM_NAME),
+            groundPresentUniformLocation = binding.getUniformLocation(program, STICKER_GROUND_PRESENT_UNIFORM_NAME),
         ),
     )
 }
@@ -300,14 +321,13 @@ internal fun deleteConsumerStickerPipeline(
 
 /**
  * A consumer sticker program and what it is drawn with this frame: the uniform snapshot `prepare()`
- * took, each texture's uploaded name, and the column-major window-to-ground matrix (zero when the
- * sticker declares no ground rectangle or the frame is a globe's, ADR 0087).
+ * took, each texture's uploaded name, and this frame's [StickerGroundMapping] (ADR 0087).
  */
 internal class ResolvedStickerShader(
     val pipeline: ConsumerStickerPipeline,
     val uniforms: Map<String, ShaderValue>,
     val textures: Map<String, Int>,
-    val windowToGround: FloatArray,
+    val ground: StickerGroundMapping,
 )
 
 /**
@@ -407,6 +427,9 @@ internal fun beginStickerPass(binding: GlBinding, pipeline: StickerPipeline) {
     binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
     binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
     binding.activeTexture(GL_TEXTURE0)
+    // The image's own sampler state, not a sampler object the host left on unit 0 (ADR 0055 saves
+    // and restores it). A consumer sticker program's units 1 onwards are cleared as they are bound.
+    binding.bindSampler(0, 0)
     if (pipeline.textureUniformLocation >= 0) {
         binding.uniform1i(pipeline.textureUniformLocation, 0)
     }
@@ -463,7 +486,13 @@ private fun drawOneConsumerSticker(
         binding.uniform1f(consumer.opacityUniformLocation, sticker.opacity)
     }
     if (consumer.windowToGroundUniformLocation >= 0) {
-        binding.uniformMatrix4fv(consumer.windowToGroundUniformLocation, 1, false, shader.windowToGround)
+        binding.uniformMatrix4fv(consumer.windowToGroundUniformLocation, 1, false, shader.ground.windowToGround)
+    }
+    if (consumer.groundOriginUniformLocation >= 0) {
+        binding.uniform2f(consumer.groundOriginUniformLocation, shader.ground.originX, shader.ground.originY)
+    }
+    if (consumer.groundPresentUniformLocation >= 0) {
+        binding.uniform1f(consumer.groundPresentUniformLocation, if (shader.ground.present) 1f else 0f)
     }
     bindConsumerValues(
         binding = binding,

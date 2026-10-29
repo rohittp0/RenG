@@ -1,6 +1,8 @@
 package com.rohittp.reng.internal.diff
 
 import com.rohittp.reng.Camera
+import com.rohittp.reng.Bloom
+import com.rohittp.reng.BasemapSelection
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.FramePlanSegment
@@ -13,7 +15,7 @@ import kotlin.test.assertNotEquals
 
 class FrameStructuralDiffTest {
     @Test
-    fun nullBaselineChangesAllEightSegmentsInTagOrder() {
+    fun nullBaselineChangesEverySegmentInTagOrder() {
         val current = FramePlanCanonicalEncoder().encode(minimalPlan(0))
 
         assertEquals(
@@ -63,6 +65,32 @@ class FrameStructuralDiffTest {
     }
 
     @Test
+    fun twoPlansDifferingOnlyByBloomChangeExactlyThatSegment() {
+        val encoder = FramePlanCanonicalEncoder()
+        val previous = encoder.encode(minimalPlan(0))
+        val current = encoder.encode(minimalPlan(0, bloom = Bloom(intensity = 2f)))
+
+        assertEquals(
+            listOf(FramePlanSegment.BLOOM),
+            FrameStructuralDiffer.diff(previous, current).changedSegments,
+        )
+    }
+
+    @Test
+    fun twoPlansDifferingOnlyByBasemapSelectionChangeExactlyThatSegment() {
+        val encoder = FramePlanCanonicalEncoder()
+        val previous = encoder.encode(minimalPlan(frameIndex = 0))
+        val current = encoder.encode(
+            minimalPlan(frameIndex = 0, basemap = BasemapSelection(style = 0)),
+        )
+
+        assertEquals(
+            listOf(FramePlanSegment.BASEMAP_SELECTION),
+            FrameStructuralDiffer.diff(previous, current).changedSegments,
+        )
+    }
+
+    @Test
     fun changedSegmentResultsSnapshotListsAndUseStructuralValueSemantics() {
         val input = mutableListOf(FramePlanSegment.CAMERA, FramePlanSegment.MODELS)
         val first = FrameStructuralDiff(input)
@@ -79,10 +107,17 @@ class FrameStructuralDiffTest {
         assertFalse(first.changedSegments === first.changedSegments)
     }
 
-    private fun minimalPlan(frameIndex: Long, drawLabels: Boolean = true): FramePlan = FramePlan(
+    private fun minimalPlan(
+        frameIndex: Long,
+        drawLabels: Boolean = true,
+        bloom: Bloom? = null,
+        basemap: BasemapSelection? = null,
+    ): FramePlan = FramePlan(
         frameIndex = frameIndex,
         camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
         drawLabels = drawLabels,
+        bloom = bloom,
+        basemap = basemap,
     )
 
     private companion object {
@@ -95,6 +130,9 @@ class FrameStructuralDiffTest {
             FramePlanSegment.MODELS,
             FramePlanSegment.GEOMETRIES,
             FramePlanSegment.DRAW_LABELS,
+            FramePlanSegment.BACKDROP,
+            FramePlanSegment.BLOOM,
+            FramePlanSegment.BASEMAP_SELECTION,
         )
 
         val CONSTANT_SHA256: Sha256Function = Sha256Function {

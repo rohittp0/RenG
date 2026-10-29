@@ -38,9 +38,31 @@ final enum class com.rohittp.reng/AnchoringMode : kotlin/Enum<com.rohittp.reng/A
     }
 }
 
+final enum class com.rohittp.reng/BlendMode : kotlin/Enum<com.rohittp.reng/BlendMode> { // com.rohittp.reng/BlendMode|null[0]
+    enum entry ADDITIVE // com.rohittp.reng/BlendMode.ADDITIVE|null[0]
+    enum entry MULTIPLY // com.rohittp.reng/BlendMode.MULTIPLY|null[0]
+    enum entry OVER // com.rohittp.reng/BlendMode.OVER|null[0]
+    enum entry SCREEN // com.rohittp.reng/BlendMode.SCREEN|null[0]
+
+    final val entries // com.rohittp.reng/BlendMode.entries|#static{}entries[0]
+        final fun <get-entries>(): kotlin.enums/EnumEntries<com.rohittp.reng/BlendMode> // com.rohittp.reng/BlendMode.entries.<get-entries>|<get-entries>#static(){}[0]
+
+    final fun valueOf(kotlin/String): com.rohittp.reng/BlendMode // com.rohittp.reng/BlendMode.valueOf|valueOf#static(kotlin.String){}[0]
+    final fun values(): kotlin/Array<com.rohittp.reng/BlendMode> // com.rohittp.reng/BlendMode.values|values#static(){}[0]
+
+    final object Companion : kotlinx.serialization.internal/SerializerFactory { // com.rohittp.reng/BlendMode.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BlendMode> // com.rohittp.reng/BlendMode.Companion.serializer|serializer(){}[0]
+        final fun serializer(kotlin/Array<out kotlinx.serialization/KSerializer<*>>...): kotlinx.serialization/KSerializer<*> // com.rohittp.reng/BlendMode.Companion.serializer|serializer(kotlin.Array<out|kotlinx.serialization.KSerializer<*>>...){}[0]
+    }
+}
+
 final enum class com.rohittp.reng/DiagnosticCode : kotlin/Enum<com.rohittp.reng/DiagnosticCode> { // com.rohittp.reng/DiagnosticCode|null[0]
     enum entry BASEMAP_NOT_CONFIGURED // com.rohittp.reng/DiagnosticCode.BASEMAP_NOT_CONFIGURED|null[0]
+    enum entry BASEMAP_STYLE_INDEX_OUT_OF_RANGE // com.rohittp.reng/DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE|null[0]
+    enum entry BLOOM_EMISSION_PRECISION_REDUCED // com.rohittp.reng/DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED|null[0]
+    enum entry BLOOM_UNAVAILABLE // com.rohittp.reng/DiagnosticCode.BLOOM_UNAVAILABLE|null[0]
     enum entry FAILURE_CONTEXT // com.rohittp.reng/DiagnosticCode.FAILURE_CONTEXT|null[0]
+    enum entry GROUND_PRESENTED_PROVISIONALLY // com.rohittp.reng/DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY|null[0]
     enum entry LABEL_CONTENT_EXCLUDED // com.rohittp.reng/DiagnosticCode.LABEL_CONTENT_EXCLUDED|null[0]
     enum entry RESIDENT_GPU_TEXTURES_OVER_BUDGET // com.rohittp.reng/DiagnosticCode.RESIDENT_GPU_TEXTURES_OVER_BUDGET|null[0]
     enum entry RESOURCE_RELOADED_AFTER_FREE // com.rohittp.reng/DiagnosticCode.RESOURCE_RELOADED_AFTER_FREE|null[0]
@@ -128,6 +150,7 @@ final enum class com.rohittp.reng/RenGErrorCode : kotlin/Enum<com.rohittp.reng/R
     enum entry PREPARED_FRAME_CLOSED // com.rohittp.reng/RenGErrorCode.PREPARED_FRAME_CLOSED|null[0]
     enum entry RENDERER_CLOSED // com.rohittp.reng/RenGErrorCode.RENDERER_CLOSED|null[0]
     enum entry RENDER_CONTEXT_ADOPTION_REQUIRED // com.rohittp.reng/RenGErrorCode.RENDER_CONTEXT_ADOPTION_REQUIRED|null[0]
+    enum entry RENDER_CONTEXT_THREAD_CHANGED // com.rohittp.reng/RenGErrorCode.RENDER_CONTEXT_THREAD_CHANGED|null[0]
     enum entry RESOURCE_DECODE_FAILED // com.rohittp.reng/RenGErrorCode.RESOURCE_DECODE_FAILED|null[0]
     enum entry RESOURCE_LIMIT_EXCEEDED // com.rohittp.reng/RenGErrorCode.RESOURCE_LIMIT_EXCEEDED|null[0]
     enum entry RESOURCE_PARSE_FAILED // com.rohittp.reng/RenGErrorCode.RESOURCE_PARSE_FAILED|null[0]
@@ -152,6 +175,51 @@ final enum class com.rohittp.reng/RenGErrorCode : kotlin/Enum<com.rohittp.reng/R
     final fun values(): kotlin/Array<com.rohittp.reng/RenGErrorCode> // com.rohittp.reng/RenGErrorCode.values|values#static(){}[0]
 }
 
+final enum class com.rohittp.reng/RenGMetricName : kotlin/Enum<com.rohittp.reng/RenGMetricName> { // com.rohittp.reng/RenGMetricName|null[0]
+    enum entry ENGINE_METRICS_UNRECOGNISED // com.rohittp.reng/RenGMetricName.ENGINE_METRICS_UNRECOGNISED|null[0]
+    enum entry ENGINE_RESOURCE_DECODED_BYTES // com.rohittp.reng/RenGMetricName.ENGINE_RESOURCE_DECODED_BYTES|null[0]
+    enum entry ENGINE_RESOURCE_REQUESTS // com.rohittp.reng/RenGMetricName.ENGINE_RESOURCE_REQUESTS|null[0]
+    enum entry ENGINE_RESOURCE_WIRE_BYTES // com.rohittp.reng/RenGMetricName.ENGINE_RESOURCE_WIRE_BYTES|null[0]
+    enum entry ENGINE_REVALIDATIONS_FAILED // com.rohittp.reng/RenGMetricName.ENGINE_REVALIDATIONS_FAILED|null[0]
+    enum entry ENGINE_REVALIDATIONS_NOT_MODIFIED // com.rohittp.reng/RenGMetricName.ENGINE_REVALIDATIONS_NOT_MODIFIED|null[0]
+    enum entry ENGINE_REVALIDATIONS_REPLACED // com.rohittp.reng/RenGMetricName.ENGINE_REVALIDATIONS_REPLACED|null[0]
+    enum entry ENGINE_REVALIDATIONS_STARTED // com.rohittp.reng/RenGMetricName.ENGINE_REVALIDATIONS_STARTED|null[0]
+    enum entry ENGINE_SINGLE_FLIGHT_JOINS // com.rohittp.reng/RenGMetricName.ENGINE_SINGLE_FLIGHT_JOINS|null[0]
+    enum entry ENGINE_STORE_HITS // com.rohittp.reng/RenGMetricName.ENGINE_STORE_HITS|null[0]
+    enum entry ENGINE_STORE_MISSES // com.rohittp.reng/RenGMetricName.ENGINE_STORE_MISSES|null[0]
+    enum entry ENGINE_TILES_RENDERED // com.rohittp.reng/RenGMetricName.ENGINE_TILES_RENDERED|null[0]
+    enum entry ENGINE_TILE_DRAW_NANOS // com.rohittp.reng/RenGMetricName.ENGINE_TILE_DRAW_NANOS|null[0]
+    enum entry ENGINE_TILE_EXACT_RECOVERIES // com.rohittp.reng/RenGMetricName.ENGINE_TILE_EXACT_RECOVERIES|null[0]
+    enum entry ENGINE_TILE_PNG_BYTES // com.rohittp.reng/RenGMetricName.ENGINE_TILE_PNG_BYTES|null[0]
+    enum entry ENGINE_TILE_PNG_ENCODE_NANOS // com.rohittp.reng/RenGMetricName.ENGINE_TILE_PNG_ENCODE_NANOS|null[0]
+    enum entry ENGINE_TILE_RESOURCE_SUBSTITUTIONS // com.rohittp.reng/RenGMetricName.ENGINE_TILE_RESOURCE_SUBSTITUTIONS|null[0]
+    enum entry ENGINE_WARM_ALREADY_IN_FLIGHT // com.rohittp.reng/RenGMetricName.ENGINE_WARM_ALREADY_IN_FLIGHT|null[0]
+    enum entry READ_AHEAD_ALREADY_CACHED // com.rohittp.reng/RenGMetricName.READ_AHEAD_ALREADY_CACHED|null[0]
+    enum entry READ_AHEAD_FAILED // com.rohittp.reng/RenGMetricName.READ_AHEAD_FAILED|null[0]
+    enum entry READ_AHEAD_FETCHED // com.rohittp.reng/RenGMetricName.READ_AHEAD_FETCHED|null[0]
+    enum entry READ_AHEAD_RASTERISED // com.rohittp.reng/RenGMetricName.READ_AHEAD_RASTERISED|null[0]
+    enum entry RENDERED_TILE_CACHE_EVICTIONS // com.rohittp.reng/RenGMetricName.RENDERED_TILE_CACHE_EVICTIONS|null[0]
+    enum entry RENDERED_TILE_CACHE_HITS // com.rohittp.reng/RenGMetricName.RENDERED_TILE_CACHE_HITS|null[0]
+    enum entry TILES_PRESENTED_AFTER_FAILURE // com.rohittp.reng/RenGMetricName.TILES_PRESENTED_AFTER_FAILURE|null[0]
+
+    final val entries // com.rohittp.reng/RenGMetricName.entries|#static{}entries[0]
+        final fun <get-entries>(): kotlin.enums/EnumEntries<com.rohittp.reng/RenGMetricName> // com.rohittp.reng/RenGMetricName.entries.<get-entries>|<get-entries>#static(){}[0]
+
+    final fun valueOf(kotlin/String): com.rohittp.reng/RenGMetricName // com.rohittp.reng/RenGMetricName.valueOf|valueOf#static(kotlin.String){}[0]
+    final fun values(): kotlin/Array<com.rohittp.reng/RenGMetricName> // com.rohittp.reng/RenGMetricName.values|values#static(){}[0]
+}
+
+final enum class com.rohittp.reng/RenGRenderPriority : kotlin/Enum<com.rohittp.reng/RenGRenderPriority> { // com.rohittp.reng/RenGRenderPriority|null[0]
+    enum entry NORMAL // com.rohittp.reng/RenGRenderPriority.NORMAL|null[0]
+    enum entry URGENT // com.rohittp.reng/RenGRenderPriority.URGENT|null[0]
+
+    final val entries // com.rohittp.reng/RenGRenderPriority.entries|#static{}entries[0]
+        final fun <get-entries>(): kotlin.enums/EnumEntries<com.rohittp.reng/RenGRenderPriority> // com.rohittp.reng/RenGRenderPriority.entries.<get-entries>|<get-entries>#static(){}[0]
+
+    final fun valueOf(kotlin/String): com.rohittp.reng/RenGRenderPriority // com.rohittp.reng/RenGRenderPriority.valueOf|valueOf#static(kotlin.String){}[0]
+    final fun values(): kotlin/Array<com.rohittp.reng/RenGRenderPriority> // com.rohittp.reng/RenGRenderPriority.values|values#static(){}[0]
+}
+
 final enum class com.rohittp.reng/ResourceAccessMode : kotlin/Enum<com.rohittp.reng/ResourceAccessMode> { // com.rohittp.reng/ResourceAccessMode|null[0]
     enum entry CACHE_ONLY // com.rohittp.reng/ResourceAccessMode.CACHE_ONLY|null[0]
     enum entry NORMAL // com.rohittp.reng/ResourceAccessMode.NORMAL|null[0]
@@ -165,6 +233,7 @@ final enum class com.rohittp.reng/ResourceAccessMode : kotlin/Enum<com.rohittp.r
 }
 
 final enum class com.rohittp.reng/ResourceClass : kotlin/Enum<com.rohittp.reng/ResourceClass> { // com.rohittp.reng/ResourceClass|null[0]
+    enum entry BACKDROP_IMAGE // com.rohittp.reng/ResourceClass.BACKDROP_IMAGE|null[0]
     enum entry BASEMAP_DEM_TILE // com.rohittp.reng/ResourceClass.BASEMAP_DEM_TILE|null[0]
     enum entry BASEMAP_GEO_JSON // com.rohittp.reng/ResourceClass.BASEMAP_GEO_JSON|null[0]
     enum entry BASEMAP_GLYPH_RANGE // com.rohittp.reng/ResourceClass.BASEMAP_GLYPH_RANGE|null[0]
@@ -260,6 +329,106 @@ sealed interface com.rohittp.reng/AnimationSelector { // com.rohittp.reng/Animat
     }
 }
 
+sealed interface com.rohittp.reng/Backdrop { // com.rohittp.reng/Backdrop|null[0]
+    final class Pattern : com.rohittp.reng/Backdrop { // com.rohittp.reng/Backdrop.Pattern|null[0]
+        constructor <init>(com.rohittp.reng/ResourceLocator, kotlin/Double = ...) // com.rohittp.reng/Backdrop.Pattern.<init>|<init>(com.rohittp.reng.ResourceLocator;kotlin.Double){}[0]
+
+        final val image // com.rohittp.reng/Backdrop.Pattern.image|{}image[0]
+            final fun <get-image>(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Backdrop.Pattern.image.<get-image>|<get-image>(){}[0]
+        final val tileSizeLogicalPixels // com.rohittp.reng/Backdrop.Pattern.tileSizeLogicalPixels|{}tileSizeLogicalPixels[0]
+            final fun <get-tileSizeLogicalPixels>(): kotlin/Double // com.rohittp.reng/Backdrop.Pattern.tileSizeLogicalPixels.<get-tileSizeLogicalPixels>|<get-tileSizeLogicalPixels>(){}[0]
+
+        final fun component1(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Backdrop.Pattern.component1|component1(){}[0]
+        final fun component2(): kotlin/Double // com.rohittp.reng/Backdrop.Pattern.component2|component2(){}[0]
+        final fun copy(com.rohittp.reng/ResourceLocator = ..., kotlin/Double = ...): com.rohittp.reng/Backdrop.Pattern // com.rohittp.reng/Backdrop.Pattern.copy|copy(com.rohittp.reng.ResourceLocator;kotlin.Double){}[0]
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Backdrop.Pattern.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/Backdrop.Pattern.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/Backdrop.Pattern.toString|toString(){}[0]
+    }
+
+    final class Shader : com.rohittp.reng/Backdrop { // com.rohittp.reng/Backdrop.Shader|null[0]
+        constructor <init>(com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ...) // com.rohittp.reng/Backdrop.Shader.<init>|<init>(com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>){}[0]
+
+        final val shaderPair // com.rohittp.reng/Backdrop.Shader.shaderPair|{}shaderPair[0]
+            final fun <get-shaderPair>(): com.rohittp.reng/ShaderPair // com.rohittp.reng/Backdrop.Shader.shaderPair.<get-shaderPair>|<get-shaderPair>(){}[0]
+        final val textures // com.rohittp.reng/Backdrop.Shader.textures|{}textures[0]
+            final fun <get-textures>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/Backdrop.Shader.textures.<get-textures>|<get-textures>(){}[0]
+        final val uniforms // com.rohittp.reng/Backdrop.Shader.uniforms|{}uniforms[0]
+            final fun <get-uniforms>(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/Backdrop.Shader.uniforms.<get-uniforms>|<get-uniforms>(){}[0]
+
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Backdrop.Shader.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/Backdrop.Shader.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/Backdrop.Shader.toString|toString(){}[0]
+    }
+
+    final object Companion : kotlinx.serialization.internal/SerializerFactory { // com.rohittp.reng/Backdrop.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/Backdrop> // com.rohittp.reng/Backdrop.Companion.serializer|serializer(){}[0]
+        final fun serializer(kotlin/Array<out kotlinx.serialization/KSerializer<*>>...): kotlinx.serialization/KSerializer<*> // com.rohittp.reng/Backdrop.Companion.serializer|serializer(kotlin.Array<out|kotlinx.serialization.KSerializer<*>>...){}[0]
+    }
+}
+
+sealed interface com.rohittp.reng/BlendMask { // com.rohittp.reng/BlendMask|null[0]
+    final class Linear : com.rohittp.reng/BlendMask { // com.rohittp.reng/BlendMask.Linear|null[0]
+        constructor <init>(kotlin/Float, kotlin/Float, kotlin/Float) // com.rohittp.reng/BlendMask.Linear.<init>|<init>(kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+
+        final val angleRadians // com.rohittp.reng/BlendMask.Linear.angleRadians|{}angleRadians[0]
+            final fun <get-angleRadians>(): kotlin/Float // com.rohittp.reng/BlendMask.Linear.angleRadians.<get-angleRadians>|<get-angleRadians>(){}[0]
+        final val feather // com.rohittp.reng/BlendMask.Linear.feather|{}feather[0]
+            final fun <get-feather>(): kotlin/Float // com.rohittp.reng/BlendMask.Linear.feather.<get-feather>|<get-feather>(){}[0]
+        final val position // com.rohittp.reng/BlendMask.Linear.position|{}position[0]
+            final fun <get-position>(): kotlin/Float // com.rohittp.reng/BlendMask.Linear.position.<get-position>|<get-position>(){}[0]
+
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/BlendMask.Linear.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/BlendMask.Linear.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/BlendMask.Linear.toString|toString(){}[0]
+
+        final object Companion { // com.rohittp.reng/BlendMask.Linear.Companion|null[0]
+            final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BlendMask.Linear> // com.rohittp.reng/BlendMask.Linear.Companion.serializer|serializer(){}[0]
+        }
+    }
+
+    final class Radial : com.rohittp.reng/BlendMask { // com.rohittp.reng/BlendMask.Radial|null[0]
+        constructor <init>(kotlin/Float, kotlin/Float, kotlin/Float, kotlin/Float) // com.rohittp.reng/BlendMask.Radial.<init>|<init>(kotlin.Float;kotlin.Float;kotlin.Float;kotlin.Float){}[0]
+
+        final val centreX // com.rohittp.reng/BlendMask.Radial.centreX|{}centreX[0]
+            final fun <get-centreX>(): kotlin/Float // com.rohittp.reng/BlendMask.Radial.centreX.<get-centreX>|<get-centreX>(){}[0]
+        final val centreY // com.rohittp.reng/BlendMask.Radial.centreY|{}centreY[0]
+            final fun <get-centreY>(): kotlin/Float // com.rohittp.reng/BlendMask.Radial.centreY.<get-centreY>|<get-centreY>(){}[0]
+        final val feather // com.rohittp.reng/BlendMask.Radial.feather|{}feather[0]
+            final fun <get-feather>(): kotlin/Float // com.rohittp.reng/BlendMask.Radial.feather.<get-feather>|<get-feather>(){}[0]
+        final val radius // com.rohittp.reng/BlendMask.Radial.radius|{}radius[0]
+            final fun <get-radius>(): kotlin/Float // com.rohittp.reng/BlendMask.Radial.radius.<get-radius>|<get-radius>(){}[0]
+
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/BlendMask.Radial.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/BlendMask.Radial.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/BlendMask.Radial.toString|toString(){}[0]
+
+        final object Companion { // com.rohittp.reng/BlendMask.Radial.Companion|null[0]
+            final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BlendMask.Radial> // com.rohittp.reng/BlendMask.Radial.Companion.serializer|serializer(){}[0]
+        }
+    }
+
+    final class Uniform : com.rohittp.reng/BlendMask { // com.rohittp.reng/BlendMask.Uniform|null[0]
+        constructor <init>(kotlin/Float) // com.rohittp.reng/BlendMask.Uniform.<init>|<init>(kotlin.Float){}[0]
+
+        final val amount // com.rohittp.reng/BlendMask.Uniform.amount|{}amount[0]
+            final fun <get-amount>(): kotlin/Float // com.rohittp.reng/BlendMask.Uniform.amount.<get-amount>|<get-amount>(){}[0]
+
+        final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/BlendMask.Uniform.equals|equals(kotlin.Any?){}[0]
+        final fun hashCode(): kotlin/Int // com.rohittp.reng/BlendMask.Uniform.hashCode|hashCode(){}[0]
+        final fun toString(): kotlin/String // com.rohittp.reng/BlendMask.Uniform.toString|toString(){}[0]
+
+        final object Companion { // com.rohittp.reng/BlendMask.Uniform.Companion|null[0]
+            final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BlendMask.Uniform> // com.rohittp.reng/BlendMask.Uniform.Companion.serializer|serializer(){}[0]
+        }
+    }
+
+    final object Companion : kotlinx.serialization.internal/SerializerFactory { // com.rohittp.reng/BlendMask.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BlendMask> // com.rohittp.reng/BlendMask.Companion.serializer|serializer(){}[0]
+        final fun serializer(kotlin/Array<out kotlinx.serialization/KSerializer<*>>...): kotlinx.serialization/KSerializer<*> // com.rohittp.reng/BlendMask.Companion.serializer|serializer(kotlin.Array<out|kotlinx.serialization.KSerializer<*>>...){}[0]
+    }
+}
+
 sealed interface com.rohittp.reng/PreparedFrame : kotlin/AutoCloseable { // com.rohittp.reng/PreparedFrame|null[0]
     abstract val frameIndex // com.rohittp.reng/PreparedFrame.frameIndex|{}frameIndex[0]
         abstract fun <get-frameIndex>(): kotlin/Long // com.rohittp.reng/PreparedFrame.frameIndex.<get-frameIndex>|<get-frameIndex>(){}[0]
@@ -280,10 +449,13 @@ sealed interface com.rohittp.reng/Renderer : kotlin/AutoCloseable { // com.rohit
     abstract fun freeResources(com.rohittp.reng/ResourceSelector = ...): com.rohittp.reng/ResourceFreeResult // com.rohittp.reng/Renderer.freeResources|freeResources(com.rohittp.reng.ResourceSelector){}[0]
     abstract fun mintRenderTarget(com.rohittp.reng/FramebufferName): com.rohittp.reng/RenderTarget // com.rohittp.reng/Renderer.mintRenderTarget|mintRenderTarget(com.rohittp.reng.FramebufferName){}[0]
     abstract fun notifyGpuObjectsGone() // com.rohittp.reng/Renderer.notifyGpuObjectsGone|notifyGpuObjectsGone(){}[0]
+    abstract fun queryMetrics(): com.rohittp.reng/MetricReport // com.rohittp.reng/Renderer.queryMetrics|queryMetrics(){}[0]
     abstract fun queryResources(com.rohittp.reng/ResourceSelector = ...): com.rohittp.reng/ResourceReport // com.rohittp.reng/Renderer.queryResources|queryResources(com.rohittp.reng.ResourceSelector){}[0]
+    abstract fun readAhead(kotlin.collections/List<com.rohittp.reng/FramePlan>) // com.rohittp.reng/Renderer.readAhead|readAhead(kotlin.collections.List<com.rohittp.reng.FramePlan>){}[0]
+    abstract suspend fun awaitReadAheadIdle() // com.rohittp.reng/Renderer.awaitReadAheadIdle|awaitReadAheadIdle(){}[0]
     abstract suspend fun cancelPreparations() // com.rohittp.reng/Renderer.cancelPreparations|cancelPreparations(){}[0]
-    abstract suspend fun prepare(com.rohittp.reng/FramePlan, com.rohittp.reng/ResourceAccessMode = ...): com.rohittp.reng/PreparedFrame // com.rohittp.reng/Renderer.prepare|prepare(com.rohittp.reng.FramePlan;com.rohittp.reng.ResourceAccessMode){}[0]
-    abstract suspend fun prepareBatch(kotlin.collections/List<com.rohittp.reng/FramePlan>, com.rohittp.reng/ResourceAccessMode = ...): kotlin.collections/List<com.rohittp.reng/PreparedFrame> // com.rohittp.reng/Renderer.prepareBatch|prepareBatch(kotlin.collections.List<com.rohittp.reng.FramePlan>;com.rohittp.reng.ResourceAccessMode){}[0]
+    abstract suspend fun prepare(com.rohittp.reng/FramePlan, com.rohittp.reng/ResourceAccessMode = ..., com.rohittp.reng/RenGRenderPriority = ...): com.rohittp.reng/PreparedFrame // com.rohittp.reng/Renderer.prepare|prepare(com.rohittp.reng.FramePlan;com.rohittp.reng.ResourceAccessMode;com.rohittp.reng.RenGRenderPriority){}[0]
+    abstract suspend fun prepareBatch(kotlin.collections/List<com.rohittp.reng/FramePlan>, com.rohittp.reng/ResourceAccessMode = ..., com.rohittp.reng/RenGRenderPriority = ...): kotlin.collections/List<com.rohittp.reng/PreparedFrame> // com.rohittp.reng/Renderer.prepareBatch|prepareBatch(kotlin.collections.List<com.rohittp.reng.FramePlan>;com.rohittp.reng.ResourceAccessMode;com.rohittp.reng.RenGRenderPriority){}[0]
 }
 
 sealed interface com.rohittp.reng/ResourceSelector { // com.rohittp.reng/ResourceSelector|null[0]
@@ -471,6 +643,75 @@ final class com.rohittp.reng/AnimationTrack { // com.rohittp.reng/AnimationTrack
     }
 }
 
+final class com.rohittp.reng/BasemapBlend { // com.rohittp.reng/BasemapBlend|null[0]
+    constructor <init>(kotlin/Int, com.rohittp.reng/BlendMask) // com.rohittp.reng/BasemapBlend.<init>|<init>(kotlin.Int;com.rohittp.reng.BlendMask){}[0]
+
+    final val mask // com.rohittp.reng/BasemapBlend.mask|{}mask[0]
+        final fun <get-mask>(): com.rohittp.reng/BlendMask // com.rohittp.reng/BasemapBlend.mask.<get-mask>|<get-mask>(){}[0]
+    final val toStyle // com.rohittp.reng/BasemapBlend.toStyle|{}toStyle[0]
+        final fun <get-toStyle>(): kotlin/Int // com.rohittp.reng/BasemapBlend.toStyle.<get-toStyle>|<get-toStyle>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/BasemapBlend.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/BasemapBlend.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/BasemapBlend.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/BasemapBlend.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BasemapBlend> // com.rohittp.reng/BasemapBlend.Companion.serializer|serializer(){}[0]
+    }
+}
+
+final class com.rohittp.reng/BasemapSelection { // com.rohittp.reng/BasemapSelection|null[0]
+    constructor <init>(kotlin/Int = ..., com.rohittp.reng/BasemapBlend? = ...) // com.rohittp.reng/BasemapSelection.<init>|<init>(kotlin.Int;com.rohittp.reng.BasemapBlend?){}[0]
+
+    final val blend // com.rohittp.reng/BasemapSelection.blend|{}blend[0]
+        final fun <get-blend>(): com.rohittp.reng/BasemapBlend? // com.rohittp.reng/BasemapSelection.blend.<get-blend>|<get-blend>(){}[0]
+    final val style // com.rohittp.reng/BasemapSelection.style|{}style[0]
+        final fun <get-style>(): kotlin/Int // com.rohittp.reng/BasemapSelection.style.<get-style>|<get-style>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/BasemapSelection.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/BasemapSelection.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/BasemapSelection.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/BasemapSelection.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/BasemapSelection> // com.rohittp.reng/BasemapSelection.Companion.serializer|serializer(){}[0]
+    }
+}
+
+final class com.rohittp.reng/Bloom { // com.rohittp.reng/Bloom|null[0]
+    constructor <init>(kotlin/Float = ..., kotlin.collections/List<kotlin/Float> = ..., kotlin/Float = ..., kotlin/Float = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Float = ...) // com.rohittp.reng/Bloom.<init>|<init>(kotlin.Float;kotlin.collections.List<kotlin.Float>;kotlin.Float;kotlin.Float;kotlin.Boolean;kotlin.Int;kotlin.Float){}[0]
+
+    final val highPrecisionEmission // com.rohittp.reng/Bloom.highPrecisionEmission|{}highPrecisionEmission[0]
+        final fun <get-highPrecisionEmission>(): kotlin/Boolean // com.rohittp.reng/Bloom.highPrecisionEmission.<get-highPrecisionEmission>|<get-highPrecisionEmission>(){}[0]
+    final val insideSuppression // com.rohittp.reng/Bloom.insideSuppression|{}insideSuppression[0]
+        final fun <get-insideSuppression>(): kotlin/Float // com.rohittp.reng/Bloom.insideSuppression.<get-insideSuppression>|<get-insideSuppression>(){}[0]
+    final val intensity // com.rohittp.reng/Bloom.intensity|{}intensity[0]
+        final fun <get-intensity>(): kotlin/Float // com.rohittp.reng/Bloom.intensity.<get-intensity>|<get-intensity>(){}[0]
+    final val levelWeights // com.rohittp.reng/Bloom.levelWeights|{}levelWeights[0]
+        final fun <get-levelWeights>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.levelWeights.<get-levelWeights>|<get-levelWeights>(){}[0]
+    final val reachGain // com.rohittp.reng/Bloom.reachGain|{}reachGain[0]
+        final fun <get-reachGain>(): kotlin/Float // com.rohittp.reng/Bloom.reachGain.<get-reachGain>|<get-reachGain>(){}[0]
+    final val reachLevel // com.rohittp.reng/Bloom.reachLevel|{}reachLevel[0]
+        final fun <get-reachLevel>(): kotlin/Int // com.rohittp.reng/Bloom.reachLevel.<get-reachLevel>|<get-reachLevel>(){}[0]
+    final val whiteness // com.rohittp.reng/Bloom.whiteness|{}whiteness[0]
+        final fun <get-whiteness>(): kotlin/Float // com.rohittp.reng/Bloom.whiteness.<get-whiteness>|<get-whiteness>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Bloom.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/Bloom.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/Bloom.toString|toString(){}[0]
+
+    final object Companion { // com.rohittp.reng/Bloom.Companion|null[0]
+        final const val DEFAULT_REACH_LEVEL // com.rohittp.reng/Bloom.Companion.DEFAULT_REACH_LEVEL|{}DEFAULT_REACH_LEVEL[0]
+            final fun <get-DEFAULT_REACH_LEVEL>(): kotlin/Int // com.rohittp.reng/Bloom.Companion.DEFAULT_REACH_LEVEL.<get-DEFAULT_REACH_LEVEL>|<get-DEFAULT_REACH_LEVEL>(){}[0]
+        final const val MAXIMUM_REACH_LEVEL // com.rohittp.reng/Bloom.Companion.MAXIMUM_REACH_LEVEL|{}MAXIMUM_REACH_LEVEL[0]
+            final fun <get-MAXIMUM_REACH_LEVEL>(): kotlin/Int // com.rohittp.reng/Bloom.Companion.MAXIMUM_REACH_LEVEL.<get-MAXIMUM_REACH_LEVEL>|<get-MAXIMUM_REACH_LEVEL>(){}[0]
+
+        final val DEFAULT_LEVEL_WEIGHTS // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS|{}DEFAULT_LEVEL_WEIGHTS[0]
+            final fun <get-DEFAULT_LEVEL_WEIGHTS>(): kotlin.collections/List<kotlin/Float> // com.rohittp.reng/Bloom.Companion.DEFAULT_LEVEL_WEIGHTS.<get-DEFAULT_LEVEL_WEIGHTS>|<get-DEFAULT_LEVEL_WEIGHTS>(){}[0]
+
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/Bloom> // com.rohittp.reng/Bloom.Companion.serializer|serializer(){}[0]
+    }
+}
+
 final class com.rohittp.reng/Camera { // com.rohittp.reng/Camera|null[0]
     constructor <init>(kotlin/Double, kotlin/Double, kotlin/Double, kotlin/Double, kotlin/Double) // com.rohittp.reng/Camera.<init>|<init>(kotlin.Double;kotlin.Double;kotlin.Double;kotlin.Double;kotlin.Double){}[0]
 
@@ -490,6 +731,9 @@ final class com.rohittp.reng/Camera { // com.rohittp.reng/Camera|null[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Camera.toString|toString(){}[0]
 
     final object Companion { // com.rohittp.reng/Camera.Companion|null[0]
+        final val MAXIMUM_GROUND_FILLING_PITCH_DEGREES // com.rohittp.reng/Camera.Companion.MAXIMUM_GROUND_FILLING_PITCH_DEGREES|{}MAXIMUM_GROUND_FILLING_PITCH_DEGREES[0]
+            final fun <get-MAXIMUM_GROUND_FILLING_PITCH_DEGREES>(): kotlin/Double // com.rohittp.reng/Camera.Companion.MAXIMUM_GROUND_FILLING_PITCH_DEGREES.<get-MAXIMUM_GROUND_FILLING_PITCH_DEGREES>|<get-MAXIMUM_GROUND_FILLING_PITCH_DEGREES>(){}[0]
+
         final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/Camera> // com.rohittp.reng/Camera.Companion.serializer|serializer(){}[0]
     }
 }
@@ -529,8 +773,14 @@ final class com.rohittp.reng/Diagnostic { // com.rohittp.reng/Diagnostic|null[0]
 }
 
 final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
-    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>){}[0]
+    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ..., com.rohittp.reng/Backdrop? = ..., com.rohittp.reng/Bloom? = ..., com.rohittp.reng/BasemapSelection? = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>;com.rohittp.reng.Backdrop?;com.rohittp.reng.Bloom?;com.rohittp.reng.BasemapSelection?){}[0]
 
+    final val backdrop // com.rohittp.reng/FramePlan.backdrop|{}backdrop[0]
+        final fun <get-backdrop>(): com.rohittp.reng/Backdrop? // com.rohittp.reng/FramePlan.backdrop.<get-backdrop>|<get-backdrop>(){}[0]
+    final val basemap // com.rohittp.reng/FramePlan.basemap|{}basemap[0]
+        final fun <get-basemap>(): com.rohittp.reng/BasemapSelection? // com.rohittp.reng/FramePlan.basemap.<get-basemap>|<get-basemap>(){}[0]
+    final val bloom // com.rohittp.reng/FramePlan.bloom|{}bloom[0]
+        final fun <get-bloom>(): com.rohittp.reng/Bloom? // com.rohittp.reng/FramePlan.bloom.<get-bloom>|<get-bloom>(){}[0]
     final val camera // com.rohittp.reng/FramePlan.camera|{}camera[0]
         final fun <get-camera>(): com.rohittp.reng/Camera // com.rohittp.reng/FramePlan.camera.<get-camera>|<get-camera>(){}[0]
     final val drawBasemap // com.rohittp.reng/FramePlan.drawBasemap|{}drawBasemap[0]
@@ -557,12 +807,18 @@ final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
 }
 
 final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
-    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode){}[0]
+    constructor <init>(com.rohittp.reng/Vector3, com.rohittp.reng/Vector3, com.rohittp.reng/ShaderPair, kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ..., kotlin/Float = ...) // com.rohittp.reng/Geometry.<init>|<init>(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode;kotlin.Float){}[0]
 
     final val altitudeMode // com.rohittp.reng/Geometry.altitudeMode|{}altitudeMode[0]
         final fun <get-altitudeMode>(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.altitudeMode.<get-altitudeMode>|<get-altitudeMode>(){}[0]
+    final val blend // com.rohittp.reng/Geometry.blend|{}blend[0]
+        final fun <get-blend>(): com.rohittp.reng/BlendMode // com.rohittp.reng/Geometry.blend.<get-blend>|<get-blend>(){}[0]
+    final val bloomReach // com.rohittp.reng/Geometry.bloomReach|{}bloomReach[0]
+        final fun <get-bloomReach>(): kotlin/Float // com.rohittp.reng/Geometry.bloomReach.<get-bloomReach>|<get-bloomReach>(){}[0]
     final val bottomRight // com.rohittp.reng/Geometry.bottomRight|{}bottomRight[0]
         final fun <get-bottomRight>(): com.rohittp.reng/Vector3 // com.rohittp.reng/Geometry.bottomRight.<get-bottomRight>|<get-bottomRight>(){}[0]
+    final val emissive // com.rohittp.reng/Geometry.emissive|{}emissive[0]
+        final fun <get-emissive>(): kotlin/Boolean // com.rohittp.reng/Geometry.emissive.<get-emissive>|<get-emissive>(){}[0]
     final val shaderPair // com.rohittp.reng/Geometry.shaderPair|{}shaderPair[0]
         final fun <get-shaderPair>(): com.rohittp.reng/ShaderPair // com.rohittp.reng/Geometry.shaderPair.<get-shaderPair>|<get-shaderPair>(){}[0]
     final val textures // com.rohittp.reng/Geometry.textures|{}textures[0]
@@ -578,7 +834,10 @@ final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
     final fun component4(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> // com.rohittp.reng/Geometry.component4|component4(){}[0]
     final fun component5(): kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> // com.rohittp.reng/Geometry.component5|component5(){}[0]
     final fun component6(): com.rohittp.reng/AltitudeMode // com.rohittp.reng/Geometry.component6|component6(){}[0]
-    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode){}[0]
+    final fun component7(): kotlin/Boolean // com.rohittp.reng/Geometry.component7|component7(){}[0]
+    final fun component8(): com.rohittp.reng/BlendMode // com.rohittp.reng/Geometry.component8|component8(){}[0]
+    final fun component9(): kotlin/Float // com.rohittp.reng/Geometry.component9|component9(){}[0]
+    final fun copy(com.rohittp.reng/Vector3 = ..., com.rohittp.reng/Vector3 = ..., com.rohittp.reng/ShaderPair = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ShaderValue> = ..., kotlin.collections/Map<kotlin/String, com.rohittp.reng/ResourceLocator> = ..., com.rohittp.reng/AltitudeMode = ..., kotlin/Boolean = ..., com.rohittp.reng/BlendMode = ..., kotlin/Float = ...): com.rohittp.reng/Geometry // com.rohittp.reng/Geometry.copy|copy(com.rohittp.reng.Vector3;com.rohittp.reng.Vector3;com.rohittp.reng.ShaderPair;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ShaderValue>;kotlin.collections.Map<kotlin.String,com.rohittp.reng.ResourceLocator>;com.rohittp.reng.AltitudeMode;kotlin.Boolean;com.rohittp.reng.BlendMode;kotlin.Float){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Geometry.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Geometry.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Geometry.toString|toString(){}[0]
@@ -588,13 +847,25 @@ final class com.rohittp.reng/Geometry { // com.rohittp.reng/Geometry|null[0]
     }
 }
 
+final class com.rohittp.reng/MetricReport { // com.rohittp.reng/MetricReport|null[0]
+    final val counters // com.rohittp.reng/MetricReport.counters|{}counters[0]
+        final fun <get-counters>(): kotlin.collections/Map<com.rohittp.reng/RenGMetricName, kotlin/Long> // com.rohittp.reng/MetricReport.counters.<get-counters>|<get-counters>(){}[0]
+
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/MetricReport.equals|equals(kotlin.Any?){}[0]
+    final fun get(com.rohittp.reng/RenGMetricName): kotlin/Long // com.rohittp.reng/MetricReport.get|get(com.rohittp.reng.RenGMetricName){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/MetricReport.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/MetricReport.toString|toString(){}[0]
+}
+
 final class com.rohittp.reng/Model { // com.rohittp.reng/Model|null[0]
-    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, com.rohittp.reng/ResourceLocator? = ..., kotlin.collections/List<com.rohittp.reng/AnimationTrack> = ...) // com.rohittp.reng/Model.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;com.rohittp.reng.ResourceLocator?;kotlin.collections.List<com.rohittp.reng.AnimationTrack>){}[0]
+    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, com.rohittp.reng/ResourceLocator? = ..., kotlin.collections/List<com.rohittp.reng/AnimationTrack> = ..., kotlin/Float = ...) // com.rohittp.reng/Model.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;com.rohittp.reng.ResourceLocator?;kotlin.collections.List<com.rohittp.reng.AnimationTrack>;kotlin.Float){}[0]
 
     final val animationTracks // com.rohittp.reng/Model.animationTracks|{}animationTracks[0]
         final fun <get-animationTracks>(): kotlin.collections/List<com.rohittp.reng/AnimationTrack> // com.rohittp.reng/Model.animationTracks.<get-animationTracks>|<get-animationTracks>(){}[0]
     final val glb // com.rohittp.reng/Model.glb|{}glb[0]
         final fun <get-glb>(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Model.glb.<get-glb>|<get-glb>(){}[0]
+    final val opacity // com.rohittp.reng/Model.opacity|{}opacity[0]
+        final fun <get-opacity>(): kotlin/Float // com.rohittp.reng/Model.opacity.<get-opacity>|<get-opacity>(){}[0]
     final val placement // com.rohittp.reng/Model.placement|{}placement[0]
         final fun <get-placement>(): com.rohittp.reng/Placement // com.rohittp.reng/Model.placement.<get-placement>|<get-placement>(){}[0]
     final val texture // com.rohittp.reng/Model.texture|{}texture[0]
@@ -674,20 +945,32 @@ final class com.rohittp.reng/RenGException : kotlin/RuntimeException { // com.ro
 }
 
 final class com.rohittp.reng/RendererConfiguration { // com.rohittp.reng/RendererConfiguration|null[0]
-    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean){}[0]
+    constructor <init>(com.rohittp.reng/OutputPixelSize, com.rohittp.reng/Transport, com.rohittp.reng/Store, com.rohittp.reng/ResourceLocator? = ..., com.rohittp.reng/ResourceLimits = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., com.rohittp.reng/DiagnosticSink = ..., kotlin/Boolean = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/ResourceLocator> = ...) // com.rohittp.reng/RendererConfiguration.<init>|<init>(com.rohittp.reng.OutputPixelSize;com.rohittp.reng.Transport;com.rohittp.reng.Store;com.rohittp.reng.ResourceLocator?;com.rohittp.reng.ResourceLimits;kotlin.Int;kotlin.Int;kotlin.Int;com.rohittp.reng.DiagnosticSink;kotlin.Boolean;kotlin.Int;kotlin.Int;kotlin.Int;kotlin.Long;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.ResourceLocator>){}[0]
 
+    final val additionalBasemapStyles // com.rohittp.reng/RendererConfiguration.additionalBasemapStyles|{}additionalBasemapStyles[0]
+        final fun <get-additionalBasemapStyles>(): kotlin.collections/List<com.rohittp.reng/ResourceLocator> // com.rohittp.reng/RendererConfiguration.additionalBasemapStyles.<get-additionalBasemapStyles>|<get-additionalBasemapStyles>(){}[0]
     final val basemapStyle // com.rohittp.reng/RendererConfiguration.basemapStyle|{}basemapStyle[0]
         final fun <get-basemapStyle>(): com.rohittp.reng/ResourceLocator? // com.rohittp.reng/RendererConfiguration.basemapStyle.<get-basemapStyle>|<get-basemapStyle>(){}[0]
     final val diagnosticSink // com.rohittp.reng/RendererConfiguration.diagnosticSink|{}diagnosticSink[0]
         final fun <get-diagnosticSink>(): com.rohittp.reng/DiagnosticSink // com.rohittp.reng/RendererConfiguration.diagnosticSink.<get-diagnosticSink>|<get-diagnosticSink>(){}[0]
     final val maximumBasemapTileInstances // com.rohittp.reng/RendererConfiguration.maximumBasemapTileInstances|{}maximumBasemapTileInstances[0]
         final fun <get-maximumBasemapTileInstances>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumBasemapTileInstances.<get-maximumBasemapTileInstances>|<get-maximumBasemapTileInstances>(){}[0]
+    final val maximumCachedConsumerPipelines // com.rohittp.reng/RendererConfiguration.maximumCachedConsumerPipelines|{}maximumCachedConsumerPipelines[0]
+        final fun <get-maximumCachedConsumerPipelines>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumCachedConsumerPipelines.<get-maximumCachedConsumerPipelines>|<get-maximumCachedConsumerPipelines>(){}[0]
     final val maximumConcurrentResourceOperations // com.rohittp.reng/RendererConfiguration.maximumConcurrentResourceOperations|{}maximumConcurrentResourceOperations[0]
         final fun <get-maximumConcurrentResourceOperations>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConcurrentResourceOperations.<get-maximumConcurrentResourceOperations>|<get-maximumConcurrentResourceOperations>(){}[0]
+    final val maximumConcurrentTileRasterisations // com.rohittp.reng/RendererConfiguration.maximumConcurrentTileRasterisations|{}maximumConcurrentTileRasterisations[0]
+        final fun <get-maximumConcurrentTileRasterisations>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConcurrentTileRasterisations.<get-maximumConcurrentTileRasterisations>|<get-maximumConcurrentTileRasterisations>(){}[0]
+    final val maximumConsumerPipelinesPerFrame // com.rohittp.reng/RendererConfiguration.maximumConsumerPipelinesPerFrame|{}maximumConsumerPipelinesPerFrame[0]
+        final fun <get-maximumConsumerPipelinesPerFrame>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumConsumerPipelinesPerFrame.<get-maximumConsumerPipelinesPerFrame>|<get-maximumConsumerPipelinesPerFrame>(){}[0]
     final val maximumPreparationBatchSize // com.rohittp.reng/RendererConfiguration.maximumPreparationBatchSize|{}maximumPreparationBatchSize[0]
         final fun <get-maximumPreparationBatchSize>(): kotlin/Int // com.rohittp.reng/RendererConfiguration.maximumPreparationBatchSize.<get-maximumPreparationBatchSize>|<get-maximumPreparationBatchSize>(){}[0]
+    final val maximumReadAheadRasterisedTileBytes // com.rohittp.reng/RendererConfiguration.maximumReadAheadRasterisedTileBytes|{}maximumReadAheadRasterisedTileBytes[0]
+        final fun <get-maximumReadAheadRasterisedTileBytes>(): kotlin/Long // com.rohittp.reng/RendererConfiguration.maximumReadAheadRasterisedTileBytes.<get-maximumReadAheadRasterisedTileBytes>|<get-maximumReadAheadRasterisedTileBytes>(){}[0]
     final val outputPixelSize // com.rohittp.reng/RendererConfiguration.outputPixelSize|{}outputPixelSize[0]
         final fun <get-outputPixelSize>(): com.rohittp.reng/OutputPixelSize // com.rohittp.reng/RendererConfiguration.outputPixelSize.<get-outputPixelSize>|<get-outputPixelSize>(){}[0]
+    final val presentFailedTilesProvisionally // com.rohittp.reng/RendererConfiguration.presentFailedTilesProvisionally|{}presentFailedTilesProvisionally[0]
+        final fun <get-presentFailedTilesProvisionally>(): kotlin/Boolean // com.rohittp.reng/RendererConfiguration.presentFailedTilesProvisionally.<get-presentFailedTilesProvisionally>|<get-presentFailedTilesProvisionally>(){}[0]
     final val resourceLimits // com.rohittp.reng/RendererConfiguration.resourceLimits|{}resourceLimits[0]
         final fun <get-resourceLimits>(): com.rohittp.reng/ResourceLimits // com.rohittp.reng/RendererConfiguration.resourceLimits.<get-resourceLimits>|<get-resourceLimits>(){}[0]
     final val store // com.rohittp.reng/RendererConfiguration.store|{}store[0]
@@ -734,7 +1017,7 @@ final class com.rohittp.reng/ResourceKey { // com.rohittp.reng/ResourceKey|null[
 }
 
 final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits|null[0]
-    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    constructor <init>(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long? = ...) // com.rohittp.reng/ResourceLimits.<init>|<init>(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long?){}[0]
 
     final val maximumBasemapGeoJsonBytes // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes|{}maximumBasemapGeoJsonBytes[0]
         final fun <get-maximumBasemapGeoJsonBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapGeoJsonBytes.<get-maximumBasemapGeoJsonBytes>|<get-maximumBasemapGeoJsonBytes>(){}[0]
@@ -748,20 +1031,41 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
         final fun <get-maximumBasemapTileBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumBasemapTileBytes.<get-maximumBasemapTileBytes>|<get-maximumBasemapTileBytes>(){}[0]
     final val maximumDecodedImageBytes // com.rohittp.reng/ResourceLimits.maximumDecodedImageBytes|{}maximumDecodedImageBytes[0]
         final fun <get-maximumDecodedImageBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumDecodedImageBytes.<get-maximumDecodedImageBytes>|<get-maximumDecodedImageBytes>(){}[0]
+    final val maximumImageDecodeWorkingBytes // com.rohittp.reng/ResourceLimits.maximumImageDecodeWorkingBytes|{}maximumImageDecodeWorkingBytes[0]
+        final fun <get-maximumImageDecodeWorkingBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumImageDecodeWorkingBytes.<get-maximumImageDecodeWorkingBytes>|<get-maximumImageDecodeWorkingBytes>(){}[0]
+    final val maximumInFlightPreparedFrameCpuBytes // com.rohittp.reng/ResourceLimits.maximumInFlightPreparedFrameCpuBytes|{}maximumInFlightPreparedFrameCpuBytes[0]
+        final fun <get-maximumInFlightPreparedFrameCpuBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumInFlightPreparedFrameCpuBytes.<get-maximumInFlightPreparedFrameCpuBytes>|<get-maximumInFlightPreparedFrameCpuBytes>(){}[0]
+    final val maximumInFlightRawBasemapTileBytes // com.rohittp.reng/ResourceLimits.maximumInFlightRawBasemapTileBytes|{}maximumInFlightRawBasemapTileBytes[0]
+        final fun <get-maximumInFlightRawBasemapTileBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumInFlightRawBasemapTileBytes.<get-maximumInFlightRawBasemapTileBytes>|<get-maximumInFlightRawBasemapTileBytes>(){}[0]
     final val maximumModelGlbBytes // com.rohittp.reng/ResourceLimits.maximumModelGlbBytes|{}maximumModelGlbBytes[0]
         final fun <get-maximumModelGlbBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelGlbBytes.<get-maximumModelGlbBytes>|<get-maximumModelGlbBytes>(){}[0]
     final val maximumModelJsonChunkBytes // com.rohittp.reng/ResourceLimits.maximumModelJsonChunkBytes|{}maximumModelJsonChunkBytes[0]
         final fun <get-maximumModelJsonChunkBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelJsonChunkBytes.<get-maximumModelJsonChunkBytes>|<get-maximumModelJsonChunkBytes>(){}[0]
     final val maximumModelTextureBytes // com.rohittp.reng/ResourceLimits.maximumModelTextureBytes|{}maximumModelTextureBytes[0]
         final fun <get-maximumModelTextureBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumModelTextureBytes.<get-maximumModelTextureBytes>|<get-maximumModelTextureBytes>(){}[0]
+    final val maximumResidentCpuResourceBytes // com.rohittp.reng/ResourceLimits.maximumResidentCpuResourceBytes|{}maximumResidentCpuResourceBytes[0]
+        final fun <get-maximumResidentCpuResourceBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentCpuResourceBytes.<get-maximumResidentCpuResourceBytes>|<get-maximumResidentCpuResourceBytes>(){}[0]
+    final val maximumResidentGpuBufferBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuBufferBytes|{}maximumResidentGpuBufferBytes[0]
+        final fun <get-maximumResidentGpuBufferBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentGpuBufferBytes.<get-maximumResidentGpuBufferBytes>|<get-maximumResidentGpuBufferBytes>(){}[0]
+    final val maximumResidentGpuContentTextureBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuContentTextureBytes|{}maximumResidentGpuContentTextureBytes[0]
+        final fun <get-maximumResidentGpuContentTextureBytes>(): kotlin/Long? // com.rohittp.reng/ResourceLimits.maximumResidentGpuContentTextureBytes.<get-maximumResidentGpuContentTextureBytes>|<get-maximumResidentGpuContentTextureBytes>(){}[0]
     final val maximumResidentGpuTextureBytes // com.rohittp.reng/ResourceLimits.maximumResidentGpuTextureBytes|{}maximumResidentGpuTextureBytes[0]
         final fun <get-maximumResidentGpuTextureBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumResidentGpuTextureBytes.<get-maximumResidentGpuTextureBytes>|<get-maximumResidentGpuTextureBytes>(){}[0]
     final val maximumStickerImageBytes // com.rohittp.reng/ResourceLimits.maximumStickerImageBytes|{}maximumStickerImageBytes[0]
         final fun <get-maximumStickerImageBytes>(): kotlin/Long // com.rohittp.reng/ResourceLimits.maximumStickerImageBytes.<get-maximumStickerImageBytes>|<get-maximumStickerImageBytes>(){}[0]
+    final val maximumTilesRasterisedPerFrame // com.rohittp.reng/ResourceLimits.maximumTilesRasterisedPerFrame|{}maximumTilesRasterisedPerFrame[0]
+        final fun <get-maximumTilesRasterisedPerFrame>(): kotlin/Int // com.rohittp.reng/ResourceLimits.maximumTilesRasterisedPerFrame.<get-maximumTilesRasterisedPerFrame>|<get-maximumTilesRasterisedPerFrame>(){}[0]
 
     final fun component1(): kotlin/Long // com.rohittp.reng/ResourceLimits.component1|component1(){}[0]
     final fun component10(): kotlin/Long // com.rohittp.reng/ResourceLimits.component10|component10(){}[0]
     final fun component11(): kotlin/Long // com.rohittp.reng/ResourceLimits.component11|component11(){}[0]
+    final fun component12(): kotlin/Long // com.rohittp.reng/ResourceLimits.component12|component12(){}[0]
+    final fun component13(): kotlin/Long // com.rohittp.reng/ResourceLimits.component13|component13(){}[0]
+    final fun component14(): kotlin/Int // com.rohittp.reng/ResourceLimits.component14|component14(){}[0]
+    final fun component15(): kotlin/Long // com.rohittp.reng/ResourceLimits.component15|component15(){}[0]
+    final fun component16(): kotlin/Long // com.rohittp.reng/ResourceLimits.component16|component16(){}[0]
+    final fun component17(): kotlin/Long // com.rohittp.reng/ResourceLimits.component17|component17(){}[0]
+    final fun component18(): kotlin/Long? // com.rohittp.reng/ResourceLimits.component18|component18(){}[0]
     final fun component2(): kotlin/Long // com.rohittp.reng/ResourceLimits.component2|component2(){}[0]
     final fun component3(): kotlin/Long // com.rohittp.reng/ResourceLimits.component3|component3(){}[0]
     final fun component4(): kotlin/Long // com.rohittp.reng/ResourceLimits.component4|component4(){}[0]
@@ -770,7 +1074,7 @@ final class com.rohittp.reng/ResourceLimits { // com.rohittp.reng/ResourceLimits
     final fun component7(): kotlin/Long // com.rohittp.reng/ResourceLimits.component7|component7(){}[0]
     final fun component8(): kotlin/Long // com.rohittp.reng/ResourceLimits.component8|component8(){}[0]
     final fun component9(): kotlin/Long // com.rohittp.reng/ResourceLimits.component9|component9(){}[0]
-    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long){}[0]
+    final fun copy(kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long = ..., kotlin/Long? = ...): com.rohittp.reng/ResourceLimits // com.rohittp.reng/ResourceLimits.copy|copy(kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Int;kotlin.Long;kotlin.Long;kotlin.Long;kotlin.Long?){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ResourceLimits.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/ResourceLimits.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/ResourceLimits.toString|toString(){}[0]
@@ -792,6 +1096,8 @@ final class com.rohittp.reng/ResourceLocator { // com.rohittp.reng/ResourceLocat
 }
 
 final class com.rohittp.reng/ResourceReport { // com.rohittp.reng/ResourceReport|null[0]
+    final val cpuResidency // com.rohittp.reng/ResourceReport.cpuResidency|{}cpuResidency[0]
+        final fun <get-cpuResidency>(): com.rohittp.reng/ResourceResidency // com.rohittp.reng/ResourceReport.cpuResidency.<get-cpuResidency>|<get-cpuResidency>(){}[0]
     final val entries // com.rohittp.reng/ResourceReport.entries|{}entries[0]
         final fun <get-entries>(): kotlin.collections/List<com.rohittp.reng/ResourceReportEntry> // com.rohittp.reng/ResourceReport.entries.<get-entries>|<get-entries>(){}[0]
     final val totals // com.rohittp.reng/ResourceReport.totals|{}totals[0]
@@ -825,6 +1131,25 @@ final class com.rohittp.reng/ResourceReportEntry { // com.rohittp.reng/ResourceR
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ResourceReportEntry.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/ResourceReportEntry.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/ResourceReportEntry.toString|toString(){}[0]
+}
+
+final class com.rohittp.reng/ResourceResidency { // com.rohittp.reng/ResourceResidency|null[0]
+    final val budgetBytes // com.rohittp.reng/ResourceResidency.budgetBytes|{}budgetBytes[0]
+        final fun <get-budgetBytes>(): kotlin/Long // com.rohittp.reng/ResourceResidency.budgetBytes.<get-budgetBytes>|<get-budgetBytes>(){}[0]
+    final val evictedBytes // com.rohittp.reng/ResourceResidency.evictedBytes|{}evictedBytes[0]
+        final fun <get-evictedBytes>(): kotlin/Long // com.rohittp.reng/ResourceResidency.evictedBytes.<get-evictedBytes>|<get-evictedBytes>(){}[0]
+    final val evictedKeyCount // com.rohittp.reng/ResourceResidency.evictedKeyCount|{}evictedKeyCount[0]
+        final fun <get-evictedKeyCount>(): kotlin/Long // com.rohittp.reng/ResourceResidency.evictedKeyCount.<get-evictedKeyCount>|<get-evictedKeyCount>(){}[0]
+    final val residentBytes // com.rohittp.reng/ResourceResidency.residentBytes|{}residentBytes[0]
+        final fun <get-residentBytes>(): kotlin/Long // com.rohittp.reng/ResourceResidency.residentBytes.<get-residentBytes>|<get-residentBytes>(){}[0]
+
+    final fun component1(): kotlin/Long // com.rohittp.reng/ResourceResidency.component1|component1(){}[0]
+    final fun component2(): kotlin/Long // com.rohittp.reng/ResourceResidency.component2|component2(){}[0]
+    final fun component3(): kotlin/Long // com.rohittp.reng/ResourceResidency.component3|component3(){}[0]
+    final fun component4(): kotlin/Long // com.rohittp.reng/ResourceResidency.component4|component4(){}[0]
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ResourceResidency.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/ResourceResidency.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/ResourceResidency.toString|toString(){}[0]
 }
 
 final class com.rohittp.reng/ResourceUsage { // com.rohittp.reng/ResourceUsage|null[0]
@@ -867,16 +1192,22 @@ final class com.rohittp.reng/ShaderPair { // com.rohittp.reng/ShaderPair|null[0]
 }
 
 final class com.rohittp.reng/Sticker { // com.rohittp.reng/Sticker|null[0]
-    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator){}[0]
+    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, kotlin/Float = ..., com.rohittp.reng/BlendMode = ...) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode){}[0]
 
+    final val blend // com.rohittp.reng/Sticker.blend|{}blend[0]
+        final fun <get-blend>(): com.rohittp.reng/BlendMode // com.rohittp.reng/Sticker.blend.<get-blend>|<get-blend>(){}[0]
     final val image // com.rohittp.reng/Sticker.image|{}image[0]
         final fun <get-image>(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Sticker.image.<get-image>|<get-image>(){}[0]
+    final val opacity // com.rohittp.reng/Sticker.opacity|{}opacity[0]
+        final fun <get-opacity>(): kotlin/Float // com.rohittp.reng/Sticker.opacity.<get-opacity>|<get-opacity>(){}[0]
     final val placement // com.rohittp.reng/Sticker.placement|{}placement[0]
         final fun <get-placement>(): com.rohittp.reng/Placement // com.rohittp.reng/Sticker.placement.<get-placement>|<get-placement>(){}[0]
 
     final fun component1(): com.rohittp.reng/Placement // com.rohittp.reng/Sticker.component1|component1(){}[0]
     final fun component2(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Sticker.component2|component2(){}[0]
-    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator){}[0]
+    final fun component3(): kotlin/Float // com.rohittp.reng/Sticker.component3|component3(){}[0]
+    final fun component4(): com.rohittp.reng/BlendMode // com.rohittp.reng/Sticker.component4|component4(){}[0]
+    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ..., kotlin/Float = ..., com.rohittp.reng/BlendMode = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Sticker.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Sticker.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Sticker.toString|toString(){}[0]

@@ -1,6 +1,9 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.AltitudeMode
+import com.rohittp.reng.BasemapBlend
+import com.rohittp.reng.BlendMode
+import com.rohittp.reng.Bloom
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
@@ -50,6 +53,8 @@ internal class SceneSticker(
     val texture: Int,
     val imageWidthPixels: Int = 1,
     val imageHeightPixels: Int = 1,
+    val opacity: Float = 1f,
+    val blend: BlendMode = BlendMode.OVER,
 )
 
 /**
@@ -106,6 +111,19 @@ internal class SceneGroundTile(
     val instance: BasemapTileInstance,
     val texture: Int,
     /**
+     * Which part of [texture] this tile occupies (ADR 0057).
+     *
+     * [GroundTileWindow.WHOLE] for a tile drawn from its own texture, which is every tile unless the
+     * consumer set a per-frame rasterisation budget and this one was drawn from an ancestor instead.
+     * Declared with a default so the many construction sites that draw exact tiles say nothing about
+     * it, and the one that does not says it explicitly.
+     */
+    val colourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /** ADR 0086's target-style texture paired by identical [instance], or `null` without a blend. */
+    val blendTexture: Int? = null,
+    /** The target style's own provisional window; it is independent of [colourWindow] (ADR 0086). */
+    val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /**
      * This tile's own padded DEM texture and the sub-rectangle of it this tile occupies, or `null`
      * when the frame declares no terrain or Rentile returned no DEM for this canonical tile.
      *
@@ -151,16 +169,15 @@ internal class SceneTerrain(
      * The same displaced surface, readable on the CPU, or `null` when nothing in this frame asked a
      * question of it.
      *
-     * **It is built per frame and only on demand**, because holding it costs one `rgbaSnapshot` per
-     * distinct source DEM and a frame that asks nothing of it would pay that for nothing. That
-     * conditional construction is the whole of what survives the design's §6 "sparse CPU decode":
-     * Rentile `0.7.0` hands over decoded texels, so there is no decode to be sparse about, only a
-     * copy to be avoided.
+     * **It is built per frame and only on demand**, because a frame that asks nothing of the surface
+     * needs no tile index. Rentile `0.7.0` hands over decoded texels and [GroundSurface] keeps their
+     * immutable [com.rohittp.reng.internal.image.DecodedImage] references directly, so constructing
+     * this surface copies no DEM raster.
      *
      * **It is built during `prepare()` and carried here, not derived at draw time**, because the
      * label placement pass rode this exact object before the frame existed -- ADR 0035 puts label
-     * collision inside `prepare()`. Two constructions would be two copies of every source DEM and
-     * two answers to which of the frame's tiles displace.
+     * collision inside `prepare()`. Two constructions would be two indexes and two answers to which
+     * of the frame's tiles displace, even though both reference the same pixels.
      */
     val surface: GroundSurface? = null,
 ) {
@@ -211,6 +228,7 @@ internal class SceneModel(
     val uploaded: Map<Pair<Int, Int>, UploadedPrimitive>,
     val imageTextures: List<Int>,
     val overrideTexture: Int?,
+    val opacity: Float = 1f,
 )
 
 /**
@@ -269,6 +287,7 @@ internal class Scene(
     val stickers: List<SceneSticker> = emptyList(),
     val geometries: List<SceneGeometry> = emptyList(),
     val groundTiles: List<SceneGroundTile> = emptyList(),
+    val basemapBlend: BasemapBlend? = null,
     /**
      * This frame's terrain, or `null` when its style declared none — which is 28 of the corpus's 34
      * styles and every frame of three published releases.
@@ -321,11 +340,18 @@ internal class Scene(
  * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every **model**, then
  * every map-anchored sticker. That is ADR 0025's order with ADR 0030's models inserted before the
  * stickers, because a map-anchored sticker is a marker and a marker paints over the scene it marks.
- * ADR 0034 then adds **phase 5, the labels**, between the two regimes:
+ * ADR 0034 adds the labels between the two regimes. ADR 0080 amends ADR 0074 by inserting optional
+ * bloom work immediately after the last emissive Geometry in phase 2, without renumbering either
+ * regime. Later Geometry, models and map-anchored stickers consequently cover that light in the
+ * same order in which the consumer declared them:
  *
  * ```
  * map regime (depth tested throughout, ADR 0027)
- *   1 ground (test, AND write when displaced, ADR 0039)   2 geometries
+ *   1 ground (test, AND write when displaced, ADR 0039)
+ *   2 geometries in FramePlan order
+ *       ... last emissive Geometry
+ *       [emissive redraw tests depth; BLOOM chain/composite is screen-space, ADR 0080]
+ *       ... later Geometry
  *   3 models (test AND write, ADR 0030)                   4 map-anchored stickers
  *   5 LABELS   depth test OFF   <-- ADR 0034, and OUTSIDE both regimes
  * screen regime (no depth)
@@ -338,8 +364,13 @@ internal class Scene(
  * [beginLabelPass] *disables* the test, which would read as a third exception if the label pass were
  * inside the map regime. It is not: it is a fourth scene list drawn between the regimes, described by
  * a phase number rather than by a regime name, so both of those ADRs continue to describe every pass
- * that *is* in the map regime without amendment. So a consumer's screen-anchored sticker covers a
- * label, and a label covers a map-anchored sticker. What still binds the label pass is
+ * that *is* in the map regime without amendment. Bloom is interstitial work inside phase 2 rather
+ * than a drawn-thing type: it samples only the emissive Geometry redraw, so later Geometry, models,
+ * map-anchored stickers, labels and the screen stack cover it. A non-emissive Geometry between two
+ * emitters is necessarily below the last-emitter boundary and still receives bloom; removing that
+ * known sandwich limit would require a later-content occlusion mask (ADR 0080). Thus a consumer's
+ * screen-anchored sticker covers a label, and a label covers every map-regime item. What still binds
+ * the label pass is
  * `SceneContentTest.exactlyOnePhaseWritesDepthItIsTheModelPassAndTheMaskIsOffAgainOnTheWayOut`:
  * exactly one phase in a whole scene enables depth writes and it is the model pass. The label pass
  * enables none, and the test off is genuinely *needed* here rather than merely restated — phase 4
@@ -348,7 +379,7 @@ internal class Scene(
  *
  * **The phase order is a relative order, not a claim that any earlier phase produced pixels.** The
  * label pass is orthogonal to the basemap (`FramePlan.drawLabels` against `FramePlan.drawBasemap`),
- * so phase 5 runs on a frame with no ground at all — which is why [Scene.labels] joins the
+ * so the label phase runs on a frame with no ground at all — which is why [Scene.labels] joins the
  * nothing-to-draw guard below rather than being reachable only past a ground tile.
  *
  * **Which regime each drawn thing is in, and its order within its own type, is
@@ -458,6 +489,11 @@ internal class SceneContent(
     private val labelPipeline: LabelPipeline? = null,
     private val iconPipeline: IconPipeline? = null,
     private val globeGroundPipeline: GlobeGroundPipeline? = null,
+    private val backdrop: ResolvedBackdrop? = null,
+    private val bloom: Bloom? = null,
+    private val bloomResources: BloomResources? = null,
+    private val surfaceFramebuffer: Int? = null,
+    private val surfaceDepthRenderbuffer: Int? = null,
 ) : GlFrameContent {
 
     /**
@@ -494,6 +530,21 @@ internal class SceneContent(
         ?.takeIf { scene.groundTiles.isNotEmpty() && !it.isEmpty }
 
     override fun draw(binding: GlBinding) {
+        // ADR 0068, and it is deliberately the first thing here -- ahead of the emptiness check
+        // below as well as ahead of the ground. A frame carrying nothing but a backdrop is a frame
+        // that draws its backdrop; returning early on an empty *scene* would make the one case a
+        // consumer is most likely to try first, a backdrop with `drawBasemap = false`, silently
+        // paint nothing.
+        if (backdrop != null) {
+            drawBackdrop(
+                binding = binding,
+                backdrop = backdrop,
+                resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+                resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+                frameIndex = scene.frameIndex,
+            )
+        }
+
         if (scene.groundTiles.isEmpty() &&
             scene.geometries.isEmpty() &&
             scene.models.isEmpty() &&
@@ -537,11 +588,33 @@ internal class SceneContent(
             // the disable belongs here beside the depth state, for the same reason the depth state
             // does: `drawGeometry` cannot make these calls for itself.
             binding.disable(GL_CULL_FACE)
+            // ADR 0073: Geometry writes premultiplied colour and the pass owns its blend state.
+            binding.enable(GL_BLEND)
+            binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
             val geometryViewProjection = when (camera) {
                 is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
                 is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
             }
-            for (sceneGeometry in scene.geometries) {
+            val lastEmissiveGeometryIndex = if (bloom == null) {
+                -1
+            } else {
+                scene.geometries.indexOfLast { it.geometry.emissive }
+            }
+            var currentBlend: BlendMode? = null
+            // ADR 0080 (2026-10-21 and 2026-10-22 amendments) and ADR 0085: the texture this frame's
+            // normal draws left on each consumer unit, and each emitter's consumer state at its normal
+            // draw. Kept only on a frame with a bloom phase, whose redraws replay the emitters' state
+            // and which restores the rest afterwards. What each program holds is its pipeline's shadow.
+            val consumerHistory = if (lastEmissiveGeometryIndex >= 0) {
+                ConsumerValueHistory(binding as? TextureUnitCapturingBinding)
+            } else {
+                null
+            }
+            for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
+                if (sceneGeometry.geometry.blend != currentBlend) {
+                    applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
+                    currentBlend = sceneGeometry.geometry.blend
+                }
                 // Subdivided and CPU-projected, in both projection modes, so that the matrix above
                 // stays linear and a consumer's shader pair survives a globe unchanged (ADR 0008's
                 // 2026-08-29 erratum). Under Mercator the camera implies a single cell, so this
@@ -567,8 +640,22 @@ internal class SceneContent(
                     frameIndex = scene.frameIndex,
                     consumerUniforms = sceneGeometry.consumerUniforms,
                     consumerTextures = sceneGeometry.consumerTextures,
+                    emissionPass = 0,
                 )
+                if (consumerHistory != null) {
+                    if (grid.triangleIndices.isNotEmpty()) consumerHistory.record(sceneGeometry)
+                    if (sceneGeometry.geometry.emissive) consumerHistory.snapshotEmitter(sceneGeometry, grid)
+                }
+                if (geometryIndex == lastEmissiveGeometryIndex) {
+                    // ADR 0080: compositing here makes the rest of the existing phase order an
+                    // occluder in painter's order. The phase re-establishes this loop's known state
+                    // except the blend function, which it leaves as the chain left it; clearing
+                    // currentBlend is what makes the next geometry, whatever its blend, bind its own.
+                    drawBloomPhase(binding, checkNotNull(consumerHistory))
+                    currentBlend = null
+                }
             }
+            applyPremultipliedBlendMode(binding, BlendMode.OVER)
         }
 
         // ADR 0030's phase order over the planner's per-type order. `Scene.mapOrder` is
@@ -618,6 +705,161 @@ internal class SceneContent(
 
         drawLabelPhase(binding)
         drawScreenStack(binding)
+    }
+
+    /**
+     * ADR 0080's emission redraw and dual-Kawase chain, immediately after the last emitter.
+     *
+     * Each redraw re-uploads its grid into buffers owned by a pipeline shared with the normal pass.
+     * This happens in the middle of that pass; the next ordinary [drawGeometry] call re-uploads its
+     * own vertex and index bytes before drawing.
+     */
+    private fun drawBloomPhase(binding: GlBinding, consumerHistory: ConsumerValueHistory) {
+        val bloom = bloom ?: return
+        val resources = bloomResources ?: return
+        val emitters = consumerHistory.emitters
+        if (emitters.isEmpty()) return
+        // The consumer units as the normal pass leaves them, which the restore below returns to.
+        val unitsAtNormalPassEnd = consumerHistory.currentBindings()
+        val framebuffer = requireNotNull(surfaceFramebuffer) {
+            "bloom requires the main offscreen framebuffer"
+        }
+        val depthRenderbuffer = requireNotNull(surfaceDepthRenderbuffer) {
+            "bloom requires the main offscreen depth renderbuffer"
+        }
+        require(resources.sharedDepthRenderbuffer == depthRenderbuffer) {
+            "the emission image must share the main offscreen depth renderbuffer"
+        }
+
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.emission.framebuffer)
+        binding.viewport(0, 0, resources.emission.width, resources.emission.height)
+        binding.clearColor(0f, 0f, 0f, 0f)
+        binding.clear(GL_COLOR_BUFFER_BIT)
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
+        binding.depthMask(false)
+        binding.disable(GL_CULL_FACE)
+        binding.enable(GL_BLEND)
+        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+        binding.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+
+        val geometryViewProjection = when (camera) {
+            is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
+            is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
+        }
+        // Each emitter is redrawn with the grid its normal draw resolved moments earlier, from the same
+        // geometry, camera and drape, so the identical grid; the far band redraws a subset of them
+        // with the same grid, view-projection and consumer values.
+        for (emitter in emitters) drawEmissionRedraw(binding, emitter, geometryViewProjection)
+
+        // ADR 0085's far band, only when some emitter asks for it with a weight that adds anything:
+        // with every bloomReach at zero (or a zero reachGain) no extra draw happens and the frame is
+        // the one ADR 0083 drew.
+        val farBandLevel = bloomFarBandLevel(bloom)
+        val someEmitterReaches = emitters.any { it.sceneGeometry.geometry.bloomReach > 0f }
+        val farBand = if (farBandLevel != null && bloomHasFarBand(bloom, someEmitterReaches)) {
+            BloomFarBand(farBandLevel) {
+                drawBloomFarBand(binding, emitters, geometryViewProjection)
+            }
+        } else {
+            null
+        }
+
+        drawBloom(binding, resources, bloom, framebuffer, farBand)
+
+        // Every value here is owned by this loop; asking the driver what the just-run chain changed
+        // would add synchronous glGet* calls and native allocations to every bloom frame. Programs,
+        // vertex arrays, buffers and generic texture bindings need no restoration because the next
+        // drawGeometry binds and uploads all of them for itself.
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer)
+        binding.viewport(0, 0, scene.outputPixelSize.width, scene.outputPixelSize.height)
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
+        binding.depthMask(false)
+        binding.disable(GL_CULL_FACE)
+        binding.enable(GL_BLEND)
+        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+
+        // Consumer locations belong to a shared program and omitted values deliberately retain that
+        // program's previous value; a sampler an omitting draw inherits samples whatever its unit then
+        // holds. Emission and far redraws and the bloom chain disturb both, so before the loop
+        // continues every consumer texture unit gets back the texture the normal pass left on it,
+        // whoever bound it, and every program the redraws touched gets back every value its shadow
+        // holds -- everything RenG has set on it since link, as the normal pass left it (ADR 0080's
+        // 2026-10-21 and 2026-10-22 amendments).
+        consumerHistory.restoreTextureUnits(binding, unitsAtNormalPassEnd)
+        for (index in emitters.indices) {
+            val pipeline = emitters[index].sceneGeometry.pipeline
+            val program = pipeline.program
+            // Each program once, at its first emitter; emitters are few, so a scan beats a set.
+            if (emitters.indexOfFirst { it.sceneGeometry.pipeline.program == program } != index) continue
+            binding.useProgram(program)
+            restoreConsumerValues(binding, pipeline)
+        }
+    }
+
+    /** One emitter drawn with `rengGeometryEmissionPass` at one, into whatever target is bound. */
+    private fun drawEmissionRedraw(
+        binding: GlBinding,
+        emitter: BloomEmitter,
+        geometryViewProjection: FloatArray,
+    ) {
+        val sceneGeometry = emitter.sceneGeometry
+        val values = emitter.values
+        val grid = emitter.grid
+        drawGeometry(
+            binding = binding,
+            pipeline = sceneGeometry.pipeline,
+            grid = grid,
+            modelViewProjection = geometryViewProjection,
+            resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+            resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+            boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
+            frameIndex = scene.frameIndex,
+            emissionPass = 1,
+            consumerReplay = values,
+        )
+        endGeometryEmissionPass(binding, sceneGeometry.pipeline)
+    }
+
+    /**
+     * ADR 0085: every emitter with a positive [com.rohittp.reng.Geometry.bloomReach], drawn again into
+     * the target [drawBloom] has bound, with the grid, view-projection and consumer values of its
+     * emission redraw and `rengGeometryEmissionPass` at one.
+     *
+     * The target is the full-resolution reach image, which shares the main depth renderbuffer, so the depth state is the emission redraw's. Each emitter's
+     * premultiplied light is scaled by its reach through the blend constant's alpha and composited
+     * over the reach image as the emission redraw composites (`CONSTANT_ALPHA, ONE_MINUS_SRC_ALPHA`;
+     * alpha `ONE, ONE_MINUS_SRC_ALPHA`, unscaled). `reachGain` is applied later, unclamped, where the
+     * reach image's level is added to the chain.
+     *
+     * A consumer value an emitter omits inherits its program's previous value, so a far redraw, like
+     * the emission redraw, replays [BloomEmitter.values]: every value its program held and the texture
+     * on each unit its samplers read, at its normal draw. The blend colour is
+     * returned to GL's default afterwards; it is a member of the Restore Set, so the consumer's own
+     * value comes back when the draw returns either way.
+     */
+    private fun drawBloomFarBand(
+        binding: GlBinding,
+        emitters: List<BloomEmitter>,
+        geometryViewProjection: FloatArray,
+    ) {
+        binding.enable(GL_DEPTH_TEST)
+        binding.depthFunc(GL_GEQUAL)
+        binding.depthMask(false)
+        binding.disable(GL_CULL_FACE)
+        binding.enable(GL_BLEND)
+        binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+        binding.blendFuncSeparate(GL_CONSTANT_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        for (emitter in emitters) {
+            // An emitter with an empty grid bound nothing in the emission redraw, and draws nothing here.
+            if (emitter.grid.triangleIndices.isEmpty()) continue
+            val reach = emitter.sceneGeometry.geometry.bloomReach
+            if (reach <= 0f) continue
+            binding.blendColor(0f, 0f, 0f, reach)
+            drawEmissionRedraw(binding, emitter, geometryViewProjection)
+        }
+        binding.blendColor(0f, 0f, 0f, 0f)
     }
 
     /**
@@ -708,20 +950,28 @@ internal class SceneContent(
 
         binding.disable(GL_DEPTH_TEST)
         var boundProgram: Int? = null
+        var stickerBlend = BlendMode.OVER
         for (reference in scene.screenOrder) {
             when (reference) {
                 is DrawnThingReference.StickerAt -> {
                     if (boundProgram != stickerPipeline.program) {
                         beginStickerPass(binding, stickerPipeline)
                         boundProgram = stickerPipeline.program
+                        stickerBlend = BlendMode.OVER
                     }
-                    drawOneSticker(binding, stickerPipeline, screenCompositedSticker(scene.stickers[reference.index]))
+                    val sticker = screenCompositedSticker(scene.stickers[reference.index])
+                    if (sticker.blend != stickerBlend) {
+                        applyPremultipliedBlendMode(binding, sticker.blend)
+                        stickerBlend = sticker.blend
+                    }
+                    drawOneSticker(binding, stickerPipeline, sticker)
                 }
                 is DrawnThingReference.ModelAt -> throw IllegalArgumentException(
                     "ADR 0029 refuses a SCREEN-positioned Model before drawing; one reached the screen stack",
                 )
             }
         }
+        applyPremultipliedBlendMode(binding, BlendMode.OVER)
     }
 
     /**
@@ -743,6 +993,13 @@ internal class SceneContent(
      */
     private fun drawGroundPhase(binding: GlBinding) {
         val terrain = scene.terrain
+        val blendFrame = scene.basemapBlend?.let { blend ->
+            GroundBlendFrame(
+                mask = blend.mask,
+                frameWidth = scene.outputPixelSize.width.toFloat(),
+                frameHeight = scene.outputPixelSize.height.toFloat(),
+            )
+        }
         val dem = terrain?.let {
             GroundDemUniforms(
                 decode = it.decode,
@@ -750,30 +1007,78 @@ internal class SceneContent(
                 exaggeration = it.exaggeration.toFloat(),
             )
         }
-        when (camera) {
-            is ResolvedMercatorCamera -> drawGround(
-                binding = binding,
-                pipeline = groundPipeline,
-                tiles = scene.groundTiles.map { tile ->
-                    ResolvedGroundTile(
-                        modelViewProjection = composeGroundModelViewProjection(
-                            camera,
-                            resolveBasemapTileQuad(tile.instance, camera),
-                        ),
+        fun mercatorTiles(source: List<SceneGroundTile>, camera: ResolvedMercatorCamera): List<ResolvedGroundTile> =
+            source.map { tile ->
+                ResolvedGroundTile(
+                    modelViewProjection = composeGroundModelViewProjection(
+                        camera,
+                        resolveBasemapTileQuad(tile.instance, camera),
+                    ),
+                    texture = tile.texture,
+                    colourWindow = tile.colourWindow,
+                    blendTexture = tile.blendTexture,
+                    blendColourWindow = tile.blendColourWindow,
+                    elevation = tile.elevation?.let { demTile ->
+                        MercatorGroundTileDem(
+                            dem = groundTileDemOf(demTile, tile.instance.lod),
+                            mercatorY = mercatorTileYEdges(tile.instance.lod, tile.instance.tileY),
+                        )
+                    },
+                )
+            }
+
+        fun globeTiles(source: List<SceneGroundTile>): List<ResolvedGlobeGroundTile> = source.flatMap { tile ->
+            val edges = globeGroundTileEdges(
+                lod = tile.instance.lod,
+                tileY = tile.instance.tileY.toLong(),
+                unwrappedX = tile.instance.unwrappedX,
+            )
+            val tileDem = tile.elevation?.let { groundTileDemOf(it, tile.instance.lod) }
+            buildList {
+                add(
+                    ResolvedGlobeGroundTile(
+                        edges = edges,
                         texture = tile.texture,
-                        elevation = tile.elevation?.let { demTile ->
-                            MercatorGroundTileDem(
-                                dem = groundTileDemOf(demTile, tile.instance.lod),
-                                mercatorY = mercatorTileYEdges(tile.instance.lod, tile.instance.tileY),
-                            )
-                        },
+                        colourWindow = tile.colourWindow,
+                        blendTexture = tile.blendTexture,
+                        blendColourWindow = tile.blendColourWindow,
+                        elevation = tileDem,
+                    ),
+                )
+                if (tile.instance.tileY.toLong() == 0L) {
+                    add(
+                        ResolvedGlobeGroundTile(
+                            edges = globeGroundPolarCapEdges(edges, north = true),
+                            texture = tile.texture,
+                            // The cap carries the same window as the tile it hangs from: its
+                            // collapsed v lands on the window's own edge, which is the tile's
+                            // last row inside the ancestor rather than the ancestor's.
+                            colourWindow = tile.colourWindow,
+                            blendTexture = tile.blendTexture,
+                            blendColourWindow = tile.blendColourWindow,
+                            uvV = NORTH_POLAR_CAP_UV_V,
+                            elevation = tileDem?.let { polarCapDem(it, north = true) },
+                        ),
                     )
-                },
-                // Mercator has no curvature claim on the granularity, so terrain's is the whole
-                // answer -- and `groundCellsPerTileSide` is still where it is spent, so the cap and
-                // the reconciliation rule live in one place for both projections.
-                cellsPerTileSide = frameGroundCells,
-                elevation = dem?.let {
+                }
+                if (tile.instance.tileY.toLong() == (1L shl tile.instance.lod) - 1L) {
+                    add(
+                        ResolvedGlobeGroundTile(
+                            edges = globeGroundPolarCapEdges(edges, north = false),
+                            texture = tile.texture,
+                            colourWindow = tile.colourWindow,
+                            blendTexture = tile.blendTexture,
+                            blendColourWindow = tile.blendColourWindow,
+                            uvV = SOUTH_POLAR_CAP_UV_V,
+                            elevation = tileDem?.let { polarCapDem(it, north = false) },
+                        ),
+                    )
+                }
+            }
+        }
+        when (camera) {
+            is ResolvedMercatorCamera -> {
+                val elevation = dem?.let {
                     MercatorGroundElevationFrame(
                         dem = it,
                         // `projectMercator`'s own altitude scale with its `1 / cos(latitude)` term
@@ -782,62 +1087,26 @@ internal class SceneContent(
                         equatorialLogicalPixelsPerMetre =
                             (camera.worldSizeLogicalPixels / WORLD_CIRCUMFERENCE_METRES).toFloat(),
                     )
-                },
-            )
+                }
+                drawGround(
+                    binding = binding,
+                    pipeline = groundPipeline,
+                    tiles = mercatorTiles(scene.groundTiles, camera),
+                    // Mercator has no curvature claim on the granularity, so terrain's is the whole
+                    // answer -- and `groundCellsPerTileSide` is still where it is spent, so the cap and
+                    // the reconciliation rule live in one place for both projections.
+                    cellsPerTileSide = frameGroundCells,
+                    elevation = elevation,
+                    blend = blendFrame,
+                )
+            }
 
-            is ResolvedGlobeCamera -> drawGlobeGround(
-                binding = binding,
-                pipeline = requireNotNull(globeGroundPipeline) {
+            is ResolvedGlobeCamera -> {
+                val globePipeline = requireNotNull(globeGroundPipeline) {
                     "a globe frame carrying ground tiles must be drawn with the globe ground pipeline"
-                },
-                // A top- or bottom-row tile also paints the cap above or below it, because web
-                // Mercator ends at 85.0511 degrees and a sphere shows the hole that leaves. At lod 0
-                // one tile is both rows and draws both caps, which is why these are two independent
-                // conditions rather than a `when`.
-                tiles = scene.groundTiles.flatMap { tile ->
-                    val edges = globeGroundTileEdges(
-                        lod = tile.instance.lod,
-                        tileY = tile.instance.tileY.toLong(),
-                        unwrappedX = tile.instance.unwrappedX,
-                    )
-                    val tileDem = tile.elevation?.let { groundTileDemOf(it, tile.instance.lod) }
-                    buildList {
-                        add(
-                            ResolvedGlobeGroundTile(
-                                edges = edges,
-                                texture = tile.texture,
-                                elevation = tileDem,
-                            ),
-                        )
-                        if (tile.instance.tileY.toLong() == 0L) {
-                            add(
-                                ResolvedGlobeGroundTile(
-                                    edges = globeGroundPolarCapEdges(edges, north = true),
-                                    texture = tile.texture,
-                                    uvV = NORTH_POLAR_CAP_UV_V,
-                                    elevation = tileDem?.let { polarCapDem(it, north = true) },
-                                ),
-                            )
-                        }
-                        if (tile.instance.tileY.toLong() == (1L shl tile.instance.lod) - 1L) {
-                            add(
-                                ResolvedGlobeGroundTile(
-                                    edges = globeGroundPolarCapEdges(edges, north = false),
-                                    texture = tile.texture,
-                                    uvV = SOUTH_POLAR_CAP_UV_V,
-                                    elevation = tileDem?.let { polarCapDem(it, north = false) },
-                                ),
-                            )
-                        }
-                    }
-                },
-                unitSphereToClip = composeGlobeGroundUnitSphereToClip(camera),
-                // The frame's one granularity: the globe's curvature claim and terrain's, reconciled
-                // by `max` and capped by the grid's own 16-bit-index ceiling. Two meshes sharing an
-                // edge on the sphere must be subdivided identically, so this is one number for the
-                // whole ground and never one per tile.
-                cellsPerTileSide = frameGroundCells,
-                elevation = dem?.let {
+                }
+                val unitSphereToClip = composeGlobeGroundUnitSphereToClip(camera)
+                val elevation = dem?.let {
                     GlobeGroundElevationFrame(
                         dem = it,
                         // `globeMetresToLogicalPixels(R) / R`, which is `1 / a` and independent of
@@ -848,8 +1117,25 @@ internal class SceneContent(
                                 camera.radiusLogicalPixels
                             ).toFloat(),
                     )
-                },
-            )
+                }
+                drawGlobeGround(
+                    binding = binding,
+                    pipeline = globePipeline,
+                    // A top- or bottom-row tile also paints the cap above or below it, because web
+                    // Mercator ends at 85.0511 degrees and a sphere shows the hole that leaves. At lod 0
+                    // one tile is both rows and draws both caps, which is why these are two independent
+                    // conditions rather than a `when`.
+                    tiles = globeTiles(scene.groundTiles),
+                    unitSphereToClip = unitSphereToClip,
+                    // The frame's one granularity: the globe's curvature claim and terrain's, reconciled
+                    // by `max` and capped by the grid's own 16-bit-index ceiling. Two meshes sharing an
+                    // edge on the sphere must be subdivided identically, so this is one number for the
+                    // whole ground and never one per tile.
+                    cellsPerTileSide = frameGroundCells,
+                    elevation = elevation,
+                    blend = blendFrame,
+                )
+            }
         }
     }
 
@@ -1024,6 +1310,8 @@ internal class SceneContent(
         return ResolvedSticker(
             modelViewProjection = composeMapModelViewProjection(camera, resolved, sticker.localDimensions()),
             texture = sticker.texture,
+            opacity = sticker.opacity,
+            blend = sticker.blend,
         )
     }
 
@@ -1039,6 +1327,8 @@ internal class SceneContent(
                 sticker.localDimensions(),
             ),
             texture = sticker.texture,
+            opacity = sticker.opacity,
+            blend = sticker.blend,
         )
     }
 }
@@ -1107,6 +1397,7 @@ private fun resolveModel(
                 ?.let { sceneModel.jointMatricesBySkin[it] }
                 ?.let { packJointMatrices(it) },
             reverseWinding = nodeTransform.linearDeterminant() < 0.0,
+            opacity = sceneModel.opacity,
         )
     }
     return ResolvedModel(primitives)
@@ -1184,7 +1475,24 @@ private fun Geometry.boundsWestSouthEastNorth(): FloatArray = floatArrayOf(
  * globe too, because the nonlinearity was spent on the CPU before any vertex was handed over.
  */
 internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): FloatArray =
-    (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+    camera.viewProjection.toColumnMajorFloatArray()
+
+/**
+ * The inverse of that same product, column-major, or `null` when the camera does not invert
+ * (ADR 0072) -- what `rengBackdropInverseViewProjection` carries to a backdrop shader.
+ *
+ * Its own named function rather than three lines at the call site, for the reason
+ * `resolvedBackdropFor` is one: the factor order is the whole content, `view * projection` is a
+ * perfectly valid matrix that draws a perfectly plausible wrong grid, and no GL call log can tell
+ * the two apart. Naming it puts the order somewhere a test can reach.
+ *
+ * Takes [ResolvedFrameCamera] rather than either concrete camera because both modes build these
+ * two matrices from the same two functions. What differs is the ground, not the matrix: under
+ * Mercator it is the plane `z = 0`, under a globe that plane is only the sphere's tangent at the
+ * anchor -- see ADR 0072.
+ */
+internal fun composeBackdropInverseViewProjection(camera: ResolvedFrameCamera): FloatArray? =
+    camera.viewProjection.inverse()?.toColumnMajorFloatArray()
 
 /**
  * The same matrix for a globe camera, and it is the same two factors in the same order.
@@ -1201,7 +1509,7 @@ internal fun composeGeometryViewProjection(camera: ResolvedMercatorCamera): Floa
  * mode and `FramePlanningCore` still refuses `GLOBE` — and closing that seam is task 10's.
  */
 internal fun composeGeometryViewProjection(camera: ResolvedGlobeCamera): FloatArray =
-    (camera.projectionMatrix * camera.viewMatrix).toColumnMajorFloatArray()
+    camera.viewProjection.toColumnMajorFloatArray()
 
 /**
  * Composes one ground tile's model-view-projection matrix.
@@ -1222,15 +1530,13 @@ internal fun composeGroundModelViewProjection(
     camera: ResolvedMercatorCamera,
     quad: BasemapTileQuad,
 ): FloatArray {
-    val mapSpaceModel = DoubleMatrix4.fromRows(
-        listOf(
-            listOf(quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels),
-            listOf(0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels),
-            listOf(0.0, 0.0, 1.0, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    val mapSpaceModel = DoubleMatrix4.rowMajor(
+        quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels,
+        0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
-    return (camera.projectionMatrix * camera.viewMatrix * mapSpaceModel).toColumnMajorFloatArray()
+    return (camera.viewProjection * mapSpaceModel).toColumnMajorFloatArray()
 }
 
 /**
@@ -1351,28 +1657,20 @@ private fun affineModelMatrix(
     scale: DoubleVector3,
     translation: DoubleVector3,
     rotationScaleRowSign: DoubleVector3 = DoubleVector3(1.0, 1.0, 1.0),
-): DoubleMatrix4 = DoubleMatrix4.fromRows(
-    listOf(
-        listOf(
-            rotationScaleRowSign.x * rotation[0, 0] * scale.x,
-            rotationScaleRowSign.x * rotation[0, 1] * scale.y,
-            rotationScaleRowSign.x * rotation[0, 2] * scale.z,
-            translation.x,
-        ),
-        listOf(
-            rotationScaleRowSign.y * rotation[1, 0] * scale.x,
-            rotationScaleRowSign.y * rotation[1, 1] * scale.y,
-            rotationScaleRowSign.y * rotation[1, 2] * scale.z,
-            translation.y,
-        ),
-        listOf(
-            rotationScaleRowSign.z * rotation[2, 0] * scale.x,
-            rotationScaleRowSign.z * rotation[2, 1] * scale.y,
-            rotationScaleRowSign.z * rotation[2, 2] * scale.z,
-            translation.z,
-        ),
-        listOf(0.0, 0.0, 0.0, 1.0),
-    ),
+): DoubleMatrix4 = DoubleMatrix4.rowMajor(
+    rotationScaleRowSign.x * rotation[0, 0] * scale.x,
+    rotationScaleRowSign.x * rotation[0, 1] * scale.y,
+    rotationScaleRowSign.x * rotation[0, 2] * scale.z,
+    translation.x,
+    rotationScaleRowSign.y * rotation[1, 0] * scale.x,
+    rotationScaleRowSign.y * rotation[1, 1] * scale.y,
+    rotationScaleRowSign.y * rotation[1, 2] * scale.z,
+    translation.y,
+    rotationScaleRowSign.z * rotation[2, 0] * scale.x,
+    rotationScaleRowSign.z * rotation[2, 1] * scale.y,
+    rotationScaleRowSign.z * rotation[2, 2] * scale.z,
+    translation.z,
+    0.0, 0.0, 0.0, 1.0,
 )
 
 /**
@@ -1384,13 +1682,11 @@ private fun affineModelMatrix(
 private fun screenOrthographicProjection(outputPixelSize: OutputPixelSize): DoubleMatrix4 {
     val width = outputPixelSize.width.toDouble()
     val height = outputPixelSize.height.toDouble()
-    return DoubleMatrix4.fromRows(
-        listOf(
-            listOf(2.0 / width, 0.0, 0.0, -1.0),
-            listOf(0.0, -2.0 / height, 0.0, 1.0),
-            listOf(0.0, 0.0, 0.0, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    return DoubleMatrix4.rowMajor(
+        2.0 / width, 0.0, 0.0, -1.0,
+        0.0, -2.0 / height, 0.0, 1.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
 }
 
@@ -1400,14 +1696,65 @@ private fun screenOrthographicProjection(outputPixelSize: OutputPixelSize): Doub
  * exactly `1` and never needs a perspective divide.
  */
 private fun DoubleMatrix4.transformAffinePoint(point: DoubleVector3): DoubleVector3 = DoubleVector3(
-    x = this[0, 0] * point.x + this[0, 1] * point.y + this[0, 2] * point.z + this[0, 3],
-    y = this[1, 0] * point.x + this[1, 1] * point.y + this[1, 2] * point.z + this[1, 3],
-    z = this[2, 0] * point.x + this[2, 1] * point.y + this[2, 2] * point.z + this[2, 3],
+    x = homogeneousRow(0, point),
+    y = homogeneousRow(1, point),
+    z = homogeneousRow(2, point),
 )
 
 /** This matrix's elements in the column-major order [GlBinding.uniformMatrix4fv] expects. */
 internal fun DoubleMatrix4.toColumnMajorFloatArray(): FloatArray = FloatArray(16) { index ->
-    val row = index % 4
-    val column = index / 4
-    this[row, column].toFloat()
+    columnMajorElement(index).toFloat()
+}
+
+/** One emitter as its normal draw drew it, which is how the bloom phase redraws it. */
+internal class BloomEmitter(
+    val sceneGeometry: SceneGeometry,
+    val grid: GeometryGrid,
+    val values: EmitterConsumerValues,
+)
+
+/**
+ * The texture each consumer unit holds as this frame's normal geometry draws left it, and each
+ * emitter's consumer state at its normal draw (ADR 0080's 2026-10-22 note), kept only on a frame with
+ * a bloom phase.
+ *
+ * Consumer values are sparse: an omitted uniform keeps its program's previous value, and an omitted
+ * texture leaves its sampler pointing at a unit that holds whatever was last bound there. What each
+ * program holds is its pipeline's [ConsumerValueShadow], which outlives the frame. What each unit holds
+ * is read from [capturing], the capture region's binding, which sees every bind -- a consumer's,
+ * another RenG pass's, and the host's original -- so a unit is put back exactly whoever bound it.
+ * Outside a capture region only the consumer binds [record] sees are known.
+ */
+internal class ConsumerValueHistory(private val capturing: TextureUnitCapturingBinding?) {
+    /** Outside a capture region: the consumer texture on each unit, [UNTOUCHED_UNIT] where none. */
+    private val textureByUnit = IntArray(MAXIMUM_CONSUMER_TEXTURES) { UNTOUCHED_UNIT }
+
+    /** Each emitter as its normal draw drew it, in draw order. */
+    val emitters: MutableList<BloomEmitter> = ArrayList()
+
+    /** Records a normal draw that bound its values (a draw with an empty grid binds none). */
+    fun record(sceneGeometry: SceneGeometry) {
+        if (capturing != null) return
+        val textures = sceneGeometry.consumerTextures
+        if (textures.isEmpty()) return
+        val names = sceneGeometry.pipeline.textureNameOrder.of(textures.keys)
+        for (unit in names.indices) textureByUnit[unit] = textures.getValue(names[unit])
+    }
+
+    /** Snapshots what [sceneGeometry], an emitter, just drew with, and the [grid] it drew. */
+    fun snapshotEmitter(sceneGeometry: SceneGeometry, grid: GeometryGrid) {
+        val values = EmitterConsumerValues(
+            uniforms = sceneGeometry.pipeline.consumerShadow.snapshot(),
+            textureByUnit = currentBindings(),
+        )
+        emitters += BloomEmitter(sceneGeometry, grid, values)
+    }
+
+    /** Each consumer unit's texture now, in [rebindConsumerUnit]'s terms. */
+    fun currentBindings(): IntArray = capturing?.consumerUnitBindings() ?: textureByUnit.copyOf()
+
+    /** Puts every consumer unit back to [bindings], taken from [currentBindings] earlier. */
+    fun restoreTextureUnits(binding: GlBinding, bindings: IntArray) {
+        for (unit in bindings.indices) rebindConsumerUnit(binding, unit, bindings[unit])
+    }
 }

@@ -46,3 +46,16 @@ The cost accepted here is the container code itself, including the filter revers
 place to introduce an off-by-one, plus two platform inflate seams that must stay behaviourally
 identical. Both are gated by one shared vector suite of byte literals run in `commonTest` on every
 target, which is cheap precisely because the vectors are literals.
+
+**Amendment (2026-10-09): stored blocks are copied, not inflated.** A zlib stream made only of stored
+deflate blocks (`BTYPE = 00`) is read by the container itself (`decodeStoredRows`), because a stored
+block's payload is its output and the consumer's own textures are written that way; on a phone, inflating
+twenty newly published labels through the platform seam stalled one frame by ~320 ms. This writes no
+Huffman decoder and repairs nothing: it succeeds only for a stream the platform inflater accepts with the
+same bytes (header, `NLEN`, final block, exact length, Adler-32, nothing trailing), and every other stream,
+and every failure, goes through the platform seam from the start, so rejections stay the platform's.
+`PngStoredFastPathTest` holds the two paths to identical output, including under IDAT mutation.
+
+**Note, 2026-10-22.** The fast path's Adler-32 comes from the platform's zlib (`Adler32Stream`): a Kotlin
+byte loop was the largest single cost of decoding one large stored texture on the preview's GL thread
+(83 of 199 samples, OPPO CPH2629, 2026-10-09).

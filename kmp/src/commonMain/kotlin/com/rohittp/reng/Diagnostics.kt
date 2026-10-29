@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.isAllowedDiagnosticFieldName
 import com.rohittp.reng.internal.isAllowedDiagnosticFieldStage
 
@@ -40,6 +41,33 @@ public enum class DiagnosticCode {
     LABEL_CONTENT_EXCLUDED,
     TERRAIN_COVERAGE_INCOMPLETE,
     TERRAIN_UNAVAILABLE,
+
+    /**
+     * Some of this frame's ground was drawn from a resident ancestor tile rather than its own,
+     * because the consumer's `maximumTilesRasterisedPerFrame` declined to rasterise it, or because its
+     * own resources could not be acquired and `RendererConfiguration.presentFailedTilesProvisionally`
+     * is on (ADR 0057). `actual` counts both kinds together; [RenGMetricName.TILES_PRESENTED_AFTER_FAILURE]
+     * counts the second alone.
+     *
+     * A frame that presented an ancestor is not the same artefact as one that did not, and a consumer
+     * compositing a still or capturing a video frame needs to know which they have. Appended last, so
+     * no existing constant's ordinal moves.
+     */
+    GROUND_PRESENTED_PROVISIONALLY,
+
+    /** Bloom GPU resources could not be created, so the frame drew without bloom. */
+    BLOOM_UNAVAILABLE,
+
+    /**
+     * The frame asked for `Bloom.highPrecisionEmission` but its bloom used the RGBA8 emission chain,
+     * because the context cannot render to half-float colour or refused a half-float target (ADR
+     * 0085), so emitted light above one was clipped. A frame that did get the half-float chain
+     * reports nothing. Appended last, so no existing constant's ordinal moves.
+     */
+    BLOOM_EMISSION_PRECISION_REDUCED,
+
+    /** A Frame Plan named a style outside its renderer's configured Style Set (ADR 0086). */
+    BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
 }
 
 @ConsistentCopyVisibility
@@ -165,6 +193,28 @@ public data class Diagnostic internal constructor(
                 }
             }
 
+            DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY -> {
+                // ADR 0057. A warning, and for TERRAIN_COVERAGE_INCOMPLETE's reason: the frame
+                // prepared and it drew, and some of its ground is coarser than the LOD it chose --
+                // a wrong picture rather than a missing one, which is exactly what a consumer
+                // capturing a still needs told.
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "provisional-ground diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "provisional ground is decided during the draw that resolves it"
+                }
+                require(fieldName == null && resourceClass == null && resourceKey == null && statusCode == null) {
+                    "provisional-ground diagnostics name no single tile"
+                }
+                // The same structural shape TERRAIN_COVERAGE_INCOMPLETE uses: a count against a
+                // limit of zero, so a report that nothing was provisional is unconstructible rather
+                // than merely pointless.
+                require(limit == 0L && actual!! > 0L) {
+                    "provisional-ground diagnostics carry a positive count of tiles drawn from an ancestor"
+                }
+            }
+
             DiagnosticCode.TERRAIN_UNAVAILABLE -> {
                 require(severity == DiagnosticSeverity.WARNING) {
                     "terrain-unavailable diagnostics are warnings"
@@ -180,6 +230,46 @@ public data class Diagnostic internal constructor(
                     fieldName == null && resourceClass == null && resourceKey == null &&
                         statusCode == null && limit == null,
                 ) { "terrain-unavailable diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BLOOM_UNAVAILABLE -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "bloom-unavailable diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "bloom availability is decided during draw"
+                }
+                require(
+                    fieldName == null && resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "bloom-unavailable diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED -> {
+                require(severity == DiagnosticSeverity.WARNING) {
+                    "bloom-emission-precision diagnostics are warnings"
+                }
+                require(stage == PipelineStage.DRAW) {
+                    "bloom emission precision is decided during draw"
+                }
+                require(
+                    fieldName == null && resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "bloom-emission-precision diagnostics carry no further context" }
+            }
+
+            DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE -> {
+                require(severity == DiagnosticSeverity.ERROR) {
+                    "basemap-style-index diagnostics are errors"
+                }
+                require(stage == PipelineStage.FRAME_PLANNING) {
+                    "basemap-style-index diagnostics occur during frame planning"
+                }
+                require(
+                    fieldName == DiagnosticField.FRAME_INDEX.wireName &&
+                        resourceClass == null && resourceKey == null &&
+                        statusCode == null && limit == null,
+                ) { "basemap-style-index diagnostics carry only frameIndex context" }
             }
         }
     }

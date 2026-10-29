@@ -134,6 +134,7 @@ _LIBRARY_CREATED_DATA_CLASSES = (
     ("ResourceUsage", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceResidency", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
 )
 # Each value is a tuple of equally-exact accepted `plugins { }` token sequences, in the same shape
 # and for the same reason as _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS: a superseded form stays
@@ -286,21 +287,28 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
     # whole-file digests: comments and whitespace are free, and any token is not. Each of these
     # two files pins four equally-exact accepted forms -- the pre-Cycle-C original, ADR 0019's
     # coroutines form, ADR 0032's device-test form, and ADR 0042's serialization form, which is the
-    # one currently on disk.
-    # Every form carries the rentile 0.7.0 bump (see base_versions below, which must move in
-    # lockstep with these fingerprints), and the two older forms cannot be recomputed from disk;
-    # they are the fixtures in tools/tests/test_check_repository_policy.py.
+    # one currently on disk for the catalog. `kmp/build.gradle.kts` pins a fifth, the opt-in
+    # benchmark form, which is the one on disk for it.
+    # Every form carries the rentile 0.11.3 bump (see base_versions below, which must move in
+    # lockstep with these fingerprints), and the three older forms cannot be recomputed from disk;
+    # they are the catalog fixtures in tools/tests/test_check_repository_policy.py, so all four move
+    # together whenever a version in the catalog does. Recompute them by fingerprinting
+    # VERSION_CATALOG and its three amended forms from that module, not by editing one hash.
     "gradle/libs.versions.toml": frozenset({
-        "0f665393f96f3c78621ac757322a742f7737187e81410330434f901e003ea1e6",
-        "cdfb80be9c5b2ea5c98ecbe8537a15ec4a0d7fe17a9c3291173fce0c66d20132",
-        "14c2e746e14aeccda729881a3005f8708d5c56ade5741081ccca622081b69f57",
-        "e0fa49ba3e177fd8294990e4ae613cb4ad5d75e83b277aef6c7a12a96707a83a",
+        "82403c9340ea566aa778d5b1df7305f2d63ecc2bb0a857450bc749e820d27aec",
+        "213f665b2470e5ae5dcaf550f527bb4baa9eb1b35314d63ab1176c315a2632b6",
+        "aaf4d45732e5a0901e09dc722364a512cf155d85702dacb94ed10ea16945ed71",
+        "7ceb137ff20bd535ab579fea906a40a8624f8d55e6103fd8e950f1b786da368d",
     }),
     "kmp/build.gradle.kts": frozenset({
         "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
         "386c6936c783eb1004ac0efe0a7954b0e93674d739f407e298e94a7a0763ccc7",
         "3d81ad92a07df321c226e3b796d02b7be85ca332b00f63e04c800d23fc399dfc",
         "22c1bbba0dd403502accadb914d7bc7e8a6ce7e5cc625f4a3d09a4f75b0e02d0",
+        # The opt-in benchmark form, on disk: ADR 0042's serialization form plus the
+        # `tasks.withType<AbstractTestTask>` filter that skips `*BenchmarkTest` classes unless
+        # `-Preng.benchmarks=true`. Its fixture is _KMP_BUILD_WITH_BENCHMARKS in tools/tests.
+        "8585bc4f3749083f15ed580971390c23a1b9fad6fc9cf2a919c02abb4b1e14fb",
     }),
     "settings.gradle.kts": frozenset({
         "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
@@ -1967,7 +1975,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             "agp": "9.3.1",
             "kotlin": "2.3.21",
             "mavenPublish": "0.36.0",
-            "rentile": "0.7.0",
+            "rentile": "0.11.3",
         }
         base_libraries = {
             "rentile-kmp": {

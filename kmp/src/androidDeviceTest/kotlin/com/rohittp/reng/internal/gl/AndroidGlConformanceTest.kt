@@ -15,6 +15,14 @@ import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
+import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
+import com.rohittp.reng.runStickerOpacityReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.TERRAIN_FRAME_READBACK_PIXELS
@@ -81,7 +89,7 @@ class AndroidGlConformanceTest {
      * as a silent wrong answer somewhere later.
      */
     @Test fun everyRosterEntryPointResolvesOnThisDriver() {
-        assertEquals(91, GlEntryPoint.entries.size)
+        assertEquals(93, GlEntryPoint.entries.size)
         withCurrentContext { binding ->
             val adoption = adoptRenderContext(binding)
             val adopted = adoption as? RenderContextAdoption.Adopted
@@ -109,7 +117,7 @@ class AndroidGlConformanceTest {
                     "sl=${report.shadingLanguageVersionText} checks=${report.checks}",
             )
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
         } finally {
             fixture.destroy()
@@ -227,6 +235,55 @@ class AndroidGlConformanceTest {
         }
     }
 
+    @Test fun theGeometryBlendReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theStickerOpacityReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
     /**
      * Cycle G task 7's gate on Android's driver: the globe ground's own geometry, its seams and the
      * granularity the camera implies. Manual, like everything in this source set (ADR 0033).
@@ -241,6 +298,7 @@ class AndroidGlConformanceTest {
         } finally {
             fixture.destroy()
         }
+    }
 
     /**
      * Cycle G task 12's gate on Android's driver: a `ProjectionMode.GLOBE` frame through the
@@ -264,7 +322,6 @@ class AndroidGlConformanceTest {
         } finally {
             fixture.destroy()
         }
-    }
     }
 
     /**

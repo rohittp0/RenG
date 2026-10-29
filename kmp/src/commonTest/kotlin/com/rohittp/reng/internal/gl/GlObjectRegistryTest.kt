@@ -7,6 +7,7 @@ import com.rohittp.reng.ResourceSelector
 import com.rohittp.reng.StoredRawResource
 import com.rohittp.reng.StoredRawResourceMetadata
 import com.rohittp.reng.internal.cache.ResidentCache
+import com.rohittp.reng.internal.cache.ResidentGenerationId
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.lifecycle.DeletionId
 import com.rohittp.reng.internal.lifecycle.ExactContextFact
@@ -459,6 +460,318 @@ class GlObjectRegistryTest {
         assertNull(registry.resident(key), "the GL name is meaningless after context loss")
         assertNotNull(residentCache.current(key), "the decoded pixels are still valid and leased")
     }
+
+    @Test fun generationAndUploadVariantArePartOfConsumerTextureIdentity() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 16L)
+        val image = defaultSamplerStateFor(TextureContent.IMAGE)
+        val data = defaultSamplerStateFor(TextureContent.DATA)
+        val generationOne = gpuIdentity(stickerKey, 1L, GpuUploadVariant(TextureContent.IMAGE, image))
+        val generationTwo = gpuIdentity(stickerKey, 2L, GpuUploadVariant(TextureContent.IMAGE, image))
+        val dataVariant = gpuIdentity(stickerKey, 2L, GpuUploadVariant(TextureContent.DATA, data))
+
+        val first = registry.registerAllocation(
+            generationOne, listOf(GlObjectHandle(GlObjectType.TEXTURE, 100)), 4L, 0L, 100,
+        )
+        val second = registry.registerAllocation(
+            generationTwo, listOf(GlObjectHandle(GlObjectType.TEXTURE, 101)), 4L, 0L, 101,
+        )
+        val third = registry.registerAllocation(
+            dataVariant, listOf(GlObjectHandle(GlObjectType.TEXTURE, 102)), 4L, 0L, 102,
+        )
+
+        assertEquals(100, assertNotNull(registry.leaseAllocation(generationOne)).payload)
+        assertEquals(101, assertNotNull(registry.leaseAllocation(generationTwo)).payload)
+        assertEquals(102, assertNotNull(registry.leaseAllocation(dataVariant)).payload)
+        registry.releaseAllocation(first, binding)
+        registry.releaseAllocation(second, binding)
+        registry.releaseAllocation(third, binding)
+    }
+
+    @Test fun consumerTextureBudgetEvictsOldestUnleasedExactAllocation() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 4L)
+        val firstIdentity = gpuIdentity(stickerKey, 1L)
+        val secondIdentity = gpuIdentity(stickerKey, 2L)
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                firstIdentity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 100)), 4L, 0L, 100,
+            ),
+            binding,
+        )
+
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                secondIdentity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 101)), 4L, 0L, 101,
+            ),
+            binding,
+        )
+
+        assertNull(registry.leaseAllocation(firstIdentity))
+        assertNotNull(registry.leaseAllocation(secondIdentity))
+        assertTrue(100 in binding.deletedNames)
+    }
+
+    // The control for the two split-pool tests below: with one shared pool, two sticker textures arriving
+    // after a tile push the tile out, though it is the content that overflowed. This is the tile thrash
+    // a 16-sticker export showed (128 tiles re-rasterised in 120 frames, CPH2629, 2026-10-08).
+    @Test fun withOneSharedPoolContentEvictsTheOlderTile() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 2 * ONE_TILE_BYTES)
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+
+        registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        registerAndReleaseContent(registry, binding, generation = 2L, name = 102)
+
+        assertNull(registry.resident(tileKey(0)), "shared pool: the oldest entry goes, and it is the tile")
+    }
+
+    @Test fun withSplitPoolsContentPressureNeverEvictsATile() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = 2 * ONE_TILE_BYTES,
+            residentContentTextureByteBudget = ONE_TILE_BYTES,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+
+        val first = registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        val second = registerAndReleaseContent(registry, binding, generation = 2L, name = 102)
+
+        assertNotNull(registry.resident(tileKey(0)), "content over its own budget must not take a tile")
+        assertNull(registry.leaseAllocation(first), "the older content texture is the one evicted")
+        assertNotNull(registry.leaseAllocation(second))
+        assertTrue(101 in binding.deletedNames)
+    }
+
+    @Test fun withSplitPoolsTilePressureNeverEvictsContent() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = ONE_TILE_BYTES,
+            residentContentTextureByteBudget = 4 * ONE_TILE_BYTES,
+        )
+        val content = registerAndReleaseContent(registry, binding, generation = 1L, name = 101)
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertNotNull(registry.leaseAllocation(content), "tiles over their budget must not take content")
+        assertNull(registry.resident(tileKey(0)), "the older tile is the one evicted")
+        assertNotNull(registry.resident(tileKey(1)))
+    }
+
+    // With split pools, leased tiles over the tile budget are over budget though the two budgets together
+    // would hold them: comparing the total against the sum would silence RESIDENT_GPU_TEXTURES_OVER_BUDGET.
+    @Test fun withSplitPoolsATilePoolOverItsOwnBudgetIsReportedOverBudget() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(
+            residentTextureByteBudget = ONE_TILE_BYTES,
+            residentContentTextureByteBudget = 4 * ONE_TILE_BYTES,
+        )
+        registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES)
+        registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES)
+
+        val residency = registry.releaseLease(
+            registry.registerTexture(tileKey(2), GlObjectHandle(GlObjectType.TEXTURE, 102), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertTrue(residency.overBudget, "two leased tiles exceed a one-tile pool whatever the content pool holds")
+        assertEquals(ONE_TILE_BYTES, residency.budgetBytes, "reported against the tile pool's own budget")
+    }
+
+    // Buffers a live frame leases keep the buffer pool over budget with nothing evictable there; that must
+    // not stop unleased tiles being evicted for the texture pool's own pressure.
+    @Test fun leasedModelBuffersDoNotBlockTextureEviction() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = ONE_TILE_BYTES, residentBufferByteBudget = 1L)
+        registry.registerAllocation(
+            gpuPrimitiveIdentity(glbKey, generation = 1L, primitive = 0),
+            listOf(GlObjectHandle(GlObjectType.BUFFER, 90)),
+            0L,
+            8L,
+            "leased buffer",
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 100), ONE_TILE_BYTES),
+            binding,
+        )
+        registry.releaseLease(
+            registry.registerTexture(tileKey(1), GlObjectHandle(GlObjectType.TEXTURE, 101), ONE_TILE_BYTES),
+            binding,
+        )
+
+        assertNull(registry.resident(tileKey(0)), "the older unleased tile is evicted despite buffer pressure")
+        assertNotNull(registry.resident(tileKey(1)))
+    }
+
+    private fun registerAndReleaseContent(
+        registry: GlObjectRegistry,
+        binding: RecordingGlBinding,
+        generation: Long,
+        name: Int,
+    ): GpuResourceIdentity {
+        val identity = gpuIdentity(stickerKey, generation)
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                identity,
+                listOf(GlObjectHandle(GlObjectType.TEXTURE, name)),
+                ONE_TILE_BYTES,
+                0L,
+                name,
+            ),
+            binding,
+        )
+        return identity
+    }
+
+    @Test fun modelBufferBudgetDeletesAWholePrimitiveGroupExactlyOnce() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentBufferByteBudget = 8L)
+        val firstIdentity = gpuPrimitiveIdentity(glbKey, generation = 1L, primitive = 0)
+        val secondIdentity = gpuPrimitiveIdentity(glbKey, generation = 1L, primitive = 1)
+        val firstHandles = listOf(
+            GlObjectHandle(GlObjectType.VERTEX_ARRAY, 100),
+            GlObjectHandle(GlObjectType.BUFFER, 101),
+            GlObjectHandle(GlObjectType.BUFFER, 102),
+        )
+        registry.releaseAllocation(
+            registry.registerAllocation(firstIdentity, firstHandles, 0L, 8L, "first"), binding,
+        )
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                secondIdentity,
+                listOf(GlObjectHandle(GlObjectType.VERTEX_ARRAY, 103), GlObjectHandle(GlObjectType.BUFFER, 104)),
+                0L,
+                8L,
+                "second",
+            ),
+            binding,
+        )
+
+        assertNull(registry.leaseAllocation(firstIdentity))
+        assertTrue(100 in binding.deletedNames)
+        assertTrue(101 in binding.deletedNames)
+        assertTrue(102 in binding.deletedNames)
+        assertEquals(1, binding.log.count { it.startsWith("deleteVertexArrays") })
+        assertEquals(1, binding.log.count { it.startsWith("deleteBuffers") })
+    }
+
+    @Test fun freeingALeasedGenerationAllowsSameDrawSharingThenMakesLaterUploadsEphemeral() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry()
+        val identity = gpuIdentity(stickerKey, 7L)
+        val lease = registry.registerAllocation(
+            identity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 100)), 4L, 0L, 100,
+        )
+
+        val retirement = registry.retireResources(
+            ResourceSelector.ByKey(stickerKey),
+            mapOf(stickerKey to setOf(ResidentGenerationId(7L))),
+            binding,
+        )
+        assertEquals(setOf(stickerKey), retirement.deferredOwnerKeys)
+        val sameDrawDuplicate = assertNotNull(
+            registry.leaseAllocation(identity),
+            "a duplicate occurrence in the serialized draw must share its active born-retired upload",
+        )
+        assertEquals(100, sameDrawDuplicate.payload)
+        registry.releaseAllocation(lease, binding)
+        assertTrue(binding.deletedNames.isEmpty(), "the first of two draw leases cannot delete the texture")
+        registry.releaseAllocation(sameDrawDuplicate.lease, binding)
+        assertEquals(listOf(100), binding.deletedNames, "the last draw lease deletes the retired allocation")
+
+        val reupload = registry.registerAllocation(
+            identity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 101)), 4L, 0L, 101,
+        )
+        registry.releaseAllocation(reupload, binding)
+        assertTrue(101 in binding.deletedNames, "an old frame cannot undo a completed free")
+        assertNull(registry.leaseAllocation(identity))
+    }
+
+    @Test fun releasingAClaimFromALostContextCannotTouchAReplacementAllocation() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry()
+        val identity = gpuIdentity(stickerKey, 1L)
+        val lost = registry.registerAllocation(
+            identity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 100)), 4L, 0L, 100,
+        )
+        val lostLegacy = registry.registerTexture(
+            tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 200), ONE_TILE_BYTES,
+        )
+        registry.forgetEverything()
+        val replacement = registry.registerAllocation(
+            identity, listOf(GlObjectHandle(GlObjectType.TEXTURE, 101)), 4L, 0L, 101,
+        )
+        val replacementLegacy = registry.registerTexture(
+            tileKey(0), GlObjectHandle(GlObjectType.TEXTURE, 201), ONE_TILE_BYTES,
+        )
+
+        registry.releaseAllocation(lost, binding)
+        registry.releaseLease(lostLegacy, binding)
+
+        assertEquals(101, assertNotNull(registry.leaseAllocation(identity)).payload)
+        assertEquals(
+            GlObjectHandle(GlObjectType.TEXTURE, 201),
+            assertNotNull(registry.leaseResident(tileKey(0))).handle,
+        )
+        registry.releaseAllocation(replacement, binding)
+        registry.releaseLease(replacementLegacy, binding)
+    }
+
+    @Test fun generalizedAndLegacyTexturesShareOneTextureBudget() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry(residentTextureByteBudget = 10L)
+        val legacyKey = tileKey(0)
+        registry.releaseLease(
+            registry.registerTexture(legacyKey, GlObjectHandle(GlObjectType.TEXTURE, 200), 6L),
+            binding,
+        )
+        val identity = gpuIdentity(stickerKey, 1L)
+
+        registry.releaseAllocation(
+            registry.registerAllocation(
+                identity,
+                listOf(GlObjectHandle(GlObjectType.TEXTURE, 201)),
+                textureBytes = 6L,
+                bufferBytes = 0L,
+                payload = 201,
+            ),
+            binding,
+        )
+
+        assertNull(registry.leaseResident(legacyKey), "the oldest texture in the shared pool is evicted")
+        assertNotNull(registry.leaseAllocation(identity))
+        assertTrue(200 in binding.deletedNames)
+    }
+
+    @Test fun freeAndReportIncludeLegacyBudgetTrackedGpuOnlyOwners() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry()
+        val key = tileKey(3)
+        registry.releaseLease(
+            registry.registerTexture(key, GlObjectHandle(GlObjectType.TEXTURE, 203), 12L),
+            binding,
+        )
+
+        val snapshot = registry.allocationSnapshots(ResourceSelector.ByKey(key)).single()
+        assertEquals(12L, snapshot.knownBytes)
+        val retirement = registry.retireResources(ResourceSelector.ByKey(key), emptyMap(), binding)
+
+        assertEquals(setOf(key), retirement.matchedOwnerKeys)
+        assertTrue(203 in binding.deletedNames)
+        assertTrue(registry.allocationSnapshots(ResourceSelector.ByKey(key)).isEmpty())
+    }
 }
 
 private const val ONE_TILE_BYTES: Long = 512L * 512L * 4L
@@ -478,3 +791,24 @@ private val storedTileBytes = StoredRawResource(
 
 private fun tileKey(index: Int): ResourceKey =
     ResourceKey(ResourceKind.BASEMAP_TILE, index.toString().repeat(64).take(64), null)
+
+private fun gpuIdentity(
+    owner: ResourceKey,
+    generation: Long,
+    variant: GpuUploadVariant = GpuUploadVariant(
+        TextureContent.IMAGE,
+        defaultSamplerStateFor(TextureContent.IMAGE),
+    ),
+): GpuResourceIdentity = GpuResourceIdentity(
+    ownerKey = owner,
+    generationId = ResidentGenerationId(generation),
+    subresource = GpuSubresource.Texture,
+    uploadVariant = variant,
+)
+
+private fun gpuPrimitiveIdentity(owner: ResourceKey, generation: Long, primitive: Int): GpuResourceIdentity =
+    GpuResourceIdentity(
+        ownerKey = owner,
+        generationId = ResidentGenerationId(generation),
+        subresource = GpuSubresource.ModelPrimitive(meshIndex = 0, primitiveIndex = primitive),
+    )

@@ -30,22 +30,102 @@ internal sealed interface ClosedMercatorFootprint : FrameGroundFootprint {
 internal fun clippedPhysicalPixelFootprint(
     camera: ResolvedMercatorCamera,
 ): ClosedMercatorFootprint {
-    var firstAdmissibleRow = -1
-    var lastAdmissibleRow = -1
-    for (pixelY in 0 until camera.outputPixelSize.height) {
-        if (physicalPixelGroundRay(camera, pixelX = 0, pixelY = pixelY) is GroundRayResult.Hit) {
-            if (firstAdmissibleRow < 0) firstAdmissibleRow = pixelY
-            lastAdmissibleRow = pixelY
+    val rows = admissibleGroundRows(camera) ?: return ClosedMercatorFootprint.Empty
+    return footprintForAdmissibleRowRange(camera, rows.first, rows.last)
+}
+
+/**
+ * The first through last rows whose ground ray hits, or null when none does: exactly what scanning
+ * every row with [physicalPixelGroundRay] finds, without casting a ray per row.
+ *
+ * **Why it can skip rows.** On a plane a row's classification depends on the row alone, and every
+ * test in [physicalPixelGroundRay] is monotone in the row's `v` (`q` falls as `v` rises; the angle
+ * test compares a rising side against a falling one; the near test is a bound on `q`), so the
+ * admissible rows are one contiguous run -- the promise [footprintForAdmissibleRowRange] already
+ * relies on. Sampling every `height / ADMISSIBLE_ROW_SAMPLES`th row finds the run, and a binary search
+ * with the same exact test finds each edge inside the stride before it. A run too short for any sample
+ * to land in falls back to the full scan.
+ *
+ * A frame scans three times (this one and two in `groundLodBands`), so a per-row scan is a real share
+ * of the render thread (ADR 0064). This costs about `ADMISSIBLE_ROW_SAMPLES + 2 log2(stride)` casts.
+ */
+internal fun admissibleGroundRows(camera: ResolvedMercatorCamera): IntRange? {
+    val height = camera.outputPixelSize.height
+    fun hits(row: Int): Boolean = physicalPixelGroundRay(camera, pixelX = 0, pixelY = row) is GroundRayResult.Hit
+
+    val stride = max(1, height / ADMISSIBLE_ROW_SAMPLES)
+    var firstSample = -1
+    var lastSample = -1
+    for (row in (0 until height step stride) + (height - 1)) {
+        if (hits(row)) {
+            if (firstSample < 0) firstSample = row
+            lastSample = row
         }
     }
-    if (firstAdmissibleRow < 0) return ClosedMercatorFootprint.Empty
+    if (firstSample < 0) return fullScanAdmissibleGroundRows(camera)
+
+    // Rows before the first sampled hit and after the last one are misses up to the neighbouring
+    // sample (which missed), so each edge lies within one stride of its sample.
+    var low = max(0, firstSample - stride + 1)
+    var high = firstSample
+    while (low < high) {
+        val mid = (low + high) ushr 1
+        if (hits(mid)) high = mid else low = mid + 1
+    }
+    val first = low
+    low = lastSample
+    high = min(height - 1, lastSample + stride - 1)
+    while (low < high) {
+        val mid = (low + high + 1) ushr 1
+        if (hits(mid)) low = mid else high = mid - 1
+    }
+    return first..low
+}
+
+/** Every row checked: the reference [admissibleGroundRows] must agree with, and its rare fallback. */
+internal fun fullScanAdmissibleGroundRows(camera: ResolvedMercatorCamera): IntRange? {
+    var first = -1
+    var last = -1
+    for (pixelY in 0 until camera.outputPixelSize.height) {
+        if (physicalPixelGroundRay(camera, pixelX = 0, pixelY = pixelY) is GroundRayResult.Hit) {
+            if (first < 0) first = pixelY
+            last = pixelY
+        }
+    }
+    return if (first < 0) null else first..last
+}
+
+/** Rows [admissibleGroundRows] samples before searching for the run's edges. */
+private const val ADMISSIBLE_ROW_SAMPLES = 32
+
+/**
+ * The same four-corner sampling [clippedPhysicalPixelFootprint] performs, over an explicit range of
+ * rows rather than over every admissible one (ADR 0065).
+ *
+ * A per-tile level of detail decomposes the frame into bands, each needing the ground quad of *its*
+ * rows, so this is factored out and [clippedPhysicalPixelFootprint] is now its whole-frame case. The
+ * caller owns the promise that every row in `[firstRow, lastRow]` carries ground -- the same promise
+ * the whole-frame case always made, sound because [groundHit] hard-casts and on a plane a row's
+ * classification is a function of the row alone.
+ *
+ * Two adjacent ranges share exactly one edge and therefore partition the ground, though the *tiles*
+ * each admits still overlap where one straddles that edge: ADR 0065's accepted cost.
+ */
+internal fun footprintForAdmissibleRowRange(
+    camera: ResolvedMercatorCamera,
+    firstRow: Int,
+    lastRow: Int,
+): ClosedMercatorFootprint {
+    require(firstRow in 0..lastRow && lastRow < camera.outputPixelSize.height) {
+        "row range must be ordered and within the resolved output size"
+    }
 
     val lastColumn = camera.outputPixelSize.width - 1
     val pixelCentreRectangle = listOf(
-        groundHit(camera, pixelX = 0, pixelY = firstAdmissibleRow),
-        groundHit(camera, pixelX = lastColumn, pixelY = firstAdmissibleRow),
-        groundHit(camera, pixelX = lastColumn, pixelY = lastAdmissibleRow),
-        groundHit(camera, pixelX = 0, pixelY = lastAdmissibleRow),
+        groundHit(camera, pixelX = 0, pixelY = firstRow),
+        groundHit(camera, pixelX = lastColumn, pixelY = firstRow),
+        groundHit(camera, pixelX = lastColumn, pixelY = lastRow),
+        groundHit(camera, pixelX = 0, pixelY = lastRow),
     )
     return when (val footprint = classifyFootprint(pixelCentreRectangle)) {
         ClosedMercatorFootprint.Empty -> ClosedMercatorFootprint.Empty

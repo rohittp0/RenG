@@ -1,6 +1,10 @@
 package com.rohittp.reng
 
 import com.rohittp.reng.internal.canonicalDouble
+import com.rohittp.reng.internal.projection.FOCAL_LENGTH_SCALE
+import com.rohittp.reng.internal.projection.MAXIMUM_GROUND_ANGLE_DEGREES
+import kotlin.math.PI
+import kotlin.math.atan
 
 /**
  * Whether a map position's altitude is measured from the ellipsoid or from the terrain beneath it.
@@ -29,6 +33,18 @@ public enum class AltitudeMode {
     ABSOLUTE,
     @kotlinx.serialization.SerialName("GROUND_RELATIVE")
     GROUND_RELATIVE,
+}
+
+@kotlinx.serialization.Serializable
+public enum class BlendMode {
+    @kotlinx.serialization.SerialName("OVER")
+    OVER,
+    @kotlinx.serialization.SerialName("ADDITIVE")
+    ADDITIVE,
+    @kotlinx.serialization.SerialName("MULTIPLY")
+    MULTIPLY,
+    @kotlinx.serialization.SerialName("SCREEN")
+    SCREEN,
 }
 
 @kotlinx.serialization.Serializable(with = Vector3Serializer::class)
@@ -116,7 +132,34 @@ public class Camera(
     override fun toString(): String =
         "Camera(latitude=$latitude, unwrappedLongitude=$unwrappedLongitude, zoom=$zoom, " +
             "bearing=$bearing, pitch=$pitch)"
+
+    public companion object {
+        /**
+         * The largest [pitch] at which the ground still reaches every row of the output frame -- a
+         * quality ceiling, not a domain limit (ADR 0067).
+         *
+         * [pitch] keeps the full `[0, 90)` range this class has always validated: a steeper camera
+         * is legal and is drawn exactly as asked. This exists for a caller -- typically wherever a
+         * *person* drags a tilt gesture -- that wants to stop **offering** a pitch before anyone
+         * reaches one, which is a different question from which pitches are admissible.
+         *
+         * The vertical half field of view is exactly 22.5 degrees (`FOCAL_LENGTH_SCALE = 1 + sqrt(2)`
+         * being `1 / tan(22.5)`) and a ray's angle is `pitch + atan(v)` exactly, so the top row sits
+         * at `pitch + 22.5` and is always the first to run out of ground. This is therefore
+         * `MAXIMUM_GROUND_ANGLE_DEGREES` (ADR 0064) less that half angle -- **66.75 degrees** at the
+         * shipped constants -- computed from both rather than written as a literal, so a change to
+         * either moves it.
+         *
+         * **Above it the renderer keeps drawing and the horizon enters the frame.** The rows above
+         * carry whatever the consumer's surface was cleared to: a horizon, not a clipped edge.
+         */
+        public val MAXIMUM_GROUND_FILLING_PITCH_DEGREES: Double =
+            MAXIMUM_GROUND_ANGLE_DEGREES - atan(1.0 / FOCAL_LENGTH_SCALE) * DEGREES_PER_RADIAN
+    }
 }
+
+/** Radians to degrees, for the one derived constant on [Camera] that needs it. */
+private const val DEGREES_PER_RADIAN: Double = 180.0 / PI
 
 @kotlinx.serialization.Serializable(with = PlacementSerializer::class)
 public class Placement(

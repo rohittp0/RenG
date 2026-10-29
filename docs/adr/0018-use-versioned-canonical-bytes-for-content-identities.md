@@ -95,3 +95,20 @@ model and geometry lists are empty and the new fields live inside those. The rep
 paying one 8-byte field. Its digest was re-derived outside RenG with Python's `hashlib`, by a script that
 first reproduced both tracked digests byte-exactly and round-tripped both fixtures through its own
 parser — so the expectation is not a transcription of what the changed code emitted.
+
+## Erratum, 2026-10-03: the registry retains the canonical bytes, not a copy of them
+
+"The registry retains a defensive copy of canonical bytes beside every digest" now reads "the registry
+retains the canonical bytes". `CanonicalBytes` and `Sha256Digest` are immutable — each copies its array
+in at construction, keeps it private and copies it out of every read — so the copy `register` took on
+every frame defended nothing, and cost two full copies of the frame plan's encoding per `prepare`. The
+bytes are still retained beside every digest, the collision check is unchanged and still mandatory, and
+a collision still reports deep copies. ADR 0062's 2026-10-03 erratum records the measurement.
+
+## Erratum, 2026-10-09: frames keep digests only, and geometries name their program (ADR 0081)
+
+For Frame Identities only, two statements above no longer hold. The registry no longer retains canonical
+bytes beside each digest and no longer fails `IDENTITY_COLLISION` when one digest names different bytes: a
+repeated digest is the same frame. And `Geometry` tag 3 (the shader pair's sources) is retired in favour of
+tag 9, the geometry program's stable id. Resource identities, their roots and `preRegister`'s collision check
+are unchanged. ADR 0081 records the decision and its measurement.

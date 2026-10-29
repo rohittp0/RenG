@@ -4,34 +4,18 @@ internal sealed interface IdentityRegistration {
     data object Registered : IdentityRegistration
 
     data object AlreadyRegistered : IdentityRegistration
-
-    data class Collision(
-        val established: HashedCanonicalBytes,
-        val attempted: HashedCanonicalBytes,
-    ) : IdentityRegistration
 }
 
+/**
+ * The Frame Identities a renderer has prepared since its frame history was last cleared, by digest only.
+ *
+ * **Digests, not bytes (ADR 0081, relaxing ADR 0018).** No canonical encoding is kept to refuse a
+ * SHA-256 collision: that never happens in practice, and keeping every frame's encoding until
+ * `clearFrameHistory` costs a long export most of its heap. A digest that repeats is the same frame.
+ */
 internal class CanonicalIdentityRegistry {
-    private val establishedByDigest: MutableMap<Sha256Digest, HashedCanonicalBytes> = mutableMapOf()
+    private val established: MutableSet<Sha256Digest> = HashSet()
 
-    internal fun register(identity: HashedCanonicalBytes): IdentityRegistration {
-        val attempted = identity.deepCopy()
-        val established = establishedByDigest[attempted.digest]
-        if (established == null) {
-            establishedByDigest[attempted.digest] = attempted
-            return IdentityRegistration.Registered
-        }
-        if (established.canonicalBytes == attempted.canonicalBytes) {
-            return IdentityRegistration.AlreadyRegistered
-        }
-        return IdentityRegistration.Collision(
-            established = established.deepCopy(),
-            attempted = attempted.deepCopy(),
-        )
-    }
+    internal fun register(attempted: HashedCanonicalBytes): IdentityRegistration =
+        if (established.add(attempted.digest)) IdentityRegistration.Registered else IdentityRegistration.AlreadyRegistered
 }
-
-private fun HashedCanonicalBytes.deepCopy(): HashedCanonicalBytes = HashedCanonicalBytes(
-    digest = Sha256Digest(digest.bytes),
-    canonicalBytes = CanonicalBytes(canonicalBytes.bytes),
-)

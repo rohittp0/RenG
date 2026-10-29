@@ -100,20 +100,16 @@ private fun List<Double>.toVector3(): DoubleVector3 = DoubleVector3(this[0], thi
 
 private fun List<Double>.toQuaternion(): DoubleQuaternion = DoubleQuaternion(this[0], this[1], this[2], this[3])
 
-private fun translationMatrix(translation: DoubleVector3): DoubleMatrix4 = DoubleMatrix4.fromRows(
-    listOf(
-        listOf(1.0, 0.0, 0.0, translation.x),
-        listOf(0.0, 1.0, 0.0, translation.y),
-        listOf(0.0, 0.0, 1.0, translation.z),
-        listOf(0.0, 0.0, 0.0, 1.0),
-    ),
+private fun translationMatrix(translation: DoubleVector3): DoubleMatrix4 = DoubleMatrix4.rowMajor(
+    1.0, 0.0, 0.0, translation.x,
+    0.0, 1.0, 0.0, translation.y,
+    0.0, 0.0, 1.0, translation.z,
+    0.0, 0.0, 0.0, 1.0,
 )
 
-private fun scaleMatrix(scale: DoubleVector3): DoubleMatrix4 = DoubleMatrix4.fromRows(
-    listOf(
-        listOf(scale.x, 0.0, 0.0, 0.0),
-        listOf(0.0, scale.y, 0.0, 0.0),
-        listOf(0.0, 0.0, scale.z, 0.0),
-        listOf(0.0, 0.0, 0.0, 1.0),
-    ),
+private fun scaleMatrix(scale: DoubleVector3): DoubleMatrix4 = DoubleMatrix4.rowMajor(
+    scale.x, 0.0, 0.0, 0.0,
+    0.0, scale.y, 0.0, 0.0,
+    0.0, 0.0, scale.z, 0.0,
+    0.0, 0.0, 0.0, 1.0,
 )

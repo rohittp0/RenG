@@ -29,3 +29,26 @@ it is not a latch. A second prepare, history clearing, resource freeing, or rend
 with active preparation and fails with the operation's typed `PREPARATION_IN_PROGRESS` error. Cancelling
 the calling coroutine remains the way to cancel one specific prepare, and every `CancellationException`
 propagates unchanged.
+
+The active invocation is one published outer worker, not only its resource-acquisition children. Its lifetime
+starts before planning touches renderer state and spans ordered planning, the batch-wide firewall operation,
+acquisition, Prepared Frame construction, history/style commit, and rollback. `cancelPreparations()` snapshots
+that worker and `cancelAndJoin`s it, so returning from the barrier means none of those phases can still mutate the
+renderer.
+
+Prepared Frames remain provisional until every batch item succeeds. A later failure or cancellation closes them
+in reverse construction order, atomically taking each frame's leases and raw-pixel reservation exactly once.
+Only then does the invocation end; neither the provisional history nor a newly compiled prepared style becomes
+visible. Valid cache content acquired before the terminal outcome may remain, as above, but no caller-owned frame
+or ownership token leaks out of the failed transaction.
+
+## Amendment, 2026-10-22: only the preparation ends its own admission window
+
+`cancelPreparations()` joins the worker it snapshotted and then ran the lifecycle's own cancellation
+step, which cleared the "preparation active" flag on a termination nobody had awaited: a `prepare` that
+began between the join and that step kept running with `close()`, `freeResources()` and
+`clearFrameHistory()` admitted. The lifecycle's controller could not await it instead -- it runs inside
+the operation gate, which the preparation needs to end itself -- so the barrier stays wholly in the
+session coordinator and the lifecycle's cancellation is a no-op: only `EndPreparation` (or a failed
+`BeginPreparation`) closes the window, and a preparation started after the barrier's snapshot keeps the
+others refused until it ends.

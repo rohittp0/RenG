@@ -396,28 +396,32 @@ class RendererLifecyclePrecedenceTest {
         assertEquals(RendererLifecycleOutcome.Succeeded, succeeded.outcome)
     }
 
+    /**
+     * Replaces `activeCancellationWaitsForTerminationBeforeClearingThePreparationGate`, which asserted
+     * the defect: it cleared the admission window on a termination the renderer's driver never
+     * actually awaited. The barrier lives in the preparation-session coordinator (ADR 0014), so a
+     * window still open when CancelPreparations reaches the gate belongs to a preparation that began
+     * after the barrier's snapshot, and must keep close/free/clear refused until it ends itself.
+     */
     @Test
-    fun activeCancellationWaitsForTerminationBeforeClearingThePreparationGate() {
-        val initial = snapshot(
-            ownerState = RendererOwnerState.AWAITING_CONTEXT_ADOPTION,
-            preparationActive = true,
-        )
-        val begun = RendererLifecycleStateMachine.begin(
-            initial,
-            RendererLifecycleOperation.CancelPreparations,
-        )
-        assertEquals(
-            listOf(RendererLifecycleAction.RequestPreparationCancellation),
-            begun.actions,
-        )
-        assertTrue(begun.snapshot.preparationActive)
+    fun cancellationNeverClosesAPreparationWindowOnlyEndPreparationDoes() {
+        listOf(RendererOwnerState.LIVE, RendererOwnerState.AWAITING_CONTEXT_ADOPTION).forEach { owner ->
+            val initial = snapshot(ownerState = owner, preparationActive = true)
+            val cancelled = RendererLifecycleStateMachine.begin(
+                initial,
+                RendererLifecycleOperation.CancelPreparations,
+            )
+            assertEquals(RendererLifecycleOutcome.NoOp, cancelled.outcome)
+            assertTrue(cancelled.snapshot.preparationActive, "cancellation must not end a preparation it did not join")
 
-        val terminated = RendererLifecycleStateMachine.resume(
-            requireNotNull(begun.cursor),
-            RendererLifecycleObservation.PreparationTerminated,
-        )
-        assertEquals(RendererLifecycleOutcome.Succeeded, terminated.outcome)
-        assertFalse(terminated.snapshot.preparationActive)
+            val close = RendererLifecycleStateMachine.begin(
+                cancelled.snapshot,
+                RendererLifecycleOperation.CloseRenderer,
+            )
+            val failure = (close.outcome as RendererLifecycleOutcome.Failed).failure
+            assertEquals(RenGErrorCode.PREPARATION_IN_PROGRESS, failure.code)
+            assertEquals(PipelineStage.RENDERER_CLOSE, failure.stage)
+        }
     }
 
     @Test
@@ -450,10 +454,6 @@ class RendererLifecyclePrecedenceTest {
             ),
             CursorMismatch(
                 RendererLifecycleCursor.AwaitingFramebuffer(snapshot, query, framebufferName),
-                RendererLifecycleObservation.PermittedOperationSucceeded,
-            ),
-            CursorMismatch(
-                RendererLifecycleCursor.AwaitingPreparationTermination(snapshot, query),
                 RendererLifecycleObservation.PermittedOperationSucceeded,
             ),
             CursorMismatch(

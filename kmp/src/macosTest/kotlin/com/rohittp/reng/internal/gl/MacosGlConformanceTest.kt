@@ -9,6 +9,14 @@ import com.rohittp.reng.MODEL_READBACK_PIXELS
 import com.rohittp.reng.runBasemapReadbackSuite
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
+import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
+import com.rohittp.reng.runStickerOpacityReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.GROUND_ANCHOR_READBACK_PIXELS
@@ -41,7 +49,7 @@ class MacosGlConformanceTest {
 
             val report = runGlConformanceSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
             assertEquals(ShaderDialect.DESKTOP, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.rendererName.isNotBlank())
             // A hosted runner reports "Apple Software Renderer"; a developer's machine reports
             // "4.1 Metal - 90.5". Cycle E must key golden baselines by this string and the dialect.
@@ -463,6 +471,79 @@ class MacosGlConformanceTest {
                 binding.viewport(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
                 binding.scissor(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
                 runGeometrySubdivisionReadbackSuite(binding, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    @Test fun theGeometryBlendReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG geometry blend readback: skipped, $glRenderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+                binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+                runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG bloom readback: skipped, $glRenderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+                binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+                runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG per-element bloom readback: skipped, $glRenderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+                binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+                runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    @Test fun theStickerOpacityReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG sticker opacity readback: skipped, $glRenderer is unavailable")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+                binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+                runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
             } finally {
                 fixture.destroy()
             }

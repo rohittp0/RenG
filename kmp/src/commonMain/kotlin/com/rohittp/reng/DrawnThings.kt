@@ -3,16 +3,235 @@ package com.rohittp.reng
 import com.rohittp.reng.internal.canonicalDouble
 import com.rohittp.reng.internal.canonicalFloat
 import com.rohittp.reng.internal.freshListCopy
+import com.rohittp.reng.internal.gl.BACKDROP_RESERVED_NAME_PREFIX
+import com.rohittp.reng.internal.gl.GEOMETRY_RESERVED_NAME_PREFIX
 import com.rohittp.reng.internal.gl.MAXIMUM_CONSUMER_TEXTURES
 import com.rohittp.reng.internal.gl.RESERVED_SHADER_NAMES
 import com.rohittp.reng.internal.requireFiniteFloat
 import com.rohittp.reng.internal.requireUnicodeScalars
 
+/**
+ * What a frame paints behind everything else it draws: a repeating image, or a shader the consumer
+ * writes (ADR 0068, ADR 0071).
+ *
+ * **It needs no horizon.** The backdrop is drawn first and full frame, so the ground covers it
+ * wherever the ground draws, and wherever it does not -- above the horizon of a steep camera, or
+ * anywhere in a frame with `drawBasemap = false` -- the backdrop is what remains. Nothing here
+ * computes that boundary because nothing has to.
+ *
+ * Sealed rather than one type with a nullable shader: a backdrop is a pattern or a program, and
+ * neither "both" nor "neither" means anything.
+ */
+@kotlinx.serialization.Serializable(with = BackdropSerializer::class)
+public sealed interface Backdrop {
+
+    /**
+     * A repeating image, with no response to bearing or pitch and a hard edge where the ground
+     * meets it.
+     *
+     * [tileSizeLogicalPixels] is how far the pattern repeats on screen, in logical pixels, rather
+     * than a multiple of [image]'s own dimensions: choosing a pattern should not require knowing
+     * its encoded size.
+     */
+    public data class Pattern(
+        public val image: ResourceLocator,
+        public val tileSizeLogicalPixels: Double = DEFAULT_BACKDROP_TILE_SIZE_LOGICAL_PIXELS,
+    ) : Backdrop {
+        init {
+            val validated = canonicalDouble(tileSizeLogicalPixels, "tileSizeLogicalPixels")
+            require(validated > 0.0) { "tileSizeLogicalPixels must be positive" }
+        }
+    }
+
+    /**
+     * A shader pair drawn over the same full-frame clip-space quad (ADR 0071).
+     *
+     * The vertex stage is the consumer's, and the one thing RenG binds into it is a `vec2`
+     * clip-space position at `layout(location = 0)` -- by location, never by name. RenG also sets
+     * `uResolution` (`vec2`, pixels) and `uFrameIndex` (`uint`) on whichever stage declares them,
+     * and sets nothing else: a shader declaring neither still draws (ADR 0008).
+     *
+     * [uniforms] and [textures] bind by name, in name order, exactly as a [Geometry]'s do. Names
+     * reserved for RenG's own interface are rejected, and so is anything beginning `rengBackdrop`:
+     * that prefix is RenG's, and holding it back is what lets a later cycle add a uniform without
+     * breaking a consumer who claimed the name first.
+     *
+     * Not a `data class`, because a generated `toString` would print the shader source.
+     */
+    public class Shader(
+        public val shaderPair: ShaderPair,
+        public val uniforms: Map<String, ShaderValue> = emptyMap(),
+        public val textures: Map<String, ResourceLocator> = emptyMap(),
+    ) : Backdrop {
+        init {
+            require(uniforms.keys.none(::isReservedBackdropShaderName)) {
+                "a backdrop uniform must not use a name reserved for RenG's own shader interface"
+            }
+            require(textures.keys.none(::isReservedBackdropShaderName)) {
+                "a backdrop texture must not use a name reserved for RenG's own shader interface"
+            }
+            require(textures.size <= MAXIMUM_CONSUMER_TEXTURES) {
+                "a backdrop may declare at most $MAXIMUM_CONSUMER_TEXTURES consumer textures"
+            }
+        }
+
+        override fun equals(other: Any?): Boolean =
+            other is Shader &&
+                shaderPair == other.shaderPair &&
+                uniforms == other.uniforms &&
+                textures == other.textures
+
+        override fun hashCode(): Int {
+            var result = shaderPair.hashCode()
+            result = 31 * result + uniforms.hashCode()
+            result = 31 * result + textures.hashCode()
+            return result
+        }
+
+        override fun toString(): String =
+            "Backdrop.Shader(shaderPair=<redacted>, uniforms=<redacted>, textures=<redacted>)"
+    }
+}
+
+/** A 256 logical pixel repeat, which is one canonical tile side and a sane default for a pattern. */
+private const val DEFAULT_BACKDROP_TILE_SIZE_LOGICAL_PIXELS: Double = 256.0
+
+/**
+ * Whether [name] is RenG's rather than a consumer's: one of the documented interface names, or
+ * anything under the `rengBackdrop` prefix RenG's own backdrop uniforms already use (ADR 0071).
+ */
+private fun isReservedBackdropShaderName(name: String): Boolean =
+    name in RESERVED_SHADER_NAMES || name.startsWith(BACKDROP_RESERVED_NAME_PREFIX)
+
+/**
+ * A screen-space bloom applied to this frame's emissive [Geometry]s.
+ *
+ * [intensity] scales the light added to the frame. [levelWeights] weights each emission-image mip
+ * level, where index zero is full resolution and index `k` is the output size divided by `2^k`.
+ * [insideSuppression] removes bloom from opaque emission interiors, and [whiteness] moves bloom
+ * colour toward its brightest channel.
+ *
+ * [highPrecisionEmission] asks for a half-float emission image and downsample chain, so an emitter's
+ * light can exceed one (ADR 0085). It is honoured only where the context can render to half-float
+ * colour; elsewhere the frame draws with the eight-bit chain and reports
+ * [DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED].
+ *
+ * [reachLevel] and [reachGain] shape the far band a [Geometry.bloomReach] adds: every emitter with a
+ * positive reach is drawn a second time, scaled by its reach, into a full-resolution reach image that
+ * is downsampled through the same kernel and added into downsample level [reachLevel] at
+ * [reachGain], so it adds light that only the levels at and below [reachLevel] carry. Over a uniform
+ * field the far band's gain is `reachGain * intensity * sum(levelWeights[reachLevel..])` (1.7 for the
+ * default weights at level 3, against 3.4 for the whole chain); it is not normalised. A [reachLevel]
+ * beyond [levelWeights]' last index adds into the deepest level the frame computes; with a single
+ * level weight there is no chain and no far band.
+ */
+@kotlinx.serialization.Serializable(with = BloomSerializer::class)
+public class Bloom(
+    intensity: Float = 1f,
+    levelWeights: List<Float> = DEFAULT_LEVEL_WEIGHTS,
+    insideSuppression: Float = 0f,
+    whiteness: Float = 0f,
+    highPrecisionEmission: Boolean = false,
+    reachLevel: Int = DEFAULT_REACH_LEVEL,
+    reachGain: Float = 1f,
+) {
+    public val intensity: Float
+    private val levelWeightSnapshot: ArrayList<Float>
+    public val insideSuppression: Float
+    public val whiteness: Float
+    public val highPrecisionEmission: Boolean
+    public val reachLevel: Int
+    public val reachGain: Float
+
+    public val levelWeights: List<Float>
+        get() = freshListCopy(levelWeightSnapshot)
+
+    init {
+        require(requireFiniteFloat(intensity, "intensity") >= 0f) {
+            "intensity must be non-negative"
+        }
+        require(levelWeights.size in 1..8) {
+            "levelWeights must contain between one and eight values"
+        }
+        levelWeights.forEachIndexed { index, weight ->
+            require(requireFiniteFloat(weight, "levelWeights[$index]") >= 0f) {
+                "levelWeights[$index] must be non-negative"
+            }
+        }
+        require(insideSuppression in 0f..1f) { "insideSuppression must be between zero and one" }
+        require(whiteness in 0f..1f) { "whiteness must be between zero and one" }
+        require(reachLevel in 1..MAXIMUM_REACH_LEVEL) {
+            "reachLevel must be between one and $MAXIMUM_REACH_LEVEL"
+        }
+        require(requireFiniteFloat(reachGain, "reachGain") >= 0f) { "reachGain must be non-negative" }
+
+        this.intensity = canonicalFloat(intensity, "intensity")
+        levelWeightSnapshot = ArrayList(
+            levelWeights.mapIndexed { index, weight ->
+                canonicalFloat(weight, "levelWeights[$index]")
+            },
+        )
+        this.insideSuppression = canonicalFloat(insideSuppression, "insideSuppression")
+        this.whiteness = canonicalFloat(whiteness, "whiteness")
+        this.highPrecisionEmission = highPrecisionEmission
+        this.reachLevel = reachLevel
+        this.reachGain = canonicalFloat(reachGain, "reachGain")
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is Bloom &&
+            intensity == other.intensity &&
+            levelWeightSnapshot == other.levelWeightSnapshot &&
+            insideSuppression == other.insideSuppression &&
+            whiteness == other.whiteness &&
+            highPrecisionEmission == other.highPrecisionEmission &&
+            reachLevel == other.reachLevel &&
+            reachGain == other.reachGain
+
+    override fun hashCode(): Int {
+        var result = intensity.hashCode()
+        result = 31 * result + levelWeightSnapshot.hashCode()
+        result = 31 * result + insideSuppression.hashCode()
+        result = 31 * result + whiteness.hashCode()
+        result = 31 * result + highPrecisionEmission.hashCode()
+        result = 31 * result + reachLevel
+        result = 31 * result + reachGain.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "Bloom(intensity=$intensity, levelWeights=$levelWeightSnapshot, " +
+            "insideSuppression=$insideSuppression, whiteness=$whiteness, " +
+            "highPrecisionEmission=$highPrecisionEmission, reachLevel=$reachLevel, reachGain=$reachGain)"
+
+    public companion object {
+        public val DEFAULT_LEVEL_WEIGHTS: List<Float>
+            get() = listOf(0f, 0.9f, 0.8f, 0.6f, 0.45f, 0.35f, 0.3f)
+
+        /** The downsample level a [Geometry.bloomReach] far band is injected into by default. */
+        public const val DEFAULT_REACH_LEVEL: Int = 3
+
+        /** The deepest downsample level: [levelWeights] holds at most eight values. */
+        public const val MAXIMUM_REACH_LEVEL: Int = 7
+    }
+}
+
 @kotlinx.serialization.Serializable(with = StickerSerializer::class)
 public data class Sticker(
     public val placement: Placement,
     public val image: ResourceLocator,
-)
+    public val opacity: Float = 1f,
+    public val blend: BlendMode = BlendMode.OVER,
+) {
+    init {
+        require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
+            "opacity must be between zero and one"
+        }
+        require(!(opacity == 0f && 1f / opacity < 0f)) {
+            "opacity must not be negative zero"
+        }
+    }
+}
 
 @kotlinx.serialization.Serializable
 public sealed interface AnimationSelector {
@@ -57,6 +276,7 @@ public class Model(
     glb: ResourceLocator,
     texture: ResourceLocator? = null,
     animationTracks: List<AnimationTrack> = emptyList(),
+    opacity: Float = 1f,
 ) {
     public val placement: Placement
     public val glb: ResourceLocator
@@ -64,17 +284,22 @@ public class Model(
     private val animationTrackSnapshot: ArrayList<AnimationTrack>
     public val animationTracks: List<AnimationTrack>
         get() = freshListCopy(animationTrackSnapshot)
+    public val opacity: Float
 
     init {
         val validatedPlacement = placement
         val validatedGlb = glb
         val validatedTexture = texture
         val snapshot = ArrayList(animationTracks)
+        require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
+            "opacity must be between zero and one"
+        }
 
         this.placement = validatedPlacement
         this.glb = validatedGlb
         this.texture = validatedTexture
         this.animationTrackSnapshot = snapshot
+        this.opacity = canonicalFloat(opacity, "opacity")
     }
 
     override fun equals(other: Any?): Boolean =
@@ -82,13 +307,15 @@ public class Model(
             placement == other.placement &&
             glb == other.glb &&
             texture == other.texture &&
-            animationTrackSnapshot == other.animationTrackSnapshot
+            animationTrackSnapshot == other.animationTrackSnapshot &&
+            opacity == other.opacity
 
     override fun hashCode(): Int {
         var result = placement.hashCode()
         result = 31 * result + glb.hashCode()
         result = 31 * result + (texture?.hashCode() ?: 0)
         result = 31 * result + animationTrackSnapshot.hashCode()
+        result = 31 * result + opacity.hashCode()
         return result
     }
 }
@@ -245,7 +472,7 @@ public data class Geometry(
     /**
      * Consumer uniform values, bound by name at draw time to whichever of `shaderPair`'s programs
      * declares that name (ADR 0008: undeclared names are silently never bound, never an error).
-     * A name matching one of RenG's six documented shader-interface names (see
+     * A name matching one of RenG's documented shader-interface names (see
      * `internal.gl.RESERVED_SHADER_NAMES`) is rejected at construction, loudly, rather than being
      * silently overwritten by RenG's own binding at draw time.
      *
@@ -292,24 +519,63 @@ public data class Geometry(
      * sampled at every subdivided vertex rather than only at the two corners — the difference
      * between a quad draped over a ridge and one cutting through it.
      *
-     * **Declared last, after [textures], so no existing `componentN` moves.** [Geometry] is a
+     * **Appended after [textures], so no earlier `componentN` moved.** [Geometry] is a
      * `data class`, so a field inserted between [bottomRight] and [shaderPair] — where it would read
      * best — would renumber `component3` through `component5` and break every consumer that
      * destructures one. It takes `component6` instead, and the canonical encoder takes the next free
      * tag for the same reason (ADR 0018).
      */
     public val altitudeMode: AltitudeMode = AltitudeMode.ABSOLUTE,
+    /**
+     * Whether this Geometry contributes light to the frame's emission image.
+     *
+     * An emissive Geometry is drawn normally and drawn again into the frame's emission image when
+     * the frame has a [Bloom]; it has no effect when [FramePlan.bloom] is `null`.
+     *
+     * Declared last so the append-only data-class ABI gives it `component7` without moving any
+     * existing component.
+     */
+    public val emissive: Boolean = false,
+    /**
+     * How this Geometry composites with the colour already in the frame.
+     *
+     * Declared last so the append-only data-class ABI gives it `component8` without moving any
+     * existing component.
+     */
+    public val blend: BlendMode = BlendMode.OVER,
+    /**
+     * How much of a wide-only far band this Geometry adds to the frame's [Bloom], between zero and
+     * one (ADR 0085).
+     *
+     * A positive reach draws an [emissive] Geometry a second time, scaled by its reach, into a
+     * full-resolution reach image whose downsample is added into the bloom's level
+     * [Bloom.reachLevel] at [Bloom.reachGain]; the ordinary emission redraw is unchanged, so zero (the
+     * default) adds nothing and draws nothing. It has no effect on a Geometry that is not [emissive]
+     * or in a frame without a [Bloom]. The second draw is exactly the emission redraw's --
+     * `rengGeometryEmissionPass` at one, the output resolution, the same depth test -- so a shader
+     * needs no change for it.
+     *
+     * Declared last so the append-only data-class ABI gives it `component9` without moving any
+     * existing component.
+     */
+    public val bloomReach: Float = 0f,
 ) {
     init {
+        require(requireFiniteFloat(bloomReach, "bloomReach") in 0f..1f) {
+            "bloomReach must be between zero and one"
+        }
+        require(!(bloomReach == 0f && 1f / bloomReach < 0f)) {
+            "bloomReach must not be negative zero"
+        }
         require(topLeft.x in -90.0..90.0) { "topLeft latitude must be within the supported range" }
         require(bottomRight.x in -90.0..90.0) { "bottomRight latitude must be within the supported range" }
         require(topLeft.x > bottomRight.x) { "topLeft latitude must be north of bottomRight latitude" }
         require(topLeft.y < bottomRight.y) { "topLeft longitude must be west of bottomRight longitude" }
         require(bottomRight.y - topLeft.y <= 360.0) { "geometry longitude span must not exceed 360 degrees" }
-        require(uniforms.keys.none { it in RESERVED_SHADER_NAMES }) {
+        require(uniforms.keys.none(::isReservedGeometryShaderName)) {
             "a geometry uniform must not use a name reserved for RenG's own documented shader interface"
         }
-        require(textures.keys.none { it in RESERVED_SHADER_NAMES }) {
+        require(textures.keys.none(::isReservedGeometryShaderName)) {
             "a geometry texture must not use a name reserved for RenG's own documented shader interface"
         }
         require(textures.size <= MAXIMUM_CONSUMER_TEXTURES) {
@@ -318,6 +584,10 @@ public data class Geometry(
     }
 
     override fun toString(): String =
-        "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
-            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode)"
+            "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
+            "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive, " +
+            "blend=$blend, bloomReach=$bloomReach)"
 }
+
+private fun isReservedGeometryShaderName(name: String): Boolean =
+    name in RESERVED_SHADER_NAMES || name.startsWith(GEOMETRY_RESERVED_NAME_PREFIX)

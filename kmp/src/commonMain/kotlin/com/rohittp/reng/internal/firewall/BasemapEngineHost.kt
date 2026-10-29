@@ -15,32 +15,42 @@ import com.rohittp.reng.internal.basemap.BasemapStyleManifestOutcome
 import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
 import com.rohittp.reng.internal.basemap.glyphRangeRoutes
 import com.rohittp.reng.internal.basemap.parseBasemapTileJson
-import com.rohittp.reng.internal.basemap.deriveBasemapStyleManifest
+import com.rohittp.reng.internal.basemap.StyleManifestMemo
+import com.rohittp.reng.internal.basemap.VerifiedStoredResource
+import com.rohittp.reng.internal.resource.ResolvedResourceContent
+import com.rohittp.reng.internal.cache.BoundedMemo
 import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.identity.CanonicalBytes
-import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.ResourceAccessMode as RenGResourceAccessMode
+import com.rohittp.reng.RenGMetricName
+import com.rohittp.reng.RenGRenderPriority
+import com.rohittp.reng.internal.metrics.EngineMetricRecorder
+import com.rohittp.reng.internal.metrics.toEnginePriority
+import com.rohittp.rentile.RenderPriority as EngineRenderPriority
 import com.rohittp.rentile.BasemapRasterizer
 import com.rohittp.rentile.CredentialProvider
 import com.rohittp.rentile.GlyphTemplateMismatchException
 import com.rohittp.rentile.GroundRadianceDescriptor
 import com.rohittp.rentile.LabelCandidateBatch
 import com.rohittp.rentile.LabelCandidatePlan
+import com.rohittp.rentile.ExecutionPolicy
 import com.rohittp.rentile.MapSessionProvider
-import com.rohittp.rentile.MetricsSink
 import com.rohittp.rentile.PreparedBatch
 import com.rohittp.rentile.PreparedStyle
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
+import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.RawResourceStore as EngineRawResourceStore
 import com.rohittp.rentile.RenderOptions
 import com.rohittp.rentile.Rentile
@@ -57,6 +67,8 @@ import com.rohittp.rentile.TileSubstitutionPolicy
 import com.rohittp.rentile.TransportRequest as EngineTransportRequest
 import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.ValidatedDemTile
+import com.rohittp.reng.internal.thread.PlatformLock
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 
@@ -97,9 +109,29 @@ internal class BasemapEngineHost(
     transport: Transport,
     store: Store,
     private val cache: ResidentCache,
-    private val tileOutputSizePixels: Int = RenderOptions.DEFAULT_OUTPUT_SIZE_PX,
-    private val sha256: Sha256Function = PureKotlinSha256,
-    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(PureKotlinSha256),
+    internal val tileOutputSizePixels: Int = RenderOptions.DEFAULT_OUTPUT_SIZE_PX,
+    private val sha256: Sha256Function = AcceleratedSha256,
+    /**
+     * Remembering, like the renderer's own resolver: every [OperationRegistry] this host opens resolves
+     * every route it preregisters, and the tile plan names the same few hundred routes on every frame.
+     * Without the memo each of them would be redacted, hashed and spelled out in hex again per frame
+     * (ADR 0081). Bounded and exact for the reasons [RouteMemo] gives.
+     */
+    private val privateKeyResolver: RentilePrivateKeyResolver = ProductionRentilePrivateKeyResolver(
+        sha256 = AcceleratedSha256,
+        privateKeys = RouteMemo(),
+    ),
+    /**
+     * Where the engine's counters go (ADR 0049). Defaulted to a fresh recorder nothing reads, so
+     * every test constructing this host keeps working and no metric escapes into a shared one.
+     */
+    private val metricRecorder: EngineMetricRecorder = EngineMetricRecorder(),
+    /**
+     * How many of a batch's output tiles the engine draws at once (ADR 0076), forwarded as
+     * `ExecutionPolicy.maxConcurrentMetatileWorkers`. One, the engine's own default, unless the consumer
+     * chose otherwise.
+     */
+    maximumConcurrentTileRasterisations: Int = 1,
 ) : AutoCloseable {
 
     private val consumerTransport: Transport = transport
@@ -107,13 +139,110 @@ internal class BasemapEngineHost(
     private val renderOptions = RenderOptions(outputSizePx = tileOutputSizePixels)
     private val tileOutputSize = OutputPixelSize(tileOutputSizePixels, tileOutputSizePixels)
 
-    /** The one preparation invocation currently allowed to reach the consumer, or `null` between them. */
+    /**
+     * The one preparation invocation currently allowed to reach the consumer, or `null` between them.
+     *
+     * Volatile because Rentile's workers read it, on threads that are not the one preparing (ADR 0075):
+     * with a read-ahead window open, an engine callback is routed by looking at this and
+     * [readAheadOperation] together, and it must see whichever the preparing thread last published.
+     */
+    @Volatile
     private var activeOperation: FirewallOperation? = null
 
-    private var compiledStyle: CompiledStyleBinding? = null
+    /**
+     * The one read-ahead window currently allowed to reach the consumer, or `null` between windows
+     * (ADR 0075). A second operation beside [activeOperation], never a replacement for it: it exists
+     * from just before [warmWindow] hands tiles to the engine until that call has returned, and its
+     * registry is discarded with it. Written only by [warmWindow] and [close].
+     */
+    @Volatile
+    private var readAheadOperation: FirewallOperation? = null
 
-    private var derivedManifest: StyleManifestBinding? = null
+    /**
+     * For each read-ahead route whose Transport exchange a foreground operation served while the window
+     * was open, that operation (ADR 0075's 2026-10-22 note). A warm flight's exchange is routed
+     * foreground-first, so when the foreground knows the url it is the foreground registry that latches
+     * the digest; that foreground may close (a cancelled or failed prepare) before the flight's Store
+     * write arrives, and the read-ahead registry, which never latched those bytes, would refuse the
+     * write as an integrity failure. The write looks its route up here and removes the entry, so a
+     * closed operation is retained exactly while an exchange it served has a write still to come.
+     *
+     * Keyed by the read-ahead registry's own route object, which its Transport index and Store index
+     * resolve to alike, so the url a Transport request carries and the `(stableId, class)` a Store key
+     * carries find the same entry.
+     *
+     * Every write to this map, and to [readAheadOperation] when a window opens or ends, happens under
+     * [servedExchangesLock]; a record is added only after re-checking under the lock that the window it
+     * was routed in is still the open one. So a window's end, which clears the map in the same critical
+     * section that unpublishes the window, can never be followed by a record for that window.
+     */
+    private val servedExchanges = HashMap<ResourceRouteKey, FirewallOperation>()
+    private val servedExchangesLock = PlatformLock()
 
+    /** How many served-exchange records are held; for tests of the window's lifetime. */
+    internal val servedExchangeRecordCount: Int get() = servedExchangesLock.withLock { servedExchanges.size }
+
+    private fun recordServedExchange(window: FirewallOperation, route: ResourceRouteKey, served: FirewallOperation) {
+        servedExchangesLock.withLock {
+            if (readAheadOperation === window) servedExchanges[route] = served
+        }
+    }
+
+    private fun takeServedExchange(window: FirewallOperation, key: EngineRawResourceKey): FirewallOperation? {
+        val route = window.registry.storeRouteOf(key.stableId, key.resourceClass) ?: return null
+        return servedExchangesLock.withLock { servedExchanges.remove(route) }
+    }
+
+    /** Publishes [window] (or `null` to end the open one), dropping every record the previous window held. */
+    private fun publishReadAheadOperation(window: FirewallOperation?) {
+        servedExchangesLock.withLock {
+            readAheadOperation = window
+            servedExchanges.clear()
+        }
+    }
+
+    /** One retained compilation per configured style key (ADR 0086). */
+    private val compiledStyles: MutableMap<ResourceKey, CompiledStyleBinding> = mutableMapOf()
+
+    /** One retained manifest per configured style key (ADR 0086). */
+    private val derivedManifests: MutableMap<ResourceKey, StyleManifestBinding> = mutableMapOf()
+
+    private val styleManifestMemo = StyleManifestMemo()
+
+    /**
+     * Each route's `sha256Hex(withRedactedAuthenticationQuery(url))` -- the stable id Rentile keys its
+     * raw store and its failures by -- remembered across the operations this host opens, which each
+     * derived it again for every route they preregistered. Renderer-lifetime, and that is not the
+     * response cache ADR 0016 forbids: it is a pure function of the url and holds no answer, latch or
+     * byte the consumer returned. Keyed by class as well as locator only because that is [RouteMemo]'s
+     * key; the value depends on the url alone.
+     */
+    private val redactedLocatorDigests = RouteMemo<String>()
+
+    /**
+     * The manifest of [stored], read once per distinct document and base URI rather than once per
+     * prepare. The driver's style validation and [styleManifest] share it, so a style validated on one
+     * frame is not parsed again by the next frame's validation.
+     */
+    fun derivedStyleManifest(content: ResolvedResourceContent, baseUri: String): BasemapStyleManifestOutcome =
+        styleManifestMemo.manifestFor(VerifiedStoredResource.of(content), baseUri)
+
+    /**
+     * Derived rendered-tile keys, by the two inputs that can vary (ADR 0069), bounded by second
+     * chance ([BoundedMemo]).
+     */
+    private val rememberedTileKeys: BoundedMemo<RememberedTileKeyIdentity, ResourceKey> =
+        BoundedMemo(MAXIMUM_REMEMBERED_TILE_KEYS)
+
+    /**
+     * Guards [rememberedTileKeys], which drawing and preparation both reach: CONTEXT.md lets a draw
+     * overlap GL-free preparation, and `groundInstances` and `residentAncestorOf` ask for keys from the
+     * draw path while `renderBasemapTiles` asks from prepare. Held only around the map's get, put and
+     * eviction, never around a derivation.
+     */
+    private val rememberedKeysLock = PlatformLock()
+
+    @Volatile
     private var closed: Boolean = false
 
     val isClosed: Boolean get() = closed
@@ -128,7 +257,13 @@ internal class BasemapEngineHost(
             sessionProvider = MapSessionProvider.None,
             credentialProvider = CredentialProvider.None,
             clock = RentileClock.System,
-            metricsSink = MetricsSink.None,
+            // RenG's own recorder rather than MetricsSink.None: the engine's seventeen counters
+            // are the only measurement of this renderer's basemap path, and ADR 0049 gives them
+            // a RenG vocabulary to arrive in.
+            metricsSink = metricRecorder,
+            // Only the metatile workers move (ADR 0076). The exchange, decode and resident-decode limits
+            // keep the engine's defaults: they govern the network and the decoder, not the drawing.
+            executionPolicy = ExecutionPolicy(maxConcurrentMetatileWorkers = maximumConcurrentTileRasterisations),
         ),
     )
 
@@ -165,14 +300,33 @@ internal class BasemapEngineHost(
         routes: List<ResourceRouteKey> = emptyList(),
         block: suspend () -> T,
     ): T {
-        check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
+        val open = activeOperation
+        if (open != null) {
+            // Joining a batch root that is already open (ADR 0051). Both conditions are checked
+            // rather than assumed: a plain invocation nested inside another is still the concurrency
+            // bug this check has always caught, and one registry is never shared across access modes.
+            check(open.shared) { "a basemap engine host drives one preparation invocation at a time" }
+            check(open.accessMode == accessMode) {
+                "a shared preparation invocation is never joined under a different access mode"
+            }
+            registerRoutes(routes)
+            // A scope of its own, for the reason the root's is NOT: the Job every Rentile rasterizer
+            // entry point reads is already supplied by the root this block runs inside, so that is
+            // not what this buys. What it buys is that a frame's own children are awaited before the
+            // frame returns, so one frame's stray work cannot run on into the next frame of the
+            // batch -- joined and root blocks then behave identically, which is the least surprising
+            // thing for a caller that cannot see which it got.
+            return coroutineScope { block() }
+        }
         val registry = OperationRegistry(
             transport = consumerTransport,
             store = consumerStore,
             privateKeyResolver = privateKeyResolver,
             sha256 = sha256,
+            redactedLocatorDigests = redactedLocatorDigests,
         )
-        activeOperation = FirewallOperation(accessMode, registry)
+        val operation = FirewallOperation(accessMode, registry)
+        activeOperation = operation
         return try {
             registerRoutes(routes)
             coroutineScope { block() }
@@ -182,19 +336,120 @@ internal class BasemapEngineHost(
     }
 
     /**
-     * Declares [routes] on the invocation that is already open.
+     * Opens one invocation that every [withOperation] inside [block] joins instead of opening its own
+     * (ADR 0051), so a `prepareBatch` gets one route index and one set of single-flight latches for
+     * the whole batch rather than one per frame.
      *
-     * Preregistration cannot all happen when the invocation opens, because the routes a style's
-     * compilation will make the engine ask for are not knowable until the style document has been read —
-     * and reading it is itself work RenG's driver performs *inside* the invocation. This is therefore the
-     * incremental half of [withOperation]'s initial list, delegating to the same
-     * [OperationRegistry.preregister]: idempotent for an identical repeat (two occurrences joining one
-     * route), and a hard `AMBIGUOUS_RESOURCE_ROUTE` for a genuinely conflicting one.
+     * Without it each frame of a batch over one camera re-asks the engine for the tiles the frame
+     * before it already fetched.
      *
-     * Declaring a route with no invocation open is the same fault [RoutedEngineTransport] reports one
-     * level later — an exchange RenG never planned — so it fails the same way, rather than silently
-     * accruing routes into a registry that does not exist.
+     * Opening is still exclusive — this is the root, and a root may not nest inside anything.
      */
+    suspend fun <T> withSharedOperation(
+        accessMode: RenGResourceAccessMode,
+        block: suspend () -> T,
+    ): T {
+        check(activeOperation == null) { "a basemap engine host drives one preparation invocation at a time" }
+        val operation = FirewallOperation(
+            accessMode = accessMode,
+            registry = OperationRegistry(
+                transport = consumerTransport,
+                store = consumerStore,
+                privateKeyResolver = privateKeyResolver,
+                sha256 = sha256,
+                redactedLocatorDigests = redactedLocatorDigests,
+            ),
+            shared = true,
+        )
+        activeOperation = operation
+        return try {
+            coroutineScope { block() }
+        } finally {
+            activeOperation = null
+        }
+    }
+
+    /**
+     * Warms the raw resources [tiles] need, as one read-ahead window (ADR 0075), and reports what the
+     * engine did.
+     *
+     * A fresh [OperationRegistry] is built for the window, preregistered with [routes], and installed
+     * as [readAheadOperation]; it is discarded only after `warmRawResources` has returned. That is the
+     * whole safety argument: when the engine's call returns, every flight the window started has
+     * finished, including one a foreground acquisition joined, so no raw-store write can arrive after
+     * the transport digest it must match has gone.
+     *
+     * Always `NORMAL`. Warming under `CACHE_ONLY` would be a contradiction and `RELOAD` would fetch what
+     * is already stored, so the renderer never asks for either, and every route must agree with that.
+     *
+     * A per-resource failure is absorbed by the engine and counted in the summary; a transport fault
+     * that reached the consumer is latched in this window's registry and is gone with it, so a later
+     * window retries. Only cancellation and a closed engine propagate.
+     *
+     * One window at a time: the renderer's worker is the only caller, and a second concurrent window
+     * would be the bug this check names.
+     */
+    suspend fun warmWindow(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+        routes: List<ResourceRouteKey>,
+        /**
+         * Work to do with the window's registry still open, after the bytes are warmed (ADR 0077): the
+         * renderer's rasterisation of the window's tiles. Run inside this operation so that every engine
+         * callback it causes is routed through the window's own registry, which is discarded only after it
+         * returns. Cancellation propagates; any other failure is absorbed, because it is a hint and the
+         * warm's own summary is reported whatever becomes of it.
+         */
+        afterWarm: (suspend () -> Unit)? = null,
+    ): ReadAheadWarmSummary {
+        requireOpen()
+        require(routes.all { it.accessMode == RenGResourceAccessMode.NORMAL }) {
+            "a read-ahead window is always NORMAL"
+        }
+        check(readAheadOperation == null) { "a basemap engine host warms one read-ahead window at a time" }
+        val registry = OperationRegistry(
+            transport = consumerTransport,
+            store = consumerStore,
+            privateKeyResolver = privateKeyResolver,
+            sha256 = sha256,
+            redactedLocatorDigests = redactedLocatorDigests,
+        )
+        registry.preregister(routes)
+        val operation = FirewallOperation(RenGResourceAccessMode.NORMAL, registry)
+        publishReadAheadOperation(operation)
+        try {
+            // Re-checked after publication: a close that ran between requireOpen and here has already
+            // cleared this slot once, and must not be undone by the assignment above.
+            requireOpen()
+            val summary = coroutineScope {
+                engineCall {
+                    engine.warmRawResources(style, tiles.map(::engineTileIdOf), EngineResourceAccessMode.NORMAL)
+                }
+            }
+            val warmed = ReadAheadWarmSummary(
+                fetched = summary.fetched,
+                alreadyCached = summary.alreadyCached,
+                failed = summary.failed,
+            )
+            metricRecorder.record(RenGMetricName.READ_AHEAD_FETCHED, warmed.fetched.toLong())
+            metricRecorder.record(RenGMetricName.READ_AHEAD_ALREADY_CACHED, warmed.alreadyCached.toLong())
+            metricRecorder.record(RenGMetricName.READ_AHEAD_FAILED, warmed.failed.toLong())
+            if (afterWarm != null) {
+                try {
+                    afterWarm()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (@Suppress("TooGenericExceptionCaught") absorbed: Throwable) {
+                    // A tile that would not prepare or draw is left for the frame that needs it, which
+                    // fails on it exactly as it would have without read-ahead.
+                }
+            }
+            return warmed
+        } finally {
+            publishReadAheadOperation(null)
+        }
+    }
+
     /**
      * The sprite atlas manifest the open invocation proxied, or `null` when it held no jointly valid
      * pair -- because the style declares no sprite, because only one member was ever seen, or because
@@ -215,6 +470,20 @@ internal class BasemapEngineHost(
      */
     suspend fun spriteAtlasManifest(): SpriteAtlasManifest? = activeOperation?.registry?.spriteAtlasManifest()
 
+    /**
+     * Declares [routes] on the invocation that is already open.
+     *
+     * Preregistration cannot all happen when the invocation opens, because the routes a style's
+     * compilation will make the engine ask for are not knowable until the style document has been read —
+     * and reading it is itself work RenG's driver performs *inside* the invocation. This is therefore the
+     * incremental half of [withOperation]'s initial list, delegating to the same
+     * [OperationRegistry.preregister]: idempotent for an identical repeat (two occurrences joining one
+     * route), and a hard `AMBIGUOUS_RESOURCE_ROUTE` for a genuinely conflicting one.
+     *
+     * Declaring a route with no invocation open is the same fault [RoutedEngineTransport] reports one
+     * level later — an exchange RenG never planned — so it fails the same way, rather than silently
+     * accruing routes into a registry that does not exist.
+     */
     suspend fun registerRoutes(routes: List<ResourceRouteKey>) {
         requireOpen()
         val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
@@ -282,22 +551,22 @@ internal class BasemapEngineHost(
         val lease = cache.observeAndTakeLease(styleKey)
             ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
 
-        val existing = compiledStyle
+        val existing = compiledStyles[styleKey]
         if (existing != null && existing.styleKey == styleKey && existing.contentDigest == contentDigest) {
             cache.releaseLease(existing.lease)
             // The TileJSON documents travel with the compilation they were fetched for: no compilation,
             // no `resolveTileJson` call, so this invocation observed nothing to replace them with.
-            compiledStyle = CompiledStyleBinding(
-                styleKey,
-                contentDigest,
-                lease,
-                existing.prepared,
-                existing.tileJsonDocuments,
+            compiledStyles[styleKey] = CompiledStyleBinding(
+                styleKey = styleKey,
+                contentDigest = contentDigest,
+                lease = lease,
+                prepared = existing.prepared,
+                tileJsonDocuments = existing.tileJsonDocuments,
             )
             return existing.prepared
         }
 
-        releaseCompiledStyle()
+        releaseCompiledStyle(styleKey)
         // The lease is taken before compilation, and released again if compilation fails, so a style that
         // will not compile does not pin a generation for the renderer's whole life. It is a residency
         // claim on the style key, not the source of the bytes below: those are the caller's, which is the
@@ -316,7 +585,13 @@ internal class BasemapEngineHost(
             cache.releaseLease(lease)
             throw failure
         }
-        compiledStyle = CompiledStyleBinding(styleKey, contentDigest, lease, prepared, harvestTileJsonDocuments())
+        compiledStyles[styleKey] = CompiledStyleBinding(
+            styleKey = styleKey,
+            contentDigest = contentDigest,
+            lease = lease,
+            prepared = prepared,
+            tileJsonDocuments = harvestTileJsonDocuments(),
+        )
         return prepared
     }
 
@@ -352,8 +627,8 @@ internal class BasemapEngineHost(
      * degrades every `url`-form source rather than composing a url from a superseded document.
      */
     fun tileJsonDocuments(styleKey: ResourceKey, contentDigest: String?): Map<String, BasemapTileJsonOutcome> =
-        compiledStyle
-            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+        compiledStyles[styleKey]
+            ?.takeIf { contentDigest != null && it.contentDigest == contentDigest }
             ?.tileJsonDocuments
             .orEmpty()
 
@@ -384,8 +659,8 @@ internal class BasemapEngineHost(
      * two that can disagree. A `null` [contentDigest] (nothing resident under this key) matches nothing.
      */
     fun currentPreparedStyle(styleKey: ResourceKey, contentDigest: String?): PreparedStyle? =
-        compiledStyle
-            ?.takeIf { it.styleKey == styleKey && contentDigest != null && it.contentDigest == contentDigest }
+        compiledStyles[styleKey]
+            ?.takeIf { contentDigest != null && it.contentDigest == contentDigest }
             ?.prepared
 
     /**
@@ -442,28 +717,40 @@ internal class BasemapEngineHost(
             ?: cache.installAndTakeLease(styleKey, stored, decoded = null)
         val contentDigest = lease.generation.stored.contentDigest
 
-        val existing = derivedManifest
+        val existing = derivedManifests[styleKey]
         if (existing != null &&
             existing.styleKey == styleKey &&
             existing.baseUri == baseUri &&
             existing.contentDigest == contentDigest
         ) {
             cache.releaseLease(existing.lease)
-            derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, existing.manifest)
+            derivedManifests[styleKey] = StyleManifestBinding(
+                styleKey = styleKey,
+                baseUri = baseUri,
+                contentDigest = contentDigest,
+                lease = lease,
+                manifest = existing.manifest,
+            )
             return BasemapStyleManifestOutcome.Derived(existing.manifest)
         }
 
-        releaseStyleManifest()
+        releaseStyleManifest(styleKey)
         // The leased generation's own bytes rather than the caller's copy, which here are the same
         // document: this method's one caller reads `stored` from ResidentCache.current() after the
         // driver's visibility install. See the KDoc -- the compilation beside this one runs before that
         // install and so must read the caller's content.
-        val outcome = deriveBasemapStyleManifest(lease.generation.stored.bytes, baseUri)
+        val outcome = styleManifestMemo.manifestFor(VerifiedStoredResource.of(lease.generation), baseUri)
         if (outcome !is BasemapStyleManifestOutcome.Derived) {
             cache.releaseLease(lease)
             return outcome
         }
-        derivedManifest = StyleManifestBinding(styleKey, baseUri, contentDigest, lease, outcome.manifest)
+        derivedManifests[styleKey] = StyleManifestBinding(
+            styleKey = styleKey,
+            baseUri = baseUri,
+            contentDigest = contentDigest,
+            lease = lease,
+            manifest = outcome.manifest,
+        )
         return outcome
     }
 
@@ -471,40 +758,196 @@ internal class BasemapEngineHost(
      * Acquires everything [tiles] need — through the firewall, so through this invocation's preregistered
      * routes and nothing else — and returns a network-free batch. Substitution is disabled explicitly.
      */
-    suspend fun prepareTiles(style: PreparedStyle, tiles: List<CanonicalBasemapTile>): PreparedBasemapTiles {
+    suspend fun prepareTiles(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+        /**
+         * The access mode to prepare under, or `null` for the open invocation's own (`NORMAL` when none is
+         * open). The read-ahead worker passes `NORMAL` explicitly (ADR 0077): the invocation open at that
+         * moment can belong to a foreground `prepare` in any mode, and the worker's tiles are not its.
+         */
+        accessMode: RenGResourceAccessMode? = null,
+    ): PreparedBasemapTiles {
         requireOpen()
         val distinct = tiles.distinct()
-        val batch = engineCall {
-            engine.prepareBatch(
-                style = style,
-                tiles = distinct.map(::engineTileIdOf),
-                options = renderOptions,
-                resourceAccess = engineAccessModeOf(activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL),
-                substitutionPolicy = TileSubstitutionPolicy.Disabled,
-            )
-        }
+        val batch = engineCall { prepareEngineBatch(style, distinct, accessMode) }
         return PreparedBasemapTiles(batch, style, distinct)
     }
 
     /**
-     * Draws [prepared]'s tiles. Performs no adapter call whatsoever: everything was acquired by
-     * [prepareTiles], which is the whole point of Rentile's prepare/render split.
+     * [prepareTiles] for a foreground frame that may present a failed colour tile from an ancestor (ADR
+     * 0057, "A tile that could not be downloaded"): the same engine call under the same disabled
+     * substitution, and the same failure, except that a failure which is **only** colour tiles the engine
+     * could not acquire comes back as [BasemapTilePreparation.ColourUnavailable] instead of being thrown.
+     *
+     * **Why a result rather than a field on the failure.** The tiles are known only here, at the one seam
+     * that may read a `RentileException`, and the public [RenGException] has no room for them and must not
+     * grow any: a consumer's failure would start carrying RenG's internal tile identity. So the host
+     * answers with RenG's own [CanonicalBasemapTile]s, matched back onto the tiles it was asked for, plus
+     * the exact [RenGException] [prepareTiles] would have thrown, so a caller that declines to present the
+     * tiles rethrows a failure byte-identical to today's. No engine type crosses.
+     *
+     * The answer is `ColourUnavailable` only when every failed resource is a raster or vector tile
+     * ([unavailableColourResourcesOf]), every one of them is a route this invocation preregistered, and
+     * every tile the engine named is one of [tiles]. The second condition is what keeps a defect of RenG's
+     * own fail-closed: the firewall refusing a url RenG never derived also reaches Rentile as an
+     * acquisition failure, and an ancestor must not paper over a route RenG got wrong. A digest no route
+     * claims is exactly that case, so it is thrown. Anything else is thrown as [prepareTiles] throws it.
+     *
+     * The read-ahead worker never calls this: its own [prepareTiles] keeps failing exactly as before.
      */
-    suspend fun renderTiles(prepared: PreparedBasemapTiles): List<RenderedBasemapTile> {
+    suspend fun prepareTilesReportingUnavailableColour(
+        style: PreparedStyle,
+        tiles: List<CanonicalBasemapTile>,
+    ): BasemapTilePreparation {
+        requireOpen()
+        val distinct = tiles.distinct()
+        val batch = try {
+            prepareEngineBatch(style, distinct, accessMode = null)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (rengFailure: RenGException) {
+            throw rengFailure
+        } catch (@Suppress("TooGenericExceptionCaught") engineFailure: Throwable) {
+            // Classified first and unconditionally, so the failure handed back is the one engineCall
+            // would have thrown, built by the same two functions in the same order.
+            val failure = translateForeignIdentity(classifyEngineFailure(engineFailure)).toException()
+            val unavailable = unavailableColourTilesOf(engineFailure, distinct) ?: throw failure
+            return BasemapTilePreparation.ColourUnavailable(unavailable, failure)
+        }
+        return BasemapTilePreparation.Prepared(PreparedBasemapTiles(batch, style, distinct))
+    }
+
+    /** The one `prepareBatch` both preparation entry points make, so their arguments cannot drift apart. */
+    private suspend fun prepareEngineBatch(
+        style: PreparedStyle,
+        distinct: List<CanonicalBasemapTile>,
+        accessMode: RenGResourceAccessMode?,
+    ): PreparedBatch = engine.prepareBatch(
+        style = style,
+        tiles = distinct.map(::engineTileIdOf),
+        options = renderOptions,
+        resourceAccess = engineAccessModeOf(
+            accessMode ?: activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL,
+        ),
+        substitutionPolicy = TileSubstitutionPolicy.Disabled,
+    )
+
+    /**
+     * RenG's own tiles for the colour resources [engineFailure] says could not be acquired, or `null` when
+     * any part of it is something else. See [prepareTilesReportingUnavailableColour] for the three
+     * conditions; this is where they are checked.
+     *
+     * Matched back through [engineTileIdOf] over [requested] rather than by constructing a tile from the
+     * engine's `TileId`, for the reason `renderTiles` does the same: the inverse of a two-field mapping
+     * written out a second time is a second thing that can drift, and a `TileId` the request did not
+     * contain is a failure about something this frame did not ask for, which is not presentable.
+     */
+    private fun unavailableColourTilesOf(
+        engineFailure: Throwable,
+        requested: List<CanonicalBasemapTile>,
+    ): Set<CanonicalBasemapTile>? {
+        val resources = unavailableColourResourcesOf(engineFailure) ?: return null
+        val registry = activeOperation?.registry ?: return null
+        val requestedById = requested.associateBy(::engineTileIdOf)
+        val tiles = LinkedHashSet<CanonicalBasemapTile>()
+        for (resource in resources) {
+            val resourceClass = rengResourceClassOf(resource.resourceClass) ?: return null
+            registry.renGResourceKeyForEngineDigest(resourceClass, resource.sanitizedResourceId) ?: return null
+            for (id in resource.affectedTiles) tiles += requestedById[id] ?: return null
+        }
+        return tiles
+    }
+
+    /**
+     * The priority the most recent [renderTiles] forwarded to the engine, or `null` before the first.
+     *
+     * An observation rather than state this class acts on — the same shape as
+     * [OperationRegistry.observedTileJsonDocuments] and for the same reason. A priority is a hint the
+     * engine consumes internally and reports nowhere, so without this the whole thread-through from
+     * `prepare`'s parameter to the engine call is unobservable, and a dropped argument would default
+     * silently to NORMAL forever (ADR 0053).
+     *
+     * Written by [forwarding], which is the function that produces the argument, so the record and
+     * the argument cannot come apart: a render branch that dropped its `priority =` would stop
+     * calling [forwarding] at all and this would stay null. Recording it on entry instead would
+     * report a priority the engine never received.
+     */
+    var lastForwardedRenderPriority: RenGRenderPriority? = null
+        private set
+
+    /**
+     * Translates [priority] for the engine and records that it was forwarded, in that order and in
+     * one place, so [lastForwardedRenderPriority] is written by the same expression that supplies
+     * the argument rather than beside it (ADR 0053).
+     */
+    private fun forwarding(priority: RenGRenderPriority, forReadAhead: Boolean): EngineRenderPriority {
+        if (forReadAhead) lastReadAheadRenderPriority = priority else lastForwardedRenderPriority = priority
+        return priority.toEnginePriority()
+    }
+
+    /**
+     * The priority the read-ahead worker's most recent draw forwarded (ADR 0077), kept apart from
+     * [lastForwardedRenderPriority] so a background draw running beside a foreground `prepare` cannot
+     * overwrite the answer to what that `prepare` forwarded.
+     */
+    @Volatile
+    var lastReadAheadRenderPriority: RenGRenderPriority? = null
+        private set
+
+    /**
+     * Draws [prepared]'s tiles. Makes no adapter call: [prepareTiles] acquired everything.
+     *
+     * [asRawPixels] picks `renderRaw` over `render`, the same drawing with the PNG encode skipped
+     * (ADR 0044). Only the caller knows how many raw bytes are outstanding, so the choice is its
+     * own. Both forms carry the engine's `contentKey`, so tile identity is unaffected.
+     */
+    suspend fun renderTiles(
+        prepared: PreparedBasemapTiles,
+        asRawPixels: Boolean,
+        priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
+        /**
+         * Whether this is the read-ahead worker's draw (ADR 0077), whose priority is observed through
+         * [lastReadAheadRenderPriority] and not [lastForwardedRenderPriority].
+         */
+        forReadAhead: Boolean = false,
+    ): List<RenderedBasemapTile> {
         requireOpen()
         val styleDigest = prepared.style.digest
-        val batch = engineCall { engine.render(prepared.batch) }
         val tilesById = prepared.tiles.associateBy(::engineTileIdOf)
-        return batch.tiles.map { rendered ->
-            val tile = tilesById[rendered.id]
+
+        // One engine call either way, chosen by the caller's budget (ADR 0044) and never by
+        // anything this file knows: the firewall renders what it is asked to render.
+        fun carry(
+            id: TileId,
+            contentKey: String,
+            pixels: BasemapTilePixels,
+        ): RenderedBasemapTile {
+            val tile = tilesById[id]
                 ?: error("the engine rendered a tile this batch never asked for")
-            RenderedBasemapTile(
+            return RenderedBasemapTile(
                 key = basemapTileKey(styleDigest, tile, tileOutputSize, sha256),
                 tile = tile,
-                pngBytes = rendered.pngBytes,
-                contentKey = rendered.contentKey,
-                substitutions = prepared.batch.substitutions[rendered.id].orEmpty(),
+                pixels = pixels,
+                contentKey = contentKey,
+                substitutions = prepared.batch.substitutions[id].orEmpty(),
             )
+        }
+
+        return if (asRawPixels) {
+            val batch = engineCall { engine.renderRaw(prepared.batch, priority = forwarding(priority, forReadAhead)) }
+            batch.tiles.map { rendered ->
+                carry(
+                    rendered.id,
+                    rendered.contentKey,
+                    BasemapTilePixels.Raw(rendered.rgbaBytes, rendered.widthPx, rendered.heightPx),
+                )
+            }
+        } else {
+            val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority, forReadAhead)) }
+            batch.tiles.map { rendered ->
+                carry(rendered.id, rendered.contentKey, BasemapTilePixels.Encoded(rendered.pngBytes))
+            }
         }
     }
 
@@ -802,19 +1245,57 @@ internal class BasemapEngineHost(
     private fun redactedLocatorHex(url: String): String =
         sha256.digest(CanonicalBytes(redactAuthenticationQuery(url).encodeToByteArray())).lowercaseHex
 
-    /** RenG's own identity for the rendered tile [tile] of [style] at this host's tile output size. */
+    /**
+     * RenG's own identity for the rendered tile [tile] of [style] at this host's tile output size.
+     *
+     * Asked of the host rather than derived by the caller so [tileOutputSize] -- an engine render
+     * option, not a renderer configuration value -- stays owned in one place; a caller that guessed
+     * it would name a tile the engine never rendered.
+     */
     fun renderedTileKey(style: PreparedStyle, tile: CanonicalBasemapTile): ResourceKey =
-        basemapTileKey(style.digest, tile, tileOutputSize, sha256)
+        rememberedTileKey(style.digest, tile)
 
     /**
-     * The same identity for one unwrapped draw [instance], which the world-copy-projecting overload of
-     * [basemapTileKey] reduces to its canonical tile. Asked of the host rather than derived by the
-     * caller so that [tileOutputSize] -- an engine render option, not a renderer configuration value --
-     * stays owned in exactly one place; a caller that guessed it would derive a key naming a tile the
-     * engine never rendered.
+     * The same identity from a style **digest**, for a caller holding one and not a compiled style —
+     * a draw resolving an ancestor tile (ADR 0057) has the frame's `basemapStyleDigest` only.
      */
+    fun renderedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey =
+        rememberedTileKey(styleDigest, tile)
+
+    /** The same identity for one unwrapped draw [instance], reduced to its canonical tile. */
     fun renderedTileKey(styleDigest: String, instance: BasemapTileInstance): ResourceKey =
-        basemapTileKey(styleDigest, instance, tileOutputSize, sha256)
+        rememberedTileKey(
+            styleDigest,
+            // The world copy is projected away before the key is derived, so every unwrapped
+            // instance of one canonical tile shares one entry and one rendered resource.
+            CanonicalBasemapTile(
+                lod = instance.lod,
+                tileY = instance.tileY,
+                canonicalX = instance.canonicalX,
+            ),
+        )
+
+    /**
+     * [basemapTileKey] for `(styleDigest, tile)`, derived once and then remembered (ADR 0069).
+     *
+     * **The derivation is not cheap and is asked for twice per visible tile per frame**, before
+     * anything has been decided: tile provisioning asks for every canonical tile's key to test
+     * residency and `groundInstances` asks for the same keys again; each derivation builds a
+     * `ResourceKeyDeriver`, a canonical binary, a SHA-256 and a 64-character hex string.
+     *
+     * The answer is a pure function of `(styleDigest, tile)`: [tileOutputSize] and [sha256] are fixed
+     * for this host's lifetime. Bounded at [MAXIMUM_REMEMBERED_TILE_KEYS], by second chance.
+     */
+    private fun rememberedTileKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey {
+        val identity = RememberedTileKeyIdentity(styleDigest, tile)
+        rememberedKeysLock.withLock { rememberedTileKeys.get(identity) }?.let { return it }
+
+        // Derived outside the lock: the SHA-256 is the cost this memo exists to avoid repeating, and
+        // holding a lock across it would serialise drawing behind preparation for nothing. Two threads
+        // that both miss derive the same key, and the insert below keeps whichever arrived first.
+        val derived = basemapTileKey(styleDigest, tile, tileOutputSize, sha256)
+        return rememberedKeysLock.withLock { rememberedTileKeys.putIfAbsent(identity, derived) }
+    }
 
     /**
      * Idempotent. Releases the compiled style's lease, then closes the engine — whose own `close()` is
@@ -823,22 +1304,34 @@ internal class BasemapEngineHost(
     override fun close() {
         if (closed) return
         closed = true
-        releaseCompiledStyle()
-        releaseStyleManifest()
+        releaseCompiledStyles()
+        releaseStyleManifests()
         activeOperation = null
+        // Cleared before the engine closes, so that a Rentile callback still on its way -- a warm flight
+        // a foreground acquisition had joined -- finds no operation and is refused before it can reach
+        // the consumer's Transport or Store (ADR 0075).
+        publishReadAheadOperation(null)
         engine.close()
     }
 
     // ---- internals -------------------------------------------------------------------------------
 
-    private fun releaseCompiledStyle() {
-        compiledStyle?.let { binding -> cache.releaseLease(binding.lease) }
-        compiledStyle = null
+    private fun releaseCompiledStyle(styleKey: ResourceKey) {
+        compiledStyles.remove(styleKey)?.let { binding -> cache.releaseLease(binding.lease) }
     }
 
-    private fun releaseStyleManifest() {
-        derivedManifest?.let { binding -> cache.releaseLease(binding.lease) }
-        derivedManifest = null
+    private fun releaseCompiledStyles() {
+        compiledStyles.values.forEach { binding -> cache.releaseLease(binding.lease) }
+        compiledStyles.clear()
+    }
+
+    private fun releaseStyleManifest(styleKey: ResourceKey) {
+        derivedManifests.remove(styleKey)?.let { binding -> cache.releaseLease(binding.lease) }
+    }
+
+    private fun releaseStyleManifests() {
+        derivedManifests.values.forEach { binding -> cache.releaseLease(binding.lease) }
+        derivedManifests.clear()
     }
 
     private fun requireOpen() {
@@ -942,26 +1435,98 @@ internal class BasemapEngineHost(
     private class FirewallOperation(
         val accessMode: RenGResourceAccessMode,
         val registry: OperationRegistry,
+        /**
+         * Whether a nested [withOperation] may join this one rather than failing (ADR 0051). False
+         * for an ordinary single-frame invocation, so a plain nesting still fails as loudly as it
+         * always has.
+         */
+        val shared: Boolean = false,
     ) {
         val transport: EngineResourceTransport = FirewallTransport(registry)
         val store: EngineRawResourceStore = FirewallStore(registry)
     }
 
+    /**
+     * The engine's transport, routed by what each open operation knows (ADR 0075).
+     *
+     * The foreground operation goes first and the read-ahead one second, and an exchange neither knows
+     * goes to whichever is open so that the refusal is that registry's own -- `AMBIGUOUS_RESOURCE_ROUTE`,
+     * with the same observations, exactly as before a second operation existed. With none open it is
+     * the same refusal one level earlier.
+     */
     private inner class RoutedEngineTransport : EngineResourceTransport {
         override suspend fun execute(request: EngineTransportRequest): EngineTransportResponse {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsTransport(request.url, request.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsTransport(request.url, request.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
+            if (readAhead != null && operation === foreground) {
+                readAhead.registry.transportRouteOf(request.url, request.resourceClass)?.let { route ->
+                    recordServedExchange(readAhead, route, operation)
+                }
+            }
             return operation.transport.execute(request)
         }
     }
 
     private inner class RoutedEngineStore : EngineRawResourceStore {
+        /** Reads route as transport does: by what each open operation knows, foreground first. */
         override suspend fun read(key: EngineRawResourceKey): EngineStoredRawResource? {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
             return operation.store.read(key)
         }
 
+        /** Probes route exactly as reads do, so the probe's miss is forgotten by the registry that took it. */
+        override suspend fun metadata(key: EngineRawResourceKey): EngineRawResourceMetadata? {
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val operation = when {
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
+            return operation.store.metadata(key)
+        }
+
+        /**
+         * A write goes to the operation whose own Transport call produced these bytes, judged by the
+         * latched digest, foreground first. The route alone cannot decide it: a warm flight's write can
+         * arrive after a foreground registered the same url, and the foreground never latched the bytes.
+         *
+         * A warm flight's exchange may have been served by a foreground that has since closed; the
+         * record [RoutedEngineTransport] made of it ([servedExchanges]) finds that operation, and its latch
+         * still decides. Every write for a read-ahead route consumes its record, whichever branch routes it.
+         *
+         * When none latched them, the write goes to whichever knows the route, foreground first, so
+         * the registry refuses it as an integrity failure exactly as it always has.
+         */
         override suspend fun write(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
-            val operation = activeOperation ?: throw unplannedEngineExchangeFailure()
+            val foreground = activeOperation
+            val readAhead = readAheadOperation
+            val served = if (readAhead != null) takeServedExchange(readAhead, key) else null
+            val operation = when {
+                foreground != null &&
+                    foreground.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    foreground
+                readAhead != null &&
+                    readAhead.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    readAhead
+                served != null &&
+                    served.registry.hasLatchedDigest(key.stableId, key.resourceClass, resource.contentDigest) ->
+                    served
+                foreground != null && foreground.registry.knowsStore(key.stableId, key.resourceClass) -> foreground
+                readAhead != null && readAhead.registry.knowsStore(key.stableId, key.resourceClass) -> readAhead
+                else -> foreground ?: readAhead ?: throw unplannedEngineExchangeFailure()
+            }
             operation.store.write(key, resource)
         }
 
@@ -1005,6 +1570,21 @@ internal class BasemapEngineHost(
         val lease: Lease,
         val manifest: BasemapStyleManifest,
     )
+}
+
+/** What [BasemapEngineHost.prepareTilesReportingUnavailableColour] produced (ADR 0057). */
+internal sealed interface BasemapTilePreparation {
+    class Prepared(val tiles: PreparedBasemapTiles) : BasemapTilePreparation
+
+    /**
+     * The engine prepared nothing, because it could not acquire the colour resources of [tiles] and for
+     * no other reason. [failure] is exactly what [BasemapEngineHost.prepareTiles] throws for the same
+     * call, for a caller that decides not to present them.
+     */
+    class ColourUnavailable(
+        val tiles: Set<CanonicalBasemapTile>,
+        val failure: RenGException,
+    ) : BasemapTilePreparation
 }
 
 /**
@@ -1078,11 +1658,31 @@ internal fun classifyGlyphRouteRefusal(
     else -> GlyphRouteRefusal.CREDENTIAL_MISMATCH
 }
 
-/** One rendered ground tile: RenG's own identity, the encoded pixels, and the engine's own provenance. */
+/**
+ * A rendered tile's pixels, in whichever form the engine was asked for (ADR 0044).
+ *
+ * The two carry the same picture and the same `contentKey`; they differ only in whether the encode
+ * was paid. The draw path matches on this exhaustively, with no `else`, so a third form would be a
+ * compile error at the upload site rather than a tile that silently draws nothing.
+ */
+internal sealed interface BasemapTilePixels {
+    /** The engine's PNG, decoded at upload. The form every release before ADR 0044 used. */
+    class Encoded(val pngBytes: ByteArray) : BasemapTilePixels
+
+    /**
+     * The engine's pixels, **already premultiplied** and uploaded without a decode.
+     *
+     * [rgba] is tightly packed RGBA8, `widthPx * heightPx * 4` bytes. It must reach
+     * `uploadPremultipliedTexture` and never `uploadTexture`, which would premultiply it twice.
+     */
+    class Raw(val rgba: ByteArray, val widthPx: Int, val heightPx: Int) : BasemapTilePixels
+}
+
+/** One rendered ground tile: RenG's own identity, its pixels, and the engine's own provenance. */
 internal class RenderedBasemapTile(
     val key: ResourceKey,
     val tile: CanonicalBasemapTile,
-    val pngBytes: ByteArray,
+    val pixels: BasemapTilePixels,
     val contentKey: String,
     val substitutions: List<ResourceSubstitution>,
 )
@@ -1097,7 +1697,7 @@ internal fun basemapTileKey(
     styleDigest: String,
     tile: CanonicalBasemapTile,
     outputSize: OutputPixelSize,
-    sha256: Sha256Function = PureKotlinSha256,
+    sha256: Sha256Function = AcceleratedSha256,
 ): ResourceKey = ResourceKeyDeriver(sha256).basemapTile(styleDigest, tile, outputSize).key
 
 /**
@@ -1111,7 +1711,7 @@ internal fun basemapTileKey(
     styleDigest: String,
     instance: BasemapTileInstance,
     outputSize: OutputPixelSize,
-    sha256: Sha256Function = PureKotlinSha256,
+    sha256: Sha256Function = AcceleratedSha256,
 ): ResourceKey = basemapTileKey(
     styleDigest = styleDigest,
     tile = CanonicalBasemapTile(
@@ -1158,6 +1758,33 @@ private fun underivableGlyphRoutesFailure(): RenGException = FailureDescriptor(
     ),
 ).toException()
 
+/** What a remembered rendered-tile key varies by; everything else [basemapTileKey] takes is fixed per host. */
+private data class RememberedTileKeyIdentity(
+    val styleDigest: String,
+    val tile: CanonicalBasemapTile,
+)
+
+/**
+ * How many rendered-tile keys one host remembers (ADR 0069).
+ *
+ * `RendererConfiguration.maximumBasemapTileInstances` is capped at 4096 and canonical tiles are never
+ * more numerous than the instances naming them, so this is exactly large enough that **one frame can
+ * never evict a key it is still using**. Past that the policy is uninteresting: forgetting costs one
+ * re-derivation, which is what every frame did for every tile before this cache existed.
+ */
+internal const val MAXIMUM_REMEMBERED_TILE_KEYS: Int = 4096
+
 /** The failure for work asked of an already-closed host: the ground did not draw, and nothing more. */
 private fun basemapRenderFailure(): FailureDescriptor =
     FailureDescriptor(code = RenGErrorCode.BASEMAP_RENDER_FAILED, stage = PipelineStage.BASEMAP_RENDER)
+
+/**
+ * What one read-ahead window did, in resources rather than tiles: a tile may need several samples and
+ * one sample may serve several tiles, so these do not sum to the window's tile count. [alreadyCached]
+ * includes a resource some other acquisition was already fetching, which is not a fault (ADR 0075).
+ */
+internal data class ReadAheadWarmSummary(
+    val fetched: Int,
+    val alreadyCached: Int,
+    val failed: Int,
+)

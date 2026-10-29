@@ -1,33 +1,38 @@
 package com.rohittp.reng.internal.planning
 
+import com.rohittp.reng.Backdrop
+import com.rohittp.reng.Diagnostic
+import com.rohittp.reng.DiagnosticCode
+import com.rohittp.reng.DiagnosticSeverity
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
-import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.ProjectionMode
+import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RawResourceKey
-import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceClass
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
+import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.backdropForCore
+import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.geometriesForCore
-import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
+import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
-import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.freshListCopy
 import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.HashedCanonicalBytes
-import com.rohittp.reng.internal.identity.IdentityRegistration
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -39,7 +44,16 @@ internal data class FramePlanningRequest(
     val maximumBasemapTileInstances: Int,
     val previousPlan: EncodedFramePlan?,
     val previousSelectedLod: Int?,
+    val additionalBasemapStyles: List<ResourceLocator> = emptyList(),
 ) {
+    val basemapStyleCount: Int = if (basemapStyle == null) 0 else 1 + additionalBasemapStyles.size
+
+    fun basemapStyleAt(index: Int): ResourceLocator? = when {
+        index == 0 -> basemapStyle
+        index > 0 -> additionalBasemapStyles.getOrNull(index - 1)
+        else -> null
+    }
+
     init {
         require(maximumBasemapTileInstances > 0) { "maximumBasemapTileInstances must be positive" }
         require(previousSelectedLod == null || previousSelectedLod in MINIMUM_MERCATOR_LOD..MAXIMUM_MERCATOR_LOD) {
@@ -125,8 +139,28 @@ internal class PlannedFrameCore(
             reference is StaticResourceReference.External &&
                 reference.resourceClass == ResourceClass.BASEMAP_STYLE
         }
-        require(basemapStyleRoutes <= 1) {
-            "at most one basemap style may be traversed"
+        require(basemapStyleRoutes <= 2) {
+            "at most two basemap styles may be traversed"
+        }
+        if (basemapStyleRoutes == 2) {
+            var firstStyleKey: ResourceKey? = null
+            var distinctStyleRoutes = 0
+            staticResourceTraversalSnapshot.forEach { reference ->
+                if (
+                    reference is StaticResourceReference.External &&
+                    reference.resourceClass == ResourceClass.BASEMAP_STYLE
+                ) {
+                    if (firstStyleKey == null) {
+                        firstStyleKey = reference.resourceKey
+                        distinctStyleRoutes += 1
+                    } else if (reference.resourceKey != firstStyleKey) {
+                        distinctStyleRoutes += 1
+                    }
+                }
+            }
+            require(distinctStyleRoutes == basemapStyleRoutes) {
+                "a basemap style may be traversed at most once"
+            }
         }
         require(basemapStyleRoutes == 0 || spatialPlan.tileSelection != null) {
             "a traversed basemap style requires a planned tile selection"
@@ -158,28 +192,82 @@ internal sealed interface FramePlanningOutcome {
     data class Failure(val failure: FailureDescriptor) : FramePlanningOutcome
 }
 
+/**
+ * The spatial half of planning one frame: camera, LOD, footprint, tile selection and placements, and
+ * nothing else. **Pure**: it registers no frame identity, reads no history and touches no state, which
+ * is why `Renderer.readAhead` (ADR 0075) can ask it what tiles a *future* plan will need. Both
+ * [FramePlanningCore.plan] and read-ahead call this one function, so the tiles warmed for a frame cannot
+ * drift from the tiles `prepare` later selects for it.
+ *
+ * This is an exhaustive dispatch to two sibling planners rather than one planner taking a mode, because the
+ * globe's footprint and tile selection are not the Mercator ones reparameterised -- see
+ * `planGlobeSpatial` and `selectGlobeTiles` for what actually differs.
+ */
+internal fun planSpatial(
+    plan: FramePlan,
+    outputPixelSize: OutputPixelSize,
+    previousSelectedLod: Int?,
+    maximumBasemapTileInstances: Int,
+    basemapStyleConfigured: Boolean,
+    // A renderer passes the one it owns, so a consumer's shader text is scanned once rather than on every
+    // frame. The memo is of a pure function of an immutable `String`, so it changes no answer and leaves
+    // this function as pure as the KDoc above says; the default, a memo of this call alone, is what a
+    // caller with no renderer to own one gets.
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
+): SpatialOutcome<FrameSpatialPlan> = when (plan.projectionMode) {
+    ProjectionMode.GLOBE -> planGlobeSpatial(
+        plan,
+        outputPixelSize,
+        previousSelectedLod,
+        maximumBasemapTileInstances,
+        basemapStyleConfigured,
+        shaderProfileMemo,
+    )
+    ProjectionMode.MERCATOR -> planMercatorSpatial(
+        plan,
+        outputPixelSize,
+        previousSelectedLod,
+        maximumBasemapTileInstances,
+        basemapStyleConfigured,
+        shaderProfileMemo,
+    )
+}
+
 internal class FramePlanningCore(
     private val frameEncoder: FramePlanCanonicalEncoder,
     private val frameIdentityRegistry: CanonicalIdentityRegistry,
     private val resourceKeyDeriver: ResourceKeyDeriver,
     private val rentilePrivateKeyResolver: RentilePrivateKeyResolver,
+    private val shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ) {
     internal fun plan(request: FramePlanningRequest): FramePlanningOutcome {
         val plan = request.plan
-        // Cycle G task 10: this `when` used to be `GLOBE -> return unsupportedProjectionModeFailure()`.
-        // It is spelled as an exhaustive dispatch to two sibling planners rather than as one planner
-        // taking a mode, because the globe's footprint and tile selection are not the Mercator ones
-        // reparameterised -- see `planGlobeSpatial` and `selectGlobeTiles` for what actually differs.
-        val spatialPlanner = when (plan.projectionMode) {
-            ProjectionMode.GLOBE -> ::planGlobeSpatial
-            ProjectionMode.MERCATOR -> ::planMercatorSpatial
+        val selection = plan.basemapForCore()
+        if (selection != null && (
+                selection.style !in 0 until request.basemapStyleCount ||
+                    selection.blend?.toStyle?.let { it !in 0 until request.basemapStyleCount } == true
+                )
+        ) {
+            return FramePlanningOutcome.Failure(
+                FailureDescriptor(
+                    code = RenGErrorCode.INVALID_VALUE,
+                    stage = PipelineStage.FRAME_PLANNING,
+                    diagnostic = Diagnostic(
+                        code = DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
+                        severity = DiagnosticSeverity.ERROR,
+                        stage = PipelineStage.FRAME_PLANNING,
+                        fieldName = DiagnosticField.FRAME_INDEX.wireName,
+                    ),
+                ),
+            )
         }
-        val spatialOutcome = spatialPlanner(
+        val spatialOutcome = planSpatial(
             plan,
             request.outputPixelSize,
             request.previousSelectedLod,
             request.maximumBasemapTileInstances,
-            request.basemapStyle != null,
+            request.basemapStyleCount > 0,
+            shaderProfileMemo,
         )
         if (spatialOutcome is SpatialOutcome.Failure) {
             return FramePlanningOutcome.Failure(spatialOutcome.failure)
@@ -188,9 +276,8 @@ internal class FramePlanningCore(
 
         val encodedPlan = frameEncoder.encode(plan)
         val structuralDiff = FrameStructuralDiffer.diff(request.previousPlan, encodedPlan)
-        if (frameIdentityRegistry.register(encodedPlan.identity) is IdentityRegistration.Collision) {
-            return frameIdentityCollisionFailure()
-        }
+        // A repeated digest is the same frame (ADR 0081): registration records it and never fails.
+        frameIdentityRegistry.register(encodedPlan.identity)
 
         return FramePlanningOutcome.Success(
             PlannedFrameCore(
@@ -225,17 +312,48 @@ internal class FramePlanningCore(
             )
         }
 
-        val basemapStyle = request.basemapStyle
+        val selection = plan.basemapForCore()
+        val primaryStyleIndex = selection?.style ?: 0
         // E-labels task 8b: labels come *from* the style, so the style is traversed when either draw
         // switch is set, not when `drawBasemap` alone is. The condition is deliberately the same
         // expression `planMercatorSpatial` gates its tile selection on: [PlannedFrameCore]'s own
         // "a traversed basemap style requires a planned tile selection" invariant fails closed if the
         // two ever drift apart, so widening one without the other is caught rather than shipped.
-        if ((plan.drawBasemap || plan.drawLabels) && basemapStyle != null) {
-            external(basemapStyle, ResourceClass.BASEMAP_STYLE)
+        if (plan.drawBasemap || plan.drawLabels) {
+            request.basemapStyleAt(primaryStyleIndex)?.let { style ->
+                external(style, ResourceClass.BASEMAP_STYLE)
+            }
+        }
+        if (plan.drawBasemap) {
+            selection?.blend?.let { blend ->
+                request.basemapStyleAt(blend.toStyle)?.let { style ->
+                    external(style, ResourceClass.BASEMAP_STYLE)
+                }
+            }
         }
         for (sticker in plan.stickersForCore()) {
             external(sticker.image, ResourceClass.STICKER_IMAGE)
+        }
+        // ADR 0068. Its own class rather than STICKER_IMAGE: RenGRenderer pairs that class's
+        // references with plan.stickers by index, and a backdrop among them is an off-by-one in
+        // every sticker's texture.
+        when (val backdrop = plan.backdropForCore()) {
+            null -> Unit
+            is Backdrop.Pattern -> external(backdrop.image, ResourceClass.BACKDROP_IMAGE)
+            // ADR 0071. Its textures traverse, its program does not, and the asymmetry is the same
+            // by-index trap ADR 0068 avoided one list over: `geometryPrograms` is required to have
+            // exactly one entry per planned geometry, so a backdrop's program among them is an
+            // off-by-one in every geometry's program. The backdrop compiles its own from the
+            // ShaderPair it already carries.
+            //
+            // MODEL_TEXTURE rather than BACKDROP_IMAGE, because that class is the wrapping
+            // GL_REPEAT pattern sampler and these are ordinary clamped consumer textures. Safe to
+            // share, unlike the program list: `externalImageReference` re-derives a MODEL_TEXTURE
+            // key from the locator rather than reading the traversal back by position.
+            is Backdrop.Shader ->
+                for ((_, locator) in backdrop.textures.entries.sortedBy { it.key }) {
+                    external(locator, ResourceClass.MODEL_TEXTURE)
+                }
         }
         for (model in plan.modelsForCore()) {
             external(model.glb, ResourceClass.MODEL_GLB)
@@ -270,6 +388,7 @@ private val ResourceClass.isStaticDirect: Boolean
     get() = when (this) {
         ResourceClass.BASEMAP_STYLE,
         ResourceClass.STICKER_IMAGE,
+        ResourceClass.BACKDROP_IMAGE,
         ResourceClass.MODEL_GLB,
         ResourceClass.MODEL_TEXTURE,
         -> true
@@ -283,17 +402,6 @@ private val ResourceClass.isStaticDirect: Boolean
         ResourceClass.BASEMAP_GLYPH_RANGE,
         -> false
     }
-
-private fun frameIdentityCollisionFailure(): FramePlanningOutcome.Failure = FramePlanningOutcome.Failure(
-    FailureDescriptor(
-        code = RenGErrorCode.IDENTITY_COLLISION,
-        stage = PipelineStage.FRAME_PLANNING,
-        diagnostic = failureContextDiagnostic(
-            stage = PipelineStage.FRAME_PLANNING,
-            fieldName = DiagnosticField.FRAME_IDENTITY,
-        ),
-    ),
-)
 
 private const val MINIMUM_MERCATOR_LOD: Int = 0
 private const val MAXIMUM_MERCATOR_LOD: Int = 22

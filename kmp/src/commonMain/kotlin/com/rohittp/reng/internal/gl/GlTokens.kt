@@ -41,9 +41,14 @@ internal const val GL_TEXTURE_WRAP_T: Int = 0x2803
 internal const val GL_NEAREST: Int = 0x2600
 internal const val GL_LINEAR: Int = 0x2601
 internal const val GL_CLAMP_TO_EDGE: Int = 0x812F
+internal const val GL_TEXTURE_MAX_LEVEL: Int = 0x813D
 
 internal const val GL_RGBA: Int = 0x1908
 internal const val GL_RGBA8: Int = 0x8058
+internal const val GL_RGBA16F: Int = 0x881A
+internal const val GL_COMPRESSED_RGB8_ETC2: Int = 0x9274
+internal const val GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: Int = 0x9276
+internal const val GL_COMPRESSED_RGBA8_ETC2_EAC: Int = 0x9278
 internal const val GL_DEPTH_COMPONENT24: Int = 0x81A6
 internal const val GL_UNSIGNED_BYTE: Int = 0x1401
 internal const val GL_UNSIGNED_SHORT: Int = 0x1403
@@ -89,8 +94,11 @@ internal const val GL_BLEND_COLOR: Int = 0x8005
 internal const val GL_ZERO: Int = 0x0000
 internal const val GL_ONE: Int = 0x0001
 internal const val GL_SRC_ALPHA: Int = 0x0302
+internal const val GL_DST_COLOR: Int = 0x0306
+internal const val GL_ONE_MINUS_SRC_COLOR: Int = 0x0301
 internal const val GL_ONE_MINUS_SRC_ALPHA: Int = 0x0303
 internal const val GL_FUNC_ADD: Int = 0x8006
+internal const val GL_CONSTANT_ALPHA: Int = 0x8003
 
 internal const val GL_DEPTH_TEST: Int = 0x0B71
 internal const val GL_DEPTH_FUNC: Int = 0x0B74

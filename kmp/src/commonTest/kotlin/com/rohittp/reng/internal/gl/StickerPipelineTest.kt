@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -41,6 +42,7 @@ class StickerPipelineTest {
             pipeline.pipeline.modelViewProjectionUniformLocation,
         )
         assertEquals(TEXTURE_LOCATION, pipeline.pipeline.textureUniformLocation)
+        assertEquals(OPACITY_LOCATION, pipeline.pipeline.opacityUniformLocation)
     }
 
     @Test fun deletionRemovesTheQuadAndTheProgram() {
@@ -154,6 +156,39 @@ class StickerPipelineTest {
         assertFalse(binding.log.any { it.startsWith("blendFuncSeparate(0x302,") })
     }
 
+    @Test fun opacityUploadsPerStickerAndBlendChangesOnlyWhenTheModeChangesThenRestoresOver() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        binding.log.clear()
+        drawStickers(
+            binding,
+            pipeline,
+            StickerWorld(
+                mapAnchored = listOf(
+                    resolvedSticker(texture = 1, opacity = 0.25f),
+                    resolvedSticker(texture = 2, opacity = 0.5f, blend = BlendMode.ADDITIVE),
+                    resolvedSticker(texture = 3, opacity = 0.75f, blend = BlendMode.ADDITIVE),
+                    resolvedSticker(texture = 4, opacity = 1f, blend = BlendMode.SCREEN),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(0.25f, 0.5f, 0.75f, 1f),
+            binding.log.filter { it.startsWith("uniform1f($OPACITY_LOCATION,") }
+                .map { it.substringAfter(',').removeSuffix(")").toFloat() },
+        )
+        assertEquals(
+            listOf(
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x1,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x301,0x1,0x303)",
+                "blendFuncSeparate(0x1,0x303,0x1,0x303)",
+            ),
+            binding.log.filter { it.startsWith("blendFuncSeparate") },
+        )
+    }
+
     @Test fun anEntirelyEmptyWorldIssuesNoGlCallsAtAll() {
         val binding = newBinding()
         val pipeline = createdPipeline(binding)
@@ -174,6 +209,7 @@ class StickerPipelineTest {
         val pipeline = createdPipeline(binding)
         assertEquals(MODEL_VIEW_PROJECTION_LOCATION, pipeline.modelViewProjectionUniformLocation)
         assertEquals(TEXTURE_LOCATION, pipeline.textureUniformLocation)
+        assertEquals(OPACITY_LOCATION, pipeline.opacityUniformLocation)
 
         binding.log.clear()
         drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker())))
@@ -186,6 +222,7 @@ class StickerPipelineTest {
             binding.log.any { it == "uniform1i($TEXTURE_LOCATION,0)" },
             "the texture uniform must be bound to texture unit 0 when the shader declares it",
         )
+        assertTrue(binding.log.any { it == "uniform1f($OPACITY_LOCATION,1.0)" })
     }
 
     // The mirror image of the test above: when the shader declares neither name (RecordingGlBinding's
@@ -209,16 +246,26 @@ class StickerPipelineTest {
         (createStickerPipeline(binding, ShaderDialect.GLES, GlProgramCache()) as StickerPipelineResult.Created)
             .pipeline
 
-    private fun resolvedSticker(texture: Int = 1): ResolvedSticker =
-        ResolvedSticker(modelViewProjection = FloatArray(16), texture = texture)
+    private fun resolvedSticker(
+        texture: Int = 1,
+        opacity: Float = 1f,
+        blend: BlendMode = BlendMode.OVER,
+    ): ResolvedSticker = ResolvedSticker(
+        modelViewProjection = FloatArray(16),
+        texture = texture,
+        opacity = opacity,
+        blend = blend,
+    )
 
     private fun newBinding(): RecordingGlBinding = RecordingGlBinding().withDeclaredNames(
         STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to MODEL_VIEW_PROJECTION_LOCATION,
         STICKER_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
+        STICKER_OPACITY_UNIFORM_NAME to OPACITY_LOCATION,
     )
 
     private companion object {
         const val MODEL_VIEW_PROJECTION_LOCATION: Int = 3
         const val TEXTURE_LOCATION: Int = 7
+        const val OPACITY_LOCATION: Int = 9
     }
 }

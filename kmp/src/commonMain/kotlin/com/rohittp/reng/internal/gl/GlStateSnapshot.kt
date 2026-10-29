@@ -33,8 +33,6 @@ internal data class GlTextureUnitState(
 internal const val RENG_JOINT_UNIFORM_BINDING_POINT: Int = 0
 
 internal data class GlStateSnapshot(
-    val activeTextureUnit: Int,
-    val textureUnits: List<GlTextureUnitState>,
     val drawFramebuffer: Int,
     val readFramebuffer: Int,
     val renderbuffer: Int,
@@ -105,26 +103,9 @@ internal data class GlStateSnapshot(
 internal fun captureGlState(
     binding: GlBinding,
     profile: RenderContextProfile,
-    textureUnitCount: Int,
 ): GlStateSnapshot {
-    require(textureUnitCount > 0) { "at least one texture unit is captured" }
-
-    val activeTextureUnit = binding.integer(GL_ACTIVE_TEXTURE)
-    val units = ArrayList<GlTextureUnitState>(textureUnitCount)
-    for (index in 0 until textureUnitCount) {
-        binding.activeTexture(GL_TEXTURE0 + index)
-        units += GlTextureUnitState(
-            unit = GL_TEXTURE0 + index,
-            texture2d = binding.integer(GL_TEXTURE_BINDING_2D),
-            sampler = binding.integer(GL_SAMPLER_BINDING),
-        )
-    }
-    binding.activeTexture(activeTextureUnit)
-
     val desktop = profile.dialect == ShaderDialect.DESKTOP
     return GlStateSnapshot(
-        activeTextureUnit = activeTextureUnit,
-        textureUnits = units,
         drawFramebuffer = binding.integer(GL_DRAW_FRAMEBUFFER_BINDING),
         readFramebuffer = binding.integer(GL_READ_FRAMEBUFFER_BINDING),
         renderbuffer = binding.integer(GL_RENDERBUFFER_BINDING),
@@ -278,12 +259,6 @@ internal fun restoreGlState(binding: GlBinding, snapshot: GlStateSnapshot) {
     snapshot.drawBuffer?.let { binding.drawBuffers(1, intArrayOf(it)) }
     snapshot.lineSmoothEnabled?.let { binding.setEnabled(GL_LINE_SMOOTH, it) }
 
-    snapshot.textureUnits.forEach { unit ->
-        binding.activeTexture(unit.unit)
-        binding.bindTexture(GL_TEXTURE_2D, unit.texture2d)
-        binding.bindSampler(unit.unit - GL_TEXTURE0, unit.sampler)
-    }
-    binding.activeTexture(snapshot.activeTextureUnit)
 }
 
 private fun GlBinding.setEnabled(cap: Int, enabled: Boolean) {
@@ -300,13 +275,39 @@ private fun GlBinding.setEnabled(cap: Int, enabled: Boolean) {
 internal inline fun <T> withCapturedGlState(
     binding: GlBinding,
     profile: RenderContextProfile,
-    textureUnitCount: Int,
-    block: () -> T,
+    block: (GlBinding) -> T,
 ): T {
-    val snapshot = captureGlState(binding, profile, textureUnitCount)
+    // Already capturing: run inside the region that is open and leave both the capture and the
+    // restore to whoever opened it (ADR 0054). The same root/join shape ADR 0051 gave `withOperation`,
+    // and for the same reason -- an invariant that held for one caller has to survive being called
+    // from inside another. A second capture here would not be wrong, only paid twice.
+    if (binding is TextureUnitCapturingBinding) return block(binding)
+
+    // The texture units are captured by the binding below, one at a time and only when the draw
+    // actually overwrites one (ADR 0055); everything else is captured here and now, because it is
+    // written from too many places to intercept and is a fixed, small set.
+    val tracked = TextureUnitCapturingBinding(binding)
+    val snapshot = captureGlState(binding, profile)
     try {
-        return block()
+        // Set as the region opens, not where the frame starts drawing: texture uploads run inside
+        // the region before that (ground tiles, stickers, atlases), and the host's unpack buffer or
+        // row length would otherwise reach them. The host's values are in the snapshot above.
+        establishUnpackState(binding)
+        return block(tracked)
     } finally {
         restoreGlState(binding, snapshot)
+        // After the rest of the state, so that a restore which rebinds a framebuffer or a program
+        // cannot be undone by a texture unit switch, and because the active unit must be the last
+        // thing written either way.
+        tracked.restoreTouchedUnits()
     }
+}
+
+/** The pixel-unpack state every RenG upload assumes: tightly packed client memory, no unpack buffer. */
+internal fun establishUnpackState(binding: GlBinding) {
+    binding.pixelStorei(GL_UNPACK_ALIGNMENT, GL_UNPACK_ALIGNMENT_DEFAULT)
+    binding.pixelStorei(GL_UNPACK_ROW_LENGTH, 0)
+    binding.pixelStorei(GL_UNPACK_SKIP_ROWS, 0)
+    binding.pixelStorei(GL_UNPACK_SKIP_PIXELS, 0)
+    binding.bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
 }

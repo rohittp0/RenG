@@ -44,6 +44,19 @@ internal interface GlBinding {
         target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
         border: Int, format: Int, type: Int, pixels: ByteArray?,
     )
+    fun texSubImage2D(
+        target: Int, level: Int, xOffset: Int, yOffset: Int, width: Int, height: Int,
+        format: Int, type: Int, pixels: ByteArray,
+    )
+
+    /**
+     * Uploads one level of block-compressed texels: [imageSize] bytes of [data] from [dataOffset],
+     * which lets a level be read where it already lies inside a larger immutable array (ADR 0084).
+     */
+    fun compressedTexImage2D(
+        target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+        border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+    )
     fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int)
     fun texParameteri(target: Int, pname: Int, value: Int)
     fun generateMipmap(target: Int)

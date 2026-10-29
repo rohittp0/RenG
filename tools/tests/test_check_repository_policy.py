@@ -268,7 +268,7 @@ VERSION_CATALOG = """[versions]
 agp = "9.3.1"
 kotlin = "2.3.21"
 mavenPublish = "0.36.0"
-rentile = "0.7.0"
+rentile = "0.11.3"
 
 [libraries]
 rentile-kmp = { module = "com.rohittp.rentile:kmp", version.ref = "rentile" }
@@ -399,6 +399,22 @@ _KMP_BUILD_WITH_SERIALIZATION = _KMP_BUILD_WITH_DEVICE_TEST.replace(
     1,
 )
 
+# The opt-in benchmark form: test classes named `*BenchmarkTest` are excluded from every test
+# task unless Gradle runs with `-Preng.benchmarks=true`, and then they run alone. It changes no
+# dependency, plugin or publication; only the build fingerprint moves.
+_KMP_BUILD_WITH_BENCHMARKS = _KMP_BUILD_WITH_SERIALIZATION + """
+val rengBenchmarks = providers.gradleProperty("reng.benchmarks").orNull.toBoolean()
+
+tasks.withType<AbstractTestTask>().configureEach {
+    filter.isFailOnNoMatchingTests = false
+    if (rengBenchmarks) {
+        filter.includeTestsMatching("*BenchmarkTest")
+    } else {
+        filter.excludeTestsMatching("*BenchmarkTest")
+    }
+}
+"""
+
 _VERSION_CATALOG_WITH_SERIALIZATION = _VERSION_CATALOG_WITH_DEVICE_TEST.replace(
     'kotlinxCoroutines = "1.11.0"\n',
     'kotlinxCoroutines = "1.11.0"\n'
@@ -467,6 +483,7 @@ LIBRARY_CREATED_DATA_CLASSES = (
     ("ResourceUsage", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceResidency", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
 )
 
 
@@ -968,6 +985,28 @@ class RepositoryPolicyTests(unittest.TestCase):
             write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_SERIALIZATION)
             write(root, "gradle/libs.versions.toml", _VERSION_CATALOG_WITH_SERIALIZATION)
             self.assertEqual([], check_repository(root))
+
+    def test_clean_fixture_with_opt_in_benchmarks_passes(self) -> None:
+        # The benchmark filter on top of ADR 0042's form, not fingerprint-neutralized: it must
+        # tokenize to exactly the value pinned for the real file on disk.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_BENCHMARKS)
+            write(root, "gradle/libs.versions.toml", _VERSION_CATALOG_WITH_SERIALIZATION)
+            self.assertEqual([], check_repository(root))
+
+    def test_the_benchmark_form_is_pinned_exactly(self) -> None:
+        # One more token in the benchmark block is a different build and must be refused.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_clean_fixture(root)
+            write(root, "kmp/build.gradle.kts", _KMP_BUILD_WITH_BENCHMARKS.replace(
+                'filter.includeTestsMatching("*BenchmarkTest")',
+                'filter.includeTestsMatching("*BenchmarkTest")\n        filter.includeTestsMatching("*")',
+            ))
+            write(root, "gradle/libs.versions.toml", _VERSION_CATALOG_WITH_SERIALIZATION)
+            self.assertNotEqual([], check_repository(root))
 
     def test_api_scope_is_refused_for_every_coordinate_but_the_serialization_runtime(self) -> None:
         # The `api` widening must not become "api is allowed now".
@@ -1588,7 +1627,7 @@ class InjectedPlugin : Plugin<Project> {
     def test_cycle_b_dependency_catalog_is_exact_and_custom_catalogs_are_rejected(self) -> None:
         catalog_mutations = (
             lambda text: text.replace("com.rohittp.rentile:kmp", "com.example:replacement"),
-            lambda text: text.replace('rentile = "0.7.0"', 'rentile = "9.9.9"'),
+            lambda text: text.replace('rentile = "0.11.3"', 'rentile = "9.9.9"'),
             lambda text: text.replace(
                 "[plugins]",
                 'extra = { module = "com.example:runtime", version = "1" }\n[plugins]',

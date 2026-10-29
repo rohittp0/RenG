@@ -18,9 +18,25 @@ internal data class DerivedResourceKey(
 )
 
 internal class ResourceKeyDeriver(
-    private val sha256: Sha256Function = PureKotlinSha256,
+    private val sha256: Sha256Function = AcceleratedSha256,
+    /**
+     * Where a shader pair's canonical form and derived keys are remembered. A renderer passes the one it
+     * owns so that every deriver and the frame encoder it builds share it; a bare deriver gets its own.
+     */
+    private val shaderPairs: ShaderPairMemo = ShaderPairMemo(),
+    /**
+     * Where an external route's key is remembered: a renderer passes the one it owns so every deriver it
+     * builds shares it (see [RouteMemo]); null derives every time, as a bare deriver always has.
+     */
+    private val externalKeys: RouteMemo<DerivedResourceKey>? = null,
 ) {
     internal fun external(
+        resourceClass: ResourceClass,
+        locator: ResourceLocator,
+    ): DerivedResourceKey = externalKeys?.valueOf(resourceClass, locator) { deriveExternal(resourceClass, locator) }
+        ?: deriveExternal(resourceClass, locator)
+
+    private fun deriveExternal(
         resourceClass: ResourceClass,
         locator: ResourceLocator,
     ): DerivedResourceKey {
@@ -46,13 +62,18 @@ internal class ResourceKeyDeriver(
         )
     }
 
-    internal fun geometryProgram(shaderPair: ShaderPair): DerivedResourceKey {
+    internal fun geometryProgram(shaderPair: ShaderPair): DerivedResourceKey =
+        shaderPairs.keyOf(role = null, shaderPair = shaderPair) { canonical ->
+            deriveGeometryProgram(canonical)
+        }
+
+    private fun deriveGeometryProgram(canonical: ShaderPairMemo.Canonical): DerivedResourceKey {
         val identity = derive(
             CanonicalBinary.root(CanonicalRootKind.GEOMETRY_PROGRAM) {
                 field(1, CanonicalBinary.u16(ResourceKind.GEOMETRY_PROGRAM.wireValue))
                 field(2, CanonicalBinary.u16(GEOMETRY_SHADER_PROFILE_WIRE_VALUE))
-                field(3, CanonicalBinary.exactUtf8(shaderPair.vertexSource))
-                field(4, CanonicalBinary.exactUtf8(shaderPair.fragmentSource))
+                field(3, canonical.vertex)
+                field(4, canonical.fragment)
             },
         )
         return DerivedResourceKey(
@@ -69,14 +90,22 @@ internal class ResourceKeyDeriver(
     internal fun internalPipeline(
         role: InternalPipelineRole,
         shaderPair: ShaderPair,
+    ): DerivedResourceKey =
+        shaderPairs.keyOf(role = role, shaderPair = shaderPair) { canonical ->
+            deriveInternalPipeline(role, canonical)
+        }
+
+    private fun deriveInternalPipeline(
+        role: InternalPipelineRole,
+        canonical: ShaderPairMemo.Canonical,
     ): DerivedResourceKey {
         val identity = derive(
             CanonicalBinary.root(CanonicalRootKind.INTERNAL_PIPELINE) {
                 field(1, CanonicalBinary.u16(ResourceKind.INTERNAL_PIPELINE.wireValue))
                 field(2, CanonicalBinary.u16(role.wireValue))
                 field(3, CanonicalBinary.u16(GEOMETRY_SHADER_PROFILE_WIRE_VALUE))
-                field(4, CanonicalBinary.exactUtf8(shaderPair.vertexSource))
-                field(5, CanonicalBinary.exactUtf8(shaderPair.fragmentSource))
+                field(4, canonical.vertex)
+                field(5, canonical.fragment)
             },
         )
         return DerivedResourceKey(
@@ -384,6 +413,7 @@ private val ResourceClass.wireValue: Int
         ResourceClass.MODEL_GLB -> 10
         ResourceClass.MODEL_TEXTURE -> 11
         ResourceClass.BASEMAP_GLYPH_RANGE -> 12
+        ResourceClass.BACKDROP_IMAGE -> 13
     }
 
 private const val GEOMETRY_SHADER_PROFILE_WIRE_VALUE: Int = 1

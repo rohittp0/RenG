@@ -1,7 +1,10 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BlendMask
+import com.rohittp.reng.basemapBlendAmount
 import com.rohittp.reng.internal.shader.scanShaderProfile
 import com.rohittp.reng.internal.terrain.DemEncoding
+import kotlin.math.PI
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -25,6 +28,7 @@ class GroundPipelineTest {
         assertEquals(1, InternalPipelineRole.COMPOSITE.wireValue)
         assertEquals(2, InternalPipelineRole.STICKER.wireValue)
         assertEquals(3, InternalPipelineRole.GROUND.wireValue)
+        assertEquals(15, InternalPipelineRole.GROUND_MIXED.wireValue)
     }
 
     @Test fun theGroundSourcesAreAcceptedShaderProfileSources() {
@@ -32,6 +36,162 @@ class GroundPipelineTest {
         assertTrue(GROUND_FRAGMENT_SOURCE.startsWith("#version 300 es\n"))
         assertTrue(scanShaderProfile(GROUND_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(GROUND_MIXED_VERTEX_SOURCE) != null)
+        assertTrue(scanShaderProfile(GROUND_MIXED_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(GROUND_SHADED_MIXED_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(TERRAIN_MIXED_GROUND_VERTEX_SOURCE) != null)
+        assertTrue(scanShaderProfile(TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE) != null)
+        assertTrue(
+            GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf(
+                "vec4 tile = mix(primary, target, rengGroundBlendAmount());",
+            ) < GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf("float incidence"),
+            "ADR 0086 mixes the two premultiplied colours before applying the ordinary terrain shade",
+        )
+    }
+
+    @Test fun mixedSourcesAddOnlyTheirBlendUvContractToThePinnedOrdinarySources() {
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = GROUND_VERTEX_SOURCE,
+                primaryUvLine = MERCATOR_PRIMARY_UV_LINE,
+                blendUvLine = MERCATOR_BLEND_UV_LINE,
+            ),
+            actual = GROUND_MIXED_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = TERRAIN_GROUND_VERTEX_SOURCE,
+                primaryUvLine = MERCATOR_PRIMARY_UV_LINE,
+                blendUvLine = MERCATOR_BLEND_UV_LINE,
+            ),
+            actual = TERRAIN_MIXED_GROUND_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = TERRAIN_SHADED_GROUND_VERTEX_SOURCE,
+                primaryUvLine = MERCATOR_PRIMARY_UV_LINE,
+                blendUvLine = MERCATOR_BLEND_UV_LINE,
+            ),
+            actual = TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = GLOBE_GROUND_VERTEX_SOURCE,
+                primaryUvLine = GLOBE_PRIMARY_UV_LINE,
+                blendUvLine = GLOBE_BLEND_UV_LINE,
+            ),
+            actual = GLOBE_GROUND_MIXED_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = TERRAIN_GLOBE_GROUND_VERTEX_SOURCE,
+                primaryUvLine = GLOBE_PRIMARY_UV_LINE,
+                blendUvLine = GLOBE_BLEND_UV_LINE,
+            ),
+            actual = TERRAIN_MIXED_GLOBE_GROUND_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = mixedVertexSource(
+                ordinary = TERRAIN_SHADED_GLOBE_GROUND_VERTEX_SOURCE,
+                primaryUvLine = GLOBE_PRIMARY_UV_LINE,
+                blendUvLine = GLOBE_BLEND_UV_LINE,
+            ),
+            actual = TERRAIN_SHADED_MIXED_GLOBE_GROUND_VERTEX_SOURCE,
+        )
+        assertEquals(
+            expected = shadingLines(source = GROUND_SHADED_FRAGMENT_SOURCE),
+            actual = shadingLines(source = GROUND_SHADED_MIXED_FRAGMENT_SOURCE),
+            message = "mixing changes only how the shaded fragment obtains tile, not how it shades it",
+        )
+    }
+
+    @Test
+    fun blendMaskMathMatchesTheAdrAtCentresCornersAndSweepDirections() {
+        val width = 100f
+        val height = 100f
+        fun amount(mask: BlendMask, x: Float, y: Float): Float = basemapBlendAmount(
+            mask = mask,
+            pixelX = x,
+            pixelY = y,
+            frameWidth = width,
+            frameHeight = height,
+        )
+
+        val cornersAndCentre = listOf(
+            0.5f to 0.5f,
+            99.5f to 0.5f,
+            0.5f to 99.5f,
+            99.5f to 99.5f,
+            50f to 50f,
+        )
+        cornersAndCentre.forEach { (x, y) ->
+            assertEquals(0.5f, amount(BlendMask.Uniform(amount = 0.5f), x, y))
+        }
+        assertEquals(
+            1f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0f),
+                50f,
+                50f,
+            ),
+        )
+        assertEquals(
+            0f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0f),
+                0f,
+                0f,
+            ),
+        )
+        assertEquals(
+            0.5f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.5f, feather = 0.2f),
+                50f + 0.4f * kotlin.math.sqrt(20_000f),
+                50f,
+            ),
+            0.0001f,
+        )
+        assertEquals(
+            1f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.5f, feather = 0.2f),
+                50f,
+                50f,
+            ),
+        )
+        assertEquals(
+            0f,
+            amount(
+                BlendMask.Radial(centreX = 0.5f, centreY = 0.5f, radius = 0.1f, feather = 0.05f),
+                0.5f,
+                0.5f,
+            ),
+        )
+
+        listOf(0f, (PI / 2).toFloat(), PI.toFloat(), (3 * PI / 2).toFloat()).forEach { angle ->
+            cornersAndCentre.forEach { (x, y) ->
+                assertEquals(
+                    0f,
+                    amount(BlendMask.Linear(angleRadians = angle, position = 0f, feather = 0f), x, y),
+                )
+                assertEquals(
+                    1f,
+                    amount(BlendMask.Linear(angleRadians = angle, position = 1f, feather = 0f), x, y),
+                )
+            }
+        }
+        val half = { angle: Float, x: Float, y: Float ->
+            amount(BlendMask.Linear(angleRadians = angle, position = 0.5f, feather = 0f), x, y)
+        }
+        assertEquals(1f, half(0f, 25f, 50f))
+        assertEquals(0f, half(0f, 75f, 50f))
+        assertEquals(1f, half((PI / 2).toFloat(), 50f, 75f))
+        assertEquals(0f, half((PI / 2).toFloat(), 50f, 25f))
+        assertEquals(1f, half(PI.toFloat(), 75f, 50f))
+        assertEquals(0f, half(PI.toFloat(), 25f, 50f))
+        assertEquals(1f, half((3 * PI / 2).toFloat(), 50f, 25f))
+        assertEquals(0f, half((3 * PI / 2).toFloat(), 50f, 75f))
     }
 
     /**
@@ -52,9 +212,19 @@ class GroundPipelineTest {
             "u must run west-to-east and v north-to-south, row zero at the tile's north edge: " +
                 GROUND_VERTEX_SOURCE,
         )
+        // The grid coordinate is still the texture coordinate, now through a window (ADR 0057). The
+        // identity window -- scale 1, offset 0 -- is what every exact tile is given, so this is the
+        // same mapping it always was and the shader has no branch and no second variant; a tile drawn
+        // from an ancestor is the only one whose window is anything else.
         assertTrue(
-            GROUND_VERTEX_SOURCE.contains("rengGroundUv = rengGroundGrid;"),
-            "the grid coordinate IS the texture coordinate: " + GROUND_VERTEX_SOURCE,
+            GROUND_VERTEX_SOURCE.contains(
+                "rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;",
+            ),
+            "the grid coordinate IS the texture coordinate, windowed: " + GROUND_VERTEX_SOURCE,
+        )
+        assertTrue(
+            GROUND_VERTEX_SOURCE.contains("uniform vec3 rengGroundColourWindow;"),
+            "the window must be declared: " + GROUND_VERTEX_SOURCE,
         )
     }
 
@@ -88,12 +258,51 @@ class GroundPipelineTest {
         assertTrue(ground.program != sticker.program)
     }
 
+    @Test fun everyTileIsGivenItsColourWindowIncludingTheIdentity() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        binding.log.clear()
+
+        drawGround(
+            binding,
+            pipeline,
+            listOf(
+                resolvedTile(texture = 1),
+                resolvedTile(texture = 2, window = GroundTileWindow(0.25f, 0.5f, 0.75f)),
+            ),
+            cellsPerTileSide = 4,
+        )
+
+        // Written for every tile, identity included (ADR 0057). A uniform left over from the previous
+        // tile is the one way this draws the wrong part of the right texture, and an implementation
+        // that only wrote the non-identity ones would leave the exact tile after a provisional one
+        // sampling the provisional one's window.
+        assertEquals(
+            listOf(
+                "uniform3f($COLOUR_WINDOW_LOCATION,1.0,0.0,0.0)",
+                "uniform3f($COLOUR_WINDOW_LOCATION,0.25,0.5,0.75)",
+            ),
+            binding.log.filter { it.startsWith("uniform3f($COLOUR_WINDOW_LOCATION,") },
+        )
+    }
+
     @Test fun deletionRemovesEveryCachedGridAndTheProgram() {
         val binding = newBinding()
         val cache = GlProgramCache()
         val pipeline = (
             createGroundPipeline(binding, ShaderDialect.GLES, cache) as GroundPipelineResult.Created
             ).pipeline
+        binding.log.clear()
+        assertNull(
+            ensureGroundMixedPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+            "the first blended frame must compile both variants",
+        )
+        assertEquals(2, binding.log.count { it.startsWith("createProgram") })
         drawGround(binding, pipeline, listOf(resolvedTile()), cellsPerTileSide = 4)
         drawGround(binding, pipeline, listOf(resolvedTile()), cellsPerTileSide = 32)
         binding.log.clear()
@@ -102,13 +311,157 @@ class GroundPipelineTest {
 
         assertEquals(2, binding.log.count { it.startsWith("deleteVertexArrays") })
         assertEquals(2, binding.log.count { it.startsWith("deleteBuffers(2") }, "vertex and index")
-        // Two, not one: Cycle E-terrain compiles the displacing program beside the flat one, and a
-        // pipeline that deleted only the program it drew last frame would leak the other for the
-        // renderer's whole life.
-        assertEquals(2, binding.log.count { it.startsWith("deleteProgram") })
+        // Flat and terrain programs each have ADR 0086's mixed variant; all four are owned here.
+        assertEquals(4, binding.log.count { it.startsWith("deleteProgram") })
         assertTrue(pipeline.grids.isEmpty())
         assertNull(cache.program(pipeline.key))
         assertNull(cache.program(pipeline.terrain.key))
+        assertNull(cache.program(requireNotNull(pipeline.mixed).key))
+        assertNull(cache.program(requireNotNull(pipeline.terrainMixed).key))
+    }
+
+    @Test
+    fun blendedGroundDrawsEveryInstanceOnceWithOrdinaryStateAndTextureUnits() {
+        val binding = newBinding()
+        val cache = GlProgramCache()
+        val pipeline = (
+            createGroundPipeline(binding, ShaderDialect.GLES, cache) as GroundPipelineResult.Created
+            ).pipeline
+        assertNull(
+            ensureGroundMixedPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+        )
+
+        binding.log.clear()
+        drawGround(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(
+                resolvedTile(
+                    texture = 11,
+                    blendTexture = 21,
+                    blendWindow = GroundTileWindow(scale = 0.5f, offsetU = 0.25f, offsetV = 0.0f),
+                ),
+                resolvedTile(texture = 12, blendTexture = 22),
+            ),
+            blend = GroundBlendFrame(
+                mask = BlendMask.Uniform(amount = 0.5f),
+                frameWidth = 64f,
+                frameHeight = 64f,
+            ),
+        )
+        assertEquals(2, binding.log.count { it.startsWith("drawElements") })
+        assertEquals(1, binding.log.count { it == "useProgram(${requireNotNull(pipeline.mixed).program})" })
+        assertTrue(binding.log.contains("enable(${hex(GL_BLEND)})"))
+        assertTrue(binding.log.contains("enable(${hex(GL_DEPTH_TEST)})"))
+        assertTrue(binding.log.contains("depthMask(false)"))
+        assertTrue(
+            binding.log.contains(
+                "blendFuncSeparate(${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)}," +
+                    "${hex(GL_ONE)},${hex(GL_ONE_MINUS_SRC_ALPHA)})",
+            ),
+        )
+        assertTrue(binding.log.contains("disable(${hex(GL_CULL_FACE)})"))
+        assertFalse(binding.log.any { it == "depthFunc(${hex(GL_GEQUAL)})" })
+        assertFalse(binding.log.any { it == "enable(0x8037)" }, "polygon offset is never enabled")
+        assertEquals(
+            listOf(
+                "bindTexture(${hex(GL_TEXTURE_2D)},21)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},11)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},22)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},12)",
+            ),
+            binding.log.filter { it.startsWith("bindTexture(${hex(GL_TEXTURE_2D)},") },
+        )
+        assertEquals(
+            listOf("activeTexture(${hex(GL_TEXTURE0 + 1)})", "activeTexture(${hex(GL_TEXTURE0 + 1)})"),
+            binding.log.filter { it == "activeTexture(${hex(GL_TEXTURE0 + 1)})" },
+        )
+        assertEquals(
+            listOf(
+                "uniform3f($BLEND_COLOUR_WINDOW_LOCATION,0.5,0.25,0.0)",
+                "uniform3f($BLEND_COLOUR_WINDOW_LOCATION,1.0,0.0,0.0)",
+            ),
+            binding.log.filter { it.startsWith("uniform3f($BLEND_COLOUR_WINDOW_LOCATION,") },
+            "the target style samples through its own colour window",
+        )
+        assertEquals("activeTexture(${hex(GL_TEXTURE0)})", binding.log.last { it.startsWith("activeTexture") })
+
+        binding.log.clear()
+        drawGround(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(demTile(texture = 13, demTexture = 23, blendTexture = 33)),
+            cellsPerTileSide = 2,
+            elevation = elevationFrame(),
+            blend = GroundBlendFrame(
+                mask = BlendMask.Uniform(amount = 0.5f),
+                frameWidth = 64f,
+                frameHeight = 64f,
+            ),
+        )
+        assertTrue(binding.log.contains("useProgram(${requireNotNull(pipeline.terrainMixed).program})"))
+        assertTrue(binding.log.contains("depthMask(true)"), "mixed terrain keeps the ordinary depth mask")
+        assertTrue(binding.log.contains("activeTexture(${hex(GL_TEXTURE0 + 2)})"))
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},23)"), "the DEM remains on unit 1")
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},33)"), "the target uses unit 2")
+        assertEquals("activeTexture(${hex(GL_TEXTURE0)})", binding.log.last { it.startsWith("activeTexture") })
+        assertFalse(binding.log.any { it == "enable(0x8037)" }, "mixed terrain never enables polygon offset")
+    }
+
+    @Test
+    fun blendedTerrainDrawRestoresTheHostsTextureBindingsOnUnitsOneAndTwo() {
+        val recording = newBinding()
+        recording.integers[GL_SAMPLER_BINDING] = intArrayOf(0)
+        val host = TextureUnitStateBinding(
+            delegate = recording,
+            initialActiveUnit = GL_TEXTURE0,
+            initialTexture2d = mapOf(
+                GL_TEXTURE0 to 90,
+                GL_TEXTURE0 + 1 to 91,
+                GL_TEXTURE0 + 2 to 92,
+            ),
+        )
+        val binding = TextureUnitCapturingBinding(delegate = host)
+        val cache = GlProgramCache()
+        val pipeline = (
+            createGroundPipeline(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+            ) as GroundPipelineResult.Created
+            ).pipeline
+        assertNull(
+            ensureGroundMixedPrograms(
+                binding = binding,
+                dialect = ShaderDialect.GLES,
+                cache = cache,
+                pipeline = pipeline,
+            ),
+        )
+
+        drawGround(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(demTile(texture = 13, demTexture = 23, blendTexture = 33)),
+            cellsPerTileSide = 2,
+            elevation = elevationFrame(),
+            blend = GroundBlendFrame(
+                mask = BlendMask.Uniform(amount = 0.5f),
+                frameWidth = 64f,
+                frameHeight = 64f,
+            ),
+        )
+        binding.restoreTouchedUnits()
+
+        assertEquals(expected = 91, actual = host.texture2d(unit = GL_TEXTURE0 + 1))
+        assertEquals(expected = 92, actual = host.texture2d(unit = GL_TEXTURE0 + 2))
+        assertEquals(expected = GL_TEXTURE0, actual = host.activeUnit)
+        assertEquals(expected = 0, actual = binding.touchedUnitCount)
     }
 
     /**
@@ -502,9 +855,14 @@ class GroundPipelineTest {
         assertEquals(2, binding.log.count { it.startsWith("drawElements") }, "both tiles still draw flat")
     }
 
-    private fun demTile(texture: Int, demTexture: Int): ResolvedGroundTile = ResolvedGroundTile(
+    private fun demTile(
+        texture: Int,
+        demTexture: Int,
+        blendTexture: Int? = null,
+    ): ResolvedGroundTile = ResolvedGroundTile(
         modelViewProjection = FloatArray(16),
         texture = texture,
+        blendTexture = blendTexture,
         elevation = MercatorGroundTileDem(
             dem = GroundTileDem(
                 demTexture = demTexture,
@@ -531,12 +889,49 @@ class GroundPipelineTest {
         (createGroundPipeline(binding, ShaderDialect.GLES, GlProgramCache()) as GroundPipelineResult.Created)
             .pipeline
 
-    private fun resolvedTile(texture: Int = 1): ResolvedGroundTile =
-        ResolvedGroundTile(modelViewProjection = FloatArray(16), texture = texture)
+    private fun resolvedTile(
+        texture: Int = 1,
+        window: GroundTileWindow = GroundTileWindow.WHOLE,
+        blendTexture: Int? = null,
+        blendWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    ): ResolvedGroundTile = ResolvedGroundTile(
+        modelViewProjection = FloatArray(16),
+        texture = texture,
+        colourWindow = window,
+        blendTexture = blendTexture,
+        blendColourWindow = blendWindow,
+    )
+
+    private fun mixedVertexSource(
+        ordinary: String,
+        primaryUvLine: String,
+        blendUvLine: String,
+    ): String = ordinary
+        .replace(
+            oldValue = "out vec2 rengGroundUv;\n",
+            newValue = "out vec2 rengGroundUv;\nout vec2 rengGroundBlendUv;\n",
+        )
+        .replace(
+            oldValue = "uniform vec3 rengGroundColourWindow;\n",
+            newValue =
+                "uniform vec3 rengGroundColourWindow;\n" +
+                    "uniform vec3 rengGroundBlendColourWindow;\n",
+        )
+        .replace(
+            oldValue = "$primaryUvLine\n",
+            newValue = "$primaryUvLine\n$blendUvLine\n",
+        )
+
+    private fun shadingLines(source: String): String = source.substring(
+        startIndex = source.indexOf(string = "    float incidence"),
+    )
 
     private fun newBinding(): RecordingGlBinding = RecordingGlBinding().withDeclaredNames(
+        GROUND_COLOUR_WINDOW_UNIFORM_NAME to COLOUR_WINDOW_LOCATION,
+        GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME to BLEND_COLOUR_WINDOW_LOCATION,
         GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME to MODEL_VIEW_PROJECTION_LOCATION,
         GROUND_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
+        GROUND_BLEND_TEXTURE_UNIFORM_NAME to BLEND_TEXTURE_LOCATION,
         GROUND_MERCATOR_Y_UNIFORM_NAME to MERCATOR_Y_LOCATION,
         GROUND_ELEVATION_SCALE_UNIFORM_NAME to ELEVATION_SCALE_LOCATION,
         GROUND_DEM_SAMPLER_UNIFORM_NAME to DEM_SAMPLER_LOCATION,
@@ -549,12 +944,57 @@ class GroundPipelineTest {
 
     private companion object {
         const val MODEL_VIEW_PROJECTION_LOCATION: Int = 3
+        const val COLOUR_WINDOW_LOCATION: Int = 41
+        const val BLEND_COLOUR_WINDOW_LOCATION: Int = 42
         const val TEXTURE_LOCATION: Int = 7
+        const val BLEND_TEXTURE_LOCATION: Int = 8
         const val MERCATOR_Y_LOCATION: Int = 11
         const val ELEVATION_SCALE_LOCATION: Int = 12
         const val DEM_SAMPLER_LOCATION: Int = 13
         const val DEM_WINDOW_LOCATION: Int = 14
         const val DEM_DECODE_LOCATION: Int = 15
         const val DEM_GRID_LOCATION: Int = 16
+        const val MERCATOR_PRIMARY_UV_LINE: String =
+            "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;"
+        const val MERCATOR_BLEND_UV_LINE: String =
+            "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+                "rengGroundBlendColourWindow.yz;"
+        const val GLOBE_PRIMARY_UV_LINE: String =
+            "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;"
+        const val GLOBE_BLEND_UV_LINE: String =
+            "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
+                "rengGroundBlendColourWindow.yz;"
     }
+}
+
+private class TextureUnitStateBinding(
+    private val delegate: RecordingGlBinding,
+    initialActiveUnit: Int,
+    initialTexture2d: Map<Int, Int>,
+) : GlBinding by delegate {
+    var activeUnit: Int = initialActiveUnit
+        private set
+
+    private val texture2dByUnit: MutableMap<Int, Int> = initialTexture2d.toMutableMap()
+
+    override fun getIntegerv(pname: Int, out: IntArray) {
+        require(out.isNotEmpty()) { "an integer query needs a destination" }
+        when (pname) {
+            GL_ACTIVE_TEXTURE -> out[0] = activeUnit
+            GL_TEXTURE_BINDING_2D -> out[0] = texture2dByUnit.getValue(activeUnit)
+            else -> delegate.getIntegerv(pname = pname, out = out)
+        }
+    }
+
+    override fun activeTexture(unit: Int) {
+        activeUnit = unit
+        delegate.activeTexture(unit = unit)
+    }
+
+    override fun bindTexture(target: Int, texture: Int) {
+        if (target == GL_TEXTURE_2D) texture2dByUnit[activeUnit] = texture
+        delegate.bindTexture(target = target, texture = texture)
+    }
+
+    fun texture2d(unit: Int): Int = texture2dByUnit.getValue(unit)
 }

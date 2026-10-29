@@ -1,16 +1,18 @@
 package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.Backdrop
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
+import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.projection.GlobeGroundFootprint
 import com.rohittp.reng.internal.projection.ResolvedGlobeCamera
 import com.rohittp.reng.internal.projection.globeGroundFootprint
 import com.rohittp.reng.internal.projection.resolveGlobeCamera
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
-import com.rohittp.reng.internal.shader.scanShaderProfile
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -51,6 +53,7 @@ internal fun planGlobeSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ): SpatialOutcome<FrameSpatialPlan> {
     val cameraOutcome = resolveGlobeCamera(plan.camera, outputPixelSize)
     if (cameraOutcome is SpatialOutcome.Failure) return cameraOutcome
@@ -101,10 +104,19 @@ internal fun planGlobeSpatial(
     for (geometry in plan.geometriesForCore()) {
         val geometryOutcome = resolveGlobeGeometry(geometry, camera)
         if (geometryOutcome is SpatialOutcome.Failure) return geometryOutcome
-        val vertexProfile = scanShaderProfile(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
-        val fragmentProfile = scanShaderProfile(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+        val vertexProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        val fragmentProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
         geometries += (geometryOutcome as SpatialOutcome.Success).value
         shaderProfiles += vertexProfile to fragmentProfile
+    }
+
+    // ADR 0071, for the reason the Mercator planner gives: the scan turns a consumer's unparseable
+    // backdrop shader into INVALID_VALUE at FRAME_PLANNING instead of a GL fault at draw.
+    (plan.backdropForCore() as? Backdrop.Shader)?.let { backdrop ->
+        shaderProfileMemo.profileOf(backdrop.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
     return SpatialOutcome.Success(

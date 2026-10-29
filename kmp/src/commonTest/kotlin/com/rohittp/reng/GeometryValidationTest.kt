@@ -4,6 +4,7 @@ import com.rohittp.reng.internal.gl.MAXIMUM_CONSUMER_TEXTURES
 import com.rohittp.reng.internal.gl.UNIFORM_MODEL_VIEW_PROJECTION
 import com.rohittp.reng.internal.gl.UNIFORM_RESOLUTION
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 /**
@@ -12,6 +13,14 @@ import kotlin.test.assertFailsWith
  * binding would otherwise silently win.
  */
 class GeometryValidationTest {
+
+    @Test
+    fun blendDefaultsToPremultipliedOverAndAcceptsEveryMode() {
+        assertEquals(BlendMode.OVER, geometryWith().blend)
+        BlendMode.entries.forEach { mode ->
+            assertEquals(mode, geometryWith().copy(blend = mode).blend)
+        }
+    }
 
     @Test
     fun aConsumerUniformCollidingWithADocumentedNameIsRejectedAtConstruction() {

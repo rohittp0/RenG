@@ -1,17 +1,27 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.firewall.BasemapTilePixels
 import com.rohittp.reng.internal.firewall.basemapTileKey
+import com.rohittp.reng.internal.gl.GROUND_COLOUR_WINDOW_UNIFORM_NAME
+import com.rohittp.reng.internal.gl.RecordingGlBinding
+import com.rohittp.reng.internal.gl.RenderContextIdentity
+import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
+import kotlin.concurrent.Volatile
+import kotlin.coroutines.ContinuationInterceptor
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 
 /**
  * The renderer end of basemap **tiles**: one `prepare()` acquires the style, compiles it through the
@@ -34,10 +44,165 @@ import kotlinx.coroutines.test.runTest
  */
 class RendererBasemapTileTest {
 
+    @Test
+    fun mixedGroundProgramsCompileLazilyAndRendererCloseDeletesThem() = runTest {
+        val binding = styleGlBinding()
+        val renderer = twoStyleRenderer(
+            transport = TwoStyleTileTransport(),
+            binding = binding,
+        )
+        assertEquals(
+            7,
+            binding.log.count { call -> call.startsWith("createProgram") },
+            "a renderer that has not blended still compiles the seven ordinary programs",
+        )
+
+        val target = renderer.mintRenderTarget(FramebufferName(value = 0u))
+        val frame = renderer.prepare(blendedPlan(frameIndex = 0L, camera = styleCamera()))
+        renderer.draw(preparedFrame = frame, renderTarget = target)
+        frame.close()
+        val compiled = binding.log.count { call -> call.startsWith("createProgram") }
+        assertEquals(9, compiled, "the first blended Mercator frame lazily compiles two mixed variants")
+
+        renderer.close()
+        assertEquals(
+            compiled,
+            binding.log.count { call -> call.startsWith("deleteProgram") },
+            "renderer teardown deletes the lazily compiled mixed variants",
+        )
+    }
+
+    @Test
+    fun twoStyleAncestorFallbackIsAppliedPerStyle() = runTest {
+        val sink = RecordingProvisionalSink()
+        val renderer = twoStyleRenderer(
+            transport = TwoStyleTileTransport(),
+            resourceLimits = ResourceLimits(maximumTilesRasterisedPerFrame = 0),
+            diagnosticSink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(value = 0u))
+
+        val coarse = renderer.prepare(blendedPlan(frameIndex = 0L, camera = coarseBasemapPlan(0L).camera))
+        renderer.draw(coarse, target)
+        coarse.close()
+        val renderedAfterCoarse = renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED]
+
+        val fine = renderer.prepare(blendedPlan(frameIndex = 1L, camera = styleCamera())) as RenGPreparedFrame
+        assertEquals(renderedAfterCoarse, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
+        assertEquals(fine.groundInstances.size, fine.blendGroundInstances.size)
+        assertTrue(fine.groundInstances.isNotEmpty())
+        assertTrue(
+            fine.groundInstances.map { it.resourceKey }.toSet()
+                .intersect(fine.blendGroundInstances.map { it.resourceKey }.toSet())
+                .isEmpty(),
+            "each style derives and falls back through its own keyed tile set",
+        )
+        renderer.draw(fine, target)
+        assertTrue(sink.provisional.single().actual!! <= fine.groundInstances.size.toLong())
+        fine.close()
+        renderer.close()
+    }
+
+    @Test
+    fun closingABlendedFrameReleasesBothStylesRawReservations() = runTest {
+        val renderer = twoStyleRenderer(transport = TwoStyleTileTransport())
+        val frame = renderer.prepare(blendedPlan(frameIndex = 0L, camera = styleCamera())) as RenGPreparedFrame
+
+        assertTrue(frame.rawTileBytes > 4L * TILE_TEXTURE_BYTES, "both styles retain raw tile pixels")
+        assertEquals(frame.rawTileBytes, renderer.inFlightRawTileBytes)
+        frame.close()
+        assertEquals(0L, renderer.inFlightRawTileBytes)
+        renderer.close()
+    }
+
+    @Test
+    fun anUnavailableBlendTargetLeavesItsGroundOutAndThePrimaryStillDraws() = runTest {
+        val transport = TwoStyleTileTransport()
+        val store = FailingUpdatedStyleWriteStore()
+        val renderer = twoStyleRenderer(transport = transport, store = store)
+        try {
+            val renderTarget = renderer.mintRenderTarget(FramebufferName(value = 0u))
+            renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+            assertTrue(
+                SECOND_STYLE_URL in transport.requestedUrls(),
+                "the first foreground preparation must successfully compile the configured target",
+            )
+
+            transport.secondStyleJson = UPDATED_SECOND_STYLE_JSON
+            store.failUpdatedStyleWrites = true
+            val writeFailure = assertFailsWith<RenGException> {
+                renderer.prepare(
+                    plan = blendedPlan(frameIndex = 1L, camera = styleCamera()),
+                    accessMode = ResourceAccessMode.RELOAD,
+                )
+            }
+            assertEquals(RenGErrorCode.STORE_WRITE_FAILED, writeFailure.code)
+            store.failUpdatedStyleWrites = false
+
+            val frame = renderer.prepare(
+                plan = blendedPlan(frameIndex = 2L, camera = styleCamera()),
+                accessMode = ResourceAccessMode.CACHE_ONLY,
+            ) as RenGPreparedFrame
+            assertTrue(frame.groundInstances.isNotEmpty(), "the available primary still prepares ground")
+            assertEquals(
+                emptyList(),
+                frame.blendGroundInstances,
+                "the unavailable target contributes no ground to the blend pass",
+            )
+            renderer.draw(frame, renderTarget)
+            frame.close()
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun anUnavailablePrimaryWithAnAvailableBlendTargetDrawsNoGroundWithoutCrashing() = runTest {
+        val transport = TwoStyleTileTransport()
+        val store = FailingUpdatedStyleWriteStore()
+        val renderer = twoStyleRenderer(transport = transport, store = store)
+        try {
+            val renderTarget = renderer.mintRenderTarget(framebufferName = FramebufferName(value = 0u))
+            renderer.prepare(plan = blendedPlan(frameIndex = 0L, camera = styleCamera())).close()
+            assertTrue(
+                SECOND_STYLE_URL in transport.requestedUrls(),
+                "the first foreground preparation must successfully compile the configured target",
+            )
+
+            transport.primaryStyleJson = UPDATED_SECOND_STYLE_JSON
+            store.failUpdatedStyleWrites = true
+            val writeFailure = assertFailsWith<RenGException> {
+                renderer.prepare(
+                    plan = blendedPlan(frameIndex = 1L, camera = styleCamera()),
+                    accessMode = ResourceAccessMode.RELOAD,
+                )
+            }
+            assertEquals(expected = RenGErrorCode.STORE_WRITE_FAILED, actual = writeFailure.code)
+            store.failUpdatedStyleWrites = false
+
+            val frame = renderer.prepare(
+                plan = blendedPlan(frameIndex = 2L, camera = styleCamera()),
+                accessMode = ResourceAccessMode.CACHE_ONLY,
+            ) as RenGPreparedFrame
+            assertNull(frame.basemapStyleDigest, "the primary style is unavailable")
+            assertNotNull(frame.blendBasemapStyleDigest, "the target style remains available")
+            assertEquals(emptyList(), frame.groundInstances, "the unavailable primary contributes no ground")
+            assertTrue(frame.blendGroundInstances.isNotEmpty(), "the available target still prepares its tiles")
+            renderer.draw(preparedFrame = frame, renderTarget = renderTarget)
+            frame.close()
+        } finally {
+            renderer.close()
+        }
+    }
+
     /**
-     * The whole path in one assertion set: the frame's four selected ground tiles come back as encoded
-     * pixels, each named by [basemapTileKey] over the style digest, the canonical tile, and the engine's
-     * output size — RenG's own derivation, deliberately not Rentile's `outputRequestKey`.
+     * The whole path in one assertion set: the frame's four selected ground tiles come back as raw
+     * premultiplied pixels, each named by [basemapTileKey] over the style digest, the canonical tile,
+     * and the engine's output size — RenG's own derivation, deliberately not Rentile's
+     * `outputRequestKey`.
+     *
+     * Raw rather than encoded because four tiles are 4 MiB against ADR 0044's 64 MiB default, so this
+     * is the path the default budget admits. The fallback has its own test below.
      */
     @Test
     fun rendersEveryGroundTileTheFrameSelectedAndNamesItWithRenGsOwnIdentity() = runTest {
@@ -63,16 +228,577 @@ class RendererBasemapTileTest {
                 "a rendered tile carries RenG's own canonical identity, not the engine's request key",
             )
             assertEquals(ResourceKind.BASEMAP_TILE, rendered.key.kind)
-            // Not merely non-empty: the cheapest way to claim these are encoded pixels rather than any
-            // non-empty byte array is the 8-byte signature the PNG format mandates.
-            assertContentEquals(
-                PNG_SIGNATURE,
-                rendered.pngBytes.take(PNG_SIGNATURE.size).toByteArray(),
-                "the engine produced encoded ground pixels",
+            // Not merely non-empty: raw pixels are claimed by their own arithmetic rather than by a
+            // signature, because they have none. Tight packing at the engine's output size is the
+            // whole contract `uploadPremultipliedTexture` relies on, so it is what is asserted.
+            val pixels = assertIs<BasemapTilePixels.Raw>(
+                rendered.pixels,
+                "the default budget admits raw pixels for a four-tile frame (ADR 0044)",
+            )
+            assertEquals(TILE_OUTPUT_SIZE.width, pixels.widthPx, "a tile is square at the engine's output size")
+            assertEquals(TILE_OUTPUT_SIZE.height, pixels.heightPx, "a tile is square at the engine's output size")
+            assertEquals(
+                pixels.widthPx * pixels.heightPx * 4,
+                pixels.rgba.size,
+                "raw pixels are tightly packed RGBA8 with no row padding",
             )
             assertTrue(rendered.contentKey.isNotEmpty(), "Rentile's own content key travels beside them")
             assertEquals(emptyList(), rendered.substitutions, "tile substitution stays disabled")
         }
+    }
+
+    /**
+     * A budget too small for one tile sends the whole frame down the encoded path (ADR 0044).
+     *
+     * One byte, not zero, and that is the point of the number: zero would also be satisfied by an
+     * implementation that never takes raw pixels at all, so it cannot tell a working budget from an
+     * unwired one. One byte is under a tile and over nothing, so only an implementation that actually
+     * compares outstanding-plus-requested against the limit produces this result. The companion test
+     * above, on the same fixture with the default limit, is the other half: together they show the
+     * decision moving with the budget rather than being fixed either way.
+     *
+     * The frame still draws. Falling back is the behaviour of every release before ADR 0044, so the
+     * assertion is that the tiles arrive encoded, not that anything degraded.
+     */
+    @Test
+    fun aBudgetBelowOneTileFallsBackToEncodedPixelsAndStillRendersEveryTile() = runTest {
+        val renderer = styleRenderer(
+            TileTransport(),
+            resourceLimits = ResourceLimits(maximumInFlightRawBasemapTileBytes = 1L),
+        ) as RenGRenderer
+
+        val frame = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+
+        assertEquals(4, frame.basemapTiles.size, "the budget changes the form, never which tiles are drawn")
+        frame.basemapTiles.forEach { rendered ->
+            assertIs<BasemapTilePixels.Encoded>(
+                rendered.pixels,
+                "a budget under one tile cannot admit raw pixels",
+            )
+        }
+        assertEquals(0L, frame.rawTileBytes, "an encoded frame holds no raw bytes against the budget")
+    }
+
+    /**
+     * A camera that has not moved since its tiles were drawn rasterises nothing (ADR 0046).
+     *
+     * The draw between the two preparations is the whole point and not scaffolding: a tile becomes
+     * resident when its texture is uploaded, which is a draw-time act, so a second `prepare()` with
+     * no draw in between would legitimately still rasterise. This is what makes the assertion about
+     * residency rather than about repeating a call.
+     *
+     * It asserts the ground is still placed as well as that nothing was rendered, because those two
+     * used to be the same condition — `groundInstances` returned empty whenever nothing was rendered.
+     * Separating them is what lets a frame draw ground it did not rasterise, and a test that checked
+     * only the first half would pass on a build that drew no ground at all.
+     */
+    @Test
+    fun aPreparationsPriorityReachesTheEngineRatherThanStoppingAtTheParameter() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+        assertNull(renderer.lastForwardedRenderPriority, "nothing rendered yet")
+
+        renderer.prepare(basemapPlan(frameIndex = 0L), priority = RenGRenderPriority.URGENT).close()
+
+        // ADR 0053. The engine consumes a priority into its own gate and reports it nowhere, so this
+        // is the only point where "the consumer's choice reached the engine call" is observable at
+        // all -- and an argument quietly dropped anywhere along the thread-through would default to
+        // NORMAL for every frame, forever, with every other test still green.
+        assertEquals(RenGRenderPriority.URGENT, renderer.lastForwardedRenderPriority)
+
+        // And the default is still the lane every release before this one used.
+        renderer.prepare(basemapPlan(frameIndex = 1L)).close()
+        assertEquals(RenGRenderPriority.NORMAL, renderer.lastForwardedRenderPriority)
+    }
+
+    @Test
+    fun aBatchsPriorityAppliesToEveryFrameInIt() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L)),
+            priority = RenGRenderPriority.URGENT,
+        ).forEach { it.close() }
+
+        // The second frame rasterises tiles of its own (ADR 0052 leaves it two), so this reads the
+        // priority of a render the batch's *last* frame caused, not a leftover from its first.
+        assertEquals(RenGRenderPriority.URGENT, renderer.lastForwardedRenderPriority)
+    }
+
+    @Test
+    fun aBudgetedFrameDrawsWhatItDidNotRasteriseFromAnAncestorAndSaysSo() = runTest {
+        val sink = RecordingProvisionalSink()
+        // Zoom out first so a coarse tile is resident and can serve as an ancestor, then zoom in
+        // under a budget of zero: every tile at the new LOD has somewhere to come from, and none of
+        // them is rasterised.
+        val renderer = styleRenderer(
+            transport = TileTransport(),
+            resourceLimits = ResourceLimits(maximumTilesRasterisedPerFrame = 0),
+            diagnosticSink = sink,
+        ) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val coarse = renderer.prepare(coarseBasemapPlan(frameIndex = 0L))
+        renderer.draw(coarse, target)
+        coarse.close()
+        val rasterisedForTheCoarseFrame = renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED]
+
+        val fine = renderer.prepare(basemapPlan(frameIndex = 1L))
+        renderer.draw(fine, target)
+
+        // ADR 0057: the budget bounds the work a frame ADDS. Nothing new was rasterised, and the
+        // frame still drew -- a frame that cannot draw its ground is not an improvement on a slow one.
+        assertEquals(
+            rasterisedForTheCoarseFrame,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "a budget of zero must rasterise nothing that has an ancestor",
+        )
+        val reported = sink.provisional.singleOrNull()
+        assertNotNull(reported, "a frame that presented an ancestor must say so: ${sink.provisional}")
+        assertTrue(reported.actual!! > 0L, "and must name how many tiles it did that for")
+        fine.close()
+    }
+
+    @Test
+    fun anUnbudgetedFrameSaysNothingAndRasterisesEverything() = runTest {
+        val sink = RecordingProvisionalSink()
+        // The default is no limit, and with no limit nothing about ADR 0057 happens at all -- which
+        // is the promise that lets it ship without changing anyone's frames.
+        val renderer = styleRenderer(TileTransport(), diagnosticSink = sink) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val frame = renderer.prepare(basemapPlan(frameIndex = 0L))
+        renderer.draw(frame, target)
+
+        assertEquals(4L, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
+        assertEquals(emptyList(), sink.provisional, "an unbudgeted frame presents nothing provisional")
+        frame.close()
+    }
+
+    // ---- ADR 0057, "A tile that could not be downloaded" -------------------------------------------
+    //
+    // One tile of the fine frame's four, `(lod 4, x 2, y 11)`, cannot be fetched: its transport throws,
+    // which is what a phone with no network produces. The coarse frame's LOD-2 tile over it is resident.
+    //
+    // The recording binding rasterises nothing, so "the tile's region is the ancestor's pixels" is
+    // asserted as the relationship the GPU would turn into those pixels: the tile's ground draw binds a
+    // texture the coarse frame uploaded and samples it through a window that is not the identity, while
+    // every other tile binds a texture of its own through the identity. GroundPipelineTest pins what the
+    // window does to the uv, and GroundTileWindowTest the window's arithmetic.
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedIsDrawnFromItsResidentAncestorWhenTheConsumerOptsIn() = runTest {
+        val sink = RecordingProvisionalSink()
+        val transport = OfflineTileTransport(FAILING_TILE_URL)
+        val binding = windowRecordingBinding()
+        val renderer = failedTileRenderer(transport, presentFailedTiles = true, sink = sink, binding = binding)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val coarseTextures = drawAndCollect(renderer, binding, target, coarseBasemapPlan(frameIndex = 0L))
+            .mapTo(HashSet()) { it.texture }
+        assertTrue(coarseTextures.isNotEmpty(), "the coarse frame must draw ground, or nothing below means anything")
+
+        val fine = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        assertEquals(
+            listOf(
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 1),
+                CanonicalBasemapTile(lod = 4, tileY = 10, canonicalX = 2),
+                CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 1),
+            ),
+            fine.basemapTiles.map { it.tile }.sortedWith(compareBy({ it.tileY }, { it.canonicalX })),
+            "every tile but the one that failed is rasterised; the failed one is left out, not faked",
+        )
+        // ADR 0044: the reservation was taken before the failure removed a tile, and must have been
+        // given back down to exactly the three tiles' raw pixels the frame now carries.
+        assertEquals(3L * TILE_OUTPUT_SIZE.width * TILE_OUTPUT_SIZE.height * 4L, fine.rawTileBytes)
+        assertEquals(fine.rawTileBytes, renderer.inFlightRawTileBytes, "the reservation covers exactly those pixels")
+        binding.log.clear()
+        renderer.draw(fine, target)
+        val draws = groundDraws(binding.log)
+        fine.close()
+        assertEquals(0L, renderer.inFlightRawTileBytes, "and closing the frame returns all of it")
+
+        val provisional = draws.filter { it.window != IDENTITY_WINDOW }
+        val exact = draws.filter { it.window == IDENTITY_WINDOW }
+        assertEquals(1, provisional.map { it.window }.distinct().size, "exactly one tile is provisional: $draws")
+        assertTrue(
+            provisional.all { it.texture in coarseTextures },
+            "the failed tile is drawn from a texture the coarse frame uploaded, its ancestor's: $draws",
+        )
+        assertEquals(
+            0.25f,
+            provisional.first().window[0],
+            "the nearest resident ancestor is two levels up, so the window is a quarter of it",
+        )
+        assertEquals(3, exact.map { it.texture }.distinct().size, "the three other tiles draw their own textures")
+        assertTrue(exact.none { it.texture in coarseTextures }, "and none of them borrows the ancestor: $draws")
+
+        val reported = assertNotNull(sink.provisional.singleOrNull(), "the frame must say so: ${sink.provisional}")
+        assertEquals(1L, reported.actual, "for exactly the one tile that failed")
+        assertEquals(1L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+        // The second request is free: the three tiles that arrived were latched by this invocation's
+        // firewall, so the consumer is asked for each once, and the failed url is not asked again.
+        val fineUrls = transport.requestedUrls().filter { it.startsWith("https://tiles.example/r/4/") }
+        assertEquals(fineUrls.distinct(), fineUrls, "no tile url is fetched twice within one prepare: $fineUrls")
+        assertTrue(FAILING_TILE_URL in fineUrls, "the fixture must actually have failed the tile it names")
+    }
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedStillFailsTheFrameByDefault() = runTest {
+        val sink = RecordingProvisionalSink()
+        val renderer = failedTileRenderer(
+            OfflineTileTransport(FAILING_TILE_URL),
+            presentFailedTiles = false,
+            sink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val coarse = renderer.prepare(coarseBasemapPlan(frameIndex = 0L))
+        renderer.draw(coarse, target)
+        coarse.close()
+
+        // Off is every earlier release: the ancestor is resident and the frame fails anyway, because an
+        // export must never encode a frame with a hole it was not told about.
+        val failure = assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 1L)) }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failure.stage)
+        assertEquals(ResourceClass.BASEMAP_RASTER_TILE, failure.diagnostics.single().resourceClass)
+        assertEquals(emptyList(), sink.provisional)
+        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aTileThatCouldNotBeDownloadedAndHasNoResidentAncestorFailsExactlyAsItDoesWithTheOptionOff() = runTest {
+        // Nothing drawn first, so nothing is resident: this is zooming into ground never shown before.
+        val on = failedTileRenderer(OfflineTileTransport(FAILING_TILE_URL), presentFailedTiles = true)
+        val off = failedTileRenderer(OfflineTileTransport(FAILING_TILE_URL), presentFailedTiles = false)
+
+        val withOption = assertFailsWith<RenGException> { on.prepare(basemapPlan(frameIndex = 0L)) }
+        val without = assertFailsWith<RenGException> { off.prepare(basemapPlan(frameIndex = 0L)) }
+
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, withOption.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, withOption.stage)
+        assertEquals(without.code, withOption.code, "the option changes nothing when there is no ancestor")
+        assertEquals(without.stage, withOption.stage)
+        assertEquals(without.diagnostics, withOption.diagnostics, "down to the resource the failure names")
+        assertEquals(0L, on.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aTileDrawnFromItsAncestorIsReplacedByItsOwnOnceItDownloads() = runTest {
+        val sink = RecordingProvisionalSink()
+        val transport = OfflineTileTransport(FAILING_TILE_URL)
+        val binding = windowRecordingBinding()
+        val renderer = failedTileRenderer(transport, presentFailedTiles = true, sink = sink, binding = binding)
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val coarseTextures = drawAndCollect(renderer, binding, target, coarseBasemapPlan(frameIndex = 0L))
+            .mapTo(HashSet()) { it.texture }
+        val whileOffline = drawAndCollect(renderer, binding, target, basemapPlan(frameIndex = 1L))
+        assertTrue(
+            whileOffline.any { it.window != IDENTITY_WINDOW },
+            "the precondition: while offline, one tile is provisional: $whileOffline",
+        )
+
+        transport.failing = false
+        val refined = renderer.prepare(basemapPlan(frameIndex = 2L)) as RenGPreparedFrame
+        // ADR 0057's refinement, unchanged: the tile drawn provisionally was never resident, so the very
+        // next prepare asks for it, and it is the only tile that prepare has to rasterise.
+        assertEquals(
+            listOf(CanonicalBasemapTile(lod = 4, tileY = 11, canonicalX = 2)),
+            refined.basemapTiles.map { it.tile },
+            "the tile that failed is asked for again and rasterised; the other three are resident",
+        )
+        binding.log.clear()
+        renderer.draw(refined, target)
+        val draws = groundDraws(binding.log)
+        refined.close()
+
+        assertTrue(draws.isNotEmpty(), "the refined frame draws ground")
+        assertTrue(draws.all { it.window == IDENTITY_WINDOW }, "no tile is provisional any more: $draws")
+        assertTrue(draws.none { it.texture in coarseTextures }, "and none borrows the ancestor: $draws")
+        assertEquals(1, sink.provisional.size, "only the offline frame said it was provisional")
+        assertEquals(1L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aDemTileThatCouldNotBeDownloadedStillFailsTheFrameWithTheOptionOn() = runTest {
+        // A hillshade layer's raster-dem source: elevation, not colour, so it is never presentable. The
+        // coarse frame's DEM tiles are LOD 2, so it draws and leaves its colour tile resident first.
+        val sink = RecordingProvisionalSink()
+        val renderer = failedTileRenderer(
+            OfflineTileTransport(FAILING_DEM_TILE_URL, styleJson = DEM_HILLSHADE_STYLE),
+            presentFailedTiles = true,
+            sink = sink,
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        val coarse = renderer.prepare(coarseBasemapPlan(frameIndex = 0L))
+        renderer.draw(coarse, target)
+        coarse.close()
+
+        val failure = assertFailsWith<RenGException> { renderer.prepare(basemapPlan(frameIndex = 1L)) }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.RESOURCE_LOOKUP, failure.stage)
+        assertEquals(
+            ResourceClass.BASEMAP_DEM_TILE,
+            failure.diagnostics.single().resourceClass,
+            "the failure must be the DEM's, or this case proves nothing about DEMs",
+        )
+        assertEquals(emptyList(), sink.provisional)
+        assertEquals(0L, renderer.queryMetrics()[RenGMetricName.TILES_PRESENTED_AFTER_FAILURE])
+    }
+
+    @Test
+    fun aBatchRasterisesEachDistinctTileOnceHoweverManyFramesShowIt() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        val frames = renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), basemapPlan(frameIndex = 1L), basemapPlan(frameIndex = 2L)),
+        )
+
+        // ADR 0052. Twelve renders for four distinct tiles before: ADR 0046's residency filter cannot
+        // see inside a batch, because nothing in a batch has been drawn.
+        assertEquals(
+            4L,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "three frames over one camera must rasterise four tiles, not twelve",
+        )
+
+        // And every frame still carries all four, rather than pointing at the frame that rendered
+        // them -- which is what makes the draw order below free.
+        frames.forEach { frame ->
+            assertEquals(4, (frame as RenGPreparedFrame).basemapTiles.size, "every frame carries its own ground")
+        }
+        // The same pixels, not copies: the batch holds one tile, three frames reference it.
+        val first = (frames[0] as RenGPreparedFrame).basemapTiles.associateBy { it.key }
+        (frames[2] as RenGPreparedFrame).basemapTiles.forEach { tile ->
+            assertSame(first.getValue(tile.key), tile, "a memo hit must share the tile, not copy it")
+        }
+        frames.forEach { it.close() }
+    }
+
+    @Test
+    fun aBatchsFramesDrawInAnyOrderAndTheFirstDrawnUploadsTheSharedTile() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val frames = renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), basemapPlan(frameIndex = 1L)),
+        )
+
+        // Deliberately out of order, and the first frame is closed without ever being drawn. A design
+        // where a later frame pointed at the tile an earlier one rendered would answer
+        // RESOURCE_UNAVAILABLE here for a tile the batch definitely rendered (ADR 0052).
+        frames[0].close()
+        renderer.draw(frames[1], target)
+        frames[1].close()
+
+        // Still four: drawing must not have sent anything back to the engine.
+        assertEquals(4L, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
+    }
+
+    @Test
+    fun aFrameThatPartlyOverlapsTheOneBeforeItRendersOnlyItsNewTiles() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        // Two cameras one tile apart at LOD 4, so the second frame shares half its tiles with the
+        // first and brings half of its own. This is the realistic batch -- a moving camera -- and it
+        // is the only shape that reaches the mixed return, where a frame carries both remembered and
+        // freshly rendered tiles.
+        val frames = renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L)),
+        )
+
+        assertEquals(
+            6L,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "four tiles for the first frame and only the two new ones for the second",
+        )
+        assertEquals(
+            4,
+            (frames[1] as RenGPreparedFrame).basemapTiles.size,
+            "the overlapping frame must carry all four of its tiles, remembered ones included",
+        )
+        frames.forEach { it.close() }
+    }
+
+    @Test
+    fun aBatchsMemoDoesNotSurviveIntoTheNextPreparation() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), basemapPlan(frameIndex = 1L)),
+        ).forEach { it.close() }
+        assertEquals(4L, renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED])
+
+        // Nothing was drawn, so no texture is resident and ADR 0046's filter has nothing to say. A
+        // memo left standing past its batch would answer instead -- and would be an unbounded store
+        // of raw pixels beside the two budgets that are supposed to govern them (ADR 0052).
+        renderer.prepare(basemapPlan(frameIndex = 2L)).close()
+
+        assertEquals(
+            8L,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "a preparation after the batch must not reuse the batch's rendered pixels",
+        )
+    }
+
+    @Test
+    fun aSinglePreparationKeepsNoMemoBetweenFrames() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        // Outside a batch there is a draw between one frame and the next, which is what makes ADR
+        // 0046's residency filter sufficient -- so a prepare that is never drawn rasterises again,
+        // and the memo must not be quietly doing renderer-lifetime work it is not budgeted for.
+        renderer.prepare(basemapPlan(frameIndex = 0L)).close()
+        renderer.prepare(basemapPlan(frameIndex = 1L)).close()
+
+        assertEquals(
+            8L,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "two undrawn preparations outside a batch each rasterise their own tiles",
+        )
+    }
+
+    @Test
+    fun aBatchAsksTheConsumerForEachResourceOnceRatherThanOncePerFrame() = runTest {
+        val transport = TileTransport()
+        val renderer = styleRenderer(transport)
+
+        renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), basemapPlan(frameIndex = 1L), basemapPlan(frameIndex = 2L)),
+        )
+
+        val requested = transport.requestedUrls()
+        // ADR 0051. One registry per frame cost 17 exchanges for these same seven resources -- about
+        // five more for every frame added. One registry for the batch costs nine, about one more per
+        // frame, and the seven distinct urls are unchanged: nothing new is fetched, the repeats are
+        // gone.
+        assertEquals(7, requested.toSet().size, "the batch must fetch no resource it did not need")
+        assertEquals(9, requested.size, "each extra frame must not re-fetch what the batch already has")
+
+        // The nine is four tiles and two sprite members exactly once each, plus the style three
+        // times. A style is acquired on the resource driver's own path rather than through the
+        // firewall registry, and this fixture's style declares no freshUntilEpochMillis, so every
+        // frame revalidates it -- a property of the fixture, asserted here so that a change to it is
+        // read as a change and not as this ADR regressing.
+        assertEquals(
+            3,
+            requested.count { it == STYLE_URL },
+            "a style with no declared freshness is revalidated once per frame",
+        )
+    }
+
+    @Test
+    fun aRasterisingPreparationReportsTheEnginesCountersAndACloseForgetsThem() = runTest {
+        val renderer = styleRenderer(TileTransport())
+        assertEquals(emptyMap(), renderer.queryMetrics().counters, "nothing has happened yet")
+
+        renderer.prepare(basemapPlan(frameIndex = 0L))
+
+        val metrics = renderer.queryMetrics()
+        // Before ADR 0049 this was unconditionally empty: RenG installed MetricsSink.None and threw
+        // every counter the engine produced away. This case lives here rather than beside the other
+        // metric tests for the reason this whole suite is native-only -- androidHostTest resolves
+        // skiko without its native library, so no renderer-level basemap preparation completes there.
+        assertEquals(4L, metrics[RenGMetricName.ENGINE_TILES_RENDERED], "four tiles: ${metrics.counters}")
+        assertTrue(metrics[RenGMetricName.ENGINE_TILE_DRAW_NANOS] > 0L, "drawing took no time at all")
+        assertEquals(
+            0L,
+            metrics[RenGMetricName.ENGINE_METRICS_UNRECOGNISED],
+            "this engine emitted a metric RenG has no name for: ${metrics.counters}",
+        )
+        // The outside view of ADR 0044: a frame taking the raw-pixel path encodes no PNG, so these
+        // two stay at zero while four tiles are rasterised. Nothing else in the tree can observe it.
+        assertEquals(0L, metrics[RenGMetricName.ENGINE_TILE_PNG_BYTES])
+        assertEquals(0L, metrics[RenGMetricName.ENGINE_TILE_PNG_ENCODE_NANOS])
+
+        renderer.close()
+
+        // Empty rather than the final totals: a monotonic series that simply stopped moving reads as
+        // a quiet renderer, which a closed one is not.
+        assertEquals(emptyMap(), renderer.queryMetrics().counters)
+    }
+
+    @Test
+    fun aCameraWhoseTilesAreAlreadyDrawnRasterisesNothingAndStillPlacesItsGround() = runTest {
+        val transport = TileTransport()
+        val renderer = styleRenderer(transport) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L)) as RenGPreparedFrame
+        assertEquals(4, first.basemapTiles.size, "the first frame rasterises every tile it selected")
+        val firstGroundInstanceCount = first.groundInstances.size
+        renderer.draw(first, target)
+        first.close()
+
+        val second = renderer.prepare(basemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+
+        assertEquals(
+            emptyList(),
+            second.basemapTiles,
+            "every tile's texture is resident, so the engine is asked for none of them",
+        )
+        assertEquals(
+            firstGroundInstanceCount,
+            second.groundInstances.size,
+            "the same ground is still placed from the textures already on the GPU",
+        )
+        second.close()
+    }
+
+    /**
+     * A tile that was resident when a `prepare()` selected it, and that an overlapping draw evicts
+     * before that `prepare()` places its ground, is the draw's failure to report -- typed
+     * RESOURCE_UNAVAILABLE at DRAW -- and never an `IllegalStateException` out of `prepare()`.
+     *
+     * Measured on a OnePlus 12 on 2026-10-08: an exporter preparing frame N+1 while frame N drew (which
+     * CONTEXT.md allows) failed at the same frame on 3 of 3 runs, because `groundInstances` re-asked
+     * the registry about a tile `renderBasemapTiles` had skipped, unleased, as resident.
+     *
+     * **The overlap is real, not simulated.** The draw runs inside this `prepare()`, on the test thread
+     * that owns the context, from the transport fetch of a tile the frame is missing -- which the engine
+     * makes strictly after selection and strictly before `groundInstances`. Cameras, at LOD 4:
+     * `basemapPlan` covers x 1-2, `shiftedBasemapPlan` x 2-3, and [westBasemapPlan] x 0-1. The budget is
+     * five 1 MiB tiles: the first frame leaves four resident; drawing the shifted frame leases x 2 and
+     * uploads x 3, six tiles, so releasing its leases evicts the least recently used unleased ones --
+     * the x 1 pair, exactly the tiles the west frame skipped as resident a moment earlier.
+     *
+     * Each step is asserted rather than assumed, so a fixture that stopped producing the race fails
+     * here instead of passing: the shifted and west frames each render only their two new tiles (the
+     * others were resident at selection), the hook fired, and the west frame's draw fails -- which it
+     * can only do if a tile it was promised at selection is gone. Without the fix, the west `prepare()`
+     * itself throws.
+     */
+    @Test
+    fun aTileEvictedByAnOverlappingDrawAfterSelectionFailsTheDrawTypedRatherThanThePreparation() = runTest {
+        val testThread = requireNotNull(coroutineContext[ContinuationInterceptor])
+        val transport = DrawDuringFetchTransport(WEST_ONLY_TILE_URL_PREFIX)
+        val renderer = styleRenderer(
+            transport,
+            resourceLimits = ResourceLimits(maximumResidentGpuTextureBytes = 5L * TILE_TEXTURE_BYTES),
+        ) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val first = renderer.prepare(basemapPlan(frameIndex = 0L))
+        renderer.draw(first, target)
+        first.close()
+
+        val shifted = renderer.prepare(shiftedBasemapPlan(frameIndex = 1L)) as RenGPreparedFrame
+        assertEquals(2, shifted.basemapTiles.size, "the shifted frame's x 2 pair is resident, so only x 3 renders")
+
+        transport.duringFetch = {
+            withContext(testThread) { renderer.draw(shifted, target) }
+        }
+        val west = renderer.prepare(westBasemapPlan(frameIndex = 2L)) as RenGPreparedFrame
+
+        assertTrue(transport.fired, "the overlapping draw must have run inside the west frame's preparation")
+        assertEquals(2, west.basemapTiles.size, "the west frame's x 1 pair was resident at selection, so only x 0 renders")
+        val failure = assertFailsWith<RenGException>("a tile evicted since selection must fail the draw") {
+            renderer.draw(west, target)
+        }
+        assertEquals(RenGErrorCode.RESOURCE_UNAVAILABLE, failure.code)
+        assertEquals(PipelineStage.DRAW, failure.stage)
+        west.close()
+        shifted.close()
     }
 
     /**
@@ -437,7 +1163,7 @@ class RendererBasemapTileTest {
     }
 
     @Test
-    fun aFrameThatDrawsNeitherBasemapNorLabelsRendersNoGroundAndAcquiresNothing() = runTest {
+    fun aFirstFrameThatDrawsNeitherBasemapNorLabelsStillCompilesTheStyleSet() = runTest {
         val transport = TileTransport()
         val renderer = styleRenderer(transport)
 
@@ -451,7 +1177,16 @@ class RendererBasemapTileTest {
         ) as RenGPreparedFrame
 
         assertEquals(emptyList(), frame.basemapTiles, "neither switch renders no ground")
-        assertEquals(emptyList(), transport.requestedUrls(), "and acquires nothing at all")
+        assertEquals(
+            setOf(STYLE_URL, SPRITE_JSON_URL, SPRITE_IMAGE_URL),
+            transport.requestedUrls().toSet(),
+            "ADR 0086 compiles the configured Style Set on the first foreground preparation",
+        )
+        assertEquals(
+            emptyList(),
+            transport.requestedUrls().filter { it.startsWith("https://tiles.example/") },
+            "compiling the Style Set does not rasterise ground while both draw switches are off",
+        )
     }
 
     /**
@@ -535,6 +1270,204 @@ internal val DEM_HILLSHADE_STYLE: String =
         """{"id":"h","type":"hillshade","source":"d"}]}"""
 
 /**
+ * [styleCamera] moved one LOD-4 tile east: `unwrappedLongitude` -135 places the camera on the x = 2.0
+ * tile boundary, and -112.5 places it on x = 3.0, so the two frames share their y range and half
+ * their x range.
+ */
+private fun shiftedBasemapPlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(
+        latitude = -55.0,
+        unwrappedLongitude = -112.5,
+        zoom = 4.0,
+        bearing = 0.0,
+        pitch = 0.0,
+    ),
+    drawBasemap = true,
+)
+
+/**
+ * [styleCamera] moved one LOD-4 tile west: -157.5 is the x = 1.0 boundary, so this frame selects x 0
+ * and x 1 -- sharing the x 1 pair with [basemapPlan] and nothing with [shiftedBasemapPlan].
+ */
+private fun westBasemapPlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(
+        latitude = -55.0,
+        unwrappedLongitude = -157.5,
+        zoom = 4.0,
+        bearing = 0.0,
+        pitch = 0.0,
+    ),
+    drawBasemap = true,
+)
+
+/** The colour tiles only [westBasemapPlan] selects, `(lod 4, x 0)`, under [STYLE_TILE_TEMPLATE]. */
+private const val WEST_ONLY_TILE_URL_PREFIX: String = "https://tiles.example/r/4/0/"
+
+/** One [TILE_OUTPUT_SIZE] tile as an RGBA8 texture, which is what the residency budget is charged. */
+private const val TILE_TEXTURE_BYTES: Long = 512L * 512L * 4L
+
+/**
+ * [TileTransport] that runs [duringFetch] once, the first time a url under [triggerPrefix] is fetched,
+ * before answering it. The engine fetches a frame's missing tiles after `renderBasemapTiles` has
+ * selected which tiles are resident and before `prepare()` places its ground, so this is a seam in
+ * exactly the window the overlapping-draw race lives in, reached through the public adapter alone.
+ */
+private class DrawDuringFetchTransport(private val triggerPrefix: String) : Transport {
+    private val delegate = TileTransport()
+    private val mutex = Mutex()
+
+    /** Set by the test on its own thread, taken on the engine's. */
+    @Volatile
+    var duringFetch: (suspend () -> Unit)? = null
+
+    @Volatile
+    var fired: Boolean = false
+        private set
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        if (request.locator.value.startsWith(triggerPrefix)) {
+            mutex.withLock {
+                val hook = duringFetch
+                if (hook != null) {
+                    duringFetch = null
+                    hook()
+                    fired = true
+                }
+            }
+        }
+        return delegate.execute(request)
+    }
+}
+
+/** A camera two LODs out from [styleCamera], so its tiles are ancestors of that camera's. */
+private fun coarseBasemapPlan(frameIndex: Long): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(
+        latitude = -55.0,
+        unwrappedLongitude = -135.0,
+        zoom = 2.0,
+        bearing = 0.0,
+        pitch = 0.0,
+    ),
+    drawBasemap = true,
+)
+
+/** Keeps only the one code ADR 0057 adds, so an unrelated warning cannot satisfy these cases. */
+private class RecordingProvisionalSink : DiagnosticSink {
+    private val recorded = mutableListOf<Diagnostic>()
+
+    val provisional: List<Diagnostic>
+        get() = recorded.filter { it.code == DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY }
+
+    override fun emit(diagnostic: Diagnostic) {
+        recorded += diagnostic
+    }
+}
+
+/** The colour tile of `(lod 4, x 2, y 11)`, one of [basemapPlan]'s four, which [OfflineTileTransport] fails. */
+private const val FAILING_TILE_URL: String = "https://tiles.example/r/4/2/11.png"
+
+/** One of the sixteen DEM tiles [DEM_HILLSHADE_STYLE]'s hillshade layer needs for [basemapPlan]'s frame. */
+private const val FAILING_DEM_TILE_URL: String = "https://dem.example/4/2/11.png"
+
+/** Any location the recording binding does not hand to another name, so its writes can be told apart. */
+private const val FAILED_TILE_COLOUR_WINDOW_LOCATION: Int = 4057
+
+/** `GroundTileWindow.WHOLE` as the uniform's three floats: a tile drawn from its own texture. */
+private val IDENTITY_WINDOW: List<Float> = listOf(1.0f, 0.0f, 0.0f)
+
+/**
+ * [TileTransport] with one url that fails while [failing] is true, the way a phone with no network
+ * fails it: the call throws rather than answering a status. Every url is recorded, failed or not.
+ */
+private class OfflineTileTransport(
+    private val failingUrl: String,
+    styleJson: String = STYLE_WITH_SPRITE_JSON,
+) : Transport {
+    private val delegate = TileTransport(styleJson)
+    private val recorded = ConcurrentRecorder<String>()
+
+    /** Written by the test between preparations, read on the engine's own threads. */
+    @Volatile
+    var failing: Boolean = true
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        if (failing && url == failingUrl) throw IllegalStateException("offline")
+        return delegate.execute(request)
+    }
+}
+
+/** [styleGlBinding] with the ground's colour-window uniform declared, so each tile's window is logged. */
+private fun windowRecordingBinding(): RecordingGlBinding =
+    styleGlBinding().withDeclaredNames(GROUND_COLOUR_WINDOW_UNIFORM_NAME to FAILED_TILE_COLOUR_WINDOW_LOCATION)
+
+private fun failedTileRenderer(
+    transport: Transport,
+    presentFailedTiles: Boolean,
+    sink: DiagnosticSink = DiagnosticSink { },
+    binding: RecordingGlBinding = styleGlBinding(),
+): RenGRenderer = createRenderer(
+    RendererConfiguration(
+        outputPixelSize = OutputPixelSize(64, 64),
+        transport = transport,
+        store = RecordingStyleStore(),
+        basemapStyle = ResourceLocator(STYLE_URL),
+        diagnosticSink = sink,
+        presentFailedTilesProvisionally = presentFailedTiles,
+    ),
+    binding,
+    RenderContextProbe { RenderContextIdentity(1L) },
+) as RenGRenderer
+
+/** One ground tile's draw: the texture it bound and the colour window it sampled that texture through. */
+private data class GroundDraw(val texture: Int, val window: List<Float>)
+
+/**
+ * The ground draws in [log], in order. A draw counts as a ground tile's only when the colour-window
+ * uniform was written since the previous draw, which the ground pipeline does for every tile, identity
+ * included, and nothing else does.
+ */
+private fun groundDraws(log: List<String>): List<GroundDraw> {
+    val windowPrefix = "uniform3f($FAILED_TILE_COLOUR_WINDOW_LOCATION,"
+    val bindPrefix = "bindTexture(0xDE1,"
+    var window: List<Float>? = null
+    var texture = 0
+    val draws = ArrayList<GroundDraw>()
+    for (entry in log) {
+        when {
+            entry.startsWith(windowPrefix) ->
+                window = entry.removePrefix(windowPrefix).removeSuffix(")").split(',').map(String::toFloat)
+            entry.startsWith(bindPrefix) -> texture = entry.removePrefix(bindPrefix).removeSuffix(")").toInt()
+            entry.startsWith("drawElements(") -> {
+                window?.let { draws += GroundDraw(texture, it) }
+                window = null
+            }
+        }
+    }
+    return draws
+}
+
+private suspend fun drawAndCollect(
+    renderer: RenGRenderer,
+    binding: RecordingGlBinding,
+    target: RenderTarget,
+    plan: FramePlan,
+): List<GroundDraw> {
+    val frame = renderer.prepare(plan)
+    binding.log.clear()
+    renderer.draw(frame, target)
+    val draws = groundDraws(binding.log)
+    frame.close()
+    return draws
+}
+
+/**
  * Serves a style document, the sprite pair, and a valid PNG for everything else, recording every url in
  * call order through the same concurrency-safe recorder `RendererBasemapStyleTest` uses — Rentile
  * fetches concurrently on `Dispatchers.Default`, so an unguarded list loses entries.
@@ -577,6 +1510,101 @@ internal class TileTransport(
     }
 }
 
+private const val SECOND_STYLE_URL: String = "https://styles.example/second.json"
+
+private fun blendedPlan(frameIndex: Long, camera: Camera): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = camera,
+    drawBasemap = true,
+    drawLabels = false,
+    basemap = BasemapSelection(
+        style = 0,
+        blend = BasemapBlend(toStyle = 1, mask = BlendMask.Uniform(amount = 0.5f)),
+    ),
+)
+
+private fun twoStyleRenderer(
+    transport: Transport,
+    store: Store = RecordingStyleStore(),
+    resourceLimits: ResourceLimits = ResourceLimits(),
+    diagnosticSink: DiagnosticSink = DiagnosticSink.None,
+    binding: RecordingGlBinding = styleGlBinding(),
+): RenGRenderer = createRenderer(
+    configuration = RendererConfiguration(
+        outputPixelSize = OutputPixelSize(width = 64, height = 64),
+        transport = transport,
+        store = store,
+        basemapStyle = ResourceLocator(value = STYLE_URL),
+        resourceLimits = resourceLimits,
+        diagnosticSink = diagnosticSink,
+        additionalBasemapStyles = listOf(ResourceLocator(value = SECOND_STYLE_URL)),
+    ),
+    binding = binding,
+    probe = RenderContextProbe { RenderContextIdentity(value = 1L) },
+) as RenGRenderer
+
+private class TwoStyleTileTransport : Transport {
+    private val recorded = ConcurrentRecorder<String>()
+
+    @Volatile
+    var primaryStyleJson: String = STYLE_WITH_SPRITE_JSON
+
+    @Volatile
+    var secondStyleJson: String = STYLE_WITH_SPRITE_JSON.replace(
+        STYLE_TILE_TEMPLATE,
+        "https://tiles.example/edited/{z}/{x}/{y}.png",
+    )
+
+    suspend fun requestedUrls(): List<String> = recorded.snapshot()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val url = request.locator.value
+        recorded.record(url)
+        return when (url) {
+            STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = primaryStyleJson.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SECOND_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = secondStyleJson.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            SPRITE_JSON_URL -> TransportResponse(
+                statusCode = 200,
+                body = "{}".encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            else -> TransportResponse(
+                statusCode = 200,
+                body = STYLE_TEST_PNG,
+                metadata = TransportResponseMetadata(contentType = "image/png"),
+            )
+        }
+    }
+}
+
+private class FailingUpdatedStyleWriteStore : Store {
+    private val mutex = Mutex()
+    private val entries = mutableMapOf<RawResourceKey, StoredRawResource>()
+
+    var failUpdatedStyleWrites: Boolean = false
+
+    override suspend fun read(key: RawResourceKey): StoredRawResource? = mutex.withLock { entries[key] }
+
+    override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
+        if (
+            failUpdatedStyleWrites &&
+            key.resourceClass == ResourceClass.BASEMAP_STYLE &&
+            resource.bytes.contentEquals(UPDATED_SECOND_STYLE_JSON.encodeToByteArray())
+        ) {
+            throw IllegalStateException("consumer store is out of space")
+        }
+        mutex.withLock { entries[key] = resource }
+    }
+}
+
 /** [STYLE_TILE_TEMPLATE] edited, so the same style url serves a genuinely different ground source. */
 internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/edited/{z}/{x}/{y}.png"
 
@@ -586,6 +1614,13 @@ internal const val EDITED_STYLE_TILE_TEMPLATE: String = "https://tiles.example/e
  */
 internal val EDITED_STYLE_WITH_SPRITE_JSON: String =
     STYLE_WITH_SPRITE_JSON.replace(STYLE_TILE_TEMPLATE, EDITED_STYLE_TILE_TEMPLATE)
+
+private const val UPDATED_SECOND_STYLE_TILE_TEMPLATE: String =
+    "https://tiles.example/second-updated/{z}/{x}/{y}.png"
+private val UPDATED_SECOND_STYLE_JSON: String = EDITED_STYLE_WITH_SPRITE_JSON.replace(
+    EDITED_STYLE_TILE_TEMPLATE,
+    UPDATED_SECOND_STYLE_TILE_TEMPLATE,
+)
 
 /**
  * A [TileTransport] whose style document is **edited between frames**: the first request for

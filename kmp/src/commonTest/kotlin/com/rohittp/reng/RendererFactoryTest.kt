@@ -25,6 +25,7 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.STICKER_TEXTURE_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.composeScreenModelViewProjection
+import com.rohittp.reng.internal.lifecycle.PreparedFrameFact
 import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.planning.SpatialOutcome
 import com.rohittp.reng.internal.planning.resolvePlacement
@@ -38,6 +39,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class RendererFactoryTest {
@@ -142,6 +144,47 @@ class RendererFactoryTest {
         val renderer = createRenderer(testConfiguration(transport = transport), validGlesBinding(), fixedProbe())
         renderer.prepare(FramePlan(frameIndex = 0L, camera = testCamera()))
         assertEquals(0, transport.executeCalls)
+    }
+
+    @Test
+    fun emptyAndNonIncreasingBatchesFailBeforeConsumerWork() = runTest {
+        val transport = CountingTransport()
+        val renderer = createRenderer(testConfiguration(transport = transport), validGlesBinding(), fixedProbe())
+
+        val empty = assertFailsWith<RenGException> { renderer.prepareBatch(emptyList()) }
+        assertEquals(RenGErrorCode.INVALID_VALUE, empty.code)
+        assertEquals(PipelineStage.FRAME_PLANNING, empty.stage)
+
+        val unordered = assertFailsWith<RenGException> {
+            renderer.prepareBatch(
+                listOf(
+                    FramePlan(frameIndex = 1L, camera = testCamera()),
+                    FramePlan(frameIndex = 1L, camera = testCamera()),
+                ),
+            )
+        }
+        assertEquals(RenGErrorCode.PREPARATION_ORDER_VIOLATION, unordered.code)
+        assertEquals(0, transport.executeCalls)
+    }
+
+    @Test
+    fun failedBatchRollsBackCompletedFramesAndHistory() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(
+                transport = Transport { TransportResponse(statusCode = 500, body = byteArrayOf()) },
+            ),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val first = FramePlan(frameIndex = 0L, camera = testCamera())
+        val failing = oneStickerPlan(frameIndex = 1L)
+
+        assertFailsWith<RenGException> { renderer.prepareBatch(listOf(first, failing)) }
+        assertEquals(0, outstandingLeases(renderer))
+
+        val retried = renderer.prepare(first)
+        assertEquals(0L, retried.frameIndex, "failed batch must not commit its first frame to history")
+        retried.close()
     }
 
     // ---- drawBasemap warn-and-degrade -------------------------------------------------------------
@@ -361,8 +404,8 @@ class RendererFactoryTest {
         assertEquals(
             INTERNAL_PIPELINE_PROGRAMS,
             created,
-            "setup compiles the composite, sticker, ground, displaced ground, label and icon " +
-                "programs: ${binding.log}",
+            "setup compiles the composite, sticker, backdrop, ground, displaced ground, label " +
+                "and icon programs: ${binding.log}",
         )
 
         renderer.close()
@@ -421,6 +464,106 @@ class RendererFactoryTest {
         )
     }
 
+    @Test
+    fun recreatedObjectsKeepFreeAndCloseGuardedByTheAdoptedContext() {
+        val original = RenderContextIdentity(1L)
+        val adopted = RenderContextIdentity(2L)
+        var currentContext: RenderContextIdentity? = original
+        val binding = validGlesBinding()
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            binding,
+            RenderContextProbe { currentContext },
+        )
+
+        renderer.notifyGpuObjectsGone()
+        currentContext = adopted
+        renderer.adoptCurrentRenderContext()
+        binding.log.clear()
+
+        currentContext = RenderContextIdentity(3L)
+        val freeFailure = assertFailsWith<RenGException> { renderer.freeResources() }
+        assertEquals(RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT, freeFailure.code)
+        assertTrue(binding.log.none { it.startsWith("delete") }, "a failed free must issue no GL delete")
+
+        currentContext = null
+        val closeFailure = assertFailsWith<RenGException> { renderer.close() }
+        assertEquals(RenGErrorCode.NO_CURRENT_RENDER_CONTEXT, closeFailure.code)
+        assertTrue(binding.log.none { it.startsWith("delete") }, "a failed close must issue no GL delete")
+
+        currentContext = adopted
+        renderer.close()
+        assertTrue(binding.log.any { it.startsWith("delete") }, "close on the adopted context must clean up")
+    }
+
+    @Test
+    fun failedRecreationRollsBackToContextFreeAwaitingAdoptionState() {
+        var currentContext: RenderContextIdentity? = RenderContextIdentity(1L)
+        val binding = validGlesBinding()
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            binding,
+            RenderContextProbe { currentContext },
+        )
+
+        renderer.notifyGpuObjectsGone()
+        binding.compileStatus = 0
+        val adoptionFailure = assertFailsWith<RenGException> { renderer.adoptCurrentRenderContext() }
+        assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, adoptionFailure.code)
+
+        val targetFailure = assertFailsWith<RenGException> {
+            renderer.mintRenderTarget(FramebufferName(0u))
+        }
+        assertEquals(RenGErrorCode.RENDER_CONTEXT_ADOPTION_REQUIRED, targetFailure.code)
+
+        currentContext = null
+        binding.log.clear()
+        renderer.close()
+        assertTrue(
+            binding.log.none { it.startsWith("delete") },
+            "failed recreation cleaned its partial objects and rollback left nothing for close to delete",
+        )
+    }
+
+    @Test
+    fun duplicateImagesInAFreedButOpenFrameShareOneBornRetiredUpload() = runTest {
+        val binding = validGlesBinding()
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            binding,
+            fixedProbe(),
+        )
+        val locator = ResourceLocator("https://example.invalid/shared.png")
+        val frame = renderer.prepare(
+            FramePlan(
+                frameIndex = 0L,
+                camera = testCamera(),
+                stickers = listOf(
+                    Sticker(testPlacement(), locator),
+                    Sticker(testPlacement(), locator),
+                ),
+            ),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        renderer.freeResources(ResourceSelector.ByClass(ResourceClass.STICKER_IMAGE))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        assertEquals(
+            1,
+            binding.log.count { it.startsWith("genTextures") },
+            "both occurrences must share the active born-retired allocation",
+        )
+        assertEquals(
+            1,
+            binding.log.count { it.startsWith("deleteTextures") },
+            "the shared retired allocation must be deleted when its final draw lease ends",
+        )
+        frame.close()
+        renderer.close()
+    }
+
     // ---- Task 9b item 2: a sticker's quad is sized from its own image's pixel dimensions ------------
 
     @Test
@@ -465,6 +608,77 @@ class RendererFactoryTest {
         }
         assertContentEquals(expected, actual)
         assertTrue(actual.toList() != unitQuad.toList(), "a real 2x2 image must not draw as a 1x1 unit quad")
+    }
+
+    // ---- Production review: the per-frame consumer pipeline limit is a typed failure -----------------
+
+    @Test
+    fun aPlanOverThePerFramePipelineLimitIsATypedResourceLimitFailure() = runTest {
+        val renderer = createRenderer(
+            RendererConfiguration(
+                outputPixelSize = OutputPixelSize(64, 64),
+                transport = Transport { error("test transport must not execute") },
+                store = NoOpStore(),
+                maximumConsumerPipelinesPerFrame = 1,
+            ),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        fun geometry(shaderPair: ShaderPair) = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = shaderPair,
+        )
+        val first = minimalGeometryShaderPair()
+        val second = ShaderPair(first.vertexSource, first.fragmentSource.replace("vec4(1.0)", "vec4(0.5)"))
+        val plan = FramePlan(
+            frameIndex = 0L,
+            camera = testCamera(),
+            geometries = listOf(geometry(first), geometry(second)),
+        )
+
+        // Before the allowlist named SHADER_PAIR here, building this exception threw
+        // IllegalArgumentException from RenGException's own context check instead.
+        val failure = assertFailsWith<RenGException> { renderer.prepare(plan) }
+        assertEquals(RenGErrorCode.RESOURCE_LIMIT_EXCEEDED, failure.code)
+        assertEquals(PipelineStage.FRAME_PLANNING, failure.stage)
+    }
+
+    /**
+     * A draw that fails while it has staged diagnostics still emits them, but a sink that throws while
+     * doing so must not replace the typed draw failure: the failure is thrown, carrying the sink's
+     * exception as suppressed. The sink used to run first and its exception escaped instead.
+     */
+    @Test
+    fun aThrowingSinkDoesNotMaskATypedDrawFailure() = runTest {
+        var sinkThrows = false
+        val binding = validGlesBinding()
+        val renderer = createRenderer(
+            testConfiguration(
+                diagnosticSink = DiagnosticSink { if (sinkThrows) throw IllegalStateException("sink refused") },
+            ),
+            binding,
+            fixedProbe(),
+        )
+        val geometry = Geometry(
+            topLeft = Vector3(1.0, -1.0, 10.0),
+            bottomRight = Vector3(-1.0, 1.0, 0.0),
+            shaderPair = minimalGeometryShaderPair(),
+        )
+        // drawBasemap with no style configured stages BASEMAP_NOT_CONFIGURED on the draw.
+        val frame = renderer.prepare(
+            FramePlan(frameIndex = 0L, camera = testCamera(), drawBasemap = true, geometries = listOf(geometry)),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.compileStatus = 0
+        sinkThrows = true
+
+        val failure = assertFailsWith<RenGException> { renderer.draw(frame, target) }
+        assertEquals(RenGErrorCode.SHADER_COMPILE_FAILED, failure.code)
+        assertTrue(
+            failure.suppressedExceptions.any { it.message == "sink refused" },
+            "the sink's exception travels as suppressed: ${failure.suppressedExceptions}",
+        )
     }
 
     // ---- Task 9b item 3: a live Geometry.uniforms mutation after prepare() must not reach draw() ----
@@ -584,7 +798,12 @@ class RendererFactoryTest {
         renderer.prepare(modelPlan(tracks = listOf(AnimationTrack(AnimationSelector.Index(0L), 0.25))))
 
         val failure = assertFailsWith<RenGException> {
-            renderer.prepare(modelPlan(tracks = listOf(AnimationTrack(AnimationSelector.Index(1L), 0.25))))
+            renderer.prepare(
+                modelPlan(
+                    frameIndex = 1L,
+                    tracks = listOf(AnimationTrack(AnimationSelector.Index(1L), 0.25)),
+                ),
+            )
         }
         assertEquals(RenGErrorCode.RESOURCE_PARSE_FAILED, failure.code)
         assertEquals(PipelineStage.RESOURCE_PARSING, failure.stage)
@@ -888,7 +1107,50 @@ class RendererFactoryTest {
     }
 
     @Test
-    fun queryResourcesStopsClaimingZeroGpuBytesOnceATextureIsResident() = runTest {
+    fun aStickersImageIsDecodedOncePerGenerationRatherThanOncePerFrame() = runTest {
+        val binding = validGlesBinding()
+        val transport = CountingTransport()
+        val renderer = createRenderer(testConfiguration(transport = transport), binding, fixedProbe())
+        fun plan(frameIndex: Long) = FramePlan(
+            frameIndex = frameIndex,
+            camera = testCamera(),
+            stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"))),
+        )
+
+        val first = renderer.prepare(plan(0L)) as RenGPreparedFrame
+        val selector = ResourceSelector.ByClass(ResourceClass.STICKER_IMAGE)
+
+        // ADR 0047 recorded decodedCpuBytes as "charged at zero throughout ... the field exists for a
+        // decode path this cache does not yet have". ADR 0059 is that path, so this is the first
+        // number this report has ever been able to give.
+        val decodedBytes = renderer.queryResources(selector).totals.decodedCpuBytes
+        assertTrue(decodedBytes > 0L, "the decode must be attached to its generation")
+
+        val second = renderer.prepare(plan(1L)) as RenGPreparedFrame
+
+        // The proof the second frame did not decode again: it is holding the first frame's pixels.
+        // Before ADR 0059 every frame after the first decoded the PNG and then discarded the result,
+        // because `cachedTexture` skips its upload lambda once a texture is registered -- measured at
+        // 14.3 ms for one 512x512 image on a native build.
+        assertSame(
+            first.stickers.single().image,
+            second.stickers.single().image,
+            "a second frame must reuse the decode, not repeat it",
+        )
+        assertEquals(
+            1,
+            renderer.queryResources(selector).entries.single().residentGenerationCount,
+            "and must re-lease the generation rather than install a byte-identical new one",
+        )
+        assertEquals(
+            decodedBytes,
+            renderer.queryResources(selector).totals.decodedCpuBytes,
+            "and must not charge the budget twice for one image",
+        )
+    }
+
+    @Test
+    fun queryResourcesReportsExactGpuBytesOnceATextureIsResident() = runTest {
         val binding = validGlesBinding()
         val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
         val plan = FramePlan(
@@ -907,23 +1169,20 @@ class RendererFactoryTest {
 
         renderer.draw(frame, renderer.mintRenderTarget(FramebufferName(0u)))
 
-        // The same key, the same query, after `cachedTexture` uploaded and registered a texture under
-        // it. That texture goes through the unbudgeted `register` path, so its bytes are genuinely
-        // unknown to the layer that owns it -- and the report must now say "unknown" rather than
-        // repeating the zero it was entitled to a moment ago. These are two different claims and the
-        // difference is the whole defect: before this fix, both frames read 0L / false.
+        // The same key, the same query, after the generation-aware texture cache uploaded the
+        // fixture's 2x2 RGBA8 level. Consumer textures now join the measured GPU texture budget, so
+        // the report can give the exact 2 * 2 * 4 allocation instead of falling back to "unknown".
         val afterDraw = renderer.queryResources(selector).entries.single().usage
-        assertNull(afterDraw.knownGpuBytes, "a resident texture of unrecorded size has no known byte count")
-        assertTrue(afterDraw.hasUnknownGpuBytes, "and the report must declare that it does not know")
+        assertEquals(16L, afterDraw.knownGpuBytes)
+        assertFalse(afterDraw.hasUnknownGpuBytes)
         assertEquals(beforeDraw.rawBytes, afterDraw.rawBytes, "nothing about the CPU-side account changed")
     }
 
     @Test
     fun aModelsGlbIsReportedAsAResidentResourceAndIsFreed() = runTest {
-        // A GLB is bytes, never a GPU object of its own: its vertex and index buffers are registered
-        // under `ResourceKeyDeriver.modelGeometry` keys, not under this one, so this entry's own GPU
-        // account is a knowable zero and stays one. What a report can say about a model here is that
-        // its GLB is resident, and by how many bytes.
+        // Preparation has made the GLB resident but has not uploaded its generation yet, so its GPU
+        // account is a knowable zero. What the report can say at this point is that the source bytes
+        // are resident, and by how many bytes.
         val binding = modelBinding()
         val renderer = createRenderer(testConfiguration(transport = ModelTransport()), binding, fixedProbe())
         renderer.prepare(modelPlan())
@@ -947,10 +1206,11 @@ class RendererFactoryTest {
     }
 
     private fun modelPlan(
+        frameIndex: Long = 0L,
         texture: ResourceLocator? = null,
         tracks: List<AnimationTrack> = emptyList(),
     ): FramePlan = FramePlan(
-        frameIndex = 0L,
+        frameIndex = frameIndex,
         camera = modelCamera(),
         models = listOf(
             Model(
@@ -1011,6 +1271,188 @@ class RendererFactoryTest {
         fragmentSource = "#version 300 es\nprecision highp float;\nout vec4 rengOut;\nvoid main() {\n    rengOut = vec4(1.0);\n}\n",
     )
 
+    // ---- Prepared-frame lease lifetime ---------------------------------------------------------------
+
+    /**
+     * `CONTEXT.md` defines a lease as held "by a **Prepared Frame** for every distinct resource its plan
+     * needs", so closing the frame is what releases it. `closePreparedFrame` used to only mark the frame
+     * closed and release nothing at all: every lease a preparation took stayed outstanding for the
+     * renderer's whole life, `queryResources()` reported a permanently non-zero lease count, and
+     * `freeResources()` could only ever report the key deferred -- an unbounded leak for a consumer that
+     * prepares many frames.
+     *
+     * Two frames over one locator rather than one, because a single outstanding lease is indistinguishable
+     * from a legitimately pinned generation: it is two closed frames still holding two leases that makes
+     * the leak unbounded rather than merely present.
+     */
+    @Test
+    fun closingAPreparedFrameReleasesTheLeasesItsPreparationTook() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val first = renderer.prepare(oneStickerPlan(frameIndex = 0L))
+        val second = renderer.prepare(oneStickerPlan(frameIndex = 1L))
+
+        assertEquals(2, outstandingLeases(renderer), "each open prepared frame must hold its own lease")
+
+        first.close()
+        second.close()
+
+        assertEquals(
+            0,
+            outstandingLeases(renderer),
+            "closing a prepared frame must release every lease its own preparation took",
+        )
+
+        val freed = renderer.freeResources()
+        assertEquals(1, freed.matchedKeys)
+        assertEquals(1, freed.fullyFreedKeys, "an unleased key must be fully freed, never merely deferred")
+        assertEquals(0, freed.deferredKeys)
+    }
+
+    /**
+     * `close()` is idempotent, and a [com.rohittp.reng.internal.cache.Lease] rejects a double release
+     * outright, so the two claims are one claim: the frame hands its leases over exactly once and a second
+     * `close()` releases nothing rather than throwing.
+     */
+    @Test
+    fun closingAPreparedFrameTwiceReleasesItsLeasesOnlyOnce() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val frame = renderer.prepare(oneStickerPlan(frameIndex = 0L))
+
+        frame.close()
+        frame.close()
+
+        assertEquals(0, outstandingLeases(renderer))
+    }
+
+    @Test
+    fun closedFrameKeepsOwnedClosedPrecedenceAfterDroppingRendererCallback() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val frame = renderer.prepare(oneStickerPlan(frameIndex = 0L))
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        frame.close()
+        val failure = assertFailsWith<RenGException> { renderer.draw(frame, target) }
+
+        assertEquals(RenGErrorCode.PREPARED_FRAME_CLOSED, failure.code)
+        assertEquals(PipelineStage.DRAW, failure.stage)
+    }
+
+    @Test
+    fun ownerIdentityTokensStillRejectForeignFramesAndTargets() = runTest {
+        val first = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val second = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val firstFrame = first.prepare(oneStickerPlan(frameIndex = 0L))
+        val secondFrame = second.prepare(oneStickerPlan(frameIndex = 0L))
+        val firstTarget = first.mintRenderTarget(FramebufferName(0u))
+        val secondTarget = second.mintRenderTarget(FramebufferName(0u))
+
+        val foreignFrame = assertFailsWith<RenGException> { second.draw(firstFrame, secondTarget) }
+        val foreignTarget = assertFailsWith<RenGException> { second.draw(secondFrame, firstTarget) }
+
+        assertEquals(RenGErrorCode.FOREIGN_PREPARED_FRAME, foreignFrame.code)
+        assertEquals(RenGErrorCode.FOREIGN_RENDER_TARGET, foreignTarget.code)
+        firstFrame.close()
+        secondFrame.close()
+    }
+
+    @Test
+    fun rendererCloseDrainsAndDetachesEveryOpenPreparedFrame() = runTest {
+        val renderer = createRenderer(
+            testConfiguration(transport = CountingTransport()),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val concreteRenderer = renderer as RenGRenderer
+        val first = renderer.prepare(oneStickerPlan(frameIndex = 0L)) as RenGPreparedFrame
+        val second = renderer.prepare(oneStickerPlan(frameIndex = 1L)) as RenGPreparedFrame
+
+        assertTrue(concreteRenderer.inFlightPreparedFrameCpuBytes > 0L)
+        assertTrue(first.retainsCloseOwner)
+        assertTrue(second.retainsCloseOwner)
+        assertTrue(first.stickers.isNotEmpty())
+        assertTrue(second.stickers.isNotEmpty())
+
+        renderer.close()
+
+        assertEquals(0L, concreteRenderer.inFlightPreparedFrameCpuBytes)
+        listOf(first, second).forEach { frame ->
+            assertEquals(PreparedFrameFact.OwnedClosed, frame.fact())
+            assertFalse(frame.isRegistered)
+            assertFalse(frame.retainsCloseOwner)
+            assertTrue(frame.stickers.isEmpty())
+            assertNull(frame.takeClosePayload(), "renderer close must drain every ownership token")
+            frame.close()
+            frame.close()
+        }
+    }
+
+    @Test
+    fun preparedFrameCpuAdmissionCountsSharedGenerationsOnceAndReleasesOnLastClose() = runTest {
+        val generationBytes = onePixelPng.size.toLong() + 2L * 2L * 4L
+        // Admit both encoded generations, then reject exactly when the second one's 16 decoded
+        // bytes are projected -- before decode allocates them.
+        val admissionLimit = generationBytes * 2L - 1L
+        val renderer = createRenderer(
+            testConfiguration(
+                transport = CountingTransport(),
+                resourceLimits = ResourceLimits(maximumInFlightPreparedFrameCpuBytes = admissionLimit),
+            ),
+            validGlesBinding(),
+            fixedProbe(),
+        )
+        val first = renderer.prepare(oneStickerPlan(frameIndex = 0L))
+        val second = renderer.prepare(oneStickerPlan(frameIndex = 1L))
+        val uniquePlan = FramePlan(
+            frameIndex = 2L,
+            camera = testCamera(),
+            stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/b.png"))),
+        )
+
+        val failure = assertFailsWith<RenGException> { renderer.prepare(uniquePlan) }
+
+        assertEquals(RenGErrorCode.RESOURCE_LIMIT_EXCEEDED, failure.code)
+        assertEquals(PipelineStage.FRAME_PREPARATION, failure.stage)
+        assertEquals("preparedFrameCpuBytes", failure.diagnostics.single().fieldName)
+        assertEquals(admissionLimit, failure.diagnostics.single().limit)
+        assertEquals(admissionLimit + 1L, failure.diagnostics.single().actual)
+
+        first.close()
+        assertFailsWith<RenGException> { renderer.prepare(uniquePlan) }
+        second.close()
+
+        val replacement = renderer.prepare(uniquePlan)
+        replacement.close()
+    }
+
+    private fun oneStickerPlan(frameIndex: Long): FramePlan = FramePlan(
+        frameIndex = frameIndex,
+        camera = testCamera(),
+        stickers = listOf(Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"))),
+    )
+
+    private fun outstandingLeases(renderer: Renderer): Int =
+        renderer.queryResources().entries.sumOf { it.leaseCount }
+
     // ---- Test doubles and fixtures -----------------------------------------------------------------
 
     private fun fixedProbe(): RenderContextProbe = RenderContextProbe { RenderContextIdentity(1L) }
@@ -1030,6 +1472,7 @@ class RendererFactoryTest {
         transport: Transport = Transport { error("test transport must not execute") },
         store: Store = NoOpStore(),
         basemapStyle: ResourceLocator? = null,
+        resourceLimits: ResourceLimits = ResourceLimits(),
         diagnosticSink: DiagnosticSink = DiagnosticSink.None,
         terrainShading: Boolean = false,
     ): RendererConfiguration = RendererConfiguration(
@@ -1037,6 +1480,7 @@ class RendererFactoryTest {
         transport = transport,
         store = store,
         basemapStyle = basemapStyle,
+        resourceLimits = resourceLimits,
         diagnosticSink = diagnosticSink,
         terrainShading = terrainShading,
     )
@@ -1345,17 +1789,12 @@ private class BinWriter {
 private fun bin(write: BinWriter.() -> Unit): ByteArray = BinWriter().apply(write).build()
 
 /**
- * The programs `createInternalGlState` compiles at setup: composite, sticker, ground and — since
- * ADR 0034's phase 5 — label and icon. Phase 5 draws two textures and therefore needs two programs;
- * a sprite atlas carries coverage where a glyph atlas carries a distance field, so one program
- * cannot read both.
- */
-/**
  * The composite, sticker, ground, label and icon programs — **plus the ground's displacing twin**,
  * which Cycle E-terrain compiles beside the flat one so that a frame with no terrain runs the exact
  * program three releases shipped rather than a displacing one disabled by a zero uniform.
  *
  * The globe ground's two are not here: that pipeline is compiled on the first globe frame that
- * carries ground, and this renderer draws none.
+ * carries ground, and this renderer draws none. ADR 0086's blend variants are likewise absent until
+ * the first blended frame.
  */
-private const val INTERNAL_PIPELINE_PROGRAMS: Int = 6
+private const val INTERNAL_PIPELINE_PROGRAMS: Int = 7

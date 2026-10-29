@@ -4,6 +4,10 @@ import com.rohittp.reng.AltitudeMode
 import com.rohittp.reng.AnchoringMode
 import com.rohittp.reng.AnimationSelector
 import com.rohittp.reng.AnimationTrack
+import com.rohittp.reng.Backdrop
+import com.rohittp.reng.BasemapSelection
+import com.rohittp.reng.Bloom
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Camera
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.Geometry
@@ -26,13 +30,76 @@ class FramePlanCanonicalEncodingTest {
     private val encoder = FramePlanCanonicalEncoder()
 
     @Test
+    fun opacityAndBlendDefaultsKeepTheTrackedRepresentativeIdentity() {
+        val encoded = encoder.encode(canonicalV1RepresentativeFramePlan())
+
+        assertContentEquals(
+            CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray(),
+            encoded.identity.canonicalBytes.bytes,
+        )
+        assertEquals(
+            "reng-frame-v1:42e78dd27ae55d9b38370c226615d5a4892bccd97a0f15b60c0d0090eb5b880e",
+            encoded.frameIdentityText(),
+        )
+    }
+
+    @Test
+    fun nonDefaultOpacityAndBlendUseTheirExactAppendedFields() {
+        val base = encoder.encode(representativeFieldsPlan())
+        val changed = encoder.encode(
+            representativeFieldsPlan(
+                stickers = listOf(
+                    sticker("sticker-a").copy(opacity = 0.5f, blend = BlendMode.SCREEN),
+                ),
+                models = listOf(
+                    Model(placement(), ResourceLocator("model-a"), opacity = 0.25f),
+                ),
+                geometries = listOf(geometry("vertex-a").copy(blend = BlendMode.MULTIPLY)),
+            ),
+        )
+
+        assertEquals(
+            listOf(FramePlanSegment.STICKERS, FramePlanSegment.MODELS, FramePlanSegment.GEOMETRIES),
+            changedSegments(base, changed),
+        )
+        val stickerHex = changed.segmentPayloads[FramePlanSegment.STICKERS.index].fixtureLowercaseHex()
+        val modelHex = changed.segmentPayloads[FramePlanSegment.MODELS.index].fixtureLowercaseHex()
+        val geometryHex = changed.segmentPayloads[FramePlanSegment.GEOMETRIES.index].fixtureLowercaseHex()
+        // Sticker tag 3 contains opacity binary64 at tag 1 and SCREEN u16(4) at tag 2.
+        val stickerField3Hex =
+            "000300000016" +
+                "0001000000083fe0000000000000" +
+                "0002000000020004"
+        assertEquals(
+            stickerField3Hex,
+            stickerHex.takeLast(stickerField3Hex.length),
+        )
+        // Model tag 5 contains opacity 0.25 as canonical binary64.
+        val modelField5Hex = "0005000000083fd0000000000000"
+        assertEquals(
+            modelField5Hex,
+            modelHex.takeLast(modelField5Hex.length),
+        )
+        // Geometry tag 8 contains MULTIPLY's stable u16 wire value 3, and is followed only by tag 9, the
+        // program's 64-character stable id (ADR 0081).
+        val geometryField8Hex = "0008000000020003"
+        val geometryField9HeaderHex = "000900000040"
+        val field9Length = geometryField9HeaderHex.length + 64 * 2
+        val field9Hex = geometryHex.takeLast(field9Length)
+        assertEquals(geometryField9HeaderHex, field9Hex.take(geometryField9HeaderHex.length))
+        assertEquals(
+            geometryField8Hex,
+            geometryHex.dropLast(field9Length).takeLast(geometryField8Hex.length),
+        )
+    }
+
+    @Test
     fun minimalFrameHasExactCanonicalLengthAndIdentity() {
         val encoded = encoder.encode(canonicalV1MinimalFramePlan())
 
-        // Unchanged by Cycle E-terrain, and that is the assertion rather than an accident: the
-        // altitude mode lives inside a Placement and a Geometry, so a plan whose three drawn-thing
-        // lists are all empty carries none of it and keeps the identity `0.3.0` published.
-        assertEquals(148, encoded.identity.canonicalBytes.size)
+        // Bloom follows Backdrop's explicit optional encoding: even absence has a segment and a
+        // one-byte marker. The minimal identity therefore moves by seven bytes in this change.
+        assertEquals(162, encoded.identity.canonicalBytes.size)
         assertEquals(
             "524e474301010001000000080000000000000000000200000046" +
                 "00010000000800000000000000000002000000080000000000000000" +
@@ -40,11 +107,16 @@ class FramePlanCanonicalEncodingTest {
                 "0005000000080000000000000000000300000002000100040000000101" +
                 "000500000004000000000006000000040000000000070000000400000000" +
                 // Tag 8, one-byte payload, boolean true: drawLabels defaults on.
-                "00080000000101",
+                "00080000000101" +
+                // Tag 9, one-byte payload, the absent marker: ADR 0068's backdrop, which a minimal
+                // frame does not carry. Every frame encodes the segment; only its payload differs.
+                "00090000000100" +
+                // Tag 10 is the same explicit absent marker for Bloom.
+                "000a0000000100",
             encoded.identity.canonicalBytes.fixtureLowercaseHex(),
         )
         assertEquals(
-            "reng-frame-v1:64af9745146dd73c1b25f4c4fea53fc7526188c3e3fec2871ca53d7dbf0f3f5b",
+            "reng-frame-v1:bd494343faec2225c78d579473ebbdc8ec66f96f4fe80b3c032adf8500b494f0",
             encoded.frameIdentityText(),
         )
         assertEquals(allSegments.size, encoded.segmentPayloads.size)
@@ -57,11 +129,15 @@ class FramePlanCanonicalEncodingTest {
 
         // 1,478 before Cycle E-terrain, plus 48: six objects carrying an altitude mode -- four
         // Placements (two stickers, two models) and two Geometries -- each paying one 8-byte field.
-        assertEquals(1_526, expectedBytes.size)
-        assertEquals(1_526, encoded.identity.canonicalBytes.size)
+        // Plus 14 for the two appended absent optionals (Backdrop and Bloom), and 16 for the
+        // default-false emissive field on two Geometries: 1,554. ADR 0081 then replaces each geometry's
+        // shader sources (tag 3: 174 and 70 bytes of payload) with its 64-character program stable id
+        // (tag 9): 1,438.
+        assertEquals(1_438, expectedBytes.size)
+        assertEquals(1_438, encoded.identity.canonicalBytes.size)
         assertContentEquals(expectedBytes, encoded.identity.canonicalBytes.bytes)
         assertEquals(
-            "reng-frame-v1:ffb35d5bc4624e326c76688babd77f12359bf7d0ec54aa08b50d81bc10250261",
+            "reng-frame-v1:42e78dd27ae55d9b38370c226615d5a4892bccd97a0f15b60c0d0090eb5b880e",
             encoded.frameIdentityText(),
         )
     }
@@ -78,6 +154,13 @@ class FramePlanCanonicalEncodingTest {
             FramePlanSegment.MODELS to representativeFieldsPlan(models = listOf(model("model-b", null))),
             FramePlanSegment.GEOMETRIES to representativeFieldsPlan(geometries = listOf(geometry("vertex-b"))),
             FramePlanSegment.DRAW_LABELS to representativeFieldsPlan(drawLabels = false),
+            FramePlanSegment.BACKDROP to representativeFieldsPlan(
+                backdrop = Backdrop.Pattern(ResourceLocator("patterns/grid.png")),
+            ),
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(intensity = 2f)),
+            FramePlanSegment.BASEMAP_SELECTION to representativeFieldsPlan(
+                basemap = BasemapSelection(style = 0),
+            ),
         )
         val baseEncoded = encoder.encode(base)
 
@@ -89,6 +172,49 @@ class FramePlanCanonicalEncodingTest {
             assertEquals(listOf(expectedChanged), changed)
             assertNotEquals(baseEncoded.identity, encoded.identity)
         }
+    }
+
+    /**
+     * ADR 0085: the new Bloom and Geometry fields are encoded only away from their defaults, so a
+     * frame that leaves them alone keeps the identity it had before they existed -- the bytes of a
+     * default-valued field are absent, not merely equal -- while each non-default value moves the
+     * identity on its own.
+     */
+    @Test
+    fun bloomReachAndPrecisionFieldsMoveTheIdentityOnlyAwayFromTheirDefaults() {
+        val base = encoder.encode(representativeFieldsPlan(bloom = Bloom()))
+        val explicitDefaults = encoder.encode(
+            representativeFieldsPlan(
+                bloom = Bloom(highPrecisionEmission = false, reachLevel = 3, reachGain = 1f),
+                geometries = listOf(geometry("vertex-a").copy(bloomReach = 0f)),
+            ),
+        )
+        assertEquals(base.identity, explicitDefaults.identity)
+        // The pre-ADR-0085 Bloom payload: four fields, tags 1 to 4, nothing after.
+        val bloomIndex = allSegments.indexOf(FramePlanSegment.BLOOM)
+        assertEquals(
+            encoder.encode(representativeFieldsPlan(bloom = Bloom(intensity = 1f))).segmentPayloads[bloomIndex],
+            base.segmentPayloads[bloomIndex],
+        )
+
+        val variants = listOf(
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(highPrecisionEmission = true)),
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(reachLevel = 4)),
+            FramePlanSegment.BLOOM to representativeFieldsPlan(bloom = Bloom(reachGain = 0.5f)),
+            FramePlanSegment.GEOMETRIES to representativeFieldsPlan(
+                bloom = Bloom(),
+                geometries = listOf(geometry("vertex-a").copy(bloomReach = 0.25f)),
+            ),
+        )
+        val identities = variants.map { (expectedChanged, variant) ->
+            val encoded = encoder.encode(variant)
+            val changed = allSegments.filterIndexed { index, _ ->
+                base.segmentPayloads[index] != encoded.segmentPayloads[index]
+            }
+            assertEquals(listOf(expectedChanged), changed)
+            encoded.identity
+        }
+        assertEquals(identities.size, identities.distinct().size)
     }
 
     /**
@@ -289,7 +415,7 @@ class FramePlanCanonicalEncodingTest {
 
         val after = encoder.encode(plan)
         assertEquals(before, after)
-        assertEquals(8, before.segmentPayloads.size)
+        assertEquals(11, before.segmentPayloads.size)
         assertContentEquals(CANONICAL_V1_REPRESENTATIVE_HEX.canonicalFixtureHexToByteArray(), before.identity.canonicalBytes.bytes)
     }
 
@@ -316,6 +442,18 @@ class FramePlanCanonicalEncodingTest {
         val base = geometryWith(textures = mapOf("uMask" to ResourceLocator("a.png")))
         val other = geometryWith(textures = mapOf("uMask" to ResourceLocator("b.png")))
         assertNotEquals(frameIdentityOf(planWith(base)), frameIdentityOf(planWith(other)))
+    }
+
+    @Test
+    fun emissiveChangesOnlyTheGeometrySegmentAtFieldSeven() {
+        val ordinary = encoder.encode(planWith(geometryWith()))
+        val emissive = encoder.encode(planWith(geometryWith().copy(emissive = true)))
+
+        assertEquals(listOf(FramePlanSegment.GEOMETRIES), changedSegments(ordinary, emissive))
+        val ordinaryHex = ordinary.segmentPayloads[FramePlanSegment.GEOMETRIES.index].fixtureLowercaseHex()
+        val emissiveHex = emissive.segmentPayloads[FramePlanSegment.GEOMETRIES.index].fixtureLowercaseHex()
+        assertTrue(ordinaryHex.contains("00070000000100"), ordinaryHex)
+        assertTrue(emissiveHex.contains("00070000000101"), emissiveHex)
     }
 
     @Test
@@ -375,6 +513,9 @@ class FramePlanCanonicalEncodingTest {
         stickers: List<Sticker> = listOf(sticker("sticker-a")),
         models: List<Model> = listOf(model("model-a", null)),
         geometries: List<Geometry> = listOf(geometry("vertex-a")),
+        backdrop: Backdrop? = null,
+        bloom: Bloom? = null,
+        basemap: BasemapSelection? = null,
     ): FramePlan = FramePlan(
         frameIndex = frameIndex,
         camera = camera,
@@ -384,6 +525,9 @@ class FramePlanCanonicalEncodingTest {
         stickers = stickers,
         models = models,
         geometries = geometries,
+        backdrop = backdrop,
+        bloom = bloom,
+        basemap = basemap,
     )
 
     private fun sticker(locator: String): Sticker = Sticker(
@@ -518,8 +662,64 @@ class FramePlanCanonicalEncodingTest {
             FramePlanSegment.MODELS,
             FramePlanSegment.GEOMETRIES,
             FramePlanSegment.DRAW_LABELS,
+            FramePlanSegment.BACKDROP,
+            FramePlanSegment.BLOOM,
+            FramePlanSegment.BASEMAP_SELECTION,
         )
     }
+}
+
+/** ADR 0071: the two backdrop cases in the canonical encoding. */
+class BackdropCanonicalEncodingTest {
+    private val encoder = FramePlanCanonicalEncoder()
+
+    /**
+     * Tags 1 and 2 stay the pattern's and the shader takes 3 upward, so which tags are present is
+     * the discriminator. The payoff, and the reason this is asserted rather than assumed: a plan
+     * carrying a pattern encodes exactly as it did before the shader case existed -- tag `0001`
+     * first, the same image and repeat behind it -- so no Frame Identity moved and no cache was
+     * invalidated by the upgrade.
+     */
+    @Test
+    fun aPatternKeepsTagsOneAndTwoAndAShaderTakesThreeUpward() {
+        val pattern = encoder.encode(planWith(Backdrop.Pattern(ResourceLocator("p.png"), 128.0)))
+            .segmentPayloads[FramePlanSegment.BACKDROP.index].fixtureLowercaseHex()
+        val shader = encoder.encode(planWith(shaderBackdrop()))
+            .segmentPayloads[FramePlanSegment.BACKDROP.index].fixtureLowercaseHex()
+
+        // A present optional, then the first field header: tag 1 for a pattern, tag 3 for a shader.
+        assertTrue(pattern.startsWith("010001"), pattern)
+        assertTrue(shader.startsWith("010003"), shader)
+        assertFalse(pattern.startsWith("010003"), pattern)
+    }
+
+    /** Two backdrops that differ at all are two frames, so neither can serve the other's cache. */
+    @Test
+    fun everyDistinctBackdropReachesADistinctFrameIdentity() {
+        val identities = listOf(
+            null,
+            Backdrop.Pattern(ResourceLocator("p.png"), 128.0),
+            Backdrop.Pattern(ResourceLocator("p.png"), 256.0),
+            Backdrop.Pattern(ResourceLocator("q.png"), 128.0),
+            shaderBackdrop(),
+            shaderBackdrop(uniforms = mapOf("uTint" to ShaderValue.Scalar(2f))),
+        ).map { encoder.encode(planWith(it)).identity.digest.lowercaseHex }
+
+        assertEquals(identities.size, identities.toSet().size, identities.toString())
+    }
+
+    private fun shaderBackdrop(
+        uniforms: Map<String, ShaderValue> = mapOf("uTint" to ShaderValue.Scalar(1f)),
+    ): Backdrop.Shader = Backdrop.Shader(
+        shaderPair = ShaderPair(
+            vertexSource = "#version 300 es\nvoid main() {}\n",
+            fragmentSource = "#version 300 es\nvoid main() {}\n",
+        ),
+        uniforms = uniforms,
+    )
+
+    private fun planWith(backdrop: Backdrop?): FramePlan =
+        FramePlan(frameIndex = 1L, camera = Camera(1.0, 2.0, 3.0, 4.0, 5.0), backdrop = backdrop)
 }
 
 private val FramePlanSegment.index: Int

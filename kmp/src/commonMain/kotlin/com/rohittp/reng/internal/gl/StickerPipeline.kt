@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BlendMode
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ShaderPair
@@ -32,10 +33,11 @@ internal const val STICKER_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
         "uniform sampler2D rengStickerTexture;\n" +
+        "uniform float rengStickerOpacity;\n" +
         "in vec2 rengStickerUv;\n" +
         "layout(location = 0) out vec4 rengStickerColour;\n" +
         "void main() {\n" +
-        "    rengStickerColour = texture(rengStickerTexture, rengStickerUv);\n" +
+        "    rengStickerColour = texture(rengStickerTexture, rengStickerUv) * rengStickerOpacity;\n" +
         "}\n"
 
 internal val STICKER_SHADER_PAIR: ShaderPair =
@@ -43,6 +45,7 @@ internal val STICKER_SHADER_PAIR: ShaderPair =
 
 internal const val STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME: String = "rengStickerModelViewProjection"
 internal const val STICKER_TEXTURE_UNIFORM_NAME: String = "rengStickerTexture"
+internal const val STICKER_OPACITY_UNIFORM_NAME: String = "rengStickerOpacity"
 
 /** A unit quad (side length 1, centred on the origin) with texture coordinates spanning `[0, 1]`. */
 internal val STICKER_QUAD: FloatArray = floatArrayOf(
@@ -59,6 +62,7 @@ internal class StickerPipeline(
     val vertexBuffer: Int,
     val modelViewProjectionUniformLocation: Int,
     val textureUniformLocation: Int,
+    val opacityUniformLocation: Int = -1,
 )
 
 internal sealed interface StickerPipelineResult {
@@ -112,6 +116,7 @@ internal fun createStickerPipeline(
                 STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME,
             ),
             textureUniformLocation = binding.getUniformLocation(program, STICKER_TEXTURE_UNIFORM_NAME),
+            opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
         ),
     )
 }
@@ -138,6 +143,8 @@ internal fun deleteStickerPipeline(
 internal class ResolvedSticker(
     val modelViewProjection: FloatArray,
     val texture: Int,
+    val opacity: Float = 1f,
+    val blend: BlendMode = BlendMode.OVER,
 )
 
 /**
@@ -191,7 +198,15 @@ internal fun drawStickers(binding: GlBinding, pipeline: StickerPipeline, world: 
     beginStickerPass(binding, pipeline)
     binding.enable(GL_DEPTH_TEST)
     binding.depthMask(false)
-    world.mapAnchored.forEach { drawOneSticker(binding, pipeline, it) }
+    var currentBlend = BlendMode.OVER
+    world.mapAnchored.forEach { sticker ->
+        if (sticker.blend != currentBlend) {
+            applyPremultipliedBlendMode(binding, sticker.blend)
+            currentBlend = sticker.blend
+        }
+        drawOneSticker(binding, pipeline, sticker)
+    }
+    applyPremultipliedBlendMode(binding, BlendMode.OVER)
 }
 
 /**
@@ -231,7 +246,20 @@ internal fun drawOneSticker(binding: GlBinding, pipeline: StickerPipeline, stick
         )
     }
     binding.bindTexture(GL_TEXTURE_2D, sticker.texture)
+    if (pipeline.opacityUniformLocation >= 0) {
+        binding.uniform1f(pipeline.opacityUniformLocation, sticker.opacity)
+    }
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+}
+
+internal fun applyPremultipliedBlendMode(binding: GlBinding, blend: BlendMode) {
+    val (sourceRgb, destinationRgb) = when (blend) {
+        BlendMode.OVER -> GL_ONE to GL_ONE_MINUS_SRC_ALPHA
+        BlendMode.ADDITIVE -> GL_ONE to GL_ONE
+        BlendMode.MULTIPLY -> GL_DST_COLOR to GL_ONE_MINUS_SRC_ALPHA
+        BlendMode.SCREEN -> GL_ONE to GL_ONE_MINUS_SRC_COLOR
+    }
+    binding.blendFuncSeparate(sourceRgb, destinationRgb, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 }
 
 private const val STICKER_STRIDE_BYTES: Int = 16

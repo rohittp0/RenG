@@ -97,6 +97,8 @@ internal fun runGlConformanceSuite(
     checks += "offscreen-composite"
     assertLifecycleUnderARealContext(binding, probe, profile)
     checks += "lifecycle"
+    assertEtc2DecodesAsTheDriverDoes(binding, profile)
+    checks += "etc2-decode"
 
     return GlConformanceReport(
         dialect = profile.dialect,
@@ -123,7 +125,7 @@ private fun assertContextAdoption(
 }
 
 private fun assertEntryPointInventory(binding: GlBinding) {
-    assertEquals(91, GlEntryPoint.entries.size)
+    assertEquals(93, GlEntryPoint.entries.size)
     assertTrue(binding.getString(GL_VENDOR)?.isNotBlank() == true)
 
     val names = IntArray(1)
@@ -141,6 +143,9 @@ private fun assertEntryPointInventory(binding: GlBinding) {
     val texture = names[0]
     binding.bindTexture(GL_TEXTURE_2D, texture)
     binding.texStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4)
+    binding.texSubImage2D(
+        GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, ByteArray(4 * 4 * 4),
+    )
 
     val framebuffers = IntArray(2)
     binding.genFramebuffers(2, framebuffers)
@@ -193,7 +198,7 @@ private fun assertStateRoundTripIsExact(binding: GlBinding, profile: RenderConte
     GlErrorQueue.drainOnEntry(binding)
 
     perturbRestoredState(binding, profile, scratch, variant = 0)
-    val captured = captureGlState(binding, profile, CONFORMANCE_TEXTURE_UNITS)
+    val captured = captureGlState(binding, profile)
     assertEquals(
         GL_NO_ERROR,
         GlErrorQueue.firstOwnError(binding),
@@ -201,13 +206,13 @@ private fun assertStateRoundTripIsExact(binding: GlBinding, profile: RenderConte
     )
 
     perturbRestoredState(binding, profile, scratch, variant = 1)
-    val different = captureGlState(binding, profile, CONFORMANCE_TEXTURE_UNITS)
+    val different = captureGlState(binding, profile)
     assertTrue(captured != different, "the perturbation must actually change every captured item")
 
     restoreGlState(binding, captured)
     assertEquals(
         captured,
-        captureGlState(binding, profile, CONFORMANCE_TEXTURE_UNITS),
+        captureGlState(binding, profile),
         "save, perturb, and restore must be byte-exact",
     )
     assertEquals(GL_NO_ERROR, GlErrorQueue.firstOwnError(binding))
@@ -619,7 +624,12 @@ private fun assertOffscreenCompositeAndRestore(binding: GlBinding, profile: Rend
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
     GlErrorQueue.drainOnEntry(binding)
 
-    val before = captureGlState(binding, profile, CONFORMANCE_TEXTURE_UNITS)
+    val before = captureGlState(binding, profile)
+    // Texture units are no longer part of the snapshot -- a draw saves each unit it writes and
+    // restores exactly those (ADR 0055). This suite is the only place that checks the claim against
+    // a real driver, so it reads every unit either side of the frame rather than the ones RenG
+    // happened to track.
+    val unitsBefore = captureTextureUnits(binding, CONFORMANCE_TEXTURE_UNITS)
     val failure = drawFrame(
         binding = binding,
         profile = profile,
@@ -633,8 +643,13 @@ private fun assertOffscreenCompositeAndRestore(binding: GlBinding, profile: Rend
     assertNull(failure, "a Cycle D frame must draw without provoking a GL error")
     assertEquals(
         before,
-        captureGlState(binding, profile, CONFORMANCE_TEXTURE_UNITS),
+        captureGlState(binding, profile),
         "the documented state must be identical before and after a draw",
+    )
+    assertEquals(
+        unitsBefore,
+        captureTextureUnits(binding, CONFORMANCE_TEXTURE_UNITS),
+        "every texture unit must be identical before and after a draw, tracked or not",
     )
 
     val pixel = ByteArray(4)
@@ -716,4 +731,26 @@ private fun assertLifecycleUnderARealContext(
     )
     binding.deleteFramebuffers(1, intArrayOf(survivor))
     GlErrorQueue.drainOnEntry(binding)
+}
+
+/**
+ * Reads [textureUnitCount] units' 2D bindings and samplers. Capture saves only the units a draw writes
+ * (ADR 0055); a conformance check looks at more units than that, so a unit RenG touched and failed to
+ * restore is visible.
+ */
+private fun captureTextureUnits(binding: GlBinding, textureUnitCount: Int): List<GlTextureUnitState> {
+    require(textureUnitCount > 0) { "at least one texture unit is captured" }
+    fun integer(pname: Int): Int = IntArray(1).also { binding.getIntegerv(pname, it) }.single()
+    val activeTextureUnit = integer(GL_ACTIVE_TEXTURE)
+    val units = ArrayList<GlTextureUnitState>(textureUnitCount)
+    for (index in 0 until textureUnitCount) {
+        binding.activeTexture(GL_TEXTURE0 + index)
+        units += GlTextureUnitState(
+            unit = GL_TEXTURE0 + index,
+            texture2d = integer(GL_TEXTURE_BINDING_2D),
+            sampler = integer(GL_SAMPLER_BINDING),
+        )
+    }
+    binding.activeTexture(activeTextureUnit)
+    return units
 }

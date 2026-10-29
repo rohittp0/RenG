@@ -16,6 +16,7 @@ import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.ShaderDialect
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -118,6 +119,7 @@ internal fun runModelReadbackSuite(
         failures.run("occlusionIsReal") { assertOcclusionIsReal(world) }
         failures.run("coverageIsBounded") { assertCoverageIsBounded(world) }
         failures.run("drawingRepeats") { assertOnePreparedFrameDrawsTheSameTwice(world) }
+        failures.run("halfOpacityComposites") { assertHalfOpacityCompositesOverTheClearColour(world) }
     } finally {
         renderer.close()
     }
@@ -127,7 +129,7 @@ internal fun runModelReadbackSuite(
 /** The readback target's edge, in pixels. Square, so a transposed index cannot pass by shape. */
 internal const val MODEL_READBACK_PIXELS: Int = 160
 
-private const val MODEL_READBACK_CASE_COUNT: Int = 7
+private const val MODEL_READBACK_CASE_COUNT: Int = 8
 
 /**
  * Collects each case's failure instead of throwing at the first, for the reason
@@ -204,12 +206,13 @@ private fun modelPlacement(): Placement = Placement(
     scale = MODEL_SCREEN_SCALE,
 )
 
-private fun wedge(timeSeconds: Double?): Model = Model(
+private fun wedge(timeSeconds: Double?, opacity: Float = 1f): Model = Model(
     placement = modelPlacement(),
     glb = ResourceLocator(WEDGE_GLB_URL),
     animationTracks = timeSeconds
         ?.let { listOf(AnimationTrack(AnimationSelector.Name(WEDGE_ANIMATION_NAME), it)) }
         .orEmpty(),
+    opacity = opacity,
 )
 
 private fun blocker(): Model = Model(placement = modelPlacement(), glb = ResourceLocator(BLOCKER_GLB_URL))
@@ -278,6 +281,32 @@ private fun assertTheTextureIsApplied(world: ModelReadbackWorld) {
                 "texel ${texel.toList()}; white would mean the texture was never sampled",
         )
     }
+}
+
+private fun assertHalfOpacityCompositesOverTheClearColour(world: ModelReadbackWorld) {
+    val frame = world.render(
+        modelPlan(
+            frameIndex = 11L,
+            models = listOf(wedge(timeSeconds = null, opacity = 0.5f)),
+        ),
+    )
+    val (x, y) = projectedCentroid(STATIC_TRIANGLE_CORNERS)
+    val expected = IntArray(4) { channel ->
+        if (channel == 3) {
+            255
+        } else {
+            ((STATIC_TRIANGLE_TEXEL[channel] + MODEL_ABSENT[channel]) / 2.0).roundToInt()
+        }
+    }
+    println(
+        "RenG model opacity readback: actual=${frame.describe(x, y)} " +
+            "expected=${expected.toList()}",
+    )
+    assertTrue(
+        frame.isNear(x, y, expected, MODEL_CHANNEL_TOLERANCE),
+        "a half-opacity model over ${MODEL_ABSENT.toList()} must read ${expected.toList()} " +
+            "at ($x, $y), was ${frame.describe(x, y)}",
+    )
 }
 
 /**

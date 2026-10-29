@@ -148,6 +148,25 @@ internal object AndroidGlBinding : GlBinding {
         )
     }
 
+    override fun texSubImage2D(
+        target: Int, level: Int, xOffset: Int, yOffset: Int, width: Int, height: Int,
+        format: Int, type: Int, pixels: ByteArray,
+    ) {
+        GLES30.glTexSubImage2D(
+            target, level, xOffset, yOffset, width, height, format, type, ByteBuffer.wrap(pixels),
+        )
+    }
+
+    override fun compressedTexImage2D(
+        target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
+        border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
+    ) {
+        GLES30.glCompressedTexImage2D(
+            target, level, internalFormat, width, height, border, imageSize,
+            ByteBuffer.wrap(data, dataOffset, imageSize),
+        )
+    }
+
     override fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int) {
         GLES30.glTexStorage2D(target, levels, internalFormat, width, height)
     }

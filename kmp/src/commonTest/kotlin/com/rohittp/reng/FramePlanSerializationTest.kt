@@ -48,7 +48,12 @@ class FramePlanSerializationTest {
                 drawBasemap = false,
                 drawLabels = false,
                 stickers = listOf(
-                    Sticker(placement = mapPlacement, image = ResourceLocator("sticker://one.png")),
+                    Sticker(
+                        placement = mapPlacement,
+                        image = ResourceLocator("sticker://one.png"),
+                        opacity = 0.75f,
+                        blend = BlendMode.SCREEN,
+                    ),
                 ),
                 models = listOf(
                     Model(
@@ -59,6 +64,7 @@ class FramePlanSerializationTest {
                             AnimationTrack(AnimationSelector.Name("walk"), 1.5),
                             AnimationTrack(AnimationSelector.Index(7L), 2.25),
                         ),
+                        opacity = 0.5f,
                     ),
                 ),
                 geometries = listOf(
@@ -78,6 +84,29 @@ class FramePlanSerializationTest {
                         ),
                         textures = mapOf("uTexture" to ResourceLocator("geometry://one.png")),
                         altitudeMode = AltitudeMode.GROUND_RELATIVE,
+                        emissive = true,
+                        blend = BlendMode.MULTIPLY,
+                        bloomReach = 0.5f,
+                    ),
+                ),
+                bloom = Bloom(
+                    intensity = 1.5f,
+                    levelWeights = listOf(0.25f, 0.75f),
+                    insideSuppression = 0.5f,
+                    whiteness = 0.25f,
+                    highPrecisionEmission = true,
+                    reachLevel = 1,
+                    reachGain = 2f,
+                ),
+                basemap = BasemapSelection(
+                    style = 1,
+                    blend = BasemapBlend(
+                        toStyle = 2,
+                        mask = BlendMask.Linear(
+                            angleRadians = 1.25f,
+                            position = 0.75f,
+                            feather = 0.125f,
+                        ),
                     ),
                 ),
             )
@@ -110,7 +139,7 @@ class FramePlanSerializationTest {
         val expectedKeys = listOf(
             // FramePlan
             "frameIndex", "camera", "projectionMode", "drawBasemap", "drawLabels",
-            "stickers", "models", "geometries",
+            "stickers", "models", "geometries", "bloom", "basemap",
             // Camera
             "latitude", "unwrappedLongitude", "zoom", "bearing", "pitch",
             // Placement
@@ -119,13 +148,19 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image",
+            "placement", "image", "opacity", "blend",
             // Model
-            "glb", "texture", "animationTracks",
+            "glb", "texture", "animationTracks", "opacity",
             // AnimationTrack + AnimationSelector
             "animation", "timeSeconds", "value",
             // Geometry
-            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures",
+            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive", "blend",
+            "bloomReach",
+            // Bloom
+            "intensity", "levelWeights", "insideSuppression", "whiteness",
+            "highPrecisionEmission", "reachLevel", "reachGain",
+            // BasemapSelection + BasemapBlend + BlendMask.Linear
+            "style", "toStyle", "mask", "angleRadians", "position", "feather",
             // ShaderPair
             "vertexSource", "fragmentSource",
             // ShaderValue
@@ -172,5 +207,94 @@ class FramePlanSerializationTest {
         assertEquals(minimal, json.decodeFromString(FramePlan.serializer(), document))
         val keys = (json.parseToJsonElement(document) as JsonObject).keys
         assertEquals(setOf("frameIndex", "camera"), keys, "a minimal plan wrote more than it had to")
+    }
+
+    @Test
+    fun everyBasemapMaskRoundTripsAndNullIsOmitted() {
+        val masks = listOf<BlendMask>(
+            BlendMask.Uniform(amount = 0.25f),
+            BlendMask.Radial(centreX = -1f, centreY = 2f, radius = 0.5f, feather = 0.1f),
+            BlendMask.Linear(angleRadians = 3f, position = 0.5f, feather = 0.2f),
+        )
+        masks.forEachIndexed { index, mask ->
+            val plan = FramePlan(
+                frameIndex = index.toLong(),
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+                basemap = BasemapSelection(
+                    style = 0,
+                    blend = BasemapBlend(toStyle = 1, mask = mask),
+                ),
+            )
+            assertEquals(
+                plan,
+                json.decodeFromString(FramePlan.serializer(), json.encodeToString(FramePlan.serializer(), plan)),
+            )
+        }
+        val without = json.encodeToString(
+            FramePlan.serializer(),
+            FramePlan(
+                frameIndex = 0,
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+            ),
+        )
+        assertTrue("\"basemap\"" !in without)
+    }
+}
+
+/** ADR 0071: both backdrop cases over the wire, and what an older document still means. */
+class BackdropSerializationTest {
+    private val json = Json
+
+    @Test
+    fun bothCasesRoundTrip() {
+        val pattern: Backdrop = Backdrop.Pattern(ResourceLocator("patterns/grid.png"), 128.0)
+        val shader: Backdrop = Backdrop.Shader(
+            shaderPair = ShaderPair(
+                vertexSource = "#version 300 es\nvoid main() {}\n",
+                fragmentSource = "#version 300 es\nvoid main() {}\n",
+            ),
+            uniforms = mapOf("uTint" to ShaderValue.Vec3(0.1f, 0.2f, 0.3f)),
+            textures = mapOf("uMask" to ResourceLocator("masks/a.png")),
+        )
+
+        assertEquals(pattern, json.decodeFromString<Backdrop>(json.encodeToString(pattern)))
+        assertEquals(shader, json.decodeFromString<Backdrop>(json.encodeToString(shader)))
+    }
+
+    /**
+     * A document written before `Backdrop.Shader` existed carries `image` and nothing else. It must
+     * still mean what it meant -- a pattern, at the default repeat -- rather than failing to parse
+     * or arriving with a shader half nobody wrote.
+     */
+    @Test
+    fun aDocumentWrittenBeforeTheShaderCaseStillReadsAsAPattern() {
+        val decoded = json.decodeFromString<Backdrop>("""{"image":"patterns/grid.png"}""")
+
+        assertEquals(Backdrop.Pattern(ResourceLocator("patterns/grid.png")), decoded)
+    }
+
+    /** Neither half, or both, is a document nobody could have written: rejected, not guessed at. */
+    @Test
+    fun aDocumentCarryingBothHalvesOrNeitherIsRejected() {
+        assertFailsWith<IllegalArgumentException> {
+            json.decodeFromString<Backdrop>("""{"tileSizeLogicalPixels":64.0}""")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            json.decodeFromString<Backdrop>(
+                """{"image":"p.png","shaderPair":{"vertexSource":"v","fragmentSource":"f"}}""",
+            )
+        }
     }
 }

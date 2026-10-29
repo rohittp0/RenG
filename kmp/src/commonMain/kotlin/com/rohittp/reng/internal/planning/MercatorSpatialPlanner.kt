@@ -1,11 +1,13 @@
 package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.Backdrop
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.Placement
 import com.rohittp.reng.RenGErrorCode
+import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
@@ -14,8 +16,8 @@ import com.rohittp.reng.internal.projection.ClosedMercatorFootprint
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.clippedPhysicalPixelFootprint
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
-import com.rohittp.reng.internal.shader.scanShaderProfile
 import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.stickersForCore
 
@@ -25,6 +27,7 @@ internal fun planMercatorSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ): SpatialOutcome<FrameSpatialPlan> {
     val cameraOutcome = resolveMercatorCamera(plan.camera, outputPixelSize)
     if (cameraOutcome is SpatialOutcome.Failure) return cameraOutcome
@@ -47,10 +50,13 @@ internal fun planMercatorSpatial(
     if ((plan.drawBasemap || plan.drawLabels) && basemapStyleConfigured) {
         footprint = clippedPhysicalPixelFootprint(camera)
         when (
-            val selection = selectBasemapTiles(
-                footprint = footprint,
-                lod = lodObservation.selectedLod,
-                maximumInstances = maximumBasemapTileInstances,
+            // ADR 0065: one LOD per band rather than one for the frame. `footprint` above stays
+            // the whole frame's -- it is what `FrameSpatialPlan` carries and what the label handover
+            // reasons about -- while the tiles come from the banded decomposition of the same rays.
+            val selection = selectBandedBasemapTiles(
+                camera = camera,
+                selectedLod = lodObservation.selectedLod,
+                maximumBasemapTileInstances = maximumBasemapTileInstances,
             )
         ) {
             is TileSelectionOutcome.OverBudget -> return basemapTileBudgetFailure(selection)
@@ -86,10 +92,21 @@ internal fun planMercatorSpatial(
     for (geometry in plan.geometriesForCore()) {
         val geometryOutcome = resolveGeometry(geometry, camera)
         if (geometryOutcome is SpatialOutcome.Failure) return geometryOutcome
-        val vertexProfile = scanShaderProfile(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
-        val fragmentProfile = scanShaderProfile(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+        val vertexProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        val fragmentProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
         geometries += (geometryOutcome as SpatialOutcome.Success).value
         shaderProfiles += vertexProfile to fragmentProfile
+    }
+
+    // ADR 0071. Scanned here but not carried: `shaderProfiles` is paired with `geometries` by size
+    // and the backdrop has no geometry. What the scan buys is the failure arriving as the
+    // consumer's INVALID_VALUE at FRAME_PLANNING rather than as a GL fault at draw;
+    // `createConsumerBackdropPipeline` re-scans for itself, as `createGeometryPipeline` does.
+    (plan.backdropForCore() as? Backdrop.Shader)?.let { backdrop ->
+        shaderProfileMemo.profileOf(backdrop.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
     }
 
     return SpatialOutcome.Success(

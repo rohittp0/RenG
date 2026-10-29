@@ -1,0 +1,739 @@
+package com.rohittp.reng
+
+import com.rohittp.reng.internal.gl.GL_ACTIVE_TEXTURE
+import com.rohittp.reng.internal.gl.GL_BLEND
+import com.rohittp.reng.internal.gl.GL_COLOR_ATTACHMENT0
+import com.rohittp.reng.internal.gl.GL_COLOR_BUFFER_BIT
+import com.rohittp.reng.internal.gl.GL_DRAW_FRAMEBUFFER
+import com.rohittp.reng.internal.gl.GL_FRAMEBUFFER_COMPLETE
+import com.rohittp.reng.internal.gl.GL_PACK_ALIGNMENT
+import com.rohittp.reng.internal.gl.GL_READ_FRAMEBUFFER
+import com.rohittp.reng.internal.gl.GL_RGBA
+import com.rohittp.reng.internal.gl.GL_RGBA8
+import com.rohittp.reng.internal.gl.GL_SCISSOR_TEST
+import com.rohittp.reng.internal.gl.GL_TEXTURE0
+import com.rohittp.reng.internal.gl.GL_TEXTURE_2D
+import com.rohittp.reng.internal.gl.GL_TEXTURE_BINDING_2D
+import com.rohittp.reng.internal.gl.GL_UNSIGNED_BYTE
+import com.rohittp.reng.internal.gl.GlBinding
+import com.rohittp.reng.internal.gl.RenderContextProbe
+import com.rohittp.reng.internal.gl.ShaderDialect
+import com.rohittp.reng.internal.identity.CanonicalBytes
+import com.rohittp.reng.internal.identity.PureKotlinSha256
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.atan
+import kotlin.math.atan2
+import kotlin.math.cbrt
+import kotlin.math.hypot
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sinh
+import kotlin.io.encoding.Base64
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
+
+internal const val BLOOM_READBACK_PIXELS: Int = 128
+
+internal fun runBloomReadbackSuite(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+    dialect: ShaderDialect,
+) {
+    val target = createBloomReadbackTarget(binding)
+    val renderer = createRenderer(
+        RendererConfiguration(
+            outputPixelSize = OutputPixelSize(BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS),
+            transport = BloomReadbackTransport(),
+            store = RecordingStyleStore(),
+            basemapStyle = null,
+        ),
+        binding,
+        probe,
+    )
+    val failures = BloomCollectedFailures()
+    val hostTexture = IntArray(1).also { binding.genTextures(1, it) }[0]
+    try {
+        val renderTarget = renderer.mintRenderTarget(FramebufferName(target.framebuffer.toUInt()))
+        val nullBloomEmissive = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 0L, bloom = null, emissive = true),
+        )
+        val nullBloomOrdinary = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 1L, bloom = null, emissive = false),
+        )
+        val emptyBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 2L, bloom = Bloom(), emissive = false),
+        )
+        // The renderer's first bloom frame, which allocates its bloom targets. A host texture bound
+        // on the host's active unit must survive it (ADR 0054/0055): target creation used to bind on
+        // that unit through the renderer's raw binding, unseen by the capture, and the host's
+        // texture was lost.
+        binding.activeTexture(GL_TEXTURE0 + HOST_TEXTURE_UNIT)
+        binding.bindTexture(GL_TEXTURE_2D, hostTexture)
+        val activeBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 3L, bloom = Bloom(), emissive = true),
+        )
+        val hostActiveUnitAfterBloom = binding.queryInt(GL_ACTIVE_TEXTURE)
+        val hostTextureAfterBloom = binding.queryInt(GL_TEXTURE_BINDING_2D)
+        binding.bindTexture(GL_TEXTURE_2D, 0)
+        binding.activeTexture(GL_TEXTURE0)
+        val suppressedBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 4L,
+                bloom = Bloom(insideSuppression = 1f),
+                emissive = true,
+            ),
+        )
+        val uniformSuppressedBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 5L,
+                bloom = Bloom(),
+                emissive = true,
+                emissionAwareShader = true,
+            ),
+        )
+        val laterGeometryWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 6L, bloom = null, emissive = true, laterGeometry = true),
+        )
+        val laterGeometryWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 7L, bloom = Bloom(), emissive = true, laterGeometry = true),
+        )
+        val mapStickerWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 8L, bloom = null, emissive = true, mapSticker = true),
+        )
+        val mapStickerWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 9L, bloom = Bloom(), emissive = true, mapSticker = true),
+        )
+        val modelWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 10L, bloom = null, emissive = true, model = true),
+        )
+        val modelWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 11L, bloom = Bloom(), emissive = true, model = true),
+        )
+        val partlyOccludedEmitterWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            partlyOccludedEmitterPlan(frameIndex = 12L, bloom = null),
+        )
+        val partlyOccludedEmitterWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            partlyOccludedEmitterPlan(frameIndex = 13L, bloom = Bloom(insideSuppression = 1f)),
+        )
+        val brightGroundWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 14L, bloom = null, emissive = true, ground = ORANGE_FRAGMENT_SOURCE),
+        )
+        val brightGroundWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(frameIndex = 15L, bloom = Bloom(), emissive = true, ground = ORANGE_FRAGMENT_SOURCE),
+        )
+        val redOverTealWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 16L, bloom = null, emissive = true,
+                ground = TEAL_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverTealWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 17L, bloom = Bloom(intensity = RED_HALO_INTENSITY), emissive = true,
+                ground = TEAL_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverLimeWithoutBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 18L, bloom = null, emissive = true,
+                ground = LIME_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+        val redOverLimeWithBloom = clearDrawAndReadBloom(
+            binding, renderer, renderTarget, target.framebuffer,
+            bloomPlan(
+                frameIndex = 19L, bloom = Bloom(intensity = RED_HALO_INTENSITY), emissive = true,
+                ground = LIME_FRAGMENT_SOURCE, emitter = RED_FRAGMENT_SOURCE,
+            ),
+        )
+
+        failures.run("a host texture on its active unit survives the first bloom frame") {
+            assertEquals(GL_TEXTURE0 + HOST_TEXTURE_UNIT, hostActiveUnitAfterBloom, "host active unit")
+            assertEquals(hostTexture, hostTextureAfterBloom, "host texture on its active unit")
+        }
+        failures.run("bloom null ignores emissive") {
+            val differentBytes = differingBytes(nullBloomEmissive, nullBloomOrdinary)
+            println("RenG bloom readback case 1: dialect=$dialect differingBytes=$differentBytes")
+            assertContentEquals(nullBloomOrdinary, nullBloomEmissive)
+        }
+        failures.run("bloom with no emissive Geometry is a no-op") {
+            val differentBytes = differingBytes(nullBloomOrdinary, emptyBloom)
+            println("RenG bloom readback case 2: dialect=$dialect differingBytes=$differentBytes")
+            assertContentEquals(nullBloomOrdinary, emptyBloom)
+        }
+        failures.run("active bloom is bright, local, and unflipped") {
+            val outsideBase = nullBloomEmissive.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val outsideBloom = activeBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val outsideIncrease = outsideBloom[0] - outsideBase[0]
+            val farDelta = maxChannelDelta(
+                activeBloom.pixel(FAR_X, FAR_Y),
+                nullBloomEmissive.pixel(FAR_X, FAR_Y),
+            )
+            val mirroredDelta = maxChannelDelta(
+                activeBloom.pixel(OUTSIDE_X, MIRRORED_OUTSIDE_Y),
+                nullBloomEmissive.pixel(OUTSIDE_X, MIRRORED_OUTSIDE_Y),
+            )
+            println(
+                "RenG bloom readback case 3: dialect=$dialect " +
+                    "outsideBase=${outsideBase.describe()} outsideBloom=${outsideBloom.describe()} " +
+                    "outsideIncrease=$outsideIncrease farDelta=$farDelta mirroredDelta=$mirroredDelta " +
+                    "noEmitterSha256=${nullBloomOrdinary.sha256()} " +
+                    "emitterLastSha256=${activeBloom.sha256()}",
+            )
+            assertTrue(outsideIncrease > 8, "six pixels outside must brighten by more than 8")
+            assertTrue(farDelta <= 2, "bloom must remain local, far delta was $farDelta")
+            assertTrue(mirroredDelta <= 2, "the vertically mirrored pixel must remain unchanged")
+        }
+        failures.run("inside suppression removes bloom from the source interior") {
+            val baseline = nullBloomEmissive.pixel(SQUARE_CENTRE_X, SQUARE_CENTRE_Y)
+            val suppressed = suppressedBloom.pixel(SQUARE_CENTRE_X, SQUARE_CENTRE_Y)
+            val delta = maxChannelDelta(baseline, suppressed)
+            println(
+                "RenG bloom readback case 4: dialect=$dialect baseline=${baseline.describe()} " +
+                    "suppressed=${suppressed.describe()} delta=$delta",
+            )
+            assertTrue(delta <= 2, "insideSuppression=1 must leave the source centre unchanged")
+        }
+        failures.run("the documented emission-pass uniform reaches the redraw") {
+            val baseline = nullBloomEmissive.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val suppressed = uniformSuppressedBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val delta = maxChannelDelta(baseline, suppressed)
+            println(
+                "RenG bloom readback case 5: dialect=$dialect baseline=${baseline.describe()} " +
+                    "uniformSuppressed=${suppressed.describe()} delta=$delta",
+            )
+            assertTrue(delta <= 2, "a zero emission-pass output must produce no outside bloom")
+        }
+        failures.run("later opaque Geometry covers bloom") {
+            val withoutBloom = laterGeometryWithoutBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val withBloom = laterGeometryWithBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            println(
+                "RenG bloom readback case 6: dialect=$dialect " +
+                    "withoutBloom=${withoutBloom.describe()} withBloom=${withBloom.describe()}",
+            )
+            assertContentEquals(LATER_GEOMETRY_COLOUR, withoutBloom, "the cover Geometry must be opaque here")
+            assertContentEquals(
+                withoutBloom,
+                withBloom,
+                "a Geometry declared after the last emitter must cover its bloom byte-for-byte",
+            )
+        }
+        failures.run("map sticker drawn after an emitter is not brightened") {
+            val withoutBloom = mapStickerWithoutBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val withBloom = mapStickerWithBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            println(
+                "RenG bloom readback case 7: dialect=$dialect " +
+                    "withoutBloom=${withoutBloom.describe()} withBloom=${withBloom.describe()}",
+            )
+            assertContentEquals(MAP_STICKER_COLOUR, withoutBloom, "the opaque sticker must cover this pixel")
+            assertContentEquals(
+                withoutBloom,
+                withBloom,
+                "a map sticker drawn after the emitter must not receive bloom light",
+            )
+        }
+        failures.run("model drawn after an emitter is not brightened") {
+            val withoutBloom = modelWithoutBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val withBloom = modelWithBloom.pixel(OUTSIDE_X, OUTSIDE_Y)
+            val fixtureDelta = maxChannelDelta(BLOCKER_COLOUR, withoutBloom)
+            println(
+                "RenG bloom readback case 8: dialect=$dialect " +
+                    "withoutBloom=${withoutBloom.describe()} withBloom=${withBloom.describe()} " +
+                    "fixtureDelta=$fixtureDelta",
+            )
+            assertTrue(fixtureDelta <= 2, "the opaque model must cover this pixel with its own colour")
+            assertContentEquals(
+                withoutBloom,
+                withBloom,
+                "a model drawn after the emitter must not receive bloom light",
+            )
+        }
+        failures.run("an emitter partly behind a model still feeds bloom past its silhouette") {
+            val modelWithoutBloom = partlyOccludedEmitterWithoutBloom.pixel(OCCLUDED_MODEL_X, OCCLUDED_MODEL_Y)
+            val modelWithBloom = partlyOccludedEmitterWithBloom.pixel(OCCLUDED_MODEL_X, OCCLUDED_MODEL_Y)
+            val haloWithoutBloom = partlyOccludedEmitterWithoutBloom.pixel(OCCLUDED_HALO_X, OCCLUDED_HALO_Y)
+            val haloWithBloom = partlyOccludedEmitterWithBloom.pixel(OCCLUDED_HALO_X, OCCLUDED_HALO_Y)
+            val haloIncrease = haloWithBloom[0] - haloWithoutBloom[0]
+            println(
+                "RenG bloom readback case 9: dialect=$dialect " +
+                    "modelWithoutBloom=${modelWithoutBloom.describe()} " +
+                    "modelWithBloom=${modelWithBloom.describe()} " +
+                    "haloWithoutBloom=${haloWithoutBloom.describe()} " +
+                    "haloWithBloom=${haloWithBloom.describe()} haloIncrease=$haloIncrease",
+            )
+            assertTrue(
+                maxChannelDelta(BLOCKER_COLOUR, modelWithoutBloom) <= 2,
+                "the opaque model sample must carry the model's own colour",
+            )
+            assertContentEquals(
+                modelWithoutBloom,
+                modelWithBloom,
+                "the model's own opaque pixels must remain unbrightened",
+            )
+            assertTrue(
+                haloIncrease > 4,
+                "emission collected before model depth exists must still feed halo outside the silhouette",
+            )
+        }
+        // ADR 0082 asserted that white light over orange kept the fill's channel spacing (an orange
+        // halo). Since ADR 0083 strong light carries its own hue, so a white emitter's halo over
+        // orange is brighter and whiter than the fill: lightness up, chroma down, nothing clipped.
+        failures.run("white bloom over a bright fill brightens towards white without clipping") {
+            val ground = brightGroundWithoutBloom.pixel(EDGE_X, OUTSIDE_Y)
+            val lit = brightGroundWithBloom.pixel(EDGE_X, OUTSIDE_Y)
+            val far = brightGroundWithBloom.pixel(FAR_X, FAR_Y)
+            val groundLab = ground.oklab()
+            val litLab = lit.oklab()
+            println(
+                "RenG bloom readback case 10: dialect=$dialect ground=${ground.describe()} " +
+                    "lit=${lit.describe()} far=${far.describe()} " +
+                    "groundLch=${groundLab.describeLch()} litLch=${litLab.describeLch()}",
+            )
+            assertTrue(maxChannelDelta(ORANGE_GROUND_COLOUR, ground) <= 2, "the ground must be the orange fill")
+            assertTrue(litLab[0] > groundLab[0] + 0.02, "light must still brighten the fill")
+            assertTrue(lit.take(3).all { it < 255 }, "no channel may clip to full scale")
+            assertTrue(
+                litLab.chroma() < groundLab.chroma() - 0.02,
+                "strong white light must read whiter than the fill, not a deeper orange",
+            )
+            assertTrue(maxChannelDelta(ground, far) <= 2, "far from the emitter the fill must be untouched")
+        }
+        failures.run("a red emitter's halo keeps the emitter's hue over teal and over lime") {
+            val emitterHue = RED_EMITTER_COLOUR.oklab().hueDegrees()
+            val grounds = listOf(
+                Triple("teal", redOverTealWithoutBloom, redOverTealWithBloom),
+                Triple("lime", redOverLimeWithoutBloom, redOverLimeWithBloom),
+            )
+            for ((name, without, with) in grounds) {
+                val ground = without.pixel(EDGE_X, OUTSIDE_Y)
+                val near = with.pixel(EDGE_X, OUTSIDE_Y)
+                val far = with.pixel(FAR_X, FAR_Y)
+                val nearLab = near.oklab()
+                val hueError = hueDistance(nearLab.hueDegrees(), emitterHue)
+                println(
+                    "RenG bloom readback case 11 ($name): dialect=$dialect ground=${ground.describe()} " +
+                        "near=${near.describe()} far=${far.describe()} " +
+                        "nearLch=${nearLab.describeLch()} hueError=$hueError",
+                )
+                assertTrue(maxChannelDelta(ground, far) <= 2, "far from the emitter the $name fill must be untouched")
+                assertTrue(nearLab.chroma() > RED_HALO_MINIMUM_CHROMA, "the $name halo must be coloured, not grey")
+                assertTrue(
+                    hueError <= RED_HALO_HUE_TOLERANCE_DEGREES,
+                    "the $name halo two pixels out must read as the emitter's red, hue error was $hueError",
+                )
+                assertTrue(maxChannelDelta(ground, near) > 8, "the $name halo must visibly change the fill")
+            }
+        }
+    } finally {
+        renderer.close()
+        binding.deleteFramebuffers(1, intArrayOf(target.framebuffer))
+        binding.deleteTextures(1, intArrayOf(target.texture))
+        binding.deleteTextures(1, intArrayOf(hostTexture))
+    }
+    failures.throwIfAny()
+}
+
+/** A unit other than 0, so "the host left it active" is a distinctive observation. */
+private const val HOST_TEXTURE_UNIT: Int = 3
+
+private fun GlBinding.queryInt(pname: Int): Int {
+    val out = IntArray(1)
+    getIntegerv(pname, out)
+    return out[0]
+}
+
+private fun bloomPlan(
+    frameIndex: Long,
+    bloom: Bloom?,
+    emissive: Boolean,
+    emissionAwareShader: Boolean = false,
+    laterGeometry: Boolean = false,
+    mapSticker: Boolean = false,
+    model: Boolean = false,
+    ground: String = GREY_FRAGMENT_SOURCE,
+    emitter: String = WHITE_FRAGMENT_SOURCE,
+): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(0.0, 0.0, BLOOM_ZOOM, 0.0, 0.0),
+    drawBasemap = false,
+    geometries = buildList {
+        add(
+            Geometry(
+                topLeft = geoAtPixel(FULL_LEFT, FULL_TOP, altitude = 0.0),
+                bottomRight = geoAtPixel(FULL_RIGHT, FULL_BOTTOM, altitude = 0.0),
+                shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, ground),
+            ),
+        )
+        add(
+            Geometry(
+                topLeft = geoAtPixel(SQUARE_LEFT, SQUARE_TOP, altitude = 1.0),
+                bottomRight = geoAtPixel(SQUARE_RIGHT, SQUARE_BOTTOM, altitude = 1.0),
+                shaderPair = ShaderPair(
+                    BLOOM_VERTEX_SOURCE,
+                    if (emissionAwareShader) EMISSION_AWARE_WHITE_FRAGMENT_SOURCE else emitter,
+                ),
+                emissive = emissive,
+            ),
+        )
+        if (laterGeometry) {
+            add(
+                Geometry(
+                    topLeft = geoAtPixel(COVER_LEFT, COVER_TOP, altitude = 2.0),
+                    bottomRight = geoAtPixel(COVER_RIGHT, COVER_BOTTOM, altitude = 2.0),
+                    shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, COVER_FRAGMENT_SOURCE),
+                ),
+            )
+        }
+    },
+    stickers = if (mapSticker) {
+        listOf(
+            Sticker(
+                placement = bloomPlacement(OUTSIDE_X, OUTSIDE_Y, altitude = 3.0, scale = 5.0),
+                image = ResourceLocator(BLOOM_STICKER_URL),
+            ),
+        )
+    } else {
+        emptyList()
+    },
+    models = if (model) {
+        listOf(
+            Model(
+                placement = bloomPlacement(
+                    BLOOM_READBACK_PIXELS / 2,
+                    BLOOM_READBACK_PIXELS / 2,
+                    altitude = 3.0,
+                    scale = MODEL_SCREEN_SCALE,
+                ),
+                glb = ResourceLocator(BLOOM_MODEL_URL),
+            ),
+        )
+    } else {
+        emptyList()
+    },
+    bloom = bloom,
+)
+
+/**
+ * The white emitter crosses the small blocker's left silhouette: its right-hand portion is behind
+ * opaque model pixels, while its left-hand portion remains visible. `insideSuppression=1` removes
+ * the source interior from the composite but still counts that whole pre-model emission image when
+ * producing the halo sampled just beyond the blocker's opposite edge.
+ */
+private fun partlyOccludedEmitterPlan(frameIndex: Long, bloom: Bloom?): FramePlan = FramePlan(
+    frameIndex = frameIndex,
+    camera = Camera(0.0, 0.0, BLOOM_ZOOM, 0.0, 0.0),
+    drawBasemap = false,
+    geometries = listOf(
+        Geometry(
+            topLeft = geoAtPixel(FULL_LEFT, FULL_TOP, altitude = 0.0),
+            bottomRight = geoAtPixel(FULL_RIGHT, FULL_BOTTOM, altitude = 0.0),
+            shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, GREY_FRAGMENT_SOURCE),
+        ),
+        Geometry(
+            topLeft = geoAtPixel(OCCLUDED_EMITTER_LEFT, OCCLUDED_EMITTER_TOP, altitude = 1.0),
+            bottomRight = geoAtPixel(OCCLUDED_EMITTER_RIGHT, OCCLUDED_EMITTER_BOTTOM, altitude = 1.0),
+            shaderPair = ShaderPair(BLOOM_VERTEX_SOURCE, WHITE_FRAGMENT_SOURCE),
+            emissive = true,
+        ),
+    ),
+    models = listOf(
+        Model(
+            placement = bloomPlacement(
+                BLOOM_READBACK_PIXELS / 2,
+                BLOOM_READBACK_PIXELS / 2,
+                altitude = 3.0,
+                scale = OCCLUDING_MODEL_SCALE,
+            ),
+            glb = ResourceLocator(BLOOM_MODEL_URL),
+        ),
+    ),
+    bloom = bloom,
+)
+
+private fun bloomPlacement(x: Int, y: Int, altitude: Double, scale: Double): Placement = Placement(
+    positionMode = AnchoringMode.MAP,
+    position = geoAtPixel(x, y, altitude),
+    rotationMode = AnchoringMode.SCREEN,
+    rotation = Vector3(0.0, 0.0, 0.0),
+    scaleMode = AnchoringMode.SCREEN,
+    scale = scale,
+)
+
+/** Converts one output pixel edge to the geographic coordinate a north-up top-down camera sees. */
+private fun geoAtPixel(x: Int, y: Int, altitude: Double): Vector3 {
+    val worldSize = 512.0 * (1 shl BLOOM_ZOOM.toInt())
+    val worldX = worldSize / 2.0 + (x - BLOOM_READBACK_PIXELS / 2.0)
+    val worldY = worldSize / 2.0 - (y - BLOOM_READBACK_PIXELS / 2.0)
+    val longitude = worldX / worldSize * 360.0 - 180.0
+    val mercator = PI * (1.0 - 2.0 * worldY / worldSize)
+    val latitude = atan(sinh(mercator)) * 180.0 / PI
+    return Vector3(latitude, longitude, altitude)
+}
+
+private fun clearDrawAndReadBloom(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+    plan: FramePlan,
+): ByteArray {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
+    binding.disable(GL_BLEND)
+    binding.disable(GL_SCISSOR_TEST)
+    binding.colorMask(true, true, true, true)
+    binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+    binding.clearColor(0f, 0f, 0f, 0f)
+    binding.clear(GL_COLOR_BUFFER_BIT)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+
+    val frame = runBlocking { renderer.prepare(plan) }
+    try {
+        renderer.draw(frame, renderTarget)
+    } finally {
+        frame.close()
+    }
+
+    val pixels = ByteArray(BLOOM_READBACK_PIXELS * BLOOM_READBACK_PIXELS * 4)
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)
+    binding.readBuffer(GL_COLOR_ATTACHMENT0)
+    binding.pixelStorei(GL_PACK_ALIGNMENT, 1)
+    binding.readPixels(
+        0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels,
+    )
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+    return pixels
+}
+
+private data class BloomReadbackTarget(val framebuffer: Int, val texture: Int)
+
+private fun createBloomReadbackTarget(binding: GlBinding): BloomReadbackTarget {
+    val names = IntArray(1)
+    binding.genTextures(1, names)
+    val texture = names[0]
+    binding.bindTexture(GL_TEXTURE_2D, texture)
+    binding.texStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+    binding.genFramebuffers(1, names)
+    val framebuffer = names[0]
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer)
+    binding.framebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0)
+    assertEquals(
+        GL_FRAMEBUFFER_COMPLETE,
+        binding.checkFramebufferStatus(GL_DRAW_FRAMEBUFFER),
+        "the bloom readback target must be a complete framebuffer",
+    )
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+    return BloomReadbackTarget(framebuffer, texture)
+}
+
+private fun ByteArray.pixel(x: Int, y: Int): IntArray {
+    val offset = (y * BLOOM_READBACK_PIXELS + x) * 4
+    return IntArray(4) { channel -> this[offset + channel].toInt() and 0xff }
+}
+
+private fun differingBytes(first: ByteArray, second: ByteArray): Int =
+    first.indices.count { first[it] != second[it] }
+
+private fun maxChannelDelta(first: IntArray, second: IntArray): Int =
+    first.indices.maxOf { abs(first[it] - second[it]) }
+
+private class BloomCollectedFailures {
+    private val failures = ArrayList<String>()
+
+    fun run(name: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (failure: Throwable) {
+            failures += "$name: ${failure.message ?: failure::class.simpleName}"
+        }
+    }
+
+    fun throwIfAny() {
+        if (failures.isNotEmpty()) {
+            throw AssertionError(failures.joinToString(prefix = "Bloom readback failures:\n", separator = "\n"))
+        }
+    }
+}
+
+private fun IntArray.describe(): String = joinToString(prefix = "(", postfix = ")")
+
+/** This 8-bit sRGB pixel's Oklab (L, a, b). */
+private fun IntArray.oklab(): DoubleArray {
+    fun linear(channel: Int): Double {
+        val c = channel / 255.0
+        return if (c <= 0.04045) c / 12.92 else ((c + 0.055) / 1.055).pow(2.4)
+    }
+    val r = linear(this[0])
+    val g = linear(this[1])
+    val b = linear(this[2])
+    val l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    val m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    val s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return doubleArrayOf(
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+private fun DoubleArray.chroma(): Double = hypot(this[1], this[2])
+
+private fun DoubleArray.hueDegrees(): Double = atan2(this[2], this[1]) * 180.0 / PI
+
+private fun hueDistance(first: Double, second: Double): Double {
+    val difference = abs(first - second) % 360.0
+    return if (difference > 180.0) 360.0 - difference else difference
+}
+
+private fun DoubleArray.describeLch(): String {
+    fun Double.rounded(): Double = (this * 1000.0).roundToInt() / 1000.0
+    return "(L=${this[0].rounded()} C=${chroma().rounded()} h=${hueDegrees().roundToInt()})"
+}
+
+private fun ByteArray.sha256(): String =
+    PureKotlinSha256.digest(CanonicalBytes(this)).lowercaseHex
+
+private class BloomReadbackTransport : Transport {
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val (body, contentType) = when (request.locator.value) {
+            BLOOM_STICKER_URL -> BLOOM_STICKER_PNG to "image/png"
+            BLOOM_MODEL_URL -> tallBlockerGlb() to "model/gltf-binary"
+            else -> error("the bloom readback fixture serves no body for ${request.resourceClass}")
+        }
+        return TransportResponse(
+            statusCode = 200,
+            body = body,
+            metadata = TransportResponseMetadata(contentType = contentType),
+        )
+    }
+}
+
+private const val BLOOM_ZOOM: Double = 10.0
+private const val FULL_LEFT: Int = -4
+private const val FULL_RIGHT: Int = 132
+private const val FULL_BOTTOM: Int = -4
+private const val FULL_TOP: Int = 132
+private const val SQUARE_LEFT: Int = 24
+private const val SQUARE_RIGHT: Int = 40
+private const val SQUARE_BOTTOM: Int = 88
+private const val SQUARE_TOP: Int = 104
+private const val SQUARE_CENTRE_X: Int = 32
+private const val SQUARE_CENTRE_Y: Int = 96
+private const val OUTSIDE_X: Int = 46
+private const val EDGE_X: Int = 42
+private const val OUTSIDE_Y: Int = 96
+private const val COVER_LEFT: Int = 42
+private const val COVER_RIGHT: Int = 50
+private const val COVER_BOTTOM: Int = 92
+private const val COVER_TOP: Int = 100
+private const val MIRRORED_OUTSIDE_Y: Int = BLOOM_READBACK_PIXELS - 1 - OUTSIDE_Y
+private const val FAR_X: Int = 100
+private const val FAR_Y: Int = 16
+private const val OCCLUDED_EMITTER_LEFT: Int = 55
+private const val OCCLUDED_EMITTER_RIGHT: Int = 64
+private const val OCCLUDED_EMITTER_BOTTOM: Int = 60
+private const val OCCLUDED_EMITTER_TOP: Int = 68
+private const val OCCLUDED_MODEL_X: Int = 62
+private const val OCCLUDED_MODEL_Y: Int = 64
+private const val OCCLUDED_HALO_X: Int = 75
+private const val OCCLUDED_HALO_Y: Int = 64
+private const val OCCLUDING_MODEL_SCALE: Double = 4.0
+private const val BLOOM_STICKER_URL: String = "https://images.example/bloom-cover.png"
+private const val BLOOM_MODEL_URL: String = "https://models.example/bloom-cover.glb"
+
+private val LATER_GEOMETRY_COLOUR: IntArray = intArrayOf(32, 96, 160, 255)
+private val MAP_STICKER_COLOUR: IntArray = intArrayOf(255, 128, 0, 255)
+private val ORANGE_GROUND_COLOUR: IntArray = intArrayOf(204, 140, 76, 255)
+
+/** Travel Animator's red glow (#FF3B30); case 11 lays it over its sea (56, 101, 117) and lime (#E3FC55). */
+private val RED_EMITTER_COLOUR: IntArray = intArrayOf(255, 59, 48, 255)
+/** Travel Animator's glow at full alpha as bloom intensity, so the halo is light, not the emitter's own colour. */
+private const val RED_HALO_INTENSITY: Float = 0.6f
+private const val RED_HALO_HUE_TOLERANCE_DEGREES: Double = 6.0
+private const val RED_HALO_MINIMUM_CHROMA: Double = 0.08
+
+/** A 2x2 opaque orange PNG, shared with the basemap suite's independently stated fixture colour. */
+private val BLOOM_STICKER_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR42mP438DwH4QZYAwAWsoJ+ZJB9b8AAAAASUVORK5CYII=",
+)
+
+private const val BLOOM_VERTEX_SOURCE: String =
+    "#version 300 es\n" +
+        "in vec3 aPosition;\n" +
+        "uniform mat4 uModelViewProjection;\n" +
+        "void main() {\n" +
+        "    gl_Position = uModelViewProjection * vec4(aPosition, 1.0);\n" +
+        "}\n"
+
+private const val GREY_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(0.25, 0.25, 0.25, 1.0); }\n"
+
+private const val ORANGE_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(204.0 / 255.0, 140.0 / 255.0, 76.0 / 255.0, 1.0); }\n"
+
+private const val TEAL_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(56.0 / 255.0, 101.0 / 255.0, 117.0 / 255.0, 1.0); }\n"
+
+private const val LIME_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(227.0 / 255.0, 252.0 / 255.0, 85.0 / 255.0, 1.0); }\n"
+
+private const val RED_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(1.0, 59.0 / 255.0, 48.0 / 255.0, 1.0); }\n"
+
+private const val WHITE_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(1.0); }\n"
+
+private const val COVER_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() { rengGeometryColour = vec4(32.0 / 255.0, 96.0 / 255.0, 160.0 / 255.0, 1.0); }\n"
+
+private const val EMISSION_AWARE_WHITE_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform int rengGeometryEmissionPass;\n" +
+        "out vec4 rengGeometryColour;\n" +
+        "void main() {\n" +
+        "    rengGeometryColour = rengGeometryEmissionPass == 1 ? vec4(0.0) : vec4(1.0);\n" +
+        "}\n"

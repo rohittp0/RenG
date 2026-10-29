@@ -1,10 +1,43 @@
 package com.rohittp.reng.internal.identity
 
-internal class CanonicalBytes(bytes: ByteArray) {
-    private val snapshot: ByteArray = bytes.copyOf()
+internal class CanonicalBytes private constructor(bytes: ByteArray, adopt: Boolean) {
+    constructor(bytes: ByteArray) : this(bytes, adopt = false)
+
+    private val snapshot: ByteArray = if (adopt) bytes else bytes.copyOf()
+
+    internal companion object {
+        /**
+         * Wraps an array nothing will ever write again, without the copy the constructor takes.
+         *
+         * The caller promises one of two things about [unwritten]: it is an array the caller has just
+         * allocated and filled, and drops on return -- every encoder in [CanonicalBinary] -- or it is the
+         * private snapshot of another immutable holder, such as `StoredRawResource.byteSnapshot`, read
+         * only to be digested. Either way no reference that could write to it survives, so the copy
+         * defended nothing, and the bytes, equality and hash are those the copying constructor gives.
+         *
+         * **Why.** A frame plan's encoding is nested several levels deep and carries its geometries'
+         * vertices, so copying each level's freshly built output would copy it that many extra times
+         * on every `prepare`, and hashing a stored resource would copy the whole tile or DEM to read
+         * it once (ADR 0062).
+         */
+        internal fun adopting(unwritten: ByteArray): CanonicalBytes = CanonicalBytes(unwritten, adopt = true)
+    }
 
     internal val bytes: ByteArray
         get() = snapshot.copyOf()
+
+    /**
+     * The construction snapshot, read without a further copy by RenG-internal code only — the same
+     * accessor `StoredRawResource.byteSnapshot` documents, and for the same reason.
+     *
+     * This array is never handed to a caller, never mutated, and never retained past the reading
+     * call; [bytes] remains the only externally visible read and still returns a fresh copy.
+     *
+     * It exists because a platform digest runs at gigabytes a second (ADR 0058), and copying the
+     * input twice to reach it would have been most of the work.
+     */
+    internal val byteSnapshot: ByteArray
+        get() = snapshot
 
     internal val size: Int
         get() = snapshot.size
@@ -32,20 +65,40 @@ internal class CanonicalBytes(bytes: ByteArray) {
     override fun toString(): String = "CanonicalBytes(<redacted>)"
 }
 
-internal class Sha256Digest internal constructor(bytes: ByteArray) {
-    private val snapshot: ByteArray = bytes.copyOf()
+internal class Sha256Digest private constructor(bytes: ByteArray, adopt: Boolean) {
+    internal constructor(bytes: ByteArray) : this(bytes, adopt = false)
+
+    private val snapshot: ByteArray = if (adopt) bytes else bytes.copyOf()
 
     init {
         require(snapshot.size == SHA256_DIGEST_BYTES) { "SHA-256 digest must contain 32 bytes" }
     }
 
+    internal companion object {
+        /**
+         * Wraps a digest array a hash function has just returned and nothing else holds, without the
+         * copy the constructor takes -- [CanonicalBytes.adopting]'s contract, for the 32 bytes a
+         * `MessageDigest` or [PureKotlinSha256] hands back. Every frame plan and every external
+         * reference is hashed on every `prepare`, so the copy was paid tens of times a frame for
+         * nothing.
+         */
+        internal fun adopting(fresh: ByteArray): Sha256Digest = Sha256Digest(fresh, adopt = true)
+    }
+
     internal val bytes: ByteArray
         get() = snapshot.copyOf()
 
-    internal val lowercaseHex: String = buildString(SHA256_DIGEST_BYTES * 2) {
-        snapshot.forEach { byte ->
-            append(LOWERCASE_HEX[(byte.toInt() ushr 4) and 0x0f])
-            append(LOWERCASE_HEX[byte.toInt() and 0x0f])
+    /**
+     * Built on first read: a resource key needs it for its stable id, but a frame identity is only
+     * compared and registered by its bytes, and was spelling out 64 characters on every `prepare` for
+     * no reader.
+     */
+    internal val lowercaseHex: String by lazy {
+        buildString(SHA256_DIGEST_BYTES * 2) {
+            snapshot.forEach { byte ->
+                append(LOWERCASE_HEX[(byte.toInt() ushr 4) and 0x0f])
+                append(LOWERCASE_HEX[byte.toInt() and 0x0f])
+            }
         }
     }
 

@@ -83,7 +83,9 @@ internal fun ResourceLimits.maximumBytesFor(resourceClass: ResourceClass): Long 
         -> maximumBasemapTileBytes
         ResourceClass.BASEMAP_SPRITE_IMAGE -> maximumBasemapSpriteImageBytes
         ResourceClass.BASEMAP_GEO_JSON -> maximumBasemapGeoJsonBytes
-        ResourceClass.STICKER_IMAGE -> maximumStickerImageBytes
+        ResourceClass.STICKER_IMAGE,
+        ResourceClass.BACKDROP_IMAGE,
+        -> maximumStickerImageBytes
         ResourceClass.MODEL_GLB -> maximumModelGlbBytes
         ResourceClass.MODEL_TEXTURE -> maximumModelTextureBytes
         ResourceClass.BASEMAP_GLYPH_RANGE -> GLYPH_RANGE_ROUTE_CEILING_BYTES
@@ -100,9 +102,11 @@ internal val ResourceClass.acceptValue: String
         ResourceClass.BASEMAP_RASTER_TILE,
         ResourceClass.BASEMAP_DEM_TILE,
         ResourceClass.BASEMAP_SPRITE_IMAGE,
-        ResourceClass.STICKER_IMAGE,
+        ResourceClass.BACKDROP_IMAGE,
         ResourceClass.MODEL_TEXTURE,
         -> "image/png"
+        // ADR 0084: the ETC2 container first, because it is the form a producer can upload without decoding.
+        ResourceClass.STICKER_IMAGE -> "image/x-reng-etc2, image/png"
         ResourceClass.MODEL_GLB -> "model/gltf-binary"
         ResourceClass.BASEMAP_GLYPH_RANGE -> "application/x-protobuf"
     }
@@ -121,6 +125,7 @@ internal val ResourceClass.reportOrder: Int
         ResourceClass.MODEL_GLB -> 9
         ResourceClass.MODEL_TEXTURE -> 10
         ResourceClass.BASEMAP_GLYPH_RANGE -> 11
+        ResourceClass.BACKDROP_IMAGE -> 12
     }
 
 internal val ResourceKind.reportOrder: Int

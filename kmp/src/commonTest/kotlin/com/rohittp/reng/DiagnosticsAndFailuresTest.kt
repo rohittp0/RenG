@@ -9,6 +9,7 @@ import com.rohittp.reng.internal.residentGpuTexturesOverBudgetDiagnostic
 import com.rohittp.reng.internal.resourceReloadedAfterFreeDiagnostic
 import com.rohittp.reng.internal.terrainCoverageIncompleteDiagnostic
 import com.rohittp.reng.internal.terrainUnavailableDiagnostic
+import com.rohittp.reng.internal.bloomEmissionPrecisionReducedDiagnostic
 import com.rohittp.reng.internal.unroutableLabelSourceFailure
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -45,6 +46,9 @@ class DiagnosticsAndFailuresTest {
                 "RESOURCE_DECODE_FAILED", "RESOURCE_PARSE_FAILED", "UNSUPPORTED_RESOURCE_FEATURE",
                 "SHADER_COMPILE_FAILED", "SHADER_LINK_FAILED", "GPU_OPERATION_FAILED",
                 "IDENTITY_COLLISION", "BASEMAP_RENDER_FAILED", "UNROUTABLE_LABEL_SOURCE",
+                // Appended, never inserted: this list is in declaration order, so a constant added
+                // anywhere but the end moves every ordinal after it (ADR 0056).
+                "RENDER_CONTEXT_THREAD_CHANGED",
             ),
             RenGErrorCode.entries.map { it.name },
         )
@@ -54,6 +58,11 @@ class DiagnosticsAndFailuresTest {
                 "RESOURCE_RELOADED_AFTER_FREE", "FAILURE_CONTEXT", "BASEMAP_NOT_CONFIGURED",
                 "RESIDENT_GPU_TEXTURES_OVER_BUDGET", "LABEL_CONTENT_EXCLUDED",
                 "TERRAIN_COVERAGE_INCOMPLETE", "TERRAIN_UNAVAILABLE",
+                // Appended, never inserted: declaration order is ordinal order (ADR 0057).
+                "GROUND_PRESENTED_PROVISIONALLY",
+                "BLOOM_UNAVAILABLE",
+                "BLOOM_EMISSION_PRECISION_REDUCED",
+                "BASEMAP_STYLE_INDEX_OUT_OF_RANGE",
             ),
             DiagnosticCode.entries.map { it.name },
         )
@@ -68,8 +77,8 @@ class DiagnosticsAndFailuresTest {
                 "mapPosition.unwrappedLongitude", "mapPosition.altitude", "screenPosition.x",
                 "screenPosition.y", "placement.positionMode", "placement.scale", "geometry.latitude",
                 "geometry.unwrappedLongitude", "geometry.altitude", "basemapTileInstances",
-                "responseBodyBytes", "resource", "frameIdentity", "animationSelector",
-                "shaderPair", "renderTarget",
+                "responseBodyBytes", "resource", "animationSelector",
+                "shaderPair", "renderTarget", "preparedFrameCpuBytes",
             ),
             DiagnosticField.entries.map { it.wireName },
         )
@@ -103,9 +112,14 @@ class DiagnosticsAndFailuresTest {
 
     @Test
     fun failureFactoryAcceptsEveryAllowedFailureTableShape() {
-        assertEquals(100, allowedFailureCases.size)
-        assertEquals(29, allowedFailureCases.count { !it.hasDiagnostic })
-        assertEquals(71, allowedFailureCases.count { it.hasDiagnostic })
+        // 104 until ADR 0071 admitted an internal-pipeline identity for the two shader codes, then
+        // the prepared-frame aggregate CPU ceiling added one FRAME_PREPARATION limit shape, then
+        // 107 until a tile evicted before its draw got RESOURCE_UNAVAILABLE's four DRAW identities.
+        // 110 since ADR 0081 retired IDENTITY_COLLISION at FRAME_PLANNING; 111 since the per-frame
+        // consumer pipeline limit's RESOURCE_LIMIT_EXCEEDED at FRAME_PLANNING names SHADER_PAIR.
+        assertEquals(111, allowedFailureCases.size)
+        assertEquals(33, allowedFailureCases.count { !it.hasDiagnostic })
+        assertEquals(78, allowedFailureCases.count { it.hasDiagnostic })
         assertEquals(RenGErrorCode.entries.toSet(), allowedFailureCases.map { it.code }.toSet())
 
         allowedFailureCases.forEach(::assertFailureTableOutcome)
@@ -375,6 +389,30 @@ class DiagnosticsAndFailuresTest {
                 code = DiagnosticCode.TERRAIN_COVERAGE_INCOMPLETE,
                 severity = DiagnosticSeverity.WARNING,
                 stage = PipelineStage.BASEMAP_RENDER,
+            )
+        }
+    }
+
+    @Test
+    fun bloomEmissionPrecisionReducedIsADrawWarningWithNoContext() {
+        val diagnostic = bloomEmissionPrecisionReducedDiagnostic()
+        assertEquals(DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED, diagnostic.code)
+        assertEquals(DiagnosticSeverity.WARNING, diagnostic.severity)
+        assertEquals(PipelineStage.DRAW, diagnostic.stage)
+        assertFailsWith<IllegalArgumentException> {
+            Diagnostic(
+                code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+                severity = DiagnosticSeverity.ERROR,
+                stage = PipelineStage.DRAW,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Diagnostic(
+                code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+                severity = DiagnosticSeverity.WARNING,
+                stage = PipelineStage.DRAW,
+                limit = 0L,
+                actual = 1L,
             )
         }
     }
@@ -756,9 +794,9 @@ class DiagnosticsAndFailuresTest {
                 DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
                 DiagnosticField.GEOMETRY_ALTITUDE,
                 DiagnosticField.BASEMAP_TILE_INSTANCES,
-                DiagnosticField.FRAME_IDENTITY,
                 DiagnosticField.SHADER_PAIR,
             ),
+            PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
             PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
             PipelineStage.STORE_VALIDATION to setOf(DiagnosticField.RESOURCE),
             PipelineStage.TRANSPORT_VALIDATION to setOf(DiagnosticField.RESPONSE_BODY_BYTES),
@@ -814,6 +852,16 @@ class DiagnosticsAndFailuresTest {
                     PipelineStage.RENDERER_CLOSE,
                 ).map { noDiagnostic(RenGErrorCode.DIFFERENT_CURRENT_RENDER_CONTEXT, it) },
             )
+            // The same four stages, and that is the point: a thread change is the same family of
+            // failure one step earlier, since the thread only ever stands in for the context.
+            addAll(
+                listOf(
+                    PipelineStage.RENDER_TARGET,
+                    PipelineStage.DRAW,
+                    PipelineStage.RESOURCE_FREE,
+                    PipelineStage.RENDERER_CLOSE,
+                ).map { noDiagnostic(RenGErrorCode.RENDER_CONTEXT_THREAD_CHANGED, it) },
+            )
             addAll(
                 listOf(PipelineStage.CONTEXT_ADOPTION, PipelineStage.CONFIGURATION).map {
                     noDiagnostic(RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT, it)
@@ -842,7 +890,11 @@ class DiagnosticsAndFailuresTest {
                 ).map { failureContext(RenGErrorCode.INVALID_VALUE, PipelineStage.FRAME_PLANNING, it) },
             )
             addAll(
-                listOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES).map {
+                listOf(
+                    DiagnosticField.PLANS,
+                    DiagnosticField.BASEMAP_TILE_INSTANCES,
+                    DiagnosticField.SHADER_PAIR,
+                ).map {
                     failureContext(
                         RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
                         PipelineStage.FRAME_PLANNING,
@@ -858,6 +910,14 @@ class DiagnosticsAndFailuresTest {
                     DiagnosticField.RESPONSE_BODY_BYTES,
                     IdentityShape.EXTERNAL,
                     hasStatus = true,
+                    limitShape = LimitShape.EXCEEDED,
+                ),
+            )
+            add(
+                failureContext(
+                    RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    PipelineStage.FRAME_PREPARATION,
+                    DiagnosticField.PREPARED_FRAME_CPU_BYTES,
                     limitShape = LimitShape.EXCEEDED,
                 ),
             )
@@ -896,14 +956,30 @@ class DiagnosticsAndFailuresTest {
                         identity,
                     ),
                 )
+                // The same pair for a rendered tile evicted between preparation and draw
+                // (`resolveGroundTiles`): before it was allowed, that failure could not be built.
+                add(
+                    failureContext(
+                        RenGErrorCode.RESOURCE_UNAVAILABLE,
+                        PipelineStage.DRAW,
+                        DiagnosticField.RESOURCE,
+                        identity,
+                    ),
+                )
             }
             listOf(DiagnosticField.RESOURCE, DiagnosticField.ANIMATION_SELECTOR).forEach { field ->
                 add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field))
                 add(failureContext(RenGErrorCode.RESOURCE_PARSE_FAILED, PipelineStage.RESOURCE_PARSING, field, IdentityShape.EXTERNAL))
             }
             add(failureContext(RenGErrorCode.UNSUPPORTED_RESOURCE_FEATURE, PipelineStage.RESOURCE_PARSING, DiagnosticField.RESOURCE, IdentityShape.EXTERNAL))
+            // Both consumer-program kinds, and only those two: a geometry's, and -- since ADR 0071
+            // let a consumer supply the backdrop's source -- an internal pipeline's. EXTERNAL and
+            // OFFSCREEN_SURFACE stay rejected, which is what keeps this a rule rather than a
+            // waiver: those identities still cannot carry a shader-compilation failure.
             listOf(RenGErrorCode.SHADER_COMPILE_FAILED, RenGErrorCode.SHADER_LINK_FAILED).forEach { code ->
-                add(failureContext(code, PipelineStage.SHADER_COMPILATION, DiagnosticField.SHADER_PAIR, IdentityShape.GEOMETRY_PROGRAM))
+                listOf(IdentityShape.GEOMETRY_PROGRAM, IdentityShape.INTERNAL_PIPELINE).forEach { identity ->
+                    add(failureContext(code, PipelineStage.SHADER_COMPILATION, DiagnosticField.SHADER_PAIR, identity))
+                }
             }
             listOf(
                 PipelineStage.GPU_RESOURCE,
@@ -916,7 +992,6 @@ class DiagnosticsAndFailuresTest {
                     add(failureContext(RenGErrorCode.GPU_OPERATION_FAILED, stage, identity = identity))
                 }
             }
-            add(failureContext(RenGErrorCode.IDENTITY_COLLISION, PipelineStage.FRAME_PLANNING, DiagnosticField.FRAME_IDENTITY))
             IdentityShape.entries.filter { it != IdentityShape.NONE }.forEach { identity ->
                 add(failureContext(RenGErrorCode.IDENTITY_COLLISION, PipelineStage.RESOURCE_LOOKUP, DiagnosticField.RESOURCE, identity))
             }

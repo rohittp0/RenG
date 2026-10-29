@@ -16,6 +16,14 @@ import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
+import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
+import com.rohittp.reng.runStickerOpacityReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.GROUND_ANCHOR_READBACK_PIXELS
@@ -88,7 +96,7 @@ class IosGlConformanceTest {
         val fixture = EaglOffscreenContext.create()
         try {
             val binding = bindOrFail()
-            assertEquals(91, GlEntryPoint.entries.size)
+            assertEquals(93, GlEntryPoint.entries.size)
 
             val profile = when (val adoption = adoptRenderContext(binding)) {
                 is RenderContextAdoption.Adopted -> adoption.profile
@@ -152,7 +160,7 @@ class IosGlConformanceTest {
             val report = runGlConformanceSuite(binding, fixture.probe, ShaderDialect.GLES)
             println("RenG iOS conformance renderer: ${report.rendererName} / ${report.versionText}")
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
             assertTrue(report.versionText.startsWith("OpenGL ES 3"))
         } finally {
@@ -280,6 +288,55 @@ class IosGlConformanceTest {
             binding.viewport(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
             binding.scissor(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
             runGeometrySubdivisionReadbackSuite(binding, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theGeometryBlendReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theStickerOpacityReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
         } finally {
             fixture.destroy()
         }

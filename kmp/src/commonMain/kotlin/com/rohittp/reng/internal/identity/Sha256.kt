@@ -33,7 +33,7 @@ internal object PureKotlinSha256 : Sha256Function {
         state.forEachIndexed { index, word ->
             writeIntBigEndian(word, digest, index * Int.SIZE_BYTES)
         }
-        return Sha256Digest(digest)
+        return Sha256Digest.adopting(digest)
     }
 
     private fun compress(

@@ -25,6 +25,7 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.STICKER_TEXTURE_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.composeScreenModelViewProjection
+import com.rohittp.reng.internal.image.TWO_PIXEL_JPEG
 import com.rohittp.reng.internal.lifecycle.PreparedFrameFact
 import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.planning.SpatialOutcome
@@ -1063,6 +1064,30 @@ class RendererFactoryTest {
     }
 
     @Test
+    fun aJpegTexturedModelPreparesDrawsAndUploadsItsOpaquePixels() = runTest {
+        // The device failure ADR 0089 fixes: a GLB whose embedded texture is image/jpeg failed every
+        // frame's preparation at VALIDATE_GLB_FEATURES. It must now prepare, draw, and upload the
+        // decoded texels -- opaque, so premultiplication leaves them exactly as decoded.
+        val binding = modelBinding()
+        val renderer = createRenderer(
+            testConfiguration(transport = ModelTransport(glb = texturedTriangleGlb(TWO_PIXEL_JPEG, "image/jpeg"))),
+            binding,
+            fixedProbe(),
+        )
+        val frame = renderer.prepare(modelPlan())
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        assertTrue(binding.log.contains("drawElements(0x4,3,0x1403,0)"), "the primitive must draw: ${binding.log}")
+        assertTrue(
+            binding.log.contains("uniform1i($MODEL_TEXTURE_LOCATION,0)"),
+            "the JPEG base-colour texture must be sampled: ${binding.log}",
+        )
+        assertEquals(listOf<Byte>(0x10, 0x20, 0x30, -1, -64, -128, 0x40, -1), binding.lastTexImageBytes())
+    }
+
+    @Test
     fun movingATracksTimeMovesWhatDraws() = runTest {
         // Nothing else in this section would notice `sampleAnimationTracks` being replaced by an empty
         // override map: every other assertion is about uploads, binds and draw calls, none of which the
@@ -1760,12 +1785,15 @@ private class ModelTransport(private val glb: ByteArray = texturedTriangleGlb())
  * the sampler's four enums are four different values, and the base colour factor's four components
  * differ — so a transposed, reversed or mis-strided read fails instead of passing by coincidence.
  */
-private fun texturedTriangleGlb(): ByteArray {
+private fun texturedTriangleGlb(
+    image: ByteArray = transparentEdgePng,
+    mimeType: String = "image/png",
+): ByteArray {
     // Derived rather than written out, because the one number a hand-assembled GLB gets wrong is a
     // length: the embedded PNG's own size decides both the image buffer view's extent and the buffer's
     // declared total, and a literal for either drifts silently into a Malformed decode the moment the
     // shared PNG fixture changes by a byte.
-    val pngBytes = transparentEdgePng.size
+    val pngBytes = image.size
     val bufferBytes = PNG_BUFFER_VIEW_OFFSET + pngBytes
     return glb(
         """
@@ -1784,7 +1812,7 @@ private fun texturedTriangleGlb(): ByteArray {
        {"bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR"},
        {"bufferView": 3, "componentType": 5126, "count": 2, "type": "SCALAR"},
        {"bufferView": 4, "componentType": 5126, "count": 2, "type": "VEC3"}],
-     "images": [{"bufferView": 5, "mimeType": "image/png"}],
+     "images": [{"bufferView": 5, "mimeType": "$mimeType"}],
      "samplers": [{"magFilter": 9728, "minFilter": 9729, "wrapS": 33071, "wrapT": 33648}],
      "textures": [{"sampler": 0, "source": 0}],
      "materials": [{"doubleSided": true, "pbrMetallicRoughness": {
@@ -1807,7 +1835,7 @@ private fun texturedTriangleGlb(): ByteArray {
             u8(0, 0)
             f32(0f, 1f)
             f32(0f, 0f, 0f, 4f, 8f, 16f)
-            raw(transparentEdgePng)
+            raw(image)
         },
     )
 }

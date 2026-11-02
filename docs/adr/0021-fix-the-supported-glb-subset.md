@@ -105,6 +105,8 @@ Two rejections were re-decided and **kept**, so that neither reads as unfinished
 a decoder RenG does not have is not worth building for a single asset. Those two are why the cycle reaches
 40 of 41 models rather than all 41.
 
+*Amended by ADR 0089:* `image/jpeg` is now admitted; `IMAGE_MEDIA_TYPE` covers every other media type.
+
 `PARSE_GLB` also gained two malformation rules this ADR's split assigns to it: an animation sampler whose
 `output.count` disagrees with its `input.count` (honouring `CUBICSPLINE`'s three-values-per-keyframe form,
 so a legal cubic-spline asset is still refused as an unsupported *feature* rather than as a corrupt file),

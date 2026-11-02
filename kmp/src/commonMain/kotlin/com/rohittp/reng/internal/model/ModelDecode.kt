@@ -5,6 +5,8 @@ import com.rohittp.reng.internal.gl.GL_UNSIGNED_INT
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_SHORT
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.gltfSamplerState
+import com.rohittp.reng.internal.glb.GLTF_JPEG_MEDIA_TYPE
+import com.rohittp.reng.internal.glb.GLTF_PNG_MEDIA_TYPE
 import com.rohittp.reng.internal.glb.GlbScan
 import com.rohittp.reng.internal.glb.GltfDocument
 import com.rohittp.reng.internal.glb.GltfFeatureResult
@@ -15,8 +17,11 @@ import com.rohittp.reng.internal.glb.parseGltf
 import com.rohittp.reng.internal.glb.scanGlb
 import com.rohittp.reng.internal.glb.validateGltfFeatures
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.JpegDecodeResult
 import com.rohittp.reng.internal.image.PngDecodeResult
+import com.rohittp.reng.internal.image.decodeJpeg
 import com.rohittp.reng.internal.image.prescanPng
+import com.rohittp.reng.internal.image.projectedJpegRgbaBytes
 import com.rohittp.reng.internal.math.DoubleMatrix4
 
 /** The attribute semantics RenG binds. Every other semantic `validateGltfFeatures` admits --
@@ -437,30 +442,56 @@ private class ModelDecoder(
      * Every embedded image, decoded to canonical RGBA8 and kept index-parallel with
      * `document.images`, which is what lets [ResolvedMaterial.baseColourImageIndex] be a glTF image
      * index rather than a remapped one. An image no material references is still decoded, and still
-     * fails the decode if its bytes are not a PNG: `validateGltfFeatures` has already vouched for
-     * every image's media type and embedding, so a payload that does not decode is a corrupt file
-     * rather than the unvalidated debris an unreferenced *skin* is.
+     * fails the decode if its bytes are not the format its `mimeType` declares:
+     * `validateGltfFeatures` has already vouched for every image's media type and embedding, so a
+     * payload that does not decode is a corrupt file rather than the unvalidated debris an
+     * unreferenced *skin* is.
      *
-     * A PNG's three failures map straight through to this file's three, so a JPEG mislabelled
-     * `image/png` and a raster larger than the budget stay distinguishable at the caller.
+     * PNG and JPEG (ADR 0089) decode to the same canonical form -- a JPEG opaque, with alpha 255 --
+     * and upload through the same path, so colour space, premultiplication and `alphaMode` treat
+     * them alike. Each decoder's three failures map straight through to this file's three, so a
+     * file mislabelled with the other format's media type and a raster larger than the budget stay
+     * distinguishable at the caller.
      */
     private fun decodeImages(): List<DecodedImage> = document.images.map { image ->
         val view = document.bufferViews[image.bufferView ?: fail(ModelDecodeResult.Malformed)]
         val payload = bin.copyOfRange(view.byteOffset, view.byteLength) ?: fail(ModelDecodeResult.Malformed)
-        val png = prescanPng(payload)
-        png.projectedRgbaBytes?.let { projectedBytes ->
-            if (projectedBytes > budgetBytes - decodedBytes) fail(ModelDecodeResult.TooLarge)
-            reserveDecodedCpuBytes(projectedBytes)
+        val decoded = when (image.mimeType) {
+            GLTF_PNG_MEDIA_TYPE -> decodePngImage(payload)
+            GLTF_JPEG_MEDIA_TYPE -> decodeJpegImage(payload)
+            else -> fail(ModelDecodeResult.Unsupported)
         }
-        val decoded = when (val result = png.decode(budgetBytes, imageWorkingBudgetBytes)) {
+        decodedBytes += decoded.byteCount.toLong()
+        if (decodedBytes > budgetBytes) fail(ModelDecodeResult.TooLarge)
+        decoded
+    }
+
+    /** Projected bytes are admitted and reserved before the raster is allocated, as for geometry. */
+    private fun reserveProjectedImage(projectedBytes: Long?) {
+        projectedBytes ?: return
+        if (projectedBytes > budgetBytes - decodedBytes) fail(ModelDecodeResult.TooLarge)
+        reserveDecodedCpuBytes(projectedBytes)
+    }
+
+    private fun decodePngImage(payload: ByteArray): DecodedImage {
+        val png = prescanPng(payload)
+        reserveProjectedImage(png.projectedRgbaBytes)
+        return when (val result = png.decode(budgetBytes, imageWorkingBudgetBytes)) {
             is PngDecodeResult.Success -> result.image
             is PngDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)
             is PngDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
             PngDecodeResult.TooLarge -> fail(ModelDecodeResult.TooLarge)
         }
-        decodedBytes += decoded.byteCount.toLong()
-        if (decodedBytes > budgetBytes) fail(ModelDecodeResult.TooLarge)
-        decoded
+    }
+
+    private fun decodeJpegImage(payload: ByteArray): DecodedImage {
+        reserveProjectedImage(projectedJpegRgbaBytes(payload))
+        return when (val result = decodeJpeg(payload, budgetBytes, imageWorkingBudgetBytes)) {
+            is JpegDecodeResult.Success -> result.image
+            is JpegDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)
+            is JpegDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
+            JpegDecodeResult.TooLarge -> fail(ModelDecodeResult.TooLarge)
+        }
     }
 
     /**

@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.gl.GL_REPEAT
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_SHORT
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.gltfSamplerState
+import com.rohittp.reng.internal.image.TWO_PIXEL_JPEG
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -103,6 +104,48 @@ class ModelDecodeTest {
             TextureSamplerState(minFilter = 9987, magFilter = 9728, wrapS = 33071, wrapT = 33648),
             primitive.material.baseColourSampler,
         )
+    }
+
+    @Test
+    fun aJpegBaseColourTextureDecodesToTheSameCanonicalOpaqueRgba() {
+        // ADR 0089: core glTF 2.0's second image type. The fixture is `JpegDecoderTest`'s 2x1 file,
+        // which libjpeg decodes exactly, so the bytes are the picture rather than a tolerance.
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/jpeg")
+        val projectedGroups = mutableListOf<Long>()
+        val model = assertIs<ModelDecodeResult.Success>(decodeModel(bytes, ResourceLimits(), projectedGroups::add)).model
+
+        assertEquals(0, model.primitives[0].material.baseColourImageIndex)
+        assertContentEquals(
+            byteArrayOf(0x10, 0x20, 0x30, -1, -64, -128, 0x40, -1),
+            model.images[0].rgbaSnapshot(),
+        )
+        // Admitted and reserved before allocation exactly as a PNG is.
+        assertEquals(36L + 6L + 8L, model.decodedCpuBytes)
+        assertEquals(model.decodedCpuBytes, projectedGroups.sum())
+    }
+
+    @Test
+    fun anImageWhoseBytesAreNotItsDeclaredFormatIsMalformed() {
+        val texture = """{"source": 0, "sampler": 0}"""
+        assertIs<ModelDecodeResult.Malformed>(
+            decodeModel(texturedGlb(texture, image = PNG_2X1, mimeType = "image/jpeg"), ResourceLimits()),
+        )
+        assertIs<ModelDecodeResult.Malformed>(
+            decodeModel(texturedGlb(texture, image = TWO_PIXEL_JPEG, mimeType = "image/png"), ResourceLimits()),
+        )
+    }
+
+    @Test
+    fun anImageMediaTypeOutsideCoreGltfIsStillUnsupported() {
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/webp")
+        assertIs<ModelDecodeResult.Unsupported>(decodeModel(bytes, ResourceLimits()))
+    }
+
+    @Test
+    fun aJpegRasterOverTheDecodedImageBudgetIsTooLarge() {
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/jpeg")
+        assertIs<ModelDecodeResult.TooLarge>(decodeModel(bytes, ResourceLimits(maximumDecodedImageBytes = 49L)))
+        assertIs<ModelDecodeResult.Success>(decodeModel(bytes, ResourceLimits(maximumDecodedImageBytes = 50L)))
     }
 
     @Test
@@ -328,18 +371,20 @@ private val PNG_2X1: ByteArray = byteArrayOf(
 private fun texturedGlb(
     texture: String,
     samplers: String = """"samplers": [{"magFilter": 9728, "minFilter": 9987, "wrapS": 33071, "wrapT": 33648}],""",
+    image: ByteArray = PNG_2X1,
+    mimeType: String = "image/png",
 ): ByteArray = glb(
     """
     {$ASSET,
-     "buffers": [{"byteLength": 116}],
+     "buffers": [{"byteLength": ${42 + image.size}}],
      "bufferViews": [
        {"buffer": 0, "byteOffset": 0, "byteLength": 36},
        {"buffer": 0, "byteOffset": 36, "byteLength": 6},
-       {"buffer": 0, "byteOffset": 42, "byteLength": 74}],
+       {"buffer": 0, "byteOffset": 42, "byteLength": ${image.size}}],
      "accessors": [
        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
        {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}],
-     "images": [{"bufferView": 2, "mimeType": "image/png"}],
+     "images": [{"bufferView": 2, "mimeType": "$mimeType"}],
      $samplers
      "textures": [$texture],
      "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
@@ -350,7 +395,7 @@ private fun texturedGlb(
     bin {
         f32(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f)
         u16(0, 2, 1)
-        raw(PNG_2X1)
+        raw(image)
     },
 )
 

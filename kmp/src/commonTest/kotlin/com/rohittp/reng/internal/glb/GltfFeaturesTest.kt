@@ -26,7 +26,8 @@ class GltfFeaturesTest {
         assertEquals(GltfUnsupported.MORPH_TARGET, unsupported(documentWithMorphTargets))
         assertEquals(GltfUnsupported.ANIMATION_TARGET_PATH, unsupported(weightsChannel))
         assertEquals(GltfUnsupported.INTERPOLATION, unsupported(cubicSplineSampler))
-        assertEquals(GltfUnsupported.IMAGE_MEDIA_TYPE, unsupported(jpegImage))
+        assertEquals(GltfUnsupported.IMAGE_MEDIA_TYPE, unsupported(webpImage))
+        assertEquals(GltfUnsupported.IMAGE_MEDIA_TYPE, unsupported(imageWithoutMediaType))
         assertEquals(GltfUnsupported.EXTERNAL_URI, unsupported(imageWithUri))
         assertEquals(GltfUnsupported.EXTERNAL_URI, unsupported(bufferWithDataUri))
         assertEquals(GltfUnsupported.SCENE_AMBIGUOUS, unsupported(twoScenesNoDefault))
@@ -38,7 +39,7 @@ class GltfFeaturesTest {
         for (fixture in listOf(
             triangleIndexed, triangleNonIndexed, nodeMatrixOnly, nodeTrsOnly,
             tangentAndColourZero, sceneAbsentWithExactlyOneScene, interleavedStride,
-            linearAndStepAnimation, embeddedPngImage, fullMaterialBlock,
+            linearAndStepAnimation, embeddedPngImage, embeddedJpegImage, fullMaterialBlock,
             cameraAndLightIgnored, extensionsUsedWithoutRequired,
         )) {
             assertEquals(GltfFeatureResult.Supported, validateGltfFeatures(fixture.document))
@@ -416,11 +417,24 @@ class GltfFeaturesTest {
         }
     """.trimIndent()
 
-    private val jpegImage = """
+    /** `image/webp` is only legal under `EXT_texture_webp`, which RenG does not implement. */
+    private val webpImage = """
         {
           "asset": {"version": "2.0"},
           "scenes": [{"nodes": []}],
-          "images": [{"mimeType": "image/jpeg"}]
+          "buffers": [{"byteLength": 1024}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
+          "images": [{"bufferView": 0, "mimeType": "image/webp"}]
+        }
+    """.trimIndent()
+
+    private val imageWithoutMediaType = """
+        {
+          "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
+          "buffers": [{"byteLength": 1024}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
+          "images": [{"bufferView": 0}]
         }
     """.trimIndent()
 
@@ -599,6 +613,16 @@ class GltfFeaturesTest {
               ]
             }
           ]
+        }
+    """.trimIndent()
+
+    private val embeddedJpegImage = """
+        {
+          "asset": {"version": "2.0"},
+          "scenes": [{"nodes": []}],
+          "buffers": [{"byteLength": 1024}],
+          "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 100}],
+          "images": [{"bufferView": 0, "mimeType": "image/jpeg"}]
         }
     """.trimIndent()
 

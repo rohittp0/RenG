@@ -29,6 +29,22 @@ fixed-point BT.601 full-range transform, and 2x chroma uses libjpeg's triangle u
 libjpeg-turbo 3.2.0 the output is within 2 levels on the test fixtures and 3 on the 1024-pixel model
 texture. EXIF orientation is ignored, because glTF addresses texels by stored rows.
 
+The decoder treats its input as hostile, and is total: every fault is a typed result.
+
+- Huffman length tables are checked against the Kraft inequality before any table is built.
+- Progressive scans must advance ITU T.81 G.1.1.1's successive approximation per component and
+  coefficient (a first scan only of uncoded coefficients, a refinement only at the bit the last scan
+  left, AC only after DC, a sequential component once), and an image carries at most 64 scans, so
+  decode work is a bounded multiple of the admitted raster.
+- A scan may consume at most 16 bits past its real data; restart markers must run `RST0`..`RST7` in
+  order exactly where an interval ends; bytes between segments must be markers or fill; the file must
+  end in EOI; and every component's DC must have been coded. A truncated or damaged texture is refused
+  as `Malformed` rather than drawn part grey.
+- Three components are ordered by id (JFIF 1/2/3, 0/1/2, `R`/`G`/`B`), and by frame order otherwise.
+- The header projection runs the decoder's own marker parser, so it can never read a frame header the
+  decoder does not; when it yields nothing, `ModelDecode` refuses the image without decoding it.
+- An exception the validation did not anticipate is caught at the boundary as `Malformed`.
+
 One implementation in `commonMain` rather than a platform codec per target: Linux has no system decoder,
 and one integer decoder gives every platform the same texels, which is what lets frame comparison stay
 exact across targets.

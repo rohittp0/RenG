@@ -1,11 +1,15 @@
 package com.rohittp.reng.internal.image
 
 import kotlin.math.abs
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * Every fixture is a real JPEG produced by libjpeg-turbo 3.2.0's `cjpeg`, and every reference is
@@ -33,6 +37,8 @@ import kotlin.test.assertTrue
  *     }.items():
  *         subprocess.check_call(["cjpeg", "-quality", "90", *args, "-outfile", name + ".jpg", "src.ppm"])
  *     subprocess.check_call(["cjpeg", "-quality", "90", "-grayscale", "-outfile", "grey.jpg", "src.pgm"])
+ *  *     for sampling in ["1x2", "4x1", "4x2", "2x4", "1x1,2x2,1x1", "2x2,1x2,2x1"]:
+ *         subprocess.check_call(["cjpeg", "-quality", "90", "-sample", sampling, "-outfile", ..., "src.ppm"])
  *     # then, per file: djpeg -pnm -outfile <name>.ref <name>.jpg, keeping the pixels after the header
  *     PY
  *
@@ -53,6 +59,12 @@ class JpegDecoderTest {
             "restart interval" to (RESTART_420_JPEG to RESTART_420_REFERENCE),
             "progressive with restarts" to (PROGRESSIVE_RESTART_JPEG to PROGRESSIVE_RESTART_REFERENCE),
             "greyscale" to (GREY_JPEG to GREY_REFERENCE),
+            "sampling 1x2" to (SAMPLED_1X2_JPEG to SAMPLED_1X2_REFERENCE),
+            "sampling 4x1" to (SAMPLED_4X1_JPEG to SAMPLED_4X1_REFERENCE),
+            "sampling 4x2" to (SAMPLED_4X2_JPEG to SAMPLED_4X2_REFERENCE),
+            "sampling 2x4" to (SAMPLED_2X4_JPEG to SAMPLED_2X4_REFERENCE),
+            "chroma finer than luma" to (SAMPLED_CHROMA_FINER_JPEG to SAMPLED_CHROMA_FINER_REFERENCE),
+            "mixed chroma sampling" to (SAMPLED_MIXED_JPEG to SAMPLED_MIXED_REFERENCE),
         )
         for ((name, fixture) in fixtures) {
             val (jpeg, reference) = fixture
@@ -111,6 +123,8 @@ class JpegDecoderTest {
         assertEquals(JpegReject.ARITHMETIC_CODING, unsupportedReason(withFrameMarker(0xC9)))
         val twelveBit = BASELINE_420_JPEG.copyOf().also { it[frameMarkerOffset() + 4] = 12 }
         assertEquals(JpegReject.SAMPLE_PRECISION, unsupportedReason(twelveBit))
+        // A file whose only frame is unsupported projects nothing, so a model refuses it unreserved.
+        assertNull(projectedJpegRgbaBytes(withFrameMarker(0xC3)))
     }
 
     @Test
@@ -127,31 +141,181 @@ class JpegDecoderTest {
     }
 
     @Test
-    fun noTruncationOrCorruptedByteEscapesAsAnException() {
-        // A model's texture is untrusted bytes: every outcome must be one of the four typed results.
-        for (fixture in listOf(BASELINE_420_JPEG, PROGRESSIVE_RESTART_JPEG)) {
-            for (length in 0..fixture.size) decodeJpeg(fixture.copyOf(length), Long.MAX_VALUE)
+    fun noTruncationDecodesAndNoCorruptedByteEscapesAsAnException() {
+        // A model's texture is untrusted bytes: every outcome must be one of the four typed results,
+        // checked without decodeJpeg's last-resort trap so a missed validation fails here. And a
+        // truncated texture is refused rather than drawn part grey.
+        for (fixture in listOf(BASELINE_420_JPEG, PROGRESSIVE_RESTART_JPEG, RESTART_420_JPEG)) {
+            for (length in 0 until fixture.size) {
+                val result = decodeJpegUntrapped(fixture.copyOf(length), Long.MAX_VALUE)
+                assertFalse(result is JpegDecodeResult.Success, "a ${fixture.size}-byte file cut to $length decoded")
+            }
             for (index in fixture.indices) {
                 for (mask in intArrayOf(0x01, 0x10, 0xFF)) {
                     val corrupted = fixture.copyOf()
                     corrupted[index] = (corrupted[index].toInt() xor mask).toByte()
-                    decodeJpeg(corrupted, maximumDecodedBytes = 1L shl 24, maximumWorkingBytes = 1L shl 26)
+                    decodeJpegUntrapped(corrupted, maximumDecodedBytes = 1L shl 24, maximumWorkingBytes = 1L shl 26)
+                    projectedJpegRgbaBytes(corrupted)
                 }
             }
         }
     }
 
+    @Test
+    fun anOversubscribedHuffmanTableIsMalformedBeforeAnyTableIsBuilt() {
+        // Three one-bit codes: the bytes that once wrote past the 512-entry lookup.
+        val threeOneBitCodes = hex("ffd8 ffc4 0016 00 03 000000000000000000000000000000 000102")
+        assertEquals(JpegReject.HUFFMAN_TABLE, malformedReason(threeOneBitCodes))
+        // Five two-bit codes after none of one bit: oversubscribed below the lookup's width too.
+        val fiveTwoBitCodes = hex("ffd8 ffc4 0018 00 0005 0000000000000000000000000000 0001020304")
+        assertEquals(JpegReject.HUFFMAN_TABLE, malformedReason(fiveTwoBitCodes))
+        // One code at each length 1..15 leaves two sixteen-bit codes; three is oversubscribed only at
+        // the last length, past the lookup's width.
+        val counts = ByteArray(16) { if (it < 15) 1 else 3 }
+        val sixteenBit = byteArrayOf(-1, -40) + segment(0xC4, byteArrayOf(0) + counts + ByteArray(18) { it.toByte() })
+        assertEquals(JpegReject.HUFFMAN_TABLE, malformedReason(sixteenBit))
+        // An incomplete table is legal -- every real JPEG's is, the all-ones code being reserved.
+        assertIs<JpegDecodeResult.Success>(decodeJpegUntrapped(progressive(scans = baseScans()), Long.MAX_VALUE))
+    }
+
+    @Test
+    fun aScanThatDoesNotAdvanceTheProgressionIsRefusedAtOnce() {
+        // The amplification input: one DC scan, then thousands of refinement headers with no data,
+        // each of which used to walk every block of a 1024x1024 frame on synthetic zero bits.
+        val clock = TimeSource.Monotonic.markNow()
+        val repeatedRefinement = progressive(
+            side = 1024,
+            scans = listOf(scan(0, 0, 0, 0, ByteArray(1024 * 1024 / 64 / 8))) +
+                List(10_000) { scan(0, 0, 1, 0, ByteArray(0)) },
+        )
+        assertEquals(JpegReject.SCAN_PROGRESSION, malformedReason(repeatedRefinement))
+        // The same refinement at the right bit, with no data: refused after a handful of bits.
+        val emptyRefinement = progressive(
+            side = 1024,
+            scans = listOf(scan(0, 0, 0, 1, ByteArray(1024 * 1024 / 64 / 8)), scan(0, 0, 1, 0, ByteArray(0))),
+        )
+        assertEquals(JpegReject.TRUNCATED, malformedReason(emptyRefinement))
+        assertTrue(clock.elapsedNow() < 2.seconds, "refusing both took ${clock.elapsedNow()}")
+
+        val dcTwice = baseScans() + scan(0, 0, 0, 0, byteArrayOf(0x7F))
+        assertEquals(JpegReject.SCAN_PROGRESSION, malformedReason(progressive(scans = dcTwice)))
+        val acBeforeDc = listOf(scan(1, 63, 0, 0, byteArrayOf(0x7F)), scan(0, 0, 0, 0, byteArrayOf(0x7F)))
+        assertEquals(JpegReject.SCAN_PROGRESSION, malformedReason(progressive(scans = acBeforeDc + endOfImage())))
+        val refinementAtTheWrongBit = listOf(scan(0, 0, 0, 2, byteArrayOf(0x7F)), scan(0, 0, 1, 0, byteArrayOf(0x7F)))
+        assertEquals(JpegReject.SCAN_PROGRESSION, malformedReason(progressive(scans = refinementAtTheWrongBit)))
+        val acRefinementBeforeItsFirstScan = baseScans() + scan(1, 5, 1, 0, byteArrayOf(0x7F))
+        assertEquals(JpegReject.SCAN_PROGRESSION, malformedReason(progressive(scans = acRefinementBeforeItsFirstScan)))
+    }
+
+    @Test
+    fun moreScansThanTheCapAreUnsupported() {
+        // DC first and refinement, then one first scan per AC coefficient: 65 scans, each legal.
+        val dc = listOf(scan(0, 0, 0, 1, byteArrayOf(0x7F)), scan(0, 0, 1, 0, byteArrayOf(0x7F)))
+        val everyCoefficient = dc + (1..63).map { scan(it, it, 0, 0, byteArrayOf(0x7F)) }
+        assertEquals(MAXIMUM_SCANS + 1, everyCoefficient.size)
+        val result = decodeJpegUntrapped(progressive(scans = everyCoefficient), Long.MAX_VALUE)
+        assertEquals(JpegReject.SCAN_COUNT, assertIs<JpegDecodeResult.Unsupported>(result).reason)
+        // One fewer is decoded.
+        assertIs<JpegDecodeResult.Success>(
+            decodeJpegUntrapped(progressive(scans = everyCoefficient.dropLast(1)), Long.MAX_VALUE),
+        )
+    }
+
+    @Test
+    fun theProjectionAndTheDecoderReadTheSameMarkers() {
+        // Standalone markers (RSTn, TEM) and fill bytes before the frame once made the projection
+        // read a length where the decoder read none, so a decodable file projected nothing.
+        val injections = listOf(hex("ffd0"), hex("ff01"), hex("ffff"), hex("ffd7ffd0"))
+        val corpus = listOf(
+            BASELINE_420_JPEG, BASELINE_444_JPEG, PROGRESSIVE_420_JPEG, RESTART_420_JPEG, GREY_JPEG,
+            SAMPLED_4X2_JPEG, SAMPLED_MIXED_JPEG,
+        )
+        for (fixture in corpus) {
+            for (injection in injections) {
+                for (position in listOf(2, frameMarkerOffset(fixture))) {
+                    val bytes = fixture.copyOfRange(0, position) + injection + fixture.copyOfRange(position, fixture.size)
+                    val decodedResult = decodeJpegUntrapped(bytes, Long.MAX_VALUE)
+                    val image = assertIs<JpegDecodeResult.Success>(decodedResult).image
+                    assertEquals(image.width * image.height * 4L, projectedJpegRgbaBytes(bytes))
+                }
+            }
+            // And whatever the projection refuses, the decoder refuses.
+            val garbageBeforeFrame = fixture.copyOfRange(0, 2) + hex("00") + fixture.copyOfRange(2, fixture.size)
+            assertNull(projectedJpegRgbaBytes(garbageBeforeFrame))
+            assertIs<JpegDecodeResult.Malformed>(decodeJpegUntrapped(garbageBeforeFrame, Long.MAX_VALUE))
+        }
+    }
+
+    @Test
+    fun aFileWithoutItsEndOfImageIsTruncated() {
+        val withoutEnd = BASELINE_420_JPEG.copyOf(BASELINE_420_JPEG.size - 2)
+        assertEquals(JpegReject.TRUNCATED, malformedReason(withoutEnd))
+    }
+
+    @Test
+    fun restartMarkersMustCountZeroToSevenInOrder() {
+        val first = firstMarkerAfterScanStart(RESTART_420_JPEG, 0xD0)
+        val skipped = RESTART_420_JPEG.copyOf().also { it[first + 1] = 0xD1.toByte() }
+        assertEquals(JpegReject.RESTART_SEQUENCE, malformedReason(skipped))
+        val removed = RESTART_420_JPEG.copyOfRange(0, first) + RESTART_420_JPEG.copyOfRange(first + 2, RESTART_420_JPEG.size)
+        assertIs<JpegDecodeResult.Malformed>(decodeJpegUntrapped(removed, Long.MAX_VALUE))
+    }
+
+    @Test
+    fun coloursFollowComponentIdsNotFrameOrder() {
+        // The 4:4:4 file with its two chroma entries swapped in the frame header: ids, sampling and
+        // tables travel with them, so the right decode is the original picture, byte for byte.
+        val frame = frameMarkerOffset(BASELINE_444_JPEG)
+        val cb = frame + 2 + 2 + 6 + 3
+        val swapped = BASELINE_444_JPEG.copyOf()
+        for (i in 0 until 3) {
+            swapped[cb + i] = BASELINE_444_JPEG[cb + 3 + i]
+            swapped[cb + 3 + i] = BASELINE_444_JPEG[cb + i]
+        }
+        assertEquals(2, swapped[cb + 3].toInt(), "the swap must have moved Cb (id 2) second")
+        assertEquals(decoded(BASELINE_444_JPEG).rgbaSnapshot().toList(), decoded(swapped).rgbaSnapshot().toList())
+    }
+
+    @Test
+    fun theLargestFrameIsRefusedFromItsHeaderAlone() {
+        val frame = frameMarkerOffset(BASELINE_420_JPEG)
+        val largest = BASELINE_420_JPEG.copyOf().also {
+            for (i in 0 until 4) it[frame + 5 + i] = -1 // height and width 65535
+        }
+        assertEquals(65535L * 65535L * 4L, projectedJpegRgbaBytes(largest))
+        val clock = TimeSource.Monotonic.markNow()
+        assertIs<JpegDecodeResult.TooLarge>(decodeJpegUntrapped(largest, maximumDecodedBytes = 64L shl 20))
+        assertTrue(clock.elapsedNow() < 1.seconds)
+        // The raster boundary is exact for this file too.
+        val raster = WIDTH * HEIGHT * 4L
+        assertIs<JpegDecodeResult.TooLarge>(decodeJpegUntrapped(BASELINE_420_JPEG, raster - 1))
+        assertIs<JpegDecodeResult.Success>(decodeJpegUntrapped(BASELINE_420_JPEG, raster))
+    }
+
+    @Test
+    fun structuredRandomFilesNeverThrowAndAgreeWithTheirProjection() {
+        val random = Random(0x4A504547)
+        repeat(4000) {
+            val bytes = randomJpeg(random)
+            val result = decodeJpegUntrapped(bytes, maximumDecodedBytes = 1L shl 22, maximumWorkingBytes = 1L shl 24)
+            val projection = projectedJpegRgbaBytes(bytes)
+            if (result is JpegDecodeResult.Success) {
+                assertEquals(result.image.width * result.image.height * 4L, projection)
+            }
+        }
+    }
+
     private fun decoded(bytes: ByteArray): DecodedImage =
-        assertIs<JpegDecodeResult.Success>(decodeJpeg(bytes, Long.MAX_VALUE)).image
+        assertIs<JpegDecodeResult.Success>(decodeJpegUntrapped(bytes, Long.MAX_VALUE)).image
 
     private fun unsupportedReason(bytes: ByteArray): JpegReject =
-        assertIs<JpegDecodeResult.Unsupported>(decodeJpeg(bytes, Long.MAX_VALUE)).reason
+        assertIs<JpegDecodeResult.Unsupported>(decodeJpegUntrapped(bytes, Long.MAX_VALUE)).reason
+
+    private fun malformedReason(bytes: ByteArray): JpegReject =
+        assertIs<JpegDecodeResult.Malformed>(decodeJpegUntrapped(bytes, Long.MAX_VALUE)).reason
 
     /** Offset of the baseline fixture's `FF C0`. */
-    private fun frameMarkerOffset(): Int =
-        (0 until BASELINE_420_JPEG.size - 1).first {
-            BASELINE_420_JPEG[it] == 0xFF.toByte() && BASELINE_420_JPEG[it + 1] == 0xC0.toByte()
-        }
+    private fun frameMarkerOffset(): Int = frameMarkerOffset(BASELINE_420_JPEG)
 
     private fun withFrameMarker(marker: Int): ByteArray =
         BASELINE_420_JPEG.copyOf().also { it[frameMarkerOffset() + 1] = marker.toByte() }
@@ -159,6 +323,82 @@ class JpegDecoderTest {
 
 private const val WIDTH = 19
 private const val HEIGHT = 13
+
+private fun frameMarkerOffset(bytes: ByteArray): Int =
+    (0 until bytes.size - 1).first { bytes[it] == 0xFF.toByte() && (bytes[it + 1].toInt() and 0xFF) in 0xC0..0xC2 }
+
+private fun firstMarkerAfterScanStart(bytes: ByteArray, marker: Int): Int {
+    val scanStart = (0 until bytes.size - 1).first { bytes[it] == 0xFF.toByte() && bytes[it + 1] == 0xDA.toByte() }
+    return (scanStart until bytes.size - 1).first {
+        bytes[it] == 0xFF.toByte() && (bytes[it + 1].toInt() and 0xFF) == marker
+    }
+}
+
+private fun segment(marker: Int, payload: ByteArray): ByteArray =
+    byteArrayOf(-1, marker.toByte(), ((payload.size + 2) ushr 8).toByte(), (payload.size + 2).toByte()) + payload
+
+/** A one-symbol table: symbol 0 coded by the single bit `0`. */
+private fun oneSymbolTable(tableClass: Int): ByteArray =
+    segment(0xC4, byteArrayOf((tableClass shl 4).toByte(), 1) + ByteArray(15) + byteArrayOf(0))
+
+/** A progressive scan of the one grey component: `Ss`, `Se`, `Ah`, `Al`, then [data]. */
+private fun scan(start: Int, end: Int, high: Int, low: Int, data: ByteArray): ByteArray =
+    segment(0xDA, byteArrayOf(1, 1, 0, start.toByte(), end.toByte(), ((high shl 4) or low).toByte())) + data
+
+private fun endOfImage(): List<ByteArray> = listOf(byteArrayOf(-1, 0xD9.toByte()))
+
+/** DC first and an EOB AC first over one 8x8 block, then EOI: the smallest whole progressive image.
+ * Each scan's one coded symbol is the bit `0`, padded with ones to `0x7F`. */
+private fun baseScans(): List<ByteArray> =
+    listOf(scan(0, 0, 0, 0, byteArrayOf(0x7F)), scan(1, 63, 0, 0, byteArrayOf(0x7F)))
+
+/**
+ * A greyscale progressive JPEG of [side]x[side] whose two Huffman tables each hold the one symbol 0
+ * (a DC difference of 0, and an AC end-of-band), so any scan's data is one `0` bit per block. EOI is
+ * appended unless [scans] already ends with it.
+ */
+private fun progressive(side: Int = 8, scans: List<ByteArray>): ByteArray {
+    val dqt = segment(0xDB, byteArrayOf(0) + ByteArray(64) { 1 })
+    val sof = segment(0xC2, byteArrayOf(8, (side ushr 8).toByte(), side.toByte(), (side ushr 8).toByte(), side.toByte(), 1, 1, 0x11, 0))
+    val end = if (scans.lastOrNull()?.contentEquals(endOfImage()[0]) == true) emptyList() else endOfImage()
+    return (listOf(byteArrayOf(-1, 0xD8.toByte()), dqt, sof, oneSymbolTable(0), oneSymbolTable(1)) + scans + end)
+        .fold(ByteArray(0)) { all, part -> all + part }
+}
+
+/** Length-consistent segments in a random order, with random fields and entropy bytes. */
+private fun randomJpeg(random: Random): ByteArray {
+    val parts = mutableListOf(byteArrayOf(-1, 0xD8.toByte()))
+    repeat(random.nextInt(1, 9)) {
+        parts += when (random.nextInt(7)) {
+            0 -> segment(0xDB, byteArrayOf(random.nextInt(2).toByte()) + ByteArray(64) { random.nextInt(0, 4).toByte() })
+            1 -> {
+                val counts = ByteArray(16) { if (random.nextInt(3) == 0) random.nextInt(0, 6).toByte() else 0 }
+                val total = counts.sumOf { it.toInt() }
+                segment(0xC4, byteArrayOf((random.nextInt(2) shl 4 or random.nextInt(4)).toByte()) + counts + random.nextBytes(total))
+            }
+            2 -> {
+                val count = if (random.nextBoolean()) 1 else 3
+                val header = byteArrayOf(8, 0, random.nextInt(1, 40).toByte(), 0, random.nextInt(1, 40).toByte(), count.toByte())
+                val entries = (1..count).fold(ByteArray(0)) { all, id ->
+                    all + byteArrayOf(id.toByte(), ((random.nextInt(1, 3) shl 4) or random.nextInt(1, 3)).toByte(), random.nextInt(2).toByte())
+                }
+                segment(if (random.nextBoolean()) 0xC0 else 0xC2, header + entries)
+            }
+            3 -> {
+                val count = random.nextInt(1, 4)
+                val entries = (1..count).fold(ByteArray(0)) { all, id -> all + byteArrayOf(id.toByte(), random.nextInt(0, 0x22).toByte()) }
+                val start = random.nextInt(0, 3)
+                segment(0xDA, byteArrayOf(count.toByte()) + entries + byteArrayOf(start.toByte(), (start + random.nextInt(0, 64 - start)).toByte(), random.nextInt(0, 0x22).toByte())) +
+                    random.nextBytes(random.nextInt(0, 64)).map { if (it == (-1).toByte()) 0 else it }.toByteArray()
+            }
+            4 -> segment(0xDD, byteArrayOf(0, random.nextInt(0, 4).toByte()))
+            5 -> byteArrayOf(-1, (0xD0 + random.nextInt(8)).toByte())
+            else -> segment(0xE0 + random.nextInt(16), random.nextBytes(random.nextInt(0, 20)))
+        }
+    }
+    if (random.nextInt(4) != 0) parts += byteArrayOf(-1, 0xD9.toByte())
+    return parts.fold(ByteArray(0)) { all, part -> all + part }
+}
 
 private fun hex(text: String): ByteArray {
     val digits = text.filterNot { it.isWhitespace() }
@@ -460,5 +700,267 @@ internal val TWO_PIXEL_JPEG: ByteArray = hex(
     00000000000004ffc4001a1000010501000000000000000000000000080005073877b6ffc40015010101000000000000
     00000000000000000809ffc4001b11000105010100000000000000000000000600040776b53637ffda000c0301000211
     0311003f0000cb5b87cc4228e0d814dd92fd1e40bb15eebf4fa8ff008309a88de3325fffd9
+    """,
+)
+
+private val SAMPLED_1X2_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303011200021101031101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9
+    a7c33f017fb0f64fe4f9fbbe4dbb76fbe7bfa57de5e18f865a6e87b27cf9fbbe4dbb36e3be7a9f4ad717c655726be23d
+    8bcbefeefb4e6f6f7ebc9c9adaf6e6e6e9cb6ea7f3ff000ff8955aa72ae673f2dbe67cd1e18f80bf6adba8f93b71f3f9
+    5b73f77b67f0f4afbc7c31f0cb4dbad9a8e76e3e7f2b667eef6ce7dbd2be3317c655713ff0a7ec5d6b6bf5ae6e5b72fd
+    bf63d7d9dadcb6f7f97fbc7f4bf0f7895595a1ccd7f77f4bf99f29db7c2ffdc27fa076fef7ff005abef1b7f0e69be427
+    fa376f5ffeb57cc4bc58abccff00e171ff00e13ffc03f74a1e2256f651f71fde7fffd9
+    """,
+)
+
+private val SAMPLED_1X2_REFERENCE: ByteArray = hex(
+    """
+    00031c04022917002a2e011e3605224401cb4704b65b05c86503c87a04ca8b042f9b011ba4061fbb051bc50029ca04bd
+    dd04c7eb04c6f904c40313230d14301d12302e12213615284b12d05216c46216ce7016cd8012cb8b12339f1022a91523
+    bd1526ca132fd718cae313cbf214cbff14c9012a26102c2f202b2f262920302c294a25ca5828ca6228ca752dc18025c2
+    8b2b399f2b2baf2b26b6292fbe2d2ad425cae628c8f228c9ff28c700364709374e1a3b4e2340463144534c40a46142aa
+    6a45a57e489c843f9c863d5a94394ba73745b13a56c0474edd40a9ea41a4f743a6ff43a40560a91659aa24599d295d97
+    31569a425252554b4a5c4e416e4c407c534d8b58a39f5da5b65aa3b95aabc15893d44e4ddc514cea514bf85149006dc9
+    0e64cb2067bf2c70c3386bc7436b2f5d6826646a20766724806e2c8b69c7966bc5ad66c4b86acdc96dc2db692ae06a2a
+    ef6b2afc6b280081c70f7ccf227dc62d80cc3b7cd0427d2b5b7d26647b21787b2c7d812a8d7fca9c83c7b07dcab87ecb
+    cd7bcfd57924e37f2af17f29ff7f280498a61598ac2796a73196a83d93aa3f8d4f59924e608d4a758e54778d4c9096a6
+    a29aa7b196a5be95a7d397b0d5904fde8d4eed8e4efb8e4d00a35008a54a1ba64d2ba64c33a94b4daea756aba66bb0ab
+    74aea087b0ac8ca85399a24fa7a54eb8a74dc1a446d5aca8e8ada7f7aea7ffaea503ba2a0abf221bbd292cbb2533c121
+    49c0c850becb62c0cc6dc1c37dbbc88bbd289cb929a6bf26babd24c4c021d2c2cfe4becbf2becaffbec803d52a0bdd22
+    1cd82c2dd02936d62a48d7c351daca61d5cc6fdaca7bd3c58ed82da2d62ca8da29b9d520c8d32dccd7c7e4d4c5f0d5c4
+    ffd4c300dd4501e34115e14a2cdf503ae65446eb9c55f0a266eca774f0aa7ae89f8be44c96df489ce148b6e040cde458
+    d1eda2e9eda3f6eea3ffeea20fffb019ffa72bffa93dfcaf44f7a345fc5452fa4b62f84f6df3567dfe5b9bff9fabffac
+    b5ffb0c9ff9ed8f4a7d2fc50e1f651eef750fbf74e
+    """,
+)
+
+private val SAMPLED_4X1_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303014100021101031101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9
+    a7c33f017fb0f64fe4f9fbbe4dbb76fbe7bfa57adf863e02fdab6ea3e4edc7cfe56dcfdded9fc3d2bd16dbe17fee13fd
+    03b7f7bffad4577e77c77feab6239393da5ff77bf2ff000bddbed2f8af7b74eecfe82f0bf893dbe4e9f3db67f79ea5e1
+    8f865a6e87b27cf9fbbe4dbb36e3be7a9f4af5af0c7c32d36eb66a39db8f9fcad99fbbdb39f6f4af45b7f0e69be427fa
+    376f5ffeb515fced9df17d6e15c4727b3f6b7fddfc5cbfc2f76fb4be2bdedd3bb3f94fc2fcd3115f274ef6d9fde7ffd9
+    """,
+)
+
+private val SAMPLED_4X1_REFERENCE: ByteArray = hex(
+    """
+    14001c16001e1b002321062936008a4b069f4b069f540fa884027c8b09837e00767f0077b80043be0049be0049d4115f
+    f200bcf600c0fa03c4140b1c1910211d14252017283700984f17b0521ab35820b989197b8b1b7d7d0d6f801072b60748
+    bc0d4ec01152d8296af10dc6f612cbfa16cf10222417292b1b2d2f1a2c2e38129b4e28b1542eb75731ba883176873075
+    7e276c832c71b42050b62252ba2656ce3a6af024c1f428c5f82cc90538170c3f1e134625184b2a412f93503ea25846aa
+    5c4aae8c477e88437a803b72803b72ad3443b43b4abf4655ce5564f33ab1f83fb6fc43ba194fc91a50ca1d53cd2056d0
+    4b575545514f4652504955537541687f4b72905c8399658cc6539ec855a0c6539ebe4b96ea4e38ee523cf256401066bd
+    1066bd166cc31f75cc52744f446641496b464c6e49795770815f7893718a97758ebf6692c66d99cb729ebd6490ee6426
+    f3692bf76d2f0b7cc20e7fc51384ca198ad05388504378404a7f474b8048786e6c7d7371938987998f8dbc8099bf839c
+    c488a1b2768fed7b23f17f27f5832b0b8ec41194ca1598ce189bd156955e49885153925b52915a7d866b7c856a939c81
+    9ba489bb939ebe96a1c79faab8909beb8d2df09232f4963613a22216a5251cab2b21b030359a924aafa74bb0a855bab2
+    83ac828bb48a7ea77d7ea77db89e49bea44fbea44fd4ba65f0a4bef5a9c3f9adc715b51319b9171ebe1c21c11f38a88f
+    51c1a853c3aa59c9b088c3738ac5757db86880bb6bb7b143bcb648c0ba4cd9d365f2b9c2f6bdc6fac1ca14cf201ad526
+    1dd8291dd8293cbe9853d5af58dab45adcb68bdc758adb7481d26b86d770b6cc50b7cd51bcd256d1e76bf0cec4f4d2c8
+    f8d6cc03e01609e61c0fec2215f2283ed7944de6a355eeab58f1ae88ef7c84eb787de4717de471aadb44b0e14abced56
+    cbfc65f2e4b5f7e9bafbedbe1cfacb1dfbcc21ffd024ffd34cff5546fc4f48fe514cff5576eb6782f77393ff849cff8d
+    c7ff9cc9ff9ec7ff9cc0f895ebf733effb37f3ff3b
+    """,
+)
+
+private val SAMPLED_4X2_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303014200021101031101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9
+    a7c33f017fb0f64fe4f9fbbe4dbb76fbe7bfa57adf863e02fdab6ea3e4edc7cfe56dcfdded9fc3d2bd16dbe17fee13fd
+    03b7f7bffad457a97863e1969ba1ec9f3e7eef936ecdb8ef9ea7d2bd6bc31f0cb4dbad9a8e76e3e7f2b667eef6ce7dbd
+    2bd16dfc39a6f909fe8ddbd7ff00ad457c4e77e22d5cbb116fadbc27d9b727b5bf2e9c9d7f877b737dbbdfa1f59e17f8
+    8f5a793ad1cb6f2f9fccffd9
+    """,
+)
+
+private val SAMPLED_4X2_REFERENCE: ByteArray = hex(
+    """
+    0b001c0d001e120523180b2930008845099d45099d4e12a67d067c840d83770076780177b10043b70049b70049cd155f
+    eb00c2ef01c6f305ca1609271b0e2c1f12302215333a00925216aa5519ad5b1fb38c158b8e178d80097f830c82bc044e
+    c20a54c60e58de2670f608cdfb0dd2ff11d6082a120f311913351d12341c3f138455299a5b2fa05e32a38b2f7a8a2e79
+    812570862a75ac2939ae2b3bb22f3fc64353f125b8f529bcf92dc010321a1739211e402823452d5226976135a6693dae
+    6d41b29a3e89963a858e327d8e327db43141bb3848c64353d55262fd31c4ff36c9ff3acd085bb7095cb80c5fbb0f62be
+    4b5561454f5b46505c49535f6e4567784f7189608292698bb55f90b76192b55f90ad5788e55520e95924ed5d281164c0
+    1164c0176ac62073cf5e6874505a66555f6b58626e7d5476855c7e976e909b7294bd6798c46e9fc973a4bb6596f1612c
+    f66631fa6a35087ebb0b81be1086c3168cc94b8c523b7c4242834943844a7174617679668c8f7c929582b9819cbc849f
+    c189a4af7792e6801cea8420ee88241389c6198fcc1d93d02096d355965c48894f5293595192588083707f826f969986
+    9ea18ec48ca7c78faad098b3c189a4f18b27f6902cfa94300fa61d12a92018af261db42b39998e4eaea34fafa459b9ae
+    85ad798db58180a87480a874b2a33eb8a944b8a944cebf5aeea5c3f3aac8f7aecc19b0271db42b22b93025bc3342a297
+    5bbbb05dbdb263c3b892ba8694bc8887af7b8ab27ebcad48c1b24dc5b651decf6afbb2d0ffb6d4ffbad80dd31a13d920
+    16dc2316dc232ecd7145e4884ae98d4ceb8f81e36c80e26b77d9627cde67b4cf44b5d045bad54acfea5fe9d4b5edd8b9
+    f1dcbd11d71e17dd241de32a23e9303ddc804ceb8f54f39757f69a8cee7788ea7381e36c81e36cb8d348bed94ecae55a
+    d9f469f5e0c1fae5c6fee9ca19fbcb1afccc1effd021ffd342ff583cff523eff5442ff5870ef627cfb6e8dff7f96ff88
+    c8fca7cafea9c8fca7c1f5a0e8fa2aecfe2ef0ff32
+    """,
+)
+
+private val SAMPLED_2X4_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303012400021101031101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9
+    a7c33f017fb0f64fe4f9fbbe4dbb76fbe7bfa57adf863e02fdab6ea3e4edc7cfe56dcfdded9fc3d2be97f0c7c32d3743
+    d93e7cfddf26dd9b71df3d4fa57ad7863e1969b75b351cedc7cfe56ccfdded9cfb7a51451457c5673c4199c332af95aa
+    cf929d3751691f895beca5ecd6ff0014611a9fdfdeff0087787dc719ef2539fb77abb75ff3bfe363e53b6f85ff00b84f
+    f40edfdeff00eb515f78dbf8734df213fd1bb7afff005a8a28a28afe7a7e2bf11ddfef3ff2a623ff00971fd9b4f8bf3a
+    e45fbf7b765fe47fffd9
+    """,
+)
+
+private val SAMPLED_2X4_REFERENCE: ByteArray = hex(
+    """
+    00091e000b200c0c0c12121228015a3d166f4901ba520ac36806b16f0db8810c1e820d1fa10a0fa71015b2005ac81370
+    d50cb4d910b8ea0eb800142904192e1919191c1c1c320b644a237c5911ca5f17d07715c07917c28a15278d182aac151a
+    b21b20c10c69d92481e017bfe51cc4f61ac40c213613283d2828282727273e1770542d86661ed76921da8422cd8321cc
+    9924369e293bbb2429bd262bcc1774e02b88ed24ccf128d0ff26d014293e1b3045333333383838512a83603992742ce5
+    7830e99331dc8f2dd8a63143a63143c32c31ca3338e02b88ef3a97f930d8fe35ddff33dd0067a60068a70762bf0a65c2
+    266666206060445f104762135f5c17696621815bb08a64b99e64b0a066b2af6a65a7625dd75e15db6219ea61190070af
+    0070af126dca1b76d33979792b6b6b536e1f5671226e6b2676732e8f69be936dc2a66cb8ad73bfc37e79b5706be36a21
+    e86f26f76e260c7cbb0f7fbe207bd82681de4585853575755f7a2b607b2c7b7833807d389d77cca37dd2b57bc7b87eca
+    ce8984bc7772f0772ef47b32ff7a321787c61d8dcc2d88e5308be84f8f8f4282826f8a3b6e893a8a8742898641a781d6
+    af89dec086d2c389d5dd9893ce8984fb8239ff873eff863e00b12200b42511b70b16bc1028ab5b3dc07045b4a34fbead
+    62b6a66abeae7eba1c7eba1ca4b01caab622b8a650cebc66d3b5b7d8babce7b9bb01bb2c05bf301bc1151ec41831b464
+    4acd7d53c2b159c8b76fc3b371c5b585c12388c426aeba26b3bf2bc5b35ddecc76e0c2c4e4c6c8f3c5c711cb3c17d142
+    2bd1252bd12540c37357da8a63d2c165d4c37fd3c37ed2c296d2349bd739bfcb37c0cc38d3c16be8d680ecced0f0d2d4
+    ffd1d315cf401bd54632d82c38de324fd2825ee1916ddccb70dfce8adece86dacaa0dc3ea0dc3ec3cf3bc9d541e3d17b
+    f2e08af8dadcfddfe1ffdee007ffcb08ffcc1dfedc20ffdf3eff7538fd6f5efc2362ff2773fb1f7fff2b94f8d49dffdd
+    b1ffd3b3ffd5c4ff75bdff6eeafb1feeff23fdfe24
+    """,
+)
+
+private val SAMPLED_CHROMA_FINER_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303011100022201031101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00d0
+    f865fb18d80f2a2fb34236e1fecfb87c9fedeeeff4f7afd23178eff50af99fb4f6fcff00bbe5b725afef5ef797f2dad6
+    ebbe87c662f1dfdab7e2ef69cbcbfbcf676bff000b4b73dd7c5c9bf2e97d9db5fcab16eb7015f33e7f6fcffbbe5b725a
+    fef5ef797f2dad6ebbe87c662dd6cd7fe32ee7e5b7ef3d9daffc2d2dcf75f1726fcba5f676d7e27c3ef126b7b92e67af
+    5efe56fd4f758bf643b0f2d3fd3a1e83fe580afd865e34fbcffd97ff002a7ff6807f3bcbc5cadccffd93ff002a7ff680
+    7f61d3f112b722f71eddcfffd9
+    """,
+)
+
+private val SAMPLED_CHROMA_FINER_REFERENCE: ByteArray = hex(
+    """
+    0e092710073215092f1f0f2c2f16333f01c45304cf6509c47805d28700c9900e2a9b0533ac0928b70e25c41534d000cc
+    e306cfed09cef80bcd0c12360f142717142f211e19322038420cc25210c96414c17613c5830bc58f1a2c9b122cab1230
+    b81727c5212cd20ac2e312c5ee15c6f916c50829300d2c24182f1d263226353533441dd25428c36228d27029c77e22c3
+    8c332d992d20a92928b72b2ec73234d41dc5e426c6f028c8fa2ac60648240d4538194a2a284c26374b304534b65438c0
+    6239c36e37c67c36ba8a4f2399492ea84726b84437c64c23d533bce535c6f036c5f939c40648d00c4fb71950c4274dca
+    3548c0455d39555c30635b2a6f5e2a7c5f358a4ccb9951c1a74bc8b64cbac647cad46132e15f2bed5d28f65f260867c5
+    0e67cb1b6acf2668c93560be45761d566a2b666b1b726a297d732c8d66c19a6acea969c7b766c2c662bcd47729e06f2b
+    eb6c27f66d250c7dc1127ec91b84be277bd33776b946872d587f24687b2a757e2d82872b8f79c19e81c1aa80c2b87bc9
+    c776c3d58c2de3832ded7f28f881270b89d3118dc11c90bf298ec43888c3479e35589b27679733759b2c839f318f89c5
+    9e8fbaab8bcabb89d2c889c2d5a32ae39d2def9b29f89d2807b2250db02f1bb02e2bb32b3ab6304a9fbe56a1c862a6bb
+    72a4c97fa2c08cb6249caf31adaf28bab124c7b52dd49ec2e4a0c5efa2c4f9a4c305bf360cc1271bbe3129c51a3bc939
+    48b6c553bdcb5fc3c36fc2c87eb9c78bc72b9abd2dadbb30bac02ac5c92cd3b5c1e3bbc4eebfc5f8c0c304d7300bd823
+    17d81b28da2439df3346c8d550d3c15dd4d06dd6c87dcec58cdc2b9ad61facd32ab9d630c4de33d1cac4e1d0c6eed4c7
+    f8d4c405f3230ced3719f02627f32239f52f47deb552dfbc5fe1bf70e1c57fdfba8df4219bec2babee24baee34c4f621
+    d1dcbadfdec2eddfc2f5e1c009ecd010f1b51cf0c029edc73aebbf47ff3856fc2c63fc2674ff2682ff348fe8ca9eedbe
+    aeecc5baf0b6c6e9c8d2ff33e2ff28ecff25f5ff23
+    """,
+)
+
+private val SAMPLED_MIXED_JPEG: ByteArray = hex(
+    """
+    ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a07
+    0706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb0043010304
+    0405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414
+    1414141414141414141414141414ffc0001108000d001303012200021201032101ffc4001f0000010501010101010100
+    000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+    31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a
+    434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a9293949596979899
+    9aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1
+    f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100
+    020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+    6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a63646566676869
+    6a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4
+    c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9
+    a7c33f017fb0f64fe4f9fbbe4dbb76fbe7bfa57adf863e02fdab6ea3e4edc7cfe56dcfdded9fc3d2be97f0c7c32d3743
+    d93e7cfddf26dd9b71df3d4fa57ad7863e1969b75b351cedc7cfe56ccfdded9cfb7a57d7e6d8ef637e1ff697f61fbfe7
+    b7c56d39396fa7c5f1733db63f9db3675a8df87f9efec3f7fcf6f8ada7272df4f8be2e67b6c7f3ff000ff8955aa72ae6
+    73f2dbe67f4bf0f7895595a1ccd7f77f4bf99f29db7c2ffdc27fa076fef7ff005a8afbc6dfc39a6f909fe8ddbd7ffad4
+    57e8efc69d7fdd7ff2a7ff00687f3b3f172b5ffdd3ff002a7ff687ee943c44adeca3ee3fbc0fffd9
+    """,
+)
+
+private val SAMPLED_MIXED_REFERENCE: ByteArray = hex(
+    """
+    00012704022917002f2e004036005a440e8a4706ac5b06c56504c37a0ba58b004d9b0027a4042abb003cc50055ca0d8b
+    dd07b4eb03c9f902cc03141e0d16251d132b2e0c3f360a634b1d97521ab36218c77017cb8019a88b0d4c9f0f2aa91330
+    bd0f44ca0a60d72293e318b2f215c5ff14c9012929102d2b202d2426263030235b4a3093582cb56228ca7529d1802aa7
+    8b28479f2d23af2a2db62542be2166d42f98e62bb6f229c7ff28cb003e1e0940231a43232343383141634c4396613ebe
+    6a3dce7e40c9843f9c86404b944024a73e20b14133c0455add468bea3eb4f73ccbff3bcd0558ce1651cf244fcf2956bb
+    31598d42505b5550305c551f6e51297c52548b58a39f56ccb652ceb957bec15795d44a64dc5537ea5924f85826006ec2
+    0e65c42065cd2c70c138759443625c5d643b64692676682180694a8b6fa9966accad66c2b870afc97889db6156e06834
+    ef6c28fc6b2a0080ce0f7dcc227cc82d85b33b898d4274575b793d647a28787c277d7b4a8d86a59c82c9b080beb884ab
+    cd8791d56e5be37c39f17f29ff7e2b0491c61592c82791c13194b13d97953f896459944460932c75962e778d4c9096a2
+    a294c9b190c5be92b5d39b9ad58b64de9137ed9625fb952700ac2608ac291bab302ba84033a65b4db38b56aaac6babc6
+    74a7c287b1a58ca94d99aa26a7ad29b8ab3bc1a156d5b28ce8abb2f7a8c8ffa7cb03bd1c0abf221bbd292cb63d33b461
+    49c99650c4b162c1c56dc0c87dc2a58bb64a9cba28a6bd2ebab841c4b45dd2cd93e4c3b2f2bfc6ffbec803d52a0bdc2b
+    1cd9232dce3036cd5c48e09551ddb661d5ca6fd8d17bd9a78ed247a2d723a8da2db9ce41c8c866cce099e4d7b5f0d4c6
+    ffd3ca00e51b01ea1d15ea1e2ce5323ae45f46ed9155ebbb66e5ca74ebc57aea988be54896e6219cea1cb6e32ecde456
+    d1f287e9e9b3f6e7caffe5cc0fffd019fcd12bf9d33df9bf44fb8f45fa5d52ff3462ff256dfb2b7dfe599bfda8abfcd1
+    b5fed1c9fbc0d8f799d2f867e1fb38eeff25fbfe27
     """,
 )

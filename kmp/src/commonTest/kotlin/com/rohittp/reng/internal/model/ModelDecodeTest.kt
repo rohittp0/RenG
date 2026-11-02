@@ -142,6 +142,24 @@ class ModelDecodeTest {
     }
 
     @Test
+    fun aJpegWithoutAProjectedRasterIsRefusedWithoutDecoding() {
+        // Nothing may be decoded unreserved: a JPEG whose header does not project a raster is
+        // refused, as Unsupported when its frame is a valid process RenG lacks, Malformed otherwise.
+        val texture = """{"source": 0, "sampler": 0}"""
+        val garbage = TWO_PIXEL_JPEG.copyOfRange(0, 2) + byteArrayOf(0) + TWO_PIXEL_JPEG.copyOfRange(2, TWO_PIXEL_JPEG.size)
+        val frame = (0 until TWO_PIXEL_JPEG.size - 1).first {
+            TWO_PIXEL_JPEG[it] == 0xFF.toByte() && TWO_PIXEL_JPEG[it + 1] == 0xC0.toByte()
+        }
+        val lossless = TWO_PIXEL_JPEG.copyOf().also { it[frame + 1] = 0xC3.toByte() }
+        for ((bytes, expected) in listOf(garbage to ModelDecodeResult.Malformed, lossless to ModelDecodeResult.Unsupported)) {
+            val reserved = mutableListOf<Long>()
+            val glb = texturedGlb(texture, image = bytes, mimeType = "image/jpeg")
+            assertEquals(expected, decodeModel(glb, ResourceLimits(), reserved::add))
+            assertEquals(listOf(36L + 6L), reserved, "only the geometry may have been reserved")
+        }
+    }
+
+    @Test
     fun aJpegRasterOverTheDecodedImageBudgetIsTooLarge() {
         val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/jpeg")
         assertIs<ModelDecodeResult.TooLarge>(decodeModel(bytes, ResourceLimits(maximumDecodedImageBytes = 49L)))

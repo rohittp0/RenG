@@ -69,34 +69,43 @@ internal enum class JpegReject {
 
     /** A frame height of zero, deferring the real height to a DNL marker after the first scan. */
     HEIGHT_DEFINED_LATER,
+
+    /** More scans than [MAXIMUM_SCANS]. Each scan revisits every block of its components, so an
+     * unbounded count is unbounded work over a bounded raster. */
+    SCAN_COUNT,
+
+    /** Bytes between marker segments that are neither a marker nor fill, or the bytes ending
+     * before EOI. A truncated texture is refused rather than drawn part grey. */
+    TRUNCATED,
+
+    /** A restart marker out of its `RST0`..`RST7` sequence, or a marker other than the expected
+     * restart where one is due. */
+    RESTART_SEQUENCE,
+
+    /** A progressive scan that does not advance its coefficients' successive approximation (ITU T.81
+     * G.1.1.1): a first scan of a coefficient already begun, a refinement of one not begun or at the
+     * wrong bit, an AC scan before its component's DC, or a sequential component scanned twice. */
+    SCAN_PROGRESSION,
+
+    /** A component the image's scans never code -- its DC was never sent. */
+    INCOMPLETE_IMAGE,
+
+    /** A fault the checks above did not anticipate, caught at the boundary so no exception escapes. */
+    UNEXPECTED,
 }
 
 /**
- * Exact final RGBA8 payload for a JPEG, read from its frame header without decoding anything. `null`
- * means no frame header could be found or the dimensions cannot be represented; [decodeJpeg] remains
- * the authority on the eventual typed rejection.
+ * Exact final RGBA8 payload for a JPEG, from its frame header, without decoding anything. It walks the
+ * markers with the decoder's own parser, so it reads the same frame header [decodeJpeg] would and every
+ * marker sequence the decoder refuses before its frame makes this `null`. A caller must treat `null` as
+ * a refusal, never as permission to decode unreserved.
  */
-internal fun projectedJpegRgbaBytes(bytes: ByteArray): Long? {
-    if (bytes.size < 4 || bytes[0] != 0xFF.toByte() || bytes[1] != 0xD8.toByte()) return null
-    var offset = 2
-    while (offset + 4 <= bytes.size) {
-        if (bytes[offset].toInt() and 0xFF != 0xFF) return null
-        val marker = bytes[offset + 1].toInt() and 0xFF
-        if (marker == 0xFF) {
-            offset++
-            continue
-        }
-        if (marker == 0xD9 || marker == 0xDA) return null
-        val length = readUInt16(bytes, offset + 2)
-        if (marker in SOF_MARKERS) {
-            if (offset + 9 > bytes.size || length < 8) return null
-            val height = readUInt16(bytes, offset + 5).toLong()
-            val width = readUInt16(bytes, offset + 7).toLong()
-            return width * height * 4L
-        }
-        offset += 2 + length
-    }
-    return null
+internal fun projectedJpegRgbaBytes(bytes: ByteArray): Long? = try {
+    JpegDecoder(bytes, Long.MAX_VALUE, Long.MAX_VALUE).projectedRgbaBytes()
+} catch (signal: JpegSignal) {
+    null
+} catch (unexpected: RuntimeException) {
+    null
 }
 
 /**
@@ -124,6 +133,19 @@ internal fun decodeJpeg(
     maximumDecodedBytes: Long,
     maximumWorkingBytes: Long = Long.MAX_VALUE,
 ): JpegDecodeResult = try {
+    decodeJpegUntrapped(bytes, maximumDecodedBytes, maximumWorkingBytes)
+} catch (unexpected: RuntimeException) {
+    // Defence in depth only: every fault the format can carry is validated above and signalled as a
+    // typed result. Tests call [decodeJpegUntrapped] so a fault reaching here fails them instead.
+    JpegDecodeResult.Malformed(JpegReject.UNEXPECTED)
+}
+
+/** [decodeJpeg] without its last-resort trap, so a test sees any exception the validation missed. */
+internal fun decodeJpegUntrapped(
+    bytes: ByteArray,
+    maximumDecodedBytes: Long,
+    maximumWorkingBytes: Long = Long.MAX_VALUE,
+): JpegDecodeResult = try {
     JpegDecoder(bytes, maximumDecodedBytes, maximumWorkingBytes).decode()
 } catch (signal: JpegSignal) {
     signal.result
@@ -141,8 +163,6 @@ private fun tooLarge(): Nothing = throw JpegSignal(JpegDecodeResult.TooLarge)
 private fun readUInt16(bytes: ByteArray, offset: Int): Int =
     ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
-/** Every start-of-frame marker, admitted or not: the projection reads dimensions from any of them. */
-private val SOF_MARKERS = setOf(0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF)
 
 /** Natural (row-major) index of each zig-zag position. */
 private val ZIGZAG_TO_NATURAL = intArrayOf(
@@ -157,6 +177,15 @@ private const val HUFFMAN_LOOKUP_BITS = 9
 private const val MAXIMUM_SAMPLING_FACTOR = 4
 private const val MAXIMUM_SUCCESSIVE_APPROXIMATION = 13
 
+/** Scans per image. Real progressive files carry about ten (libjpeg's default script) to a few dozen
+ * (optimised scripts); every scan walks all blocks of its components, so this caps decode work at a
+ * constant multiple of the raster the budget already admitted. */
+internal const val MAXIMUM_SCANS = 64
+
+/** Entropy-coded bits a scan may consume past its real data (after a marker or the end of the bytes)
+ * before it is refused as truncated. An encoder pads its last byte with ones, so a well-formed scan
+ * consumes none; the allowance only tolerates a sloppy final pad. */
+private const val MAXIMUM_SYNTHETIC_BITS = 16
 private class HuffmanTable(counts: IntArray, private val symbols: IntArray) {
     /** For each [HUFFMAN_LOOKUP_BITS]-bit prefix: `(codeLength shl 8) or symbol`, or -1. */
     val lookup = IntArray(1 shl HUFFMAN_LOOKUP_BITS) { -1 }
@@ -168,6 +197,14 @@ private class HuffmanTable(counts: IntArray, private val symbols: IntArray) {
     val symbolOffset = IntArray(17)
 
     init {
+        // Validate the whole length table first (Kraft: no length may need more codes than remain),
+        // so the lookup below can never be filled past its end by an oversubscribed table.
+        var available = 1
+        for (length in 1..16) {
+            available = (available shl 1) - counts[length - 1]
+            if (available < 0) malformed(JpegReject.HUFFMAN_TABLE)
+        }
+        if (counts.sum() != symbols.size) malformed(JpegReject.HUFFMAN_TABLE)
         var code = 0
         var index = 0
         for (length in 1..16) {
@@ -216,6 +253,10 @@ private class FrameComponent(
     var dcPrediction = 0
     var dcTable: HuffmanTable? = null
     var acTable: HuffmanTable? = null
+
+    /** Per zig-zag coefficient, the successive-approximation bit its last
+     * scan left it at (`Al`), or -1 before any scan coded it. Sequential scans set every entry to 0. */
+    val approximation = IntArray(BLOCK_SIZE) { -1 }
 }
 
 private class JpegDecoder(
@@ -239,6 +280,10 @@ private class JpegDecoder(
     private var mcusPerLine = 0
     private var mcusPerColumn = 0
     private var scans = 0
+    private var frameParsed = false
+
+    /** Parse only up to and including the frame header, allocating nothing: the projection. */
+    private var projectionOnly = false
 
     // Entropy-coded segment state.
     private var bitBuffer = 0
@@ -246,15 +291,38 @@ private class JpegDecoder(
     private var markerReached = false
     private var endOfBandRun = 0
 
+    /** Zero bits supplied past the real data since the last reset; see [MAXIMUM_SYNTHETIC_BITS]. */
+    private var syntheticBits = 0
+    private var nextRestartMarker = 0
+
+    fun projectedRgbaBytes(): Long? {
+        projectionOnly = true
+        walkMarkers()
+        return if (frameParsed) width.toLong() * height.toLong() * 4L else null
+    }
+
     fun decode(): JpegDecodeResult {
+        walkMarkers()
+        if (!frameParsed || scans == 0) malformed(JpegReject.NO_IMAGE)
+        if (components.any { it.approximation[0] < 0 }) malformed(JpegReject.INCOMPLETE_IMAGE)
+        return JpegDecodeResult.Success(produceImage())
+    }
+
+    /**
+     * The one marker parser both [decode] and [projectedRgbaBytes] run, so the two can never read a
+     * different frame header. Returns at EOI, or, projecting, right after the frame header; bytes that
+     * end before EOI are [JpegReject.TRUNCATED].
+     */
+    private fun walkMarkers() {
         if (bytes.size < 2 || bytes[0] != 0xFF.toByte() || bytes[1] != 0xD8.toByte()) {
             malformed(JpegReject.SIGNATURE)
         }
         offset = 2
         while (true) {
-            val marker = nextMarker() ?: break
+            if (projectionOnly && frameParsed) return
+            val marker = nextMarker() ?: malformed(JpegReject.TRUNCATED)
             when (marker) {
-                0xD9 -> break
+                0xD9 -> return
                 0xC0, 0xC1 -> readFrame(isProgressive = false)
                 0xC2 -> readFrame(isProgressive = true)
                 0xC3 -> unsupported(JpegReject.LOSSLESS)
@@ -269,26 +337,22 @@ private class JpegDecoder(
                 else -> skipSegment()
             }
         }
-        if (components.isEmpty() || scans == 0) malformed(JpegReject.NO_IMAGE)
-        return JpegDecodeResult.Success(produceImage())
     }
 
     // ---- marker segments ----
 
-    /** The next marker's code, skipping fill bytes and any stray bytes before it; null at the end. */
+    /** The next marker's code, skipping `FF` fill bytes; null when the bytes end first. Anything
+     * else between segments is not a JPEG. */
     private fun nextMarker(): Int? {
         while (offset + 1 < bytes.size) {
-            if (bytes[offset].toInt() and 0xFF != 0xFF) {
-                offset++
-                continue
-            }
-            val code = bytes[offset + 1].toInt() and 0xFF
+            if (byteAt(offset) != 0xFF) malformed(JpegReject.TRUNCATED)
+            val code = byteAt(offset + 1)
             if (code == 0xFF) {
                 offset++
                 continue
             }
+            if (code == 0x00) malformed(JpegReject.TRUNCATED)
             offset += 2
-            if (code == 0x00) continue
             return code
         }
         return null
@@ -365,7 +429,7 @@ private class JpegDecoder(
     }
 
     private fun readFrame(isProgressive: Boolean) {
-        if (components.isNotEmpty()) malformed(JpegReject.FRAME_HEADER)
+        if (frameParsed) malformed(JpegReject.FRAME_HEADER)
         val payload = segmentPayload(minimumLength = 6)
         val start = payload.first
         val precision = byteAt(start)
@@ -405,6 +469,11 @@ private class JpegDecoder(
             }
         }
 
+        components = parsed
+        progressive = isProgressive
+        frameParsed = true
+        if (projectionOnly) return
+
         // The raster ceiling first, from the header alone, as the PNG decoder decides it.
         val pixelCount = width.toLong() * height.toLong()
         if (pixelCount > maximumDecodedBytes / 4) tooLarge()
@@ -430,12 +499,11 @@ private class JpegDecoder(
             if (coefficientCount > Int.MAX_VALUE) tooLarge()
             component.coefficients = ShortArray(coefficientCount.toInt())
         }
-        components = parsed
-        progressive = isProgressive
     }
 
     private fun readScan() {
-        if (components.isEmpty()) malformed(JpegReject.SCAN_HEADER)
+        if (!frameParsed) malformed(JpegReject.SCAN_HEADER)
+        if (scans >= MAXIMUM_SCANS) unsupported(JpegReject.SCAN_COUNT)
         val payload = segmentPayload(minimumLength = 1)
         val start = payload.first
         val count = byteAt(start)
@@ -483,8 +551,33 @@ private class JpegDecoder(
             if (needsAc && component.acTable == null) malformed(JpegReject.MISSING_TABLE)
         }
 
+        for (component in scanComponents) {
+            advanceApproximation(component, spectralStart, spectralEnd, approximationHigh, approximationLow)
+        }
         decodeScan(scanComponents, spectralStart, spectralEnd, approximationHigh, approximationLow)
         scans++
+    }
+
+    /**
+     * ITU T.81 G.1.1.1's progression, per component and coefficient: a first scan (`Ah` 0) only of
+     * coefficients no scan has coded, a refinement only at the bit the previous scan stopped at
+     * (`Ah` equal to its `Al`), and an AC band only after the component's DC. A sequential component
+     * is coded exactly once. Every accepted scan therefore lowers some coefficient's bit for good,
+     * which together with [MAXIMUM_SCANS] bounds the work a file can demand.
+     */
+    private fun advanceApproximation(component: FrameComponent, start: Int, end: Int, high: Int, low: Int) {
+        val state = component.approximation
+        if (!progressive) {
+            if (state[0] >= 0) malformed(JpegReject.SCAN_PROGRESSION)
+            state.fill(0)
+            return
+        }
+        if (start > 0 && state[0] < 0) malformed(JpegReject.SCAN_PROGRESSION)
+        for (k in start..end) {
+            val expected = if (high == 0) -1 else high
+            if (state[k] != expected) malformed(JpegReject.SCAN_PROGRESSION)
+        }
+        for (k in start..end) state[k] = low
     }
 
     // ---- entropy-coded data ----
@@ -497,6 +590,7 @@ private class JpegDecoder(
         approximationLow: Int,
     ) {
         resetEntropyState(scanComponents)
+        nextRestartMarker = 0
         val block: (FrameComponent, Int) -> Unit = when {
             !progressive -> { component, base -> decodeBaselineBlock(component, base) }
             spectralStart == 0 && approximationHigh == 0 -> { component, base ->
@@ -556,35 +650,26 @@ private class JpegDecoder(
     private fun resetEntropyState(scanComponents: List<FrameComponent>) {
         bitBuffer = 0
         bitCount = 0
+        syntheticBits = 0
         markerReached = false
         endOfBandRun = 0
         for (component in scanComponents) component.dcPrediction = 0
     }
 
-    /** Discards the bits of the interval just finished and steps past the RSTn marker that must follow. */
+    /**
+     * Discards the bits of the interval just finished and steps past the `RSTn` that must follow it,
+     * `n` counting 0..7 from the scan's start. The reader never reads past a marker and fetches the
+     * padded last byte of an interval with its last code, so the marker must be right here; anything
+     * else -- leftover data, another marker, the wrong `n` -- is damage, and refused.
+     */
     private fun restart(scanComponents: List<FrameComponent>) {
         resetEntropyState(scanComponents)
-        while (offset + 1 < bytes.size) {
-            if (byteAt(offset) != 0xFF) {
-                offset++
-                continue
-            }
-            val code = byteAt(offset + 1)
-            when {
-                code == 0xFF -> offset++
-                code in 0xD0..0xD7 -> {
-                    offset += 2
-                    return
-                }
-                code == 0x00 -> offset += 2
-                else -> {
-                    // A marker other than RSTn: the data is damaged. Decode the rest as zeros and let
-                    // the marker loop resume at this marker.
-                    markerReached = true
-                    return
-                }
-            }
+        while (offset + 1 < bytes.size && byteAt(offset) == 0xFF && byteAt(offset + 1) == 0xFF) offset++
+        if (offset + 1 >= bytes.size || byteAt(offset) != 0xFF || byteAt(offset + 1) != 0xD0 + nextRestartMarker) {
+            malformed(JpegReject.RESTART_SEQUENCE)
         }
+        offset += 2
+        nextRestartMarker = (nextRestartMarker + 1) and 7
     }
 
     /** Moves [offset] to the first marker that is not part of the entropy-coded data. */
@@ -607,7 +692,10 @@ private class JpegDecoder(
     /** One more byte of entropy-coded data, with `FF 00` unstuffed. A marker, or the end of the
      * bytes, yields zeros from then on, as libjpeg does with a truncated scan. */
     private fun nextEntropyByte(): Int {
-        if (markerReached || offset >= bytes.size) return 0
+        if (markerReached || offset >= bytes.size) {
+            syntheticBits += 8
+            return 0
+        }
         val value = byteAt(offset)
         if (value != 0xFF) {
             offset++
@@ -618,7 +706,14 @@ private class JpegDecoder(
             return 0xFF
         }
         markerReached = true
+        syntheticBits += 8
         return 0
+    }
+
+    /** Synthetic bits sit at the tail of everything fetched, so those already consumed are the ones
+     * no longer in the buffer. */
+    private fun checkSyntheticBits() {
+        if (syntheticBits - bitCount > MAXIMUM_SYNTHETIC_BITS) malformed(JpegReject.TRUNCATED)
     }
 
     private fun fillBits() {
@@ -634,6 +729,7 @@ private class JpegDecoder(
         val value = bitBuffer ushr (32 - count)
         bitBuffer = bitBuffer shl count
         bitCount -= count
+        checkSyntheticBits()
         return value
     }
 
@@ -646,6 +742,7 @@ private class JpegDecoder(
             val length = fast ushr 8
             bitBuffer = bitBuffer shl length
             bitCount -= length
+            checkSyntheticBits()
             return fast and 0xFF
         }
         for (length in HUFFMAN_LOOKUP_BITS + 1..16) {
@@ -653,6 +750,7 @@ private class JpegDecoder(
             if (code < table.endCode[length]) {
                 bitBuffer = bitBuffer shl length
                 bitCount -= length
+                checkSyntheticBits()
                 val index = code + table.symbolOffset[length]
                 return table.symbolAt(index)
             }
@@ -806,10 +904,12 @@ private class JpegDecoder(
 
         val rgba = ByteArray(width * height * 4)
         val rows = Array(components.size) { IntArray(width) }
-        val rgb = components.size == 3 &&
-            (adobeTransform == 0 || components.map { it.id } == listOf('R'.code, 'G'.code, 'B'.code))
+        val ids = components.map { it.id }
+        val rgbIds = listOf('R'.code, 'G'.code, 'B'.code)
+        val rgb = components.size == 3 && (adobeTransform == 0 || ids.toSet() == rgbIds.toSet())
+        val ordered = colourOrder(ids, rgb, rgbIds)
         for (y in 0 until height) {
-            for (index in components.indices) upsampleRow(components[index], y, rows[index])
+            for (index in ordered.indices) upsampleRow(ordered[index], y, rows[index])
             var out = y * width * 4
             if (components.size == 1) {
                 val grey = rows[0]
@@ -850,6 +950,23 @@ private class JpegDecoder(
     }
 
     /**
+     * The components in colour order -- Y, Cb, Cr or R, G, B -- by their ids where those ids say so:
+     * JFIF's 1, 2, 3, the common 0, 1, 2, and `R`, `G`, `B`, in whatever order the frame lists them.
+     * Any other ids carry no colour meaning, and the frame's order stands, as libjpeg reads it.
+     */
+    private fun colourOrder(ids: List<Int>, rgb: Boolean, rgbIds: List<Int>): List<FrameComponent> {
+        if (components.size != 3) return components
+        val byId = components.associateBy { it.id }
+        val named = when {
+            rgb && ids.toSet() == rgbIds.toSet() -> rgbIds
+            ids.toSet() == setOf(1, 2, 3) -> listOf(1, 2, 3)
+            ids.toSet() == setOf(0, 1, 2) -> listOf(0, 1, 2)
+            else -> return components
+        }
+        return named.map { byId.getValue(it) }
+    }
+
+    /**
      * One full-resolution row of [component] for output row [y]. A 2x factor in either direction uses
      * libjpeg's triangle ("fancy") filter -- 3/4 of the nearer sample, 1/4 of the farther -- and any
      * other factor replicates the nearest sample.
@@ -857,18 +974,23 @@ private class JpegDecoder(
     private fun upsampleRow(component: FrameComponent, y: Int, out: IntArray) {
         val samples = component.samples!!
         val stride = component.blocksPerLine * 8
-        val horizontalScale = maxHorizontal / component.horizontal
-        val verticalScale = maxVertical / component.vertical
+        val horizontalFactor = maxHorizontal / component.horizontal
+        val verticalFactor = maxVertical / component.vertical
+        // libjpeg filters only the 2x1, 2x2 and 1x2 cases; every other factor replicates, in both
+        // directions, so a 4x2 component does not mix a triangle filter with replication.
+        val fancy = (horizontalFactor == 2 && verticalFactor <= 2) || (horizontalFactor == 1 && verticalFactor == 2)
+        val verticalTriangle = fancy && verticalFactor == 2
+        val horizontalTriangle = fancy && horizontalFactor == 2
         val lastColumn = component.sampleWidth - 1
         val lastRow = component.sampleHeight - 1
 
         val near: Int
         val far: Int
-        if (verticalScale == 2) {
+        if (verticalTriangle) {
             near = minOf(y shr 1, lastRow)
             far = (if (y and 1 == 0) near - 1 else near + 1).coerceIn(0, lastRow)
         } else {
-            near = minOf(y / verticalScale, lastRow)
+            near = minOf(y / verticalFactor, lastRow)
             far = near
         }
         val nearBase = near * stride
@@ -876,32 +998,30 @@ private class JpegDecoder(
         // Column sums scaled by 4, so both directions share one rounding at the end.
         fun columnSum(column: Int): Int {
             val nearSample = samples[nearBase + column].toInt() and 0xFF
-            return if (verticalScale == 2) {
+            return if (verticalTriangle) {
                 3 * nearSample + (samples[farBase + column].toInt() and 0xFF)
             } else {
                 4 * nearSample
             }
         }
 
-        when (horizontalScale) {
-            1 -> for (x in 0 until width) out[x] = (columnSum(x) + 2) shr 2
-            2 -> {
-                // libjpeg's rounding biases: h2v2 alternates 8 and 7 out of 16, h2v1 1 and 2 out of 4.
-                val leftBias = if (verticalScale == 2) 8 else 4
-                val rightBias = if (verticalScale == 2) 7 else 8
-                var x = 0
-                var column = 0
-                while (x < width) {
-                    val here = columnSum(column)
-                    val previous = if (column == 0) here else columnSum(column - 1)
-                    val next = if (column >= lastColumn) here else columnSum(column + 1)
-                    out[x] = (3 * here + previous + leftBias) shr 4
-                    if (x + 1 < width) out[x + 1] = (3 * here + next + rightBias) shr 4
-                    x += 2
-                    column++
-                }
+        if (horizontalTriangle) {
+            // libjpeg's rounding biases: h2v2 alternates 8 and 7 out of 16, h2v1 1 and 2 out of 4.
+            val leftBias = if (verticalTriangle) 8 else 4
+            val rightBias = if (verticalTriangle) 7 else 8
+            var x = 0
+            var column = 0
+            while (x < width) {
+                val here = columnSum(column)
+                val previous = if (column == 0) here else columnSum(column - 1)
+                val next = if (column >= lastColumn) here else columnSum(column + 1)
+                out[x] = (3 * here + previous + leftBias) shr 4
+                if (x + 1 < width) out[x + 1] = (3 * here + next + rightBias) shr 4
+                x += 2
+                column++
             }
-            else -> for (x in 0 until width) out[x] = (columnSum(minOf(x / horizontalScale, lastColumn)) + 2) shr 2
+        } else {
+            for (x in 0 until width) out[x] = (columnSum(minOf(x / horizontalFactor, lastColumn)) + 2) shr 2
         }
     }
 }

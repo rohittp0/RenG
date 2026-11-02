@@ -484,8 +484,21 @@ private class ModelDecoder(
         }
     }
 
+    /**
+     * A JPEG is decoded only after its raster is reserved. The projection walks the decoder's own
+     * marker parser, so a `null` means the decoder would fail at or before its frame header too: that
+     * failure is reproduced with a zero raster budget -- which allocates nothing -- only to report it
+     * as the right one of [ModelDecodeResult.Unsupported] and [ModelDecodeResult.Malformed].
+     */
     private fun decodeJpegImage(payload: ByteArray): DecodedImage {
-        reserveProjectedImage(projectedJpegRgbaBytes(payload))
+        val projected = projectedJpegRgbaBytes(payload)
+        if (projected == null) {
+            when (decodeJpeg(payload, maximumDecodedBytes = 0L, maximumWorkingBytes = 0L)) {
+                is JpegDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
+                else -> fail(ModelDecodeResult.Malformed)
+            }
+        }
+        reserveProjectedImage(projected)
         return when (val result = decodeJpeg(payload, budgetBytes, imageWorkingBudgetBytes)) {
             is JpegDecodeResult.Success -> result.image
             is JpegDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)

@@ -111,6 +111,9 @@ private fun isLabelContentExclusion(code: EngineDiagnosticCode): Boolean = when 
     EngineDiagnosticCode.ROOT_BEHAVIOR_EXCLUDED,
     EngineDiagnosticCode.UNSUPPORTED_RETAINED_CONSTRUCT,
     EngineDiagnosticCode.ICON_LAYER_SKIPPED_SOURCE_UNAVAILABLE,
+    // Rentile 0.12.0: under a host-symbols profile a symbol layer is left out of the Output Tile because
+    // the host draws it from label candidates. Only the opt-in profiles raise it; nothing is missing.
+    EngineDiagnosticCode.SYMBOL_LAYER_HOST_OWNED,
     -> false
 }
 

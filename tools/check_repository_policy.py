@@ -289,16 +289,16 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
     # coroutines form, ADR 0032's device-test form, and ADR 0042's serialization form, which is the
     # one currently on disk for the catalog. `kmp/build.gradle.kts` pins a fifth, the opt-in
     # benchmark form, which is the one on disk for it.
-    # Every form carries the rentile 0.11.3 bump (see base_versions below, which must move in
+    # Every form carries the rentile 0.19.0 bump (see base_versions below, which must move in
     # lockstep with these fingerprints), and the three older forms cannot be recomputed from disk;
     # they are the catalog fixtures in tools/tests/test_check_repository_policy.py, so all four move
     # together whenever a version in the catalog does. Recompute them by fingerprinting
     # VERSION_CATALOG and its three amended forms from that module, not by editing one hash.
     "gradle/libs.versions.toml": frozenset({
-        "82403c9340ea566aa778d5b1df7305f2d63ecc2bb0a857450bc749e820d27aec",
-        "213f665b2470e5ae5dcaf550f527bb4baa9eb1b35314d63ab1176c315a2632b6",
-        "aaf4d45732e5a0901e09dc722364a512cf155d85702dacb94ed10ea16945ed71",
-        "7ceb137ff20bd535ab579fea906a40a8624f8d55e6103fd8e950f1b786da368d",
+        "2c4def06fe1e2446e7ecacef8722838ad6f6c8d9dc8c7167bde349d3f6466eb6",
+        "f317045e6164ed71f98f2e8ac92709d2bbae271f87cef852a552c2e56eae7f95",
+        "a00e90336bb6e9cf5327f1ee2330b45b47bf6550ad9b9af287ce3f06ad61b51a",
+        "7f69f1b9f0c6e0570a5091b642c5b1b35a25578ae34c340a6c62eaa2d6609509",
     }),
     "kmp/build.gradle.kts": frozenset({
         "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
@@ -1975,7 +1975,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             "agp": "9.3.1",
             "kotlin": "2.3.21",
             "mavenPublish": "0.36.0",
-            "rentile": "0.11.3",
+            "rentile": "0.19.0",
         }
         base_libraries = {
             "rentile-kmp": {

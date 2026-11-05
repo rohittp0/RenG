@@ -17,8 +17,10 @@ import com.rohittp.rentile.LabelGlyphQuad
 import com.rohittp.rentile.LabelLayerStyle
 import com.rohittp.rentile.LabelLinePoint
 import com.rohittp.rentile.LabelPlacement
+import com.rohittp.rentile.LabelSymbolSize
 import com.rohittp.rentile.SymbolAlignment
 import com.rohittp.rentile.SymbolOverlap
+import com.rohittp.rentile.SymbolSizeKind
 import com.rohittp.rentile.SymbolZOrder
 import com.rohittp.rentile.TileId
 import kotlin.test.assertIs
@@ -174,6 +176,19 @@ internal fun placementCandidate(
     translateX = translateX,
     translateY = translateY,
     translateAlignment = translateAlignment,
+    // Rentile 0.12.0's identity and size fields. RenG does not read them; a constant text-size keeps
+    // the glyphs at their laid-out size.
+    featureId = null,
+    text = "placement",
+    textSize = LabelSymbolSize(
+        kind = SymbolSizeKind.CONSTANT,
+        tileZoomSize = 16.0,
+        lowerZoom = 0.0,
+        upperZoom = 0.0,
+        lowerSize = 16.0,
+        upperSize = 16.0,
+        interpolationBase = null,
+    ),
 )
 
 /**

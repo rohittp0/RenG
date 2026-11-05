@@ -52,6 +52,7 @@ import com.rohittp.rentile.PreparedStyle
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
 import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.RawResourceStore as EngineRawResourceStore
+import com.rohittp.rentile.RasterAcquisitionDensity
 import com.rohittp.rentile.RenderOptions
 import com.rohittp.rentile.Rentile
 import com.rohittp.rentile.RentileClock
@@ -136,7 +137,15 @@ internal class BasemapEngineHost(
 
     private val consumerTransport: Transport = transport
     private val consumerStore: Store = store
-    private val renderOptions = RenderOptions(outputSizePx = tileOutputSizePixels)
+    /**
+     * `OUTPUT_ZOOM` keeps raster imagery acquired at the output tile's own zoom, as Rentile 0.11.3 did.
+     * Rentile 0.16.0 made density-aware (`NATIVE`) acquisition the default, which fetches finer imagery
+     * and changes output keys; adopting that is a separate decision, not part of the version bump.
+     */
+    private val renderOptions = RenderOptions(
+        outputSizePx = tileOutputSizePixels,
+        rasterAcquisitionDensity = RasterAcquisitionDensity.OUTPUT_ZOOM,
+    )
     private val tileOutputSize = OutputPixelSize(tileOutputSizePixels, tileOutputSizePixels)
 
     /**
@@ -423,7 +432,7 @@ internal class BasemapEngineHost(
             requireOpen()
             val summary = coroutineScope {
                 engineCall {
-                    engine.warmRawResources(style, tiles.map(::engineTileIdOf), EngineResourceAccessMode.NORMAL)
+                    engine.warmRawResources(style, tiles.map(::engineTileIdOf), renderOptions, EngineResourceAccessMode.NORMAL)
                 }
             }
             val warmed = ReadAheadWarmSummary(

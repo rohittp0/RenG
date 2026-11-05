@@ -7,8 +7,10 @@ import com.rohittp.reng.internal.gl.ResolvedIconQuad
 import com.rohittp.rentile.IconTextFit
 import com.rohittp.rentile.LabelIconAnchor
 import com.rohittp.rentile.LabelIconRef
+import com.rohittp.rentile.LabelSymbolSize
 import com.rohittp.rentile.SymbolAlignment
 import com.rohittp.rentile.SymbolOverlap
+import com.rohittp.rentile.SymbolSizeKind
 
 /*
  * Fixtures for icon placement.
@@ -142,6 +144,16 @@ internal fun iconRef(
     // because `LabelIconRef` has no default for them.
     textFit = IconTextFit.NONE,
     textFitPadding = listOf(0.0, 0.0, 0.0, 0.0),
+    // Rentile 0.12.0's `icon-size` curve. RenG does not read it; a constant 1 is the unscaled icon.
+    size = LabelSymbolSize(
+        kind = SymbolSizeKind.CONSTANT,
+        tileZoomSize = 1.0,
+        lowerZoom = 0.0,
+        upperZoom = 0.0,
+        lowerSize = 1.0,
+        upperSize = 1.0,
+        interpolationBase = null,
+    ),
 )
 
 /**

@@ -8,7 +8,6 @@ import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.Placement
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.backdropForCore
-import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
@@ -19,8 +18,6 @@ import com.rohittp.reng.internal.projection.resolveMercatorCamera
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
 import com.rohittp.reng.internal.shader.containsExtensionDirective
-import com.rohittp.reng.modelsForCore
-import com.rohittp.reng.stickersForCore
 
 internal fun planMercatorSpatial(
     plan: FramePlan,

@@ -117,13 +117,17 @@ public class FramePlan(
         result = 31 * result + basemap.hashCode()
         return result
     }
+
+    // RenG's own reads of the three lists, without the public getters' defensive copy. Members rather
+    // than extensions because only a member can reach the snapshots. Each snapshot is copied from the
+    // caller's list in `init` and never written after, so handing it out typed as a read-only List is
+    // as immutable as a copy for code that neither casts it nor keeps it past the plan.
+    internal fun stickersForCore(): List<Sticker> = stickerSnapshot
+
+    internal fun modelsForCore(): List<Model> = modelSnapshot
+
+    internal fun geometriesForCore(): List<Geometry> = geometrySnapshot
 }
-
-internal fun FramePlan.stickersForCore(): List<Sticker> = stickers
-
-internal fun FramePlan.modelsForCore(): List<Model> = models
-
-internal fun FramePlan.geometriesForCore(): List<Geometry> = geometries
 
 internal fun FramePlan.backdropForCore(): Backdrop? = backdrop
 

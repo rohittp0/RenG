@@ -18,7 +18,6 @@ import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.basemapForCore
-import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.diff.FrameStructuralDiff
 import com.rohittp.reng.internal.diff.FrameStructuralDiffer
 import com.rohittp.reng.internal.DiagnosticField
@@ -33,8 +32,6 @@ import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
-import com.rohittp.reng.modelsForCore
-import com.rohittp.reng.stickersForCore
 
 internal data class FramePlanningRequest(
     val plan: FramePlan,
@@ -169,6 +166,16 @@ internal class PlannedFrameCore(
 
     val staticResourceTraversal: List<StaticResourceReference>
         get() = freshListCopy(staticResourceTraversalSnapshot)
+
+    /**
+     * The traversal itself, without [staticResourceTraversal]'s copy, for a reader that only scans it.
+     *
+     * The snapshot is copied at construction and never written after, so a read-only view of it is as
+     * immutable as a copy; `prepareItem` scans it four times per frame and copied the whole traversal
+     * each time. The copying getter stays for callers that keep or hand on what they read.
+     */
+    val staticResourceTraversalView: List<StaticResourceReference>
+        get() = staticResourceTraversalSnapshot
 
     override fun equals(other: Any?): Boolean =
         other is PlannedFrameCore &&

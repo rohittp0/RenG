@@ -43,6 +43,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class FramePlanningCoreTest {
@@ -806,6 +807,33 @@ class FramePlanningCoreTest {
                 afterFailure.staticResourceTraversal,
             )
         }
+    }
+
+    /**
+     * The view is the construction snapshot itself -- the same instance however often it is read, and
+     * still independent of the caller's list -- while the copying getter keeps returning a fresh list.
+     */
+    @Test
+    fun theTraversalViewIsTheSnapshotAndTheGetterStillCopies() {
+        val planned = planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(plan = framePlan(stickers = listOf(sticker("view-sticker")))),
+        )
+        val first = expectedExternal("view-sticker", ResourceClass.STICKER_IMAGE)
+        val traversalInput = mutableListOf<StaticResourceReference>(first)
+        val core = PlannedFrameCore(
+            encodedPlan = planned.encodedPlan,
+            structuralDiff = planned.structuralDiff,
+            spatialPlan = planned.spatialPlan,
+            staticResourceTraversal = traversalInput,
+        )
+        traversalInput.clear()
+
+        assertSame(core.staticResourceTraversalView, core.staticResourceTraversalView)
+        assertEquals(listOf(first), core.staticResourceTraversalView)
+        assertNotSame(core.staticResourceTraversalView, core.staticResourceTraversal)
+        assertNotSame(core.staticResourceTraversal, core.staticResourceTraversal)
+        assertEquals(core.staticResourceTraversal, core.staticResourceTraversalView)
     }
 
     @Test

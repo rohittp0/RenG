@@ -893,7 +893,7 @@ internal class RenGRenderer(
             // FramePlanningCore.staticResourceTraversal() walks plan.stickersForCore() in order,
             // emitting exactly one External reference per sticker, so zipping the two lists back
             // together by position is safe.
-            val stickerImageReferences = planned.staticResourceTraversal
+            val stickerImageReferences = planned.staticResourceTraversalView
                 .filterIsInstance<StaticResourceReference.External>()
                 .filter { it.resourceClass == ResourceClass.STICKER_IMAGE }
             check(stickerImageReferences.size == plan.stickers.size) {
@@ -905,7 +905,7 @@ internal class RenGRenderer(
             // unlike a MODEL_TEXTURE (which a Geometry's own consumer textures reuse) these can be
             // read straight back out of the traversal by position, exactly as the sticker images
             // above are.
-            val modelGlbReferences = planned.staticResourceTraversal
+            val modelGlbReferences = planned.staticResourceTraversalView
                 .filterIsInstance<StaticResourceReference.External>()
                 .filter { it.resourceClass == ResourceClass.MODEL_GLB }
             check(modelGlbReferences.size == planModels.size) {
@@ -934,7 +934,7 @@ internal class RenGRenderer(
             // The style is the one traversal entry that is neither a sticker nor a texture: it is
             // acquired, validated, compiled through the engine, written and installed by the resource
             // driver's own basemap-style commit verbs, and never decoded as an image.
-            val externalReferences = planned.staticResourceTraversal
+            val externalReferences = planned.staticResourceTraversalView
                 .filterIsInstance<StaticResourceReference.External>()
             var primaryStyleReference: StaticResourceReference.External? = null
             var blendStyleReference: StaticResourceReference.External? = null
@@ -953,7 +953,7 @@ internal class RenGRenderer(
             // ADR 0068. At most one, and its own class, so it cannot be confused with the sticker
             // images that are paired back up by position above. Only a pattern has one: ADR 0071's
             // shader backdrop brings consumer textures instead, under MODEL_TEXTURE.
-            val backdropReference = planned.staticResourceTraversal
+            val backdropReference = planned.staticResourceTraversalView
                 .filterIsInstance<StaticResourceReference.External>()
                 .singleOrNull { it.resourceClass == ResourceClass.BACKDROP_IMAGE }
             check((backdropReference == null) == (plan.backdrop !is Backdrop.Pattern)) {

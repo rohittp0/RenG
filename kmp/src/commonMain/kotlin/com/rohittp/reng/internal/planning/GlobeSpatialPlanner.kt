@@ -6,15 +6,12 @@ import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.Placement
 import com.rohittp.reng.backdropForCore
-import com.rohittp.reng.geometriesForCore
 import com.rohittp.reng.internal.projection.GlobeGroundFootprint
 import com.rohittp.reng.internal.projection.ResolvedGlobeCamera
 import com.rohittp.reng.internal.projection.globeGroundFootprint
 import com.rohittp.reng.internal.projection.resolveGlobeCamera
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
-import com.rohittp.reng.modelsForCore
-import com.rohittp.reng.stickersForCore
 
 /**
  * [planMercatorSpatial]'s globe arm: the same [FrameSpatialPlan], derived on a sphere.

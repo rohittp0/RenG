@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 
 class FramePlanTest {
     @Test
@@ -192,12 +193,39 @@ class FramePlanTest {
         assertGetterIsIndependent(listOf(model), singleton.models) { singleton.models }
         assertGetterIsIndependent(emptyList<Geometry>(), empty.geometries) { empty.geometries }
         assertGetterIsIndependent(listOf(geometry), singleton.geometries) { singleton.geometries }
-        assertGetterIsIndependent(emptyList<Sticker>(), empty.stickersForCore()) { empty.stickersForCore() }
-        assertGetterIsIndependent(listOf(sticker), singleton.stickersForCore()) { singleton.stickersForCore() }
-        assertGetterIsIndependent(emptyList<Model>(), empty.modelsForCore()) { empty.modelsForCore() }
-        assertGetterIsIndependent(listOf(model), singleton.modelsForCore()) { singleton.modelsForCore() }
-        assertGetterIsIndependent(emptyList<Geometry>(), empty.geometriesForCore()) { empty.geometriesForCore() }
-        assertGetterIsIndependent(listOf(geometry), singleton.geometriesForCore()) { singleton.geometriesForCore() }
+    }
+
+    /**
+     * The core accessors are RenG's own reads and hand out the snapshot itself, uncopied: the same
+     * instance on every call, equal to what the public getter copies, which stays a fresh list each time.
+     */
+    @Test
+    fun theCoreAccessorsReturnTheSnapshotWhileThePublicGettersStillCopy() {
+        val sticker = Sticker(screenPlacement(), ResourceLocator("sticker"))
+        val model = Model(screenPlacement(), ResourceLocator("model"))
+        val geometry = Geometry(
+            Vector3(1.0, 2.0, 3.0),
+            Vector3(0.0, 3.0, 4.0),
+            ShaderPair("vertex", "fragment"),
+        )
+        val plan = FramePlan(
+            frameIndex = 1,
+            camera = camera(),
+            stickers = listOf(sticker),
+            models = listOf(model),
+            geometries = listOf(geometry),
+        )
+
+        assertSame(plan.stickersForCore(), plan.stickersForCore())
+        assertSame(plan.modelsForCore(), plan.modelsForCore())
+        assertSame(plan.geometriesForCore(), plan.geometriesForCore())
+        assertEquals(plan.stickers, plan.stickersForCore())
+        assertEquals(plan.models, plan.modelsForCore())
+        assertEquals(plan.geometries, plan.geometriesForCore())
+        assertNotSame(plan.stickers, plan.stickersForCore())
+        assertNotSame(plan.stickers, plan.stickers)
+        assertNotSame(plan.models, plan.models)
+        assertNotSame(plan.geometries, plan.geometries)
     }
 
     @Test

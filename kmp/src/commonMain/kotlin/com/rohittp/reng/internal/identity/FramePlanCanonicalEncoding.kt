@@ -25,11 +25,8 @@ import com.rohittp.reng.animationTracksForCore
 import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.basemapForCore
 import com.rohittp.reng.bloomForCore
-import com.rohittp.reng.geometriesForCore
-import com.rohittp.reng.modelsForCore
 import com.rohittp.reng.internal.gl.InternalPipelineRole
 import com.rohittp.reng.internal.gl.consumerStickerShaderPair
-import com.rohittp.reng.stickersForCore
 
 /**
  * The Frame Plan field-tag table. ADR 0018 calls this table **permanent**, and a root is "a strictly

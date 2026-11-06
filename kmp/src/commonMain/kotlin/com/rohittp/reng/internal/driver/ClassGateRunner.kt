@@ -129,9 +129,12 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
         }
     }
 
+    // Every gate reads `byteSnapshot`, not `bytes`: the decoder and the GLB scanner only read their
+    // input and keep nothing of it past the call, so the public getter's copy -- the whole compressed
+    // file, twice for a GLB -- defended nothing (ADR 0062: copied where it enters RenG, nowhere after).
     private fun runDecodePng(content: ResolvedResourceContent): SuppliedValidationOutcome =
         when (decodePng(
-                content.stored.bytes,
+                content.stored.byteSnapshot,
                 limits.maximumDecodedImageBytes,
                 limits.maximumImageDecodeWorkingBytes,
             )
@@ -159,13 +162,13 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
     }
 
     private fun runParseGlb(content: ResolvedResourceContent): SuppliedValidationOutcome =
-        when (parseGlbDocument(content.stored.bytes)) {
+        when (parseGlbDocument(content.stored.byteSnapshot)) {
             is GltfParseResult.Parsed -> SuppliedValidationOutcome.Valid
             is GltfParseResult.Malformed, null -> SuppliedValidationOutcome.Failed
         }
 
     private fun runValidateGlbFeatures(content: ResolvedResourceContent): SuppliedValidationOutcome {
-        val document = (parseGlbDocument(content.stored.bytes) as? GltfParseResult.Parsed)?.document
+        val document = (parseGlbDocument(content.stored.byteSnapshot) as? GltfParseResult.Parsed)?.document
             ?: return SuppliedValidationOutcome.Failed
         return when (validateGltfFeatures(document)) {
             GltfFeatureResult.Supported -> SuppliedValidationOutcome.Valid

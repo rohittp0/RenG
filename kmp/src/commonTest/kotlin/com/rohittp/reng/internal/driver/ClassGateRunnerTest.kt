@@ -17,9 +17,11 @@ import com.rohittp.reng.internal.resource.SuppliedValidationOutcome
 import kotlinx.coroutines.test.runTest
 import kotlin.io.encoding.Base64
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ClassGateRunnerTest {
@@ -199,6 +201,45 @@ class ClassGateRunnerTest {
         )
         assertTrue(runner.hasPassed(ResourceClassGate.DECODE_STICKER_IMAGE, digest))
         assertFalse(runner.hasPassed(ResourceClassGate.DECODE_PNG, digest), "a container is not a PNG")
+    }
+
+    // ---- ADR 0062: the gates read the stored snapshot itself, so none may write to it ----------------
+
+    /**
+     * Every gate reads [StoredRawResource.byteSnapshot] -- the array the resource and every resource
+     * sharing it hold -- rather than a fresh copy, so a decoder that wrote to its input would corrupt
+     * the stored resource for every later reader. Each gate is run, passing and failing, on its own
+     * digest so the ADR 0060 memo answers none of them, and the backing array must come out the same
+     * instance with the same bytes.
+     */
+    @Test
+    fun noGateWritesToTheStoredBytesItReads() = runTest {
+        val runner = RenGClassGateRunner(ResourceLimits())
+        val cases = listOf(
+            ResourceClassGate.DECODE_PNG to validPng,
+            ResourceClassGate.DECODE_PNG to corruptPng,
+            ResourceClassGate.DECODE_STICKER_IMAGE to validPng,
+            ResourceClassGate.DECODE_STICKER_IMAGE to validEtc2,
+            ResourceClassGate.PARSE_GLB to validGlb,
+            ResourceClassGate.PARSE_GLB to badMagicGlb,
+            ResourceClassGate.VALIDATE_GLB_FEATURES to validGlb,
+            ResourceClassGate.VALIDATE_GLB_FEATURES to glbWithRequiredExtension,
+        )
+        cases.forEachIndexed { index, (gate, bytes) ->
+            val content = content(
+                resourceClass = when (gate) {
+                    ResourceClassGate.DECODE_PNG, ResourceClassGate.DECODE_STICKER_IMAGE -> ResourceClass.STICKER_IMAGE
+                    ResourceClassGate.PARSE_GLB, ResourceClassGate.VALIDATE_GLB_FEATURES -> ResourceClass.MODEL_GLB
+                },
+                bytes = bytes,
+                digest = index.toString().padStart(64, '7'),
+            )
+            val backing = content.stored.byteSnapshot
+            val before = backing.copyOf()
+            runner.run(gate, content)
+            assertSame(backing, content.stored.byteSnapshot, "$gate #$index")
+            assertContentEquals(before, backing, "$gate #$index wrote to the stored bytes")
+        }
     }
 
     // Every gate this runner can be handed is one RenG genuinely owns. There is no engine-validated

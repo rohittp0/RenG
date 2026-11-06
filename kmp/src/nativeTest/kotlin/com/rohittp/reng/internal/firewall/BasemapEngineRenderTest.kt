@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.firewall
 
+import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceKind
 import kotlin.test.Test
@@ -106,6 +107,54 @@ class BasemapEngineRenderTest {
                     assertTrue(
                         raw.rgba.size > encoded.pngBytes.size,
                         "raw pixels cost more than their encoding, which is why ADR 0044 bounds them",
+                    )
+                }
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * A rendered tile's key comes from the ADR 0069 memo, not a second derivation. Provisioning asks
+     * for a tile's key before rendering it, so a render that derived again paid a canonical root and a
+     * SHA-256 the memo already held. Counted, as `RenderedTileKeyRemembranceTest` counts the memo:
+     * after the key is asked for once, rendering the tile both ways hashes nothing further, and the
+     * key carried is byte-for-byte the one [basemapTileKey] derives directly.
+     */
+    @Test
+    fun aRenderedTilesKeyIsTheRememberedOneAndIsNotDerivedAgain() = runTest {
+        val sha256 = CountingSha256()
+        val host = basemapEngineHost(
+            transport = CountingHostTransport(),
+            store = CountingHostStore(),
+            sha256 = sha256,
+        )
+        try {
+            host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                val style = host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                host.prepareTiles(style, listOf(HOST_RASTER_TILE)).use { prepared ->
+                    val remembered = host.renderedTileKey(style, HOST_RASTER_TILE)
+                    val digestsBeforeRendering = sha256.digests
+
+                    val encoded = host.renderTiles(prepared, asRawPixels = false).single()
+                    val raw = host.renderTiles(prepared, asRawPixels = true).single()
+
+                    assertEquals(
+                        digestsBeforeRendering,
+                        sha256.digests,
+                        "rendering a tile whose key is remembered must not derive it again",
+                    )
+                    assertEquals(remembered, encoded.key)
+                    assertEquals(remembered, raw.key)
+                    assertEquals(
+                        basemapTileKey(
+                            styleDigest = style.digest,
+                            tile = HOST_RASTER_TILE,
+                            outputSize = OutputPixelSize(512, 512),
+                        ),
+                        encoded.key,
+                        "the remembered key is exactly the directly derived one",
                     )
                 }
             }

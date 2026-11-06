@@ -935,7 +935,10 @@ internal class BasemapEngineHost(
             val tile = tilesById[id]
                 ?: error("the engine rendered a tile this batch never asked for")
             return RenderedBasemapTile(
-                key = basemapTileKey(styleDigest, tile, tileOutputSize, sha256),
+                // Through the memo, not basemapTileKey directly: provisioning already asked for this
+                // tile's key to test residency, so deriving it again here re-ran the canonical root and
+                // SHA-256 that ADR 0069 exists to run once. Same function of the same inputs.
+                key = rememberedTileKey(styleDigest, tile),
                 tile = tile,
                 pixels = pixels,
                 contentKey = contentKey,

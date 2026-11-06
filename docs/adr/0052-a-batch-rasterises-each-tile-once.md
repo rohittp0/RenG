@@ -64,3 +64,26 @@ but it is a second decision about a different budget and does not belong inside 
 
 In practice the budget binds *less* often after this change, not more, because `rawTilesFit` is
 consulted only for tiles actually being rasterised, and there are now far fewer of those.
+
+## Note, 2026-11-06: the raw-byte charge is now exact, by distinct pixel array
+
+The per-occurrence charge above was not only conservative; under a tight budget it broke this ADR's own
+title. A frame reserved its remembered tiles' bytes as though nobody held them. When even those did not
+fit -- the consumer prepares previews under 32 MiB, thirty-two tiles -- `GroundTileProvisioner` put the
+remembered tiles back among the missing ones and the engine rasterised them a second time, encoded. With
+a five-tile budget, three frames over two overlapping cameras rendered 10 tiles for 6 distinct ones.
+
+So `RawTileBudget` now counts holds per distinct raw pixel array, the lease-counting shape this section
+named: an array no open reservation holds costs its size, one another open reservation holds costs
+nothing, and its bytes return when the last holder releases it. The key is the array itself, compared by
+reference, because the budget bounds allocations: a `ResourceKey` names a picture, and two frames outside
+a batch can each hold their own array of one picture. A blended second style (ADR 0086) is distinct for
+the same reason, whatever its tile coordinates.
+
+Every frame takes its own hold on each remembered tile at prepare, rather than borrowing the frame that
+rendered it, so the pixels stay counted when that frame closes first. Fresh tiles are reserved as bytes
+before the render, all or nothing as before, and become held arrays once rendered without moving any
+bytes. A remembered tile from the batch memo is held by an open frame of the same unfinished batch, so it
+always fits; only one no frame holds -- a read-ahead tile (ADR 0077) -- can still be refused and drawn
+again, as that ADR always said. A frame's own reservation still covers exactly the raw pixels it carries,
+per occurrence, so `RenGPreparedFrame`'s check is unchanged; what is exact now is the budget's total.

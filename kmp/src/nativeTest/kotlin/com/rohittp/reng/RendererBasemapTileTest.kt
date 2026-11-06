@@ -18,6 +18,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
@@ -656,6 +657,138 @@ class RendererBasemapTileTest {
             renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
             "two undrawn preparations outside a batch each rasterise their own tiles",
         )
+    }
+
+    /**
+     * ADR 0052's note of 2026-11-06. Under a raw budget of five tiles, one frame's four fit and two
+     * frames' eight do not. Charged per occurrence, the second frame could not afford the two tiles it
+     * shares with the first, so they went back to the engine and were rasterised again, and the third
+     * frame -- the first one's camera -- rasterised all four again. Charged by distinct array, a tile an
+     * open frame of the batch already holds costs nothing, so six distinct tiles are six renders.
+     */
+    @Test
+    fun aBatchUnderATightRawBudgetStillRasterisesEachTileOnceAndEveryFrameDraws() = runTest {
+        val renderer = styleRenderer(
+            TileTransport(),
+            resourceLimits = ResourceLimits(maximumInFlightRawBasemapTileBytes = 5L * TILE_TEXTURE_BYTES),
+        ) as RenGRenderer
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val frames = renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L), basemapPlan(frameIndex = 2L)),
+        ).map { it as RenGPreparedFrame }
+
+        assertEquals(
+            6L,
+            renderer.queryMetrics()[RenGMetricName.ENGINE_TILES_RENDERED],
+            "six distinct tiles across the batch are six renders, however tight the raw budget",
+        )
+        val first = frames[0].basemapTiles.associateBy { it.key }
+        frames[2].basemapTiles.forEach { tile ->
+            assertSame(first.getValue(tile.key), tile, "the third frame carries the first frame's tiles")
+        }
+        // The second frame's two new tiles did not fit raw beside the four it holds (six over five), so
+        // they are encoded; the four shared raw tiles are charged once for all three frames.
+        assertEquals(
+            4L * TILE_TEXTURE_BYTES,
+            renderer.inFlightRawTileBytes,
+            "the first frame's four raw tiles, once, however many frames carry them",
+        )
+        assertEquals(
+            2,
+            frames[1].basemapTiles.count { it.pixels is BasemapTilePixels.Encoded },
+            "only the second frame's own new tiles took the encoded fallback",
+        )
+        frames.forEach { frame -> renderer.draw(frame, target) }
+        frames.forEach { it.close() }
+        assertEquals(0L, renderer.inFlightRawTileBytes)
+    }
+
+    @Test
+    fun theRawBudgetChargesADistinctTileOnceAndKeepsItUntilItsLastFrameCloses() = runTest {
+        val renderer = styleRenderer(TileTransport()) as RenGRenderer
+
+        val frames = renderer.prepareBatch(
+            listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L), basemapPlan(frameIndex = 2L)),
+        ).map { it as RenGPreparedFrame }
+
+        frames.forEach { frame -> assertEquals(4L * TILE_TEXTURE_BYTES, frame.rawTileBytes) }
+        // Twelve tile occurrences, six distinct arrays.
+        assertEquals(6L * TILE_TEXTURE_BYTES, renderer.inFlightRawTileBytes)
+
+        // Out of order. The frame that rasterised the shared tiles closes first, and the frames that
+        // remembered them took their own holds at prepare, so nothing it rendered is given back yet.
+        frames[0].close()
+        assertEquals(6L * TILE_TEXTURE_BYTES, renderer.inFlightRawTileBytes)
+        frames[2].close()
+        assertEquals(4L * TILE_TEXTURE_BYTES, renderer.inFlightRawTileBytes, "only the second frame's four remain")
+        frames[1].close()
+        assertEquals(0L, renderer.inFlightRawTileBytes)
+    }
+
+    @Test
+    fun aBatchThatFailsAfterSharingTilesReturnsEveryRawByte() = runTest {
+        val transport = DrawDuringFetchTransport(WEST_ONLY_TILE_URL_PREFIX)
+        transport.duringFetch = { throw IllegalStateException("offline") }
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        // The third frame fails on a tile only it selects, after the first two have rasterised and shared.
+        assertFailsWith<RenGException> {
+            renderer.prepareBatch(
+                listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L), westBasemapPlan(2L)),
+            )
+        }
+
+        assertEquals(0L, renderer.inFlightRawTileBytes, "the batch's rollback releases every hold")
+    }
+
+    @Test
+    fun aBatchCancelledAfterSharingTilesReturnsEveryRawByte() = runTest {
+        val transport = DrawDuringFetchTransport(WEST_ONLY_TILE_URL_PREFIX)
+        val renderer = styleRenderer(transport) as RenGRenderer
+
+        val batch = launch {
+            renderer.prepareBatch(
+                listOf(basemapPlan(frameIndex = 0L), shiftedBasemapPlan(frameIndex = 1L), westBasemapPlan(2L)),
+            )
+        }
+        transport.duringFetch = { batch.cancel() }
+        batch.join()
+
+        assertTrue(transport.fired, "the batch must have been cancelled inside its third frame")
+        assertTrue(batch.isCancelled)
+        assertEquals(0L, renderer.inFlightRawTileBytes, "a cancelled batch releases every hold")
+    }
+
+    @Test
+    fun twoBlendedStylesAtTheSameTileCoordinatesAreChargedAsTwoTiles() = runTest {
+        val renderer = twoStyleRenderer(transport = TwoStyleTileTransport())
+
+        val frames = renderer.prepareBatch(
+            listOf(
+                blendedPlan(frameIndex = 0L, camera = styleCamera()),
+                blendedPlan(frameIndex = 1L, camera = styleCamera()),
+            ),
+        ).map { it as RenGPreparedFrame }
+
+        val tiles = frames[0].basemapTiles
+        assertTrue(
+            tiles.groupBy { it.tile }.values.any { sameCoordinates -> sameCoordinates.size == 2 },
+            "the fixture must put both styles' tiles at the same coordinates",
+        )
+        val arrays = tiles.map { (it.pixels as BasemapTilePixels.Raw).rgba }
+        arrays.forEachIndexed { index, array ->
+            arrays.drop(index + 1).forEach { other -> assertTrue(array !== other, "each style has its own pixels") }
+        }
+        assertEquals(frames[0].rawTileBytes, frames[1].rawTileBytes)
+        assertEquals(
+            frames[0].rawTileBytes,
+            renderer.inFlightRawTileBytes,
+            "the second frame shares both styles' tiles, and the two styles share nothing",
+        )
+        frames.forEach { it.close() }
+        assertEquals(0L, renderer.inFlightRawTileBytes)
+        renderer.close()
     }
 
     @Test

@@ -220,40 +220,50 @@ internal class GroundTileProvisioner(
         // frame adds and can never make it draw nothing.
         applyRasterisationBudget(missing, style.digest)
 
-        var rawReservation: RawTileBudget.Reservation? = null
-        var useRememberedRaw = rememberedRaw.isNotEmpty()
+        // ADR 0044's raw budget, charged by distinct pixel array (ADR 0052's note of 2026-11-06). This
+        // frame takes its own hold on every remembered tile rather than borrowing the frame that rendered
+        // it, so the pixels stay counted if that frame closes first; a tile an open frame already holds
+        // costs nothing to hold again, and fresh tiles are reserved whole or not at all.
+        val rawReservation = rawTileBudget.reserve()
+        val rememberedPixels = rememberedRaw.map { (_, tile) -> tile.rawPixels() }
+        var keptRemembered: List<Pair<CanonicalBasemapTile, RenderedBasemapTile>> = rememberedRaw
         var renderFreshAsRaw = false
-        val rememberedRawBytes = rememberedRaw.sumOf { (_, tile) -> tile.rawPixelBytes() }
-        val combinedRawBytes = checkedRawTileBytes(missing.size)?.let { fresh ->
-            if (rememberedRawBytes <= Long.MAX_VALUE - fresh) rememberedRawBytes + fresh else null
-        }
-        if (combinedRawBytes != null && combinedRawBytes > 0L) {
-            rawReservation = rawTileBudget.tryReserve(combinedRawBytes)
-            renderFreshAsRaw = rawReservation != null
-        }
-        if (rawReservation == null && rememberedRawBytes > 0L) {
-            rawReservation = rawTileBudget.tryReserve(rememberedRawBytes)
-            if (rawReservation == null) {
-                useRememberedRaw = false
-                missing += rememberedRaw.map { it.first }
-                applyRasterisationBudget(missing, style.digest)
-                val freshBytes = checkedRawTileBytes(missing.size)
-                if (freshBytes != null && freshBytes > 0L) {
-                    rawReservation = rawTileBudget.tryReserve(freshBytes)
-                    renderFreshAsRaw = rawReservation != null
-                }
+        val freshBytes = checkedRawTileBytes(missing.size)
+        if (
+            freshBytes != null &&
+            (freshBytes > 0L || rememberedPixels.isNotEmpty()) &&
+            rawReservation.tryHold(rememberedPixels, freshBytes)
+        ) {
+            renderFreshAsRaw = freshBytes > 0L
+        } else if (!rawReservation.tryHold(rememberedPixels, freshBytes = 0L)) {
+            // Only a remembered tile no open frame holds can cost anything, so a batch memo hit does not
+            // reach here: the frame that rendered or took it belongs to this same unfinished batch and is
+            // open, unless renderer close has already closed it. What does is a tile the read-ahead worker
+            // drew (ADR 0077), which nothing holds yet;
+            // the ones that do not fit are rasterised again by this frame, as that ADR always said, while
+            // whatever is already held stays shared.
+            val unheld = rawReservation.holdAlreadyHeld(rememberedPixels).toHashSet()
+            keptRemembered = rememberedRaw.filter { (_, tile) -> tile.rawPixels() !in unheld }
+            missing += rememberedRaw.filter { (_, tile) -> tile.rawPixels() in unheld }.map { it.first }
+            applyRasterisationBudget(missing, style.digest)
+            val retriedBytes = checkedRawTileBytes(missing.size)
+            if (retriedBytes != null && retriedBytes > 0L) {
+                renderFreshAsRaw = rawReservation.tryHold(emptyList(), retriedBytes)
             }
         }
-        rawReservation?.let(rawReservationSink)
-        if (useRememberedRaw) alreadyRendered += rememberedRaw.map { it.second }
+        // A reservation that holds nothing is not handed to the frame, exactly as none was taken before.
+        val holdsRawPixels = rawReservation.bytes > 0L
+        if (holdsRawPixels) rawReservationSink(rawReservation) else rawReservation.release()
+        alreadyRendered += keptRemembered.map { it.second }
         if (takeFromCache != null && cachedKeys.isNotEmpty()) {
             // A tile leaves the cache as it enters the frame (or, when the reservation did not fit, as it
             // is redrawn): the frame holds it now, and a copy left behind would be the unbounded store of
             // pixels ADR 0052 refused. Counted as a hit only when the frame actually took it.
             cachedKeys.forEach(takeFromCache::remove)
-            if (useRememberedRaw) {
-                metricRecorder.record(RenGMetricName.RENDERED_TILE_CACHE_HITS, cachedKeys.size.toLong())
-                if (memo != null) cachedHits.forEach { memo[it.key] = it }
+            val taken = cachedHits.filter { hit -> keptRemembered.any { (_, kept) -> kept === hit } }
+            if (taken.isNotEmpty()) {
+                metricRecorder.record(RenGMetricName.RENDERED_TILE_CACHE_HITS, taken.size.toLong())
+                if (memo != null) taken.forEach { memo[it.key] = it }
             }
         }
         if (missing.isEmpty()) return alreadyRendered
@@ -268,12 +278,14 @@ internal class GroundTileProvisioner(
             // ADR 0057's failed tiles left `missing`, and the reservation above was taken for them too.
             // ADR 0044 holds a frame's reservation to exactly the raw pixels it carries (the frame's own
             // `init` enforces it), so give the difference back now, before anything is rendered. The
-            // same arithmetic that sized it: what the remembered tiles hold if the frame keeps them raw,
-            // plus the tiles still to rasterise if they are rendered raw. Zero is a legal reservation.
-            rawReservation?.shrinkTo(
-                (if (useRememberedRaw) rememberedRawBytes else 0L) +
-                    (if (renderFreshAsRaw) checkNotNull(checkedRawTileBytes(missing.size)) else 0L),
-            )
+            // same arithmetic that sized it: the remembered tiles the frame holds, plus the tiles still to
+            // rasterise if they are rendered raw. Zero is a legal reservation.
+            if (holdsRawPixels) {
+                rawReservation.shrinkTo(
+                    rawReservation.heldBytes +
+                        (if (renderFreshAsRaw) checkNotNull(checkedRawTileBytes(missing.size)) else 0L),
+                )
+            }
         }
         if (preparedFresh == null) return alreadyRendered
         val freshlyRendered = preparedFresh.use { prepared ->
@@ -284,6 +296,11 @@ internal class GroundTileProvisioner(
                 // the same gate, the frame being prepared is the one thing that must never wait for it.
                 priority = if (cache != null) RenGRenderPriority.URGENT else priority,
             )
+        }
+        // Held from here by array, so a later frame of the batch that remembers one of them holds it
+        // for nothing rather than being charged for it a second time.
+        if (renderFreshAsRaw) {
+            rawReservation.bindFresh(freshlyRendered.mapNotNull { (it.pixels as? BasemapTilePixels.Raw)?.rgba })
         }
         if (memo != null) freshlyRendered.forEach { memo[it.key] = it }
         return if (alreadyRendered.isEmpty()) freshlyRendered else alreadyRendered + freshlyRendered
@@ -399,7 +416,5 @@ internal class GroundTileProvisioner(
     }
 }
 
-private fun RenderedBasemapTile.rawPixelBytes(): Long = when (val value = pixels) {
-    is BasemapTilePixels.Raw -> value.rgba.size.toLong()
-    is BasemapTilePixels.Encoded -> 0L
-}
+/** A remembered raw tile's pixel array: the batch memo and the read-ahead cache remember only raw tiles here. */
+private fun RenderedBasemapTile.rawPixels(): ByteArray = (pixels as BasemapTilePixels.Raw).rgba

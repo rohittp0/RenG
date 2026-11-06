@@ -586,13 +586,31 @@ internal class ResolvedModel(val primitives: List<ResolvedModelPrimitive>)
  * - Joints and weights present with no palette means the draw item named no skin. That draws
  *   statically rather than sampling an uninitialised joint buffer.
  */
-internal fun modelShaderVariantFor(primitive: ResolvedModelPrimitive): ModelShaderVariant {
-    val attributes = primitive.uploaded.attributes
+internal fun modelShaderVariantFor(primitive: ResolvedModelPrimitive): ModelShaderVariant =
+    modelShaderVariantFor(
+        attributes = primitive.uploaded.attributes,
+        hasJointPalette = primitive.jointMatrices != null,
+        hasBaseColourTexture = primitive.baseColourTexture != null,
+        alphaMode = primitive.material.alphaMode,
+    )
+
+/**
+ * The rule [modelShaderVariantFor] applies to a resolved primitive, from the four facts it reads.
+ *
+ * Split out so the renderer can ask which variants a frame needs before any camera has resolved a
+ * primitive ([requiredModelShaderVariants]) through this same rule rather than a copy of it.
+ */
+internal fun modelShaderVariantFor(
+    attributes: Set<ModelVertexAttribute>,
+    hasJointPalette: Boolean,
+    hasBaseColourTexture: Boolean,
+    alphaMode: String,
+): ModelShaderVariant {
     val skinnable = ModelVertexAttribute.JOINTS in attributes && ModelVertexAttribute.WEIGHTS in attributes
     return ModelShaderVariant(
-        skinned = skinnable && primitive.jointMatrices != null,
-        hasBaseColourTexture = primitive.baseColourTexture != null && ModelVertexAttribute.TEX_COORD in attributes,
-        masked = primitive.material.alphaMode == MODEL_ALPHA_MODE_MASK,
+        skinned = skinnable && hasJointPalette,
+        hasBaseColourTexture = hasBaseColourTexture && ModelVertexAttribute.TEX_COORD in attributes,
+        masked = alphaMode == MODEL_ALPHA_MODE_MASK,
     )
 }
 
@@ -819,6 +837,9 @@ internal fun jointMatricesForSkin(
     }
 }
 
+/** Whether [packJointMatrices] packs [matrices] rather than answering `null`, without packing them. */
+internal fun jointPaletteFits(matrices: List<DoubleMatrix4>): Boolean = matrices.size <= MAXIMUM_MODEL_JOINTS
+
 /**
  * [matrices] packed into the column-major float run `RengModelJoints` expects, or `null` when there
  * are more of them than [MAXIMUM_MODEL_JOINTS].
@@ -829,7 +850,7 @@ internal fun jointMatricesForSkin(
  * there, which no vertex can index because no vertex references a joint the skin does not declare.
  */
 internal fun packJointMatrices(matrices: List<DoubleMatrix4>): FloatArray? {
-    if (matrices.size > MAXIMUM_MODEL_JOINTS) return null
+    if (!jointPaletteFits(matrices)) return null
     val packed = FloatArray(matrices.size * 16)
     matrices.forEachIndexed { joint, matrix ->
         for (index in 0 until 16) packed[joint * 16 + index] = matrix.columnMajorElement(index).toFloat()

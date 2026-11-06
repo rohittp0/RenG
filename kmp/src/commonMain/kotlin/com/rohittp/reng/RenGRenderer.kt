@@ -70,12 +70,12 @@ import com.rohittp.reng.internal.gl.SceneSticker
 import com.rohittp.reng.internal.gl.SceneStickerShader
 import com.rohittp.reng.internal.gl.SceneTerrain
 import com.rohittp.reng.internal.gl.SceneTileDem
+import com.rohittp.reng.internal.gl.ShaderDialect
 import com.rohittp.reng.internal.gl.StickerPipeline
 import com.rohittp.reng.internal.gl.TextureContent
 import com.rohittp.reng.internal.gl.TextureLease
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.UploadedPrimitive
-import com.rohittp.reng.internal.gl.allModelShaderVariants
 import com.rohittp.reng.internal.gl.composeBackdropInverseViewProjection
 import com.rohittp.reng.internal.gl.consumerStickerShaderPair
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
@@ -102,6 +102,7 @@ import com.rohittp.reng.internal.gl.ensureGroundMixedPrograms
 import com.rohittp.reng.internal.gl.jointMatricesForSkin
 import com.rohittp.reng.internal.gl.modelPrimitiveAllocationBytes
 import com.rohittp.reng.internal.gl.requireResolvedAtDrawTime
+import com.rohittp.reng.internal.gl.requiredModelShaderVariants
 import com.rohittp.reng.internal.gl.resolvedBackdropFor
 import com.rohittp.reng.internal.gl.uploadDemTexture
 import com.rohittp.reng.internal.gl.uploadGlyphAtlas
@@ -295,18 +296,17 @@ internal class RenGRenderer(
     private val contentTextures = ContentTextureCache(glObjectRegistry = glObjectRegistry)
 
     /**
-     * Every model program, compiled together on the first frame that carries a [Model] and never
-     * before, keyed by the variant that selects it.
+     * Every model program compiled so far, keyed by the variant that selects it: each one on the first
+     * frame whose models need it, and never before.
      *
-     * **All eight at once, rather than only the variants this frame needs.**
-     * `internal.gl.modelShaderVariantFor` is the one authority on which of the eight draws a primitive,
-     * and its three answers depend on the primitive's *uploaded* attribute set, its joint palette and
-     * its alpha mode. Asking that question here would mean a second copy of that rule outside the file
-     * that owns it — the same duplication `Scene.mapOrder` exists to have removed — so this pays for
-     * eight programs instead. **Not at setup**, though: a renderer that never draws a model must not
-     * pay sixteen shader compilations for one, and `createModelPipeline` refuses a context whose
-     * `GL_MAX_UNIFORM_BLOCK_SIZE` is below the guaranteed 16384, which would otherwise turn a context
-     * that can draw everything else into a renderer that cannot be constructed at all.
+     * **Only the variants a frame needs, not all eight.** The first model frame used to compile all
+     * eight -- sixteen shader compilations and eight links, for a vehicle that draws with one or two.
+     * `internal.gl.requiredModelShaderVariants` now names a frame's variants from its uploaded models
+     * through `modelShaderVariantFor`'s own rule, so the rule still has one home, and
+     * [ensureModelPipelines] compiles the ones missing and commits them together. **Not at setup**:
+     * a renderer that never draws a model must not pay for one, and `createModelPipeline` refuses a
+     * context whose `GL_MAX_UNIFORM_BLOCK_SIZE` is below the guaranteed 16384, which would otherwise
+     * turn a context that can draw everything else into a renderer that cannot be constructed at all.
      */
     private val modelPipelines: MutableMap<ModelShaderVariant, ModelPipeline> = mutableMapOf()
 
@@ -3003,18 +3003,15 @@ internal class RenGRenderer(
         }
 
         val preparedModels = frame.models
-        if (preparedModels.isNotEmpty() && modelPipelines.isEmpty()) {
-            allModelShaderVariants().forEach { variant ->
-                when (val result = createModelPipeline(binding, profile.dialect, programs, variant)) {
-                    is ModelPipelineResult.Created -> modelPipelines[variant] = result.pipeline
-                    is ModelPipelineResult.Failed -> return result.failure
-                }
-            }
-        }
         val sceneModels = ArrayList<SceneModel>(preparedModels.size)
         for (preparedModel in preparedModels) {
             sceneModels += sceneModel(preparedModel, gpuAllocationLeases, binding)
         }
+        // After the uploads, because a primitive's variant depends on the attributes it was uploaded
+        // with. A failure here returns like any other in this function: the leases taken above are
+        // released by performDraw's `finally`.
+        ensureModelPipelines(requiredModelShaderVariants(sceneModels), profile.dialect, binding)
+            ?.let { return it }
 
         // The planner's own lists are handed to the Scene whole. Two `filterIsInstance` calls used to
         // stand here, dropping every ModelAt reference so a FramePlan carrying a Model would render
@@ -3273,6 +3270,39 @@ internal class RenGRenderer(
         val atlas = uploadSpriteAtlas(binding, glObjectRegistry, key, image)
         textureLeases += atlas.lease
         return listOf(IconBatch(atlasTexture = atlas.handle.name, quads = prepared.icons))
+    }
+
+    /**
+     * Compiles each of [required] not yet in [modelPipelines], and commits them only once every one has
+     * compiled.
+     *
+     * All or nothing because [modelPipelines] is what a later draw trusts: committing each as it
+     * compiled left a failure part-way through with a map that was neither empty -- so the next frame
+     * did not retry -- nor complete, and that frame's model draw reached `requireNotNull` on the missing
+     * variant. On a failure the ones this call compiled are deleted exactly as [close] deletes a
+     * committed one, and the failure is this draw's, so the next frame asks again from the same map.
+     */
+    private fun ensureModelPipelines(
+        required: List<ModelShaderVariant>,
+        dialect: ShaderDialect,
+        binding: GlBinding,
+    ): FailureDescriptor? {
+        var staged: LinkedHashMap<ModelShaderVariant, ModelPipeline>? = null
+        for (variant in required) {
+            if (variant in modelPipelines) continue
+            when (val result = createModelPipeline(binding, dialect, programs, variant)) {
+                is ModelPipelineResult.Created -> {
+                    val pipelines = staged ?: LinkedHashMap<ModelShaderVariant, ModelPipeline>().also { staged = it }
+                    pipelines[variant] = result.pipeline
+                }
+                is ModelPipelineResult.Failed -> {
+                    staged?.values?.forEach { deleteModelPipeline(binding, programs, it) }
+                    return result.failure
+                }
+            }
+        }
+        staged?.let { modelPipelines.putAll(it) }
+        return null
     }
 
     /**

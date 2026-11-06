@@ -16,6 +16,8 @@ import com.rohittp.reng.internal.math.DoubleMatrix3
 import com.rohittp.reng.internal.math.DoubleMatrix4
 import com.rohittp.reng.internal.math.DoubleVector3
 import com.rohittp.reng.internal.model.DecodedModel
+import com.rohittp.reng.internal.model.ModelDrawItem
+import com.rohittp.reng.internal.model.ResolvedMaterial
 import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.planning.BasemapTileQuad
 import com.rohittp.reng.internal.planning.DrawRegime
@@ -1372,6 +1374,49 @@ private fun SceneSticker.localDimensions(): DoubleVector3 =
     DoubleVector3(imageWidthPixels.toDouble(), imageHeightPixels.toDouble(), 1.0)
 
 /**
+ * Every [ModelShaderVariant] [drawModels] can select for [models], in [allModelShaderVariants]' order,
+ * so the renderer compiles exactly those before the draw rather than all eight.
+ *
+ * Asked before a camera exists, so it walks the same draw items [resolveModel] does and skips the two it
+ * skips without one -- a node the default scene never reaches, a primitive with no uploaded geometry --
+ * and feeds the same facts to [modelShaderVariantFor]'s own rule, through the same
+ * [baseColourTextureFor] and [jointPaletteFor] and [packJointMatrices]' own [jointPaletteFits]. The one
+ * skip it cannot make is [resolveModel]'s singular normal matrix, which depends on the camera, so the
+ * answer can name a variant this frame then draws nothing with: a superset, never a subset, of what
+ * [ModelDrawState] will look up.
+ */
+internal fun requiredModelShaderVariants(models: List<SceneModel>): List<ModelShaderVariant> {
+    if (models.isEmpty()) return emptyList()
+    val required = HashSet<ModelShaderVariant>()
+    for (sceneModel in models) {
+        val model = sceneModel.model
+        for (item in model.drawItems) {
+            if (sceneModel.nodeTransforms.getOrNull(item.nodeIndex) == null) continue
+            val uploaded = sceneModel.uploaded[item.meshIndex to item.primitiveIndex] ?: continue
+            val material = model.primitiveFor(item).material
+            required += modelShaderVariantFor(
+                attributes = uploaded.attributes,
+                hasJointPalette = sceneModel.jointPaletteFor(item)?.let(::jointPaletteFits) == true,
+                hasBaseColourTexture = sceneModel.baseColourTextureFor(material) != null,
+                alphaMode = material.alphaMode,
+            )
+        }
+    }
+    return MODEL_SHADER_VARIANT_ORDER.filter { it in required }
+}
+
+/** [allModelShaderVariants] built once, since [requiredModelShaderVariants] runs on every model frame. */
+private val MODEL_SHADER_VARIANT_ORDER: List<ModelShaderVariant> = allModelShaderVariants()
+
+/** The texture a primitive of [material] samples: the override when there is one, else its authored image. */
+private fun SceneModel.baseColourTextureFor(material: ResolvedMaterial): Int? =
+    overrideTexture ?: material.baseColourImageIndex?.let { imageTextures.getOrNull(it) }
+
+/** The joint matrices of the skin [item] names, before packing; `null` when it names none. */
+private fun SceneModel.jointPaletteFor(item: ModelDrawItem): List<DoubleMatrix4>? =
+    item.skinIndex?.let { jointMatricesBySkin[it] }
+
+/**
  * Turns one [SceneModel] into the flat list of primitive instances [drawModels] draws, resolving
  * [SceneModel.placement] against [camera] exactly as the sticker path does.
  *
@@ -1420,11 +1465,8 @@ private fun resolveModel(
             modelViewProjection = (camera.projectionMatrix * cameraSpaceModel).toColumnMajorFloatArray(),
             normalMatrix = normalMatrix,
             material = material,
-            baseColourTexture = sceneModel.overrideTexture
-                ?: material.baseColourImageIndex?.let { sceneModel.imageTextures.getOrNull(it) },
-            jointMatrices = item.skinIndex
-                ?.let { sceneModel.jointMatricesBySkin[it] }
-                ?.let { packJointMatrices(it) },
+            baseColourTexture = sceneModel.baseColourTextureFor(material),
+            jointMatrices = sceneModel.jointPaletteFor(item)?.let { packJointMatrices(it) },
             reverseWinding = nodeTransform.linearDeterminant() < 0.0,
             opacity = sceneModel.opacity,
         )

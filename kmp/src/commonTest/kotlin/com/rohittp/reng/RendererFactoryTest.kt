@@ -1,5 +1,6 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.gl.GL_COMPILE_STATUS
 import com.rohittp.reng.internal.gl.GL_MAX_COLOR_ATTACHMENTS
 import com.rohittp.reng.internal.gl.GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 import com.rohittp.reng.internal.gl.GL_MAX_TEXTURE_SIZE
@@ -9,6 +10,7 @@ import com.rohittp.reng.internal.gl.GL_RENDERER
 import com.rohittp.reng.internal.gl.GL_SHADING_LANGUAGE_VERSION
 import com.rohittp.reng.internal.gl.GL_VENDOR
 import com.rohittp.reng.internal.gl.GL_VERSION
+import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.MODEL_ALPHA_CUTOFF_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.MODEL_AMBIENT_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.MODEL_BASE_COLOUR_FACTOR_UNIFORM_NAME
@@ -17,6 +19,7 @@ import com.rohittp.reng.internal.gl.MODEL_FORCE_OPAQUE_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.MODEL_JOINT_BLOCK_NAME
 import com.rohittp.reng.internal.gl.MODEL_LIGHT_DIRECTION_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.MODEL_NORMAL_MATRIX_UNIFORM_NAME
+import com.rohittp.reng.internal.gl.MODEL_POSITION_ATTRIBUTE_NAME
 import com.rohittp.reng.internal.gl.MODEL_VERTEX_COLOUR_PRESENT_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.MODEL_VIEW_PROJECTION_UNIFORM_NAME
 import com.rohittp.reng.internal.gl.RecordingGlBinding
@@ -1042,6 +1045,114 @@ class RendererFactoryTest {
         )
     }
 
+    // ---- Model programs: only the variants a frame selects, committed together -------------------
+
+    /**
+     * The first model frame used to compile all eight variants. The textured triangle selects exactly
+     * one -- textured, unskinned, unmasked -- so exactly one model program may compile, and it must be
+     * that one: a vertex stage without the joint block, beside a fragment stage that samples.
+     */
+    @Test
+    fun aFrameWithOneSimpleModelCompilesOnlyTheVariantItDrawsWith() = runTest {
+        val binding = modelBinding()
+        val renderer = createRenderer(testConfiguration(transport = ModelTransport()), binding, fixedProbe())
+        val frame = renderer.prepare(modelPlan())
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        val compiled = compiledModelVertexSources(binding)
+        assertEquals(1, compiled.size, "one variant, one model vertex stage: ${binding.log}")
+        assertFalse(MODEL_JOINT_BLOCK_NAME in compiled.single(), "the triangle has no skin")
+        assertEquals(1, binding.log.count { it.startsWith("linkProgram(") }, "one model program links")
+        assertTrue(binding.log.contains("drawElements(0x4,3,0x1403,0)"), "and it draws: ${binding.log}")
+    }
+
+    /**
+     * A later frame that adds a skinned model needs one more variant, and compiles that one alone: the
+     * textured variant the first frame committed is reused, not compiled again.
+     */
+    @Test
+    fun aLaterFrameNeedingAnotherVariantCompilesOnlyThatOne() = runTest {
+        val binding = modelBinding()
+        val renderer = createRenderer(testConfiguration(transport = TwoModelTransport()), binding, fixedProbe())
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+        renderer.draw(renderer.prepare(texturedAndSkinnedPlan(frameIndex = 0L, skinned = false)), target)
+
+        val frame = renderer.prepare(texturedAndSkinnedPlan(frameIndex = 1L, skinned = true))
+        binding.log.clear()
+        renderer.draw(frame, target)
+
+        val compiled = compiledModelVertexSources(binding)
+        assertEquals(1, compiled.size, "only the skinned variant is new: ${binding.log}")
+        assertTrue(MODEL_JOINT_BLOCK_NAME in compiled.single(), "and it is the skinned one")
+        assertEquals(
+            2,
+            binding.log.count { it == "drawElements(0x4,3,0x1403,0)" },
+            "both models draw: ${binding.log}",
+        )
+    }
+
+    /**
+     * The correctness half. Pipelines used to be committed one at a time, so a failure on the second
+     * left a map that was neither empty -- the next frame skipped compiling -- nor complete, and that
+     * frame's model draw failed `requireNotNull` on the missing variant. Now the textured variant this
+     * frame compiled is deleted with the failure, and the next frame compiles both afresh and draws.
+     */
+    @Test
+    fun aVariantThatFailsToCompileCommitsNoneAndTheNextFrameRetriesCleanly() = runTest {
+        val recording = modelBinding()
+        val binding = SkinnedCompileFailingBinding(recording)
+        val renderer = createRenderer(testConfiguration(transport = TwoModelTransport()), binding, fixedProbe())
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        val frame = renderer.prepare(texturedAndSkinnedPlan(frameIndex = 0L, skinned = true))
+        recording.log.clear()
+        val failure = assertFailsWith<RenGException> { renderer.draw(frame, target) }
+        // RenG's own program failing is a GPU fault, not a consumer shader error (shaderProgramFailure).
+        assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, failure.code)
+        val linked = recording.log.filter { it.startsWith("linkProgram(") }
+        assertEquals(1, linked.size, "the textured variant linked before the skinned one failed: ${recording.log}")
+        val stagedProgram = linked.single().removePrefix("linkProgram(").removeSuffix(")")
+        assertTrue(
+            recording.log.contains("deleteProgram($stagedProgram)"),
+            "the staged textured program must be deleted with the failure: ${recording.log}",
+        )
+
+        binding.failSkinnedCompiles = false
+        val retry = renderer.prepare(texturedAndSkinnedPlan(frameIndex = 1L, skinned = true))
+        recording.log.clear()
+        renderer.draw(retry, target)
+
+        assertEquals(
+            2,
+            compiledModelVertexSources(recording).size,
+            "nothing was committed, so both variants compile again: ${recording.log}",
+        )
+        assertEquals(
+            2,
+            recording.log.count { it == "drawElements(0x4,3,0x1403,0)" },
+            "both models draw: ${recording.log}",
+        )
+    }
+
+    /** The vertex sources of every model shader compiled since [RecordingGlBinding.log] was cleared. */
+    private fun compiledModelVertexSources(binding: RecordingGlBinding): List<String> =
+        binding.log
+            .filter { it.startsWith("compileShader(") }
+            .mapNotNull { binding.shaderSources[it.removePrefix("compileShader(").removeSuffix(")").toInt()] }
+            .filter { MODEL_POSITION_ATTRIBUTE_NAME in it }
+
+    /** The textured triangle, and when [skinned] also the skinned one from [SKINNED_GLB_URL]. */
+    private fun texturedAndSkinnedPlan(frameIndex: Long, skinned: Boolean): FramePlan = FramePlan(
+        frameIndex = frameIndex,
+        camera = modelCamera(),
+        models = buildList {
+            add(Model(placement = mapPlacement(), glb = ResourceLocator(GLB_URL)))
+            if (skinned) add(Model(placement = mapPlacement(), glb = ResourceLocator(SKINNED_GLB_URL)))
+        },
+    )
+
     @Test
     fun aModelsEmbeddedImageUploadsPremultiplied() = runTest {
         // TextureContent.IMAGE, never DATA, and this is a coupling rather than a preference: the
@@ -1773,6 +1884,37 @@ private class ModelTransport(private val glb: ByteArray = texturedTriangleGlb())
         requested += request.locator.value
         val body = if (request.locator.value == GLB_URL) glb else onePixelPng
         return TransportResponse(statusCode = 200, body = body)
+    }
+}
+
+private const val SKINNED_GLB_URL = "https://example.invalid/skinned.glb"
+
+/** [ModelTransport] with a second GLB, the skinned triangle, at [SKINNED_GLB_URL]. */
+private class TwoModelTransport : Transport {
+    private val textured = texturedTriangleGlb()
+    private val skinned = skinnedTriangleGlb()
+
+    override suspend fun execute(request: TransportRequest): TransportResponse {
+        val body = when (request.locator.value) {
+            GLB_URL -> textured
+            SKINNED_GLB_URL -> skinned
+            else -> onePixelPng
+        }
+        return TransportResponse(statusCode = 200, body = body)
+    }
+}
+
+/**
+ * [inner], except that a shader whose source declares the joint block -- the skinned model variant's
+ * vertex stage, and nothing else RenG compiles -- reports a failed compile while [failSkinnedCompiles].
+ */
+private class SkinnedCompileFailingBinding(private val inner: RecordingGlBinding) : GlBinding by inner {
+    var failSkinnedCompiles: Boolean = true
+
+    override fun getShaderiv(shader: Int, pname: Int, out: IntArray) {
+        inner.getShaderiv(shader, pname, out)
+        val skinned = inner.shaderSources[shader]?.contains(MODEL_JOINT_BLOCK_NAME) == true
+        if (failSkinnedCompiles && pname == GL_COMPILE_STATUS && skinned) out[0] = 0
     }
 }
 

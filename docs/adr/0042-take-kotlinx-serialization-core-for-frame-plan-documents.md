@@ -129,3 +129,10 @@ argument* is the point. The rule stays exact. `serialization` is still a forbidd
 artifact but the one named; `-json`, `-cbor` and `-protobuf` are all still refused; the plugin
 allowlist still names every plugin it admits; and a fourth production dependency still meets a
 closed door and still needs an ADR explaining why it opened.
+
+## Superseded in part, 2026-11-10: there is no Frame Identity to preserve (ADR 0090)
+
+The promise that a `FramePlan` round-tripped through JSON produces the same Frame Identity is moot: ADR
+0090 removes frame identities, which nothing read. The round trip still reconstructs an equal object,
+which is what the serialization tests assert. The case against the canonical TLV encoding as a document
+format stands, and that encoder no longer exists.

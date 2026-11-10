@@ -36,8 +36,7 @@ at longitude 400 sees exactly what one at 40 sees. The turns survive anyway, bec
 consumer's own interpolation continuous — a camera animated from 170 to 190 pans smoothly east in either
 projection precisely because the number keeps counting, where a normalised field would ask the consumer to
 handle the wrap that Mercator handles for them. A consequence worth knowing rather than rediscovering: two
-globe frames differing only in winding render identically and still carry different frame identities, since
-a **Frame Plan**'s identity is a digest of the plan and never of the picture.
+globe frames differing only in winding render identically although their **Frame Plan**s are not equal.
 
 Zoom is a finite fractional
 value in `[0, 22]`; Mercator has `512` logical pixels at zoom zero and scales by `2^zoom`, independently of tile
@@ -73,19 +72,18 @@ different mode.
 _Avoid_: Anchoring mode, coordinate space, projection fallback
 
 **Frame History**:
-The renderer's clearable record of its last successfully prepared frame index, **Frame Plan**, selected
-basemap tile LOD, and label fade. Only one prepare invocation runs at a time. A batch's indices must be
-strictly increasing and above history; every item completes pure validation, projection, tile-budget, diff,
-and resource-reference planning in index order before any resource work begins. Independent resource work
+The renderer's clearable record of its last successfully prepared frame index, selected basemap tile LOD,
+and label fade. It holds no copy, encoding or digest of the last **Frame Plan** (ADR 0090). Only one prepare invocation runs at a time. A batch's indices must be
+strictly increasing and above history; every item completes pure validation, projection, tile-budget and
+resource-reference planning in index order before any resource work begins. Independent resource work
 then runs in parallel.
 The preparation session remains active across planning, the shared resource operation, acquisition, frame
 construction, and commit or rollback. History commits only when the whole batch succeeds, and returned prepared
 frames preserve input order. A failed or cancelled batch atomically closes every provisional frame, releases its
 leases and raw-tile reservation, and leaves both history and the prepared style at their prior committed values.
-Structural diffing uses the last successfully prepared plan as the first baseline and each immediately preceding
-input plan as the next baseline within a batch; missing history is an empty baseline.
-A diff may reuse content-keyed work, but every **Prepared Frame** leases the complete resource set derived
-from its own plan. Failure or cancellation exposes no partial history, though valid acquired content may
+Each item's LOD and label-fade baseline is the committed history for the first item and the immediately
+preceding input's for each later one; missing history is an empty baseline. Content-keyed work may be
+reused across frames, but every **Prepared Frame** leases the complete resource set derived from its own plan. Failure or cancellation exposes no partial history, though valid acquired content may
 remain cached. With prior selected integer LOD `L`, selection repeatedly increments while
 `zoom >= L + 0.75` and repeatedly decrements while `zoom < L - 0.75`, bounded to `[0, 22]`; this defines
 multi-level jumps as the same one-level hysteresis applied until stable. Without history, the nearest integer
@@ -95,7 +93,7 @@ never by a draw; which labels are placed is recomputed from scratch every frame 
 0035), so a fade's duration in seconds is a function of the consumer's frame rate. An entry is retained only
 while its label is placed or still mid-fade. Every successfully prepared Mercator plan advances provisional
 LOD history even when no Basemap Style is configured or `drawBasemap` is false; those frames select and acquire
-no tiles. The context-free `clearFrameHistory()` clears the structural-diff, LOD and label-fade baseline,
+no tiles. The context-free `clearFrameHistory()` clears the ordering, LOD and label-fade baseline,
 permits a new sequence, and neither frees resources nor invalidates prepared frames. Drawing never changes
 history.
 _Avoid_: Cache, draw order, partial batch commit, previous-frame mutation
@@ -583,14 +581,15 @@ _Avoid_: Label animation, transition, hysteresis, label memory
 ### Resources
 
 **Frame Identity**:
-An internal versioned canonical binary encoding of one **Frame Plan**, identified as
-`reng-frame-v1:<lowercase SHA-256>`. The encoded root begins `RNGC`, schema byte `1`, and frame-kind byte `1`;
-strict tagged fields preserve every exact scalar, ordered list, duplicate, and canonicalized numeric bit under
-ADR 0018. Frame and animation indices use unsigned 64-bit big-endian payloads, enum and shader-profile values
-use unsigned 16-bit big-endian payloads, and canonically encoded strings reject isolated UTF-16 surrogates
-before exact UTF-8 encoding. RenG retains and compares canonical bytes before sharing and fails
-`IDENTITY_COLLISION` if one digest names different bytes. The key is not public API.
-_Avoid_: Public frame id, cache key, caller id
+Retired (ADR 0090). RenG used to encode every **Frame Plan** into an internal canonical root and hash it as
+`reng-frame-v1:<lowercase SHA-256>`, diff it against the previous frame's and register the digest, and no
+rendering, caching, resource, diagnostic or public path ever read any of it. A frame now has no identity.
+The canonical root-kind byte `1` stays reserved for frames, so no resource root's kind byte moves. One
+refusal the encoding made incidentally is kept explicitly: a uniform or texture name on a **Geometry**, a
+sticker program or a shader backdrop that contains an isolated UTF-16 surrogate fails planning, after spatial
+planning and before resource traversal. Resource identities (ADR 0018) and `IDENTITY_COLLISION` are
+unaffected.
+_Avoid_: Frame id, plan digest, cache key
 
 **Resource Locator**:
 A non-blank, opaque caller-supplied string identifying encoded resource bytes. RenG preserves its exact

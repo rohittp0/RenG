@@ -319,8 +319,8 @@ internal class ReadAheadCoordinator(
         val snapshot = readAheadSnapshot ?: return
         if (snapshot.accessMode == ResourceAccessMode.CACHE_ONLY) return
 
-        // The same spatial step prepare runs, minus everything that touches state: no frame identity
-        // is registered and no history moves. The LOD chain is prepareBatch's own -- each plan's
+        // The same spatial step prepare runs, minus everything that touches state: no history
+        // moves. The LOD chain is prepareBatch's own -- each plan's
         // selected LOD is the next one's previous -- starting from the last committed one.
         val wantedByStyle = LinkedHashMap<Int, LinkedHashSet<CanonicalBasemapTile>>()
         var lod = snapshot.selectedLod

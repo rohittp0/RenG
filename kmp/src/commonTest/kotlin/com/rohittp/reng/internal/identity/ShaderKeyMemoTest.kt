@@ -1,12 +1,8 @@
 package com.rohittp.reng.internal.identity
 
-import com.rohittp.reng.Camera
-import com.rohittp.reng.FramePlan
-import com.rohittp.reng.Geometry
 import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ShaderPair
-import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.gl.InternalPipelineRole
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -122,24 +118,13 @@ class ShaderKeyMemoTest {
     }
 
     @Test
-    fun aSharedMemoServesEveryDeriverAndTheEncoder() {
+    fun aSharedMemoServesEveryDeriver() {
         val memo = ShaderPairMemo()
         val one = counting(memo)
         val two = counting(memo)
         one.geometryProgram(pair("a"))
         two.geometryProgram(pair("a"))
         assertEquals(1, digests)
-
-        val plan = FramePlan(
-            frameIndex = 0,
-            camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
-            geometries = listOf(Geometry(Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), pair("a"))),
-        )
-        val withMemo = FramePlanCanonicalEncoder(shaderPairs = memo).encode(plan)
-        val without = FramePlanCanonicalEncoder(shaderPairs = ShaderPairMemo()).encode(plan)
-        repeat(3) { assertEquals(without, FramePlanCanonicalEncoder(shaderPairs = memo).encode(plan)) }
-        assertEquals(without, withMemo)
-        assertContentEquals(without.identity.canonicalBytes.bytes, withMemo.identity.canonicalBytes.bytes)
     }
 
     @Test

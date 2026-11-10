@@ -4,6 +4,10 @@ import com.rohittp.reng.internal.canonicalDouble
 import com.rohittp.reng.internal.requireUnicodeScalars
 
 internal enum class CanonicalRootKind(internal val wireByte: Int) {
+    /**
+     * Reserved and never written: a frame is no longer encoded into an identity (ADR 0090). Kept so
+     * wire byte 1 is never given to another kind and no resource kind's number moves.
+     */
     FRAME(1),
     EXTERNAL_RESOURCE(2),
     GEOMETRY_PROGRAM(3),

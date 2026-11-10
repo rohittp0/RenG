@@ -18,17 +18,13 @@ import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.basemapForCore
-import com.rohittp.reng.internal.diff.FrameStructuralDiff
-import com.rohittp.reng.internal.diff.FrameStructuralDiffer
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.freshListCopy
-import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
-import com.rohittp.reng.internal.identity.EncodedFramePlan
-import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.HashedCanonicalBytes
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.maximumBytesFor
+import com.rohittp.reng.internal.requireUnicodeScalars
 import com.rohittp.reng.internal.resource.RentilePrivateKey
 import com.rohittp.reng.internal.resource.RentilePrivateKeyResolver
 import com.rohittp.reng.internal.shader.ShaderProfileMemo
@@ -39,7 +35,6 @@ internal data class FramePlanningRequest(
     val basemapStyle: ResourceLocator?,
     val resourceLimits: ResourceLimits,
     val maximumBasemapTileInstances: Int,
-    val previousPlan: EncodedFramePlan?,
     val previousSelectedLod: Int?,
     val additionalBasemapStyles: List<ResourceLocator> = emptyList(),
 ) {
@@ -112,8 +107,6 @@ internal sealed interface StaticResourceReference {
 }
 
 internal class PlannedFrameCore(
-    val encodedPlan: EncodedFramePlan,
-    val structuralDiff: FrameStructuralDiff,
     val spatialPlan: FrameSpatialPlan,
     staticResourceTraversal: List<StaticResourceReference>,
 ) {
@@ -179,15 +172,11 @@ internal class PlannedFrameCore(
 
     override fun equals(other: Any?): Boolean =
         other is PlannedFrameCore &&
-            encodedPlan == other.encodedPlan &&
-            structuralDiff == other.structuralDiff &&
             spatialPlan == other.spatialPlan &&
             staticResourceTraversalSnapshot == other.staticResourceTraversalSnapshot
 
     override fun hashCode(): Int {
-        var result = encodedPlan.hashCode()
-        result = 31 * result + structuralDiff.hashCode()
-        result = 31 * result + spatialPlan.hashCode()
+        var result = spatialPlan.hashCode()
         result = 31 * result + staticResourceTraversalSnapshot.hashCode()
         return result
     }
@@ -201,7 +190,7 @@ internal sealed interface FramePlanningOutcome {
 
 /**
  * The spatial half of planning one frame: camera, LOD, footprint, tile selection and placements, and
- * nothing else. **Pure**: it registers no frame identity, reads no history and touches no state, which
+ * nothing else. **Pure**: it reads no history and touches no state, which
  * is why `Renderer.readAhead` (ADR 0075) can ask it what tiles a *future* plan will need. Both
  * [FramePlanningCore.plan] and read-ahead call this one function, so the tiles warmed for a frame cannot
  * drift from the tiles `prepare` later selects for it.
@@ -241,8 +230,6 @@ internal fun planSpatial(
 }
 
 internal class FramePlanningCore(
-    private val frameEncoder: FramePlanCanonicalEncoder,
-    private val frameIdentityRegistry: CanonicalIdentityRegistry,
     private val resourceKeyDeriver: ResourceKeyDeriver,
     private val rentilePrivateKeyResolver: RentilePrivateKeyResolver,
     private val shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
@@ -281,15 +268,10 @@ internal class FramePlanningCore(
         }
         val spatialPlan = (spatialOutcome as SpatialOutcome.Success).value
 
-        val encodedPlan = frameEncoder.encode(plan)
-        val structuralDiff = FrameStructuralDiffer.diff(request.previousPlan, encodedPlan)
-        // A repeated digest is the same frame (ADR 0081): registration records it and never fails.
-        frameIdentityRegistry.register(encodedPlan.identity)
+        requireShaderNamesAreUnicodeScalars(plan)
 
         return FramePlanningOutcome.Success(
             PlannedFrameCore(
-                encodedPlan = encodedPlan,
-                structuralDiff = structuralDiff,
                 spatialPlan = spatialPlan,
                 staticResourceTraversal = staticResourceTraversal(request),
             ),
@@ -398,6 +380,42 @@ internal class FramePlanningCore(
         return references
     }
 }
+
+/**
+ * Refuses a uniform or texture name that is not a sequence of Unicode scalar values -- an isolated
+ * UTF-16 surrogate -- on a sticker program, a geometry or a shader backdrop.
+ *
+ * Every other string a plan carries is checked where it is constructed (a [ResourceLocator], a
+ * [ShaderPair]'s sources, an animation name). These map keys were only ever refused by the Frame
+ * Identity encoding, which wrote each one as canonical UTF-8; that encoding is gone (ADR 0090), and
+ * this keeps its refusal: the same `IllegalArgumentException` with the same message, at the same point
+ * of `plan` -- after spatial planning, before the static resource traversal.
+ */
+private fun requireShaderNamesAreUnicodeScalars(plan: FramePlan) {
+    for (sticker in plan.stickersForCore()) {
+        val shader = sticker.shader ?: continue
+        requireNamesAreUnicodeScalars(shader.uniforms.keys)
+        requireNamesAreUnicodeScalars(shader.textures.keys)
+    }
+    for (geometry in plan.geometriesForCore()) {
+        requireNamesAreUnicodeScalars(geometry.uniforms.keys)
+        requireNamesAreUnicodeScalars(geometry.textures.keys)
+    }
+    val backdrop = plan.backdropForCore()
+    if (backdrop is Backdrop.Shader) {
+        requireNamesAreUnicodeScalars(backdrop.uniforms.keys)
+        requireNamesAreUnicodeScalars(backdrop.textures.keys)
+    }
+}
+
+private fun requireNamesAreUnicodeScalars(names: Set<String>) {
+    for (name in names) {
+        requireUnicodeScalars(name, CANONICAL_UTF8_FIELD, nonBlank = false)
+    }
+}
+
+/** The field name the canonical UTF-8 encoder refused these names under, kept so the message is unchanged. */
+private const val CANONICAL_UTF8_FIELD: String = "canonical UTF-8 value"
 
 private val ResourceClass.isStaticDirect: Boolean
     get() = when (this) {

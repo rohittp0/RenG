@@ -89,9 +89,8 @@ internal class Sha256Digest private constructor(bytes: ByteArray, adopt: Boolean
         get() = snapshot.copyOf()
 
     /**
-     * Built on first read: a resource key needs it for its stable id, but a frame identity is only
-     * compared and registered by its bytes, and was spelling out 64 characters on every `prepare` for
-     * no reader.
+     * Built on first read: a resource key needs it for its stable id, but a digest that is only compared
+     * has no reader for 64 characters of hex.
      */
     internal val lowercaseHex: String by lazy {
         buildString(SHA256_DIGEST_BYTES * 2) {

@@ -5,8 +5,8 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 /**
- * The copies removed from canonical encoding and identity registration. The encoders' exact bytes are
- * pinned by [CanonicalBinaryTest]'s golden hex; this pins the two new paths against the copying ones.
+ * The copies removed from canonical encoding. The encoders' exact bytes are pinned by
+ * [CanonicalBinaryTest]'s golden hex; this pins the adopting paths against the copying ones.
  */
 class CanonicalCopyEliminationTest {
 
@@ -50,25 +50,5 @@ class CanonicalCopyEliminationTest {
             "0003", "00000001", "00",
         ).joinToString("")
         assertEquals(expected, encoded.bytes.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') })
-    }
-
-    @Test
-    fun registrationRetainsTheIdentityAndGivesTheSameVerdicts() {
-        val registry = CanonicalIdentityRegistry()
-        val first = identity("frame one")
-
-        assertEquals(IdentityRegistration.Registered, registry.register(first))
-        assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(first))
-        assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(identity("frame one")))
-        assertEquals(IdentityRegistration.Registered, registry.register(identity("frame two")))
-
-        // A same-digest, different-bytes identity is the same frame (ADR 0081): the registry keeps digests.
-        val sameDigest = HashedCanonicalBytes(first.digest, CanonicalBytes("not frame one".encodeToByteArray()))
-        assertEquals(IdentityRegistration.AlreadyRegistered, registry.register(sameDigest))
-    }
-
-    private fun identity(value: String): HashedCanonicalBytes {
-        val canonical = CanonicalBytes(value.encodeToByteArray())
-        return HashedCanonicalBytes(PureKotlinSha256.digest(canonical), canonical)
     }
 }

@@ -371,7 +371,7 @@ internal fun deleteGeometryPipeline(
  * map after `prepare()` cannot change what a later `draw()` on the same frame renders. This closes
  * the gap Task 7 could only document: the defensive `Map.toMap()` snapshot this function still
  * takes below guards only against the two arguments being structurally mutated mid-call, which is a
- * narrower, cheaper guarantee than the prepare-time snapshot that actually protects frame identity.
+ * narrower, cheaper guarantee than the prepare-time snapshot that actually protects the prepared frame.
  *
  * Every consumer texture name in [consumerTextures] was uploaded through [TextureContent.DATA],
  * never [TextureContent.IMAGE], by the caller that resolved it: a consumer texture is a boundary

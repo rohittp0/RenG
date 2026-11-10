@@ -27,8 +27,6 @@ import com.rohittp.reng.TransportResponseMetadata
 import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.CanonicalBytes
-import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
-import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.lifecycle.AdoptionContextFact
@@ -177,7 +175,7 @@ import kotlin.test.assertTrue
  */
 class CycleBPureCoreContractTest {
     @Test
-    fun aCompleteBatchTraceCommitsSameOrderSeedsHistoryIdentityAndLodWithoutLeakingLists() {
+    fun aCompleteBatchTraceCommitsSameOrderSeedsHistoryAndLodWithoutLeakingLists() {
         val resolver = RecordingPrivateKeyResolver()
         val history = committedHistory(frameIndex = 1L)
         val preparation = PreparationDriver(environment(), history, resolver)
@@ -206,12 +204,10 @@ class CycleBPureCoreContractTest {
         val planning = assertIs<OrderedPreparationState.Planning>(begun.state)
         assertEquals(listOf(firstPlan, secondPlan), planning.invocation.plans)
         assertNotSame(planning.invocation.plans, planning.invocation.plans)
-        assertEquals(history.encodedPlan, preparation.requestFor(0L).previousPlan)
         assertEquals(history.selectedLod, preparation.requestFor(0L).previousSelectedLod)
 
         val firstItem = preparation.planItem(0L)
         assertTrue(preparation.resourceActions().isEmpty(), "resources wait for the planning barrier")
-        assertEquals(firstItem.encodedPlan, preparation.requestFor(1L).previousPlan)
         assertEquals(
             firstItem.spatialPlan.lodObservation.selectedLod,
             preparation.requestFor(1L).previousSelectedLod,
@@ -363,7 +359,6 @@ class CycleBPureCoreContractTest {
         assertEquals(
             CommittedFrameHistory(
                 frameIndex = 9L,
-                encodedPlan = secondItem.encodedPlan,
                 selectedLod = secondItem.spatialPlan.lodObservation.selectedLod,
             ),
             idle.history,
@@ -1608,8 +1603,6 @@ private class PreparationDriver(
     resolver: RentilePrivateKeyResolver,
 ) {
     private val planningCore = FramePlanningCore(
-        frameEncoder = FramePlanCanonicalEncoder(PureKotlinSha256),
-        frameIdentityRegistry = CanonicalIdentityRegistry(),
         resourceKeyDeriver = ResourceKeyDeriver(PureKotlinSha256),
         rentilePrivateKeyResolver = resolver,
     )
@@ -2070,9 +2063,6 @@ private fun environment(): PreparationEnvironment = PreparationEnvironment(
 
 private fun committedHistory(frameIndex: Long): CommittedFrameHistory = CommittedFrameHistory(
     frameIndex = frameIndex,
-    encodedPlan = FramePlanCanonicalEncoder(PureKotlinSha256).encode(
-        FramePlan(frameIndex = frameIndex, camera = Camera(1.0, 1.0, 1.0, 0.0, 0.0)),
-    ),
     selectedLod = 0,
 )
 

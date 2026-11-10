@@ -47,3 +47,10 @@ six times, resource-key derivation was 13% of RenG's time (`RouteMemo` now deriv
 reference's key once) and frame encoding a fifth, of which uniforms were 79% once shader sources left the
 encoding (`UniformListEncoding` now writes the list in two passes with no intermediate objects; its
 redundant finiteness check alone was about a sixth of plan identity encoding).
+
+## Superseded in part, 2026-11-10: frames carry no identity at all (ADR 0090)
+
+The frame encoding, its digest registry and tag 9 are removed: an audit found no reader of the frame
+identity, its diff or the registry's verdict. The measurement above -- about 5 ms of a 30 ms `prepare` --
+is the cost that removal recovers. `RouteMemo`, the adopted digests, the lazy hex and the per-thread
+`MessageDigest` serve resource keys and stay.

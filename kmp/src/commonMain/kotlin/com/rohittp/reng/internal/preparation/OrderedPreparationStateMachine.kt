@@ -18,7 +18,7 @@ import com.rohittp.reng.internal.resource.ResourceOwnerId
 
 /**
  * The pure ordered-preparation reducer of ADR 0014. One renderer admits exactly one active invocation;
- * planning, structural diffing, and LOD selection advance in input order behind a complete planning
+ * planning and LOD selection advance in input order behind a complete planning
  * barrier; resource work and lease installation only follow that barrier; and Frame History commits
  * exactly once, atomically, from the batch's final item. Cancellation is modelled as an opaque selected
  * value, never as a thrown coroutine type, so the integration layer alone rethrows it unchanged.
@@ -168,7 +168,6 @@ internal object OrderedPreparationStateMachine {
                         basemapStyle = invocation.environment.basemapStyle,
                         resourceLimits = invocation.environment.resourceLimits,
                         maximumBasemapTileInstances = invocation.environment.maximumBasemapTileInstances,
-                        previousPlan = provisionalHistory?.encodedPlan,
                         previousSelectedLod = provisionalHistory?.selectedLod,
                     ),
                 ),
@@ -456,7 +455,6 @@ internal object OrderedPreparationStateMachine {
         val planned = plannedItems[lastIndex].plannedFrame
         return CommittedFrameHistory(
             frameIndex = invocation.plans[lastIndex].frameIndex,
-            encodedPlan = planned.encodedPlan,
             selectedLod = planned.spatialPlan.lodObservation.selectedLod,
         )
     }

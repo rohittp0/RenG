@@ -112,3 +112,11 @@ bytes beside each digest and no longer fails `IDENTITY_COLLISION` when one diges
 repeated digest is the same frame. And `Geometry` tag 3 (the shader pair's sources) is retired in favour of
 tag 9, the geometry program's stable id. Resource identities, their roots and `preRegister`'s collision check
 are unchanged. ADR 0081 records the decision and its measurement.
+
+## Superseded in part, 2026-11-10: frames carry no identity (ADR 0090)
+
+Everything above about Frame Identities -- the `reng-frame-v1:` form, the Frame Plan field-tag table, the
+frame registry and the representative frame fixture -- no longer describes RenG: a frame is not encoded or
+hashed at all, because nothing read the result. Root-kind byte `1` stays reserved for frames so no other
+kind byte moves. Resource identities, their roots, the canonical encoding rules and `preRegister`'s
+collision check are unchanged.

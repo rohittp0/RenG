@@ -21,7 +21,7 @@ internal class ResourceKeyDeriver(
     private val sha256: Sha256Function = AcceleratedSha256,
     /**
      * Where a shader pair's canonical form and derived keys are remembered. A renderer passes the one it
-     * owns so that every deriver and the frame encoder it builds share it; a bare deriver gets its own.
+     * owns so that every deriver it builds shares it; a bare deriver gets its own.
      */
     private val shaderPairs: ShaderPairMemo = ShaderPairMemo(),
     /**

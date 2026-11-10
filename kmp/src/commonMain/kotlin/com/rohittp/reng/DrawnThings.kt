@@ -468,10 +468,7 @@ public data class ShaderPair(
  * naive implementation), not with the `==` operator's IEEE-754 semantics. Writing `x == other.x` by hand
  * over statically-typed `Float` uses the IEEE-754 comparison instead, so `-0.0f` and `0.0f` compare equal;
  * `hashCode` then has to normalize the sign of zero itself to stay consistent. [Integer] has no
- * floating-point component and needs neither. The canonical frame-identity encoder
- * (`FramePlanCanonicalEncoding.kt`) independently re-canonicalizes every component before hashing anyway,
- * exactly as it already does for `Vector3`'s `Double` components, so this is defense in depth rather than
- * the only place the guarantee is enforced. [Mat4] is a plain `class` rather than a `data class`
+ * floating-point component and needs neither. [Mat4] is a plain `class` rather than a `data class`
  * specifically so its backing array can be copied defensively and its elements canonicalized at
  * construction; a `data class` over a `FloatArray` would compare by reference.
  */
@@ -569,8 +566,8 @@ public sealed interface ShaderValue {
         override fun toString(): String = "ShaderValue.Mat4(<redacted>)"
 
         /**
-         * A fresh defensive copy of the canonicalized 16 elements, for internal use only (the canonical
-         * frame-identity encoder and, later, the GL uniform binder). Not part of the public API: a
+         * A fresh defensive copy of the canonicalized 16 elements, for internal use only (the GL uniform
+         * binder). Not part of the public API: a
          * consumer has no supported way to read a [Mat4] back out.
          */
         internal fun elementsForCore(): FloatArray = elementSnapshot.copyOf()

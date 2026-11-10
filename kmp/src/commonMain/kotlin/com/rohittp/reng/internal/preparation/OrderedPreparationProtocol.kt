@@ -8,7 +8,6 @@ import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.freshListCopy
-import com.rohittp.reng.internal.identity.EncodedFramePlan
 import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
 import com.rohittp.reng.internal.planning.PlannedFrameCore
@@ -41,7 +40,6 @@ internal value class LeaseId(val value: Long) {
 
 internal data class CommittedFrameHistory(
     val frameIndex: Long,
-    val encodedPlan: EncodedFramePlan,
     val selectedLod: Int,
 ) {
     init {

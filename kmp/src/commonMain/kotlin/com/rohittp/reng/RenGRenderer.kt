@@ -113,10 +113,7 @@ import com.rohittp.reng.internal.gl.uploadTexture
 import com.rohittp.reng.internal.gl.withCapturedGlState
 import com.rohittp.reng.internal.groundPresentedProvisionallyDiagnostic
 import com.rohittp.reng.internal.identity.AcceleratedSha256
-import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
 import com.rohittp.reng.internal.identity.DerivedResourceKey
-import com.rohittp.reng.internal.identity.EncodedFramePlan
-import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.ShaderPairMemo
@@ -363,14 +360,16 @@ internal class RenGRenderer(
 
     private val bloomResourceManager = BloomResourceManager(configuration = configuration, programs = programs)
 
-    private var identityRegistry: CanonicalIdentityRegistry = CanonicalIdentityRegistry()
-    private var framePlanningCore: FramePlanningCore = newFramePlanningCore(identityRegistry)
+    private val framePlanningCore: FramePlanningCore = FramePlanningCore(
+        resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo, externalKeys = externalKeyMemo),
+        rentilePrivateKeyResolver = rentilePrivateKeyResolver,
+        shaderProfileMemo = shaderProfileMemo,
+    )
     private var previousFrameIndex: Long? = null
-    private var previousEncodedPlan: EncodedFramePlan? = null
     private var previousSelectedLod: Int? = null
 
     /**
-     * ADR 0035's label fade: the fourth member of Frame History, on exactly [previousSelectedLod]'s
+     * ADR 0035's label fade: a member of Frame History, on exactly [previousSelectedLod]'s
      * terms — read by preparation, fed to a pure function as inert data, committed only after every
      * fallible step of a `prepare` has succeeded, and cleared by the public `clearFrameHistory()`.
      * `prepareBatch` needs no rule of its own because it is `plans.map { prepare(it, accessMode) }`,
@@ -388,7 +387,7 @@ internal class RenGRenderer(
     /**
      * The Label handover this renderer is holding, and the exact opposite kind of thing to
      * [previousLabelFade] above: **a cache**, changing how fast a frame is produced and never how it
-     * looks. It is therefore not a fifth member of Frame History and is deliberately not cleared by
+     * looks. It is therefore not a member of Frame History and is deliberately not cleared by
      * `clearFrameHistory()` — see [labelHandover] for the whole decision.
      *
      * One entry, on [BasemapEngineHost.compiledStyle]'s own terms rather than as a map: a camera that
@@ -528,14 +527,6 @@ internal class RenGRenderer(
         readAheadCoordinator.awaitReadAheadIdle()
     }
 
-    private fun newFramePlanningCore(registry: CanonicalIdentityRegistry): FramePlanningCore = FramePlanningCore(
-        frameEncoder = FramePlanCanonicalEncoder(shaderPairs = shaderPairMemo, programKeys = geometryKeyDeriver),
-        frameIdentityRegistry = registry,
-        resourceKeyDeriver = ResourceKeyDeriver(shaderPairs = shaderPairMemo, externalKeys = externalKeyMemo),
-        rentilePrivateKeyResolver = rentilePrivateKeyResolver,
-        shaderProfileMemo = shaderProfileMemo,
-    )
-
     // ---- Preparation --------------------------------------------------------------------------
 
     override suspend fun prepare(
@@ -578,7 +569,6 @@ internal class RenGRenderer(
                 val initialStyle = preparedBasemapStyle
                 val initialReadAheadSnapshot = readAheadCoordinator.readAheadSnapshot
                 val initialStyleSetAttempted = configuredStyleSetAttempted
-                var planningPlan = initialHistory.encodedPlan
                 var planningLod = initialHistory.selectedLod
                 val plannedItems = plans.map { plan ->
                     currentCoroutineContext().ensureActive()
@@ -589,7 +579,6 @@ internal class RenGRenderer(
                             basemapStyle = configuration.basemapStyle,
                             resourceLimits = configuration.resourceLimits,
                             maximumBasemapTileInstances = configuration.maximumBasemapTileInstances,
-                            previousPlan = planningPlan,
                             previousSelectedLod = planningLod,
                             additionalBasemapStyles = configuration.additionalBasemapStylesForCore(),
                         ),
@@ -598,7 +587,6 @@ internal class RenGRenderer(
                         is FramePlanningOutcome.Success -> planningOutcome.planned
                         is FramePlanningOutcome.Failure -> throw planningOutcome.failure.toException()
                     }
-                    planningPlan = planned.encodedPlan
                     planningLod = planned.spatialPlan.lodObservation.selectedLod
                     PlannedPreparationItem(plan, planned)
                 }
@@ -823,7 +811,6 @@ internal class RenGRenderer(
 
     private fun preparationHistory(): PreparationHistory = PreparationHistory(
         frameIndex = previousFrameIndex,
-        encodedPlan = previousEncodedPlan,
         selectedLod = previousSelectedLod,
         labelFade = previousLabelFade,
         labelTiles = previousLabelTiles,
@@ -831,7 +818,6 @@ internal class RenGRenderer(
 
     private fun commitPreparationHistory(history: PreparationHistory) {
         previousFrameIndex = history.frameIndex
-        previousEncodedPlan = history.encodedPlan
         previousSelectedLod = history.selectedLod
         previousLabelFade = history.labelFade
         previousLabelTiles = history.labelTiles
@@ -1354,7 +1340,6 @@ internal class RenGRenderer(
                 frame = frame,
                 nextHistory = PreparationHistory(
                     frameIndex = plan.frameIndex,
-                    encodedPlan = planned.encodedPlan,
                     selectedLod = planned.spatialPlan.lodObservation.selectedLod,
                     labelFade = labelFade.nextState,
                     labelTiles = if (plan.drawLabels) labelCanonicalTiles else history.labelTiles,
@@ -2448,7 +2433,6 @@ internal class RenGRenderer(
         val outcome = driver.run(RendererLifecycleOperation.ClearFrameHistory) { operation ->
             if (operation == RendererLifecycleOperation.ClearFrameHistory) {
                 previousFrameIndex = null
-                previousEncodedPlan = null
                 previousSelectedLod = null
                 // The hint's LOD chain starts where prepare's now does.
                 readAheadCoordinator.readAheadSnapshot = readAheadCoordinator.readAheadSnapshot?.withSelectedLod(null)
@@ -2464,8 +2448,6 @@ internal class RenGRenderer(
                 // invalidates prepared frames". ADR 0035's rule -- after `clearFrameHistory()` the render
                 // is a pure function of the plan -- still holds, because neither of them can change what
                 // a frame looks like. `labelHandover` carries the full argument.
-                identityRegistry = CanonicalIdentityRegistry()
-                framePlanningCore = newFramePlanningCore(identityRegistry)
                 null
             } else {
                 unexpectedOperation(operation)

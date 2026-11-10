@@ -23,9 +23,6 @@ import com.rohittp.reng.Vector3
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
-import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
-import com.rohittp.reng.internal.identity.EncodedFramePlan
-import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.planning.FramePlanningCore
@@ -303,7 +300,6 @@ class OrderedPreparationStateMachineTest {
         assertEquals(listOf(PreparationItemId(0L)), driver.planningItemIds())
         val firstRequest = driver.requestFor(0L)
         assertEquals(plans[0], firstRequest.plan)
-        assertEquals(history.encodedPlan, firstRequest.previousPlan)
         assertEquals(history.selectedLod, firstRequest.previousSelectedLod)
         assertEquals(environment.outputPixelSize, firstRequest.outputPixelSize)
         assertEquals(environment.basemapStyle, firstRequest.basemapStyle)
@@ -320,13 +316,11 @@ class OrderedPreparationStateMachineTest {
         )
         val secondRequest = driver.requestFor(1L)
         assertEquals(plans[1], secondRequest.plan)
-        assertEquals(firstPlanned.encodedPlan, secondRequest.previousPlan)
         assertEquals(firstPlanned.spatialPlan.lodObservation.selectedLod, secondRequest.previousSelectedLod)
 
         val secondPlanned = driver.completeOne(1L)
         val thirdRequest = driver.requestFor(2L)
         assertEquals(plans[2], thirdRequest.plan)
-        assertEquals(secondPlanned.encodedPlan, thirdRequest.previousPlan)
         assertEquals(secondPlanned.spatialPlan.lodObservation.selectedLod, thirdRequest.previousSelectedLod)
         assertEquals(
             listOf(PreparationItemId(0L), PreparationItemId(1L), PreparationItemId(2L)),
@@ -583,7 +577,7 @@ class OrderedPreparationStateMachineTest {
     }
 
     @Test
-    fun totalSuccessCommitsOnlyTheFinalItemsPlanIndexAndLodAtomically() {
+    fun totalSuccessCommitsOnlyTheFinalItemsIndexAndLodAtomically() {
         val history = committedHistory(frameIndex = 1L, selectedLod = 6)
         val driver = Driver(environment(basemapStyle = STYLE_LOCATOR), history)
         driver.begin(listOf(plan(4L, stickers = listOf(sticker("one"))), plan(9L)))
@@ -596,7 +590,6 @@ class OrderedPreparationStateMachineTest {
 
         val committed = assertNotNull(assertIs<OrderedPreparationState.Idle>(driver.state).history)
         assertEquals(9L, committed.frameIndex)
-        assertEquals(driver.planned[1].encodedPlan, committed.encodedPlan)
         assertEquals(driver.planned[1].spatialPlan.lodObservation.selectedLod, committed.selectedLod)
         assertNotEquals(history, committed)
     }
@@ -868,7 +861,7 @@ class OrderedPreparationStateMachineTest {
     }
 
     @Test
-    fun clearingHistoryWhenIdleDropsOnlyTheOrderingDiffAndLodBaseline() {
+    fun clearingHistoryWhenIdleDropsOnlyTheOrderingAndLodBaseline() {
         val history = committedHistory(frameIndex = 30L, selectedLod = 9)
         val driver = Driver(environment(), history)
 
@@ -883,7 +876,6 @@ class OrderedPreparationStateMachineTest {
         val begun = driver.begin(listOf(plan(1L)))
         assertNull(begun.outcome)
         val request = driver.requestFor(0L)
-        assertNull(request.previousPlan)
         assertNull(request.previousSelectedLod)
     }
 
@@ -1099,8 +1091,6 @@ class OrderedPreparationStateMachineTest {
         initialHistory: CommittedFrameHistory? = null,
     ) {
         private val planningCore = FramePlanningCore(
-            frameEncoder = FramePlanCanonicalEncoder(PureKotlinSha256),
-            frameIdentityRegistry = CanonicalIdentityRegistry(),
             resourceKeyDeriver = ResourceKeyDeriver(PureKotlinSha256),
             rentilePrivateKeyResolver = FakePrivateKeyResolver,
         )
@@ -1325,13 +1315,7 @@ class OrderedPreparationStateMachineTest {
         fun committedHistory(frameIndex: Long, selectedLod: Int = 0): CommittedFrameHistory =
             CommittedFrameHistory(
                 frameIndex = frameIndex,
-                encodedPlan = historyEncodedPlan(frameIndex),
                 selectedLod = selectedLod,
-            )
-
-        fun historyEncodedPlan(frameIndex: Long): EncodedFramePlan =
-            FramePlanCanonicalEncoder(PureKotlinSha256).encode(
-                FramePlan(frameIndex = frameIndex, camera = Camera(1.0, 1.0, 1.0, 0.0, 0.0)),
             )
 
         fun externalReference(

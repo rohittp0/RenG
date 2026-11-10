@@ -313,7 +313,7 @@ public sealed interface Renderer : AutoCloseable {
     public suspend fun cancelPreparations(): Unit
 
     /**
-     * Clears the ordering, diff and LOD baseline the next [prepare] plans against (ADR 0035).
+     * Clears the ordering, LOD and label-fade baseline the next [prepare] plans against (ADR 0035).
      *
      * Throws [RenGErrorCode.PREPARATION_IN_PROGRESS] while a [prepare] or [prepareBatch] is running,
      * which is the whole of its suspended lifetime, not only its first step; call

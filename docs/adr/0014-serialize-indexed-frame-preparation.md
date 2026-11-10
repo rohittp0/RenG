@@ -52,3 +52,11 @@ the operation gate, which the preparation needs to end itself -- so the barrier 
 session coordinator and the lifecycle's cancellation is a no-op: only `EndPreparation` (or a failed
 `BeginPreparation`) closes the window, and a preparation started after the barrier's snapshot keeps the
 others refused until it ends.
+
+## Superseded in part, 2026-11-10: ADR 0090 removes structural diffing
+
+Nothing ever read the structural diff this ADR has each item compute against its predecessor, and the
+reuse it was for was never built; reuse across frames is content-keyed. ADR 0090 removes it with the frame
+encoding it compared. Frame History is now the frame index, LOD and label state, and `clearFrameHistory()`
+clears the ordering, LOD and label-fade baseline. Serialized, in-order planning, the batch transaction and
+the history commit are unchanged.

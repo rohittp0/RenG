@@ -3,7 +3,6 @@ package com.rohittp.reng.internal.gl
 import com.rohittp.reng.BASEMAP_READBACK_PIXELS
 import com.rohittp.reng.GLOBE_GROUND_READBACK_PIXELS
 import com.rohittp.reng.GROUND_CULL_READBACK_PIXELS
-import com.rohittp.reng.LABEL_INTEGRATION_PIXELS
 import com.rohittp.reng.LATITUDE_PROBE_PIXELS
 import com.rohittp.reng.MODEL_READBACK_PIXELS
 import com.rohittp.reng.runBasemapReadbackSuite
@@ -33,7 +32,6 @@ import com.rohittp.reng.runGroundCullReadbackSuite
 import com.rohittp.reng.runGroundDepthReadback
 import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
-import com.rohittp.reng.runLabelIntegrationReadbackSuite
 import com.rohittp.reng.runLatitudePrecisionProbeSuite
 import com.rohittp.reng.runVertexTextureFetchProbeSuite
 import com.rohittp.reng.runModelReadbackSuite
@@ -41,6 +39,13 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+/**
+ * The Apple core-profile readback gates, shared by `macosArm64Test` (Kotlin/Native over
+ * `platform.OpenGL3`) and `jvmTest` (the JVM over LWJGL's CGL, ADR 0091). Both runs ask CGL for the
+ * same pixel format, so they reach the same driver and must read back the same pixels; only the
+ * marshalling of each GL call differs. The context is the one platform piece: see
+ * [CglCoreProfileContext].
+ */
 class MacosGlConformanceTest {
     @Test fun theSuitePassesOnARealAppleCoreProfileContext() {
         val fixture = CglCoreProfileContext.create()
@@ -202,35 +207,6 @@ class MacosGlConformanceTest {
             } finally {
                 fixture.destroy()
             }
-        }
-    }
-
-    /**
-     * E-labels task 20's gate: a `FramePlan` in, drawn label pixels out, through the public API on a
-     * real Apple core-profile context.
-     *
-     * Eleven merged tasks were green while the renderer drew no label at all -- every stage had its
-     * own suite and nothing ran them in sequence -- so this is the first assertion in the tree that
-     * the label path composes. See `runLabelIntegrationReadbackSuite` for what each case
-     * discriminates, and for the two ways a "labels drew" assertion passes for the wrong reason.
-     *
-     * The default renderer only, unlike the readbacks above -- which is worth knowing precisely,
-     * because on a hosted runner the default *is* `Apple Software Renderer`. Every quad here is about
-     * ten pixels across, and task 18's `measureGlyphQuadRasterisation` opens the suite by measuring
-     * them: 0 disagreeing pixels on `Apple M3 Max`. Where it distrusts the driver, the four cases
-     * whose evidence is a drawn label pixel skip out loud and the two that assert an empty frame
-     * still run.
-     */
-    @Test fun theLabelIntegrationReadbackSuitePassesOnARealAppleCoreProfileContext() {
-        val fixture = CglCoreProfileContext.createOrNull(MacosGlRenderer.DEFAULT)
-            ?: throw AssertionError("the default Apple renderer must be available on a developer machine")
-        try {
-            val binding = bindOrFail()
-            binding.viewport(0, 0, LABEL_INTEGRATION_PIXELS, LABEL_INTEGRATION_PIXELS)
-            binding.scissor(0, 0, LABEL_INTEGRATION_PIXELS, LABEL_INTEGRATION_PIXELS)
-            runLabelIntegrationReadbackSuite(binding, fixture.probe)
-        } finally {
-            fixture.destroy()
         }
     }
 
@@ -663,6 +639,6 @@ class MacosGlConformanceTest {
 
     private fun bindOrFail(): GlBinding = when (val result = openPlatformGlBinding()) {
         is GlBindingResult.Bound -> result.binding
-        is GlBindingResult.Unsupported -> throw AssertionError("platform.OpenGL3 must bind")
+        is GlBindingResult.Unsupported -> throw AssertionError("the platform GL binding must bind on macOS")
     }
 }

@@ -40,7 +40,7 @@ kotlin {
     }
     iosArm64()
     iosSimulatorArm64()
-    // The visual harness is a macOS-only executable living beside the six-target resolution proof,
+    // The visual harness is a macOS-only executable living beside the seven-target resolution proof,
     // never inside it. The target factory keeps its parenthesised call form because
     // `tools/check_repository_policy.py` counts exactly that shape; `binaries` and `executable` are
     // not target factories and add no target.
@@ -51,6 +51,8 @@ kotlin {
     }
     linuxX64()
     linuxArm64()
+    // ADR 0091: the JVM variant resolves like the other six.
+    jvm()
 
     sourceSets {
         commonMain.dependencies {

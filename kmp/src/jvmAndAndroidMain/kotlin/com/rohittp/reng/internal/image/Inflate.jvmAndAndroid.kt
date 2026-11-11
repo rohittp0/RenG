@@ -60,7 +60,7 @@ internal actual class InflateStream actual constructor() {
     }
 }
 
-/** `java.util.zip.Adler32`, which is zlib's under ART. */
+/** `java.util.zip.Adler32`, which is zlib's under ART and the JDK alike. */
 internal actual class Adler32Stream actual constructor() {
     private val digest = java.util.zip.Adler32()
 

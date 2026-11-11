@@ -38,6 +38,8 @@ EXPECTED_ARTIFACTS = frozenset({
     "kmp-macosarm64",
     "kmp-linuxx64",
     "kmp-linuxarm64",
+    # ADR 0091.
+    "kmp-jvm",
 })
 _GROUP_PATH = ("com", "rohittp", "reng")
 _PROJECT_URL = "https://rohittp.com/reng/"

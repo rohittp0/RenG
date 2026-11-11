@@ -45,6 +45,11 @@ kotlin {
         }
     }
 
+    // A JVM target over LWJGL desktop GL, so consumers can run GPU readback tests on the JVM.
+    jvm {
+        compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }
+    }
+
     iosArm64()
     iosSimulatorArm64()
     macosArm64()
@@ -65,6 +70,10 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
             // A concrete format for the round-trip gate; `-core` defines no encoding.
             implementation(libs.kotlinx.serialization.json)
+        }
+        jvmMain.dependencies {
+            implementation("org.lwjgl:lwjgl:3.4.2")
+            implementation("org.lwjgl:lwjgl-opengl:3.4.2")
         }
         // `androidDeviceTest` is not reached by the default hierarchy template, so without this
         // edge it sees neither `commonTest`'s suites nor `commonMain`'s internals. See the comment

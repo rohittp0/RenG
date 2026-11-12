@@ -59,6 +59,7 @@ class FramePlanSerializationTest {
                             textures = mapOf("uDistance" to ResourceLocator("texture://distance.png")),
                             ground = GroundRectangle(Vector3(48.5, -38.0, 12.0), Vector3(44.5, -36.5, -4.0)),
                         ),
+                        transient = true,
                     ),
                 ),
                 models = listOf(
@@ -154,7 +155,7 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image", "opacity", "blend", "shader",
+            "placement", "image", "opacity", "blend", "shader", "transient",
             // StickerShader + GroundRectangle (its corners share Geometry's key names)
             "ground",
             // Model
@@ -362,6 +363,19 @@ class StickerShaderSerializationTest {
             assertTrue(document != valid, "a refusal fixture did not change the document")
             assertFailsWith<IllegalArgumentException> { json.decodeFromString<Sticker>(document) }
         }
+    }
+
+    /** ADR 0093: `transient` round-trips, is omitted at its default, and an older document reads as false. */
+    @Test
+    fun aStickerWithAndWithoutTransientRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("frame.rrgb"))
+        val transient = plain.copy(transient = true)
+        for (sticker in listOf(plain, transient)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"transient\"" !in json.encodeToString(plain), "the default must not be written")
+        assertTrue("\"transient\":true" in json.encodeToString(transient))
+        assertEquals(false, json.decodeFromString<Sticker>(json.encodeToString(plain)).transient)
     }
 
     private companion object {

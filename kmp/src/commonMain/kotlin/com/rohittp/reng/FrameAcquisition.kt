@@ -6,8 +6,8 @@ import com.rohittp.reng.internal.firewall.AcquiredLabelCandidates
 import com.rohittp.reng.internal.firewall.RenderedBasemapTile
 import com.rohittp.reng.internal.firewall.SpriteAtlasManifest
 import com.rohittp.reng.internal.firewall.TerrainAcquisitionOutcome
-import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.TextureImage
 import com.rohittp.rentile.PreparedStyle
 
 /** One configured style compiled and manifested by the first foreground preparation (ADR 0086). */
@@ -29,8 +29,8 @@ internal class CommittedBasemapStyleUpdate(
  */
 internal class FrameAcquisition(
     val decodedImagesByKey: Map<ResourceKey, DecodedImage>,
-    /** The sticker images that arrived as ETC2 containers, which are admitted rather than decoded (ADR 0084). */
-    val compressedImagesByKey: Map<ResourceKey, CompressedImage>,
+    /** Sticker images that arrived as an ETC2 or raw RGBA container, admitted rather than decoded (ADRs 0084, 0092). */
+    val admittedStickerImagesByKey: Map<ResourceKey, TextureImage>,
     val basemapTiles: List<RenderedBasemapTile>,
     val preparedStyle: PreparedStyle?,
     /**

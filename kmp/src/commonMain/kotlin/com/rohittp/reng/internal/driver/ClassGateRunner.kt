@@ -12,7 +12,10 @@ import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.Etc2ContainerResult
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.decodePng
+import com.rohittp.reng.internal.image.RawRgbaContainerResult
 import com.rohittp.reng.internal.image.isEtc2Container
+import com.rohittp.reng.internal.image.isRawRgbaContainer
+import com.rohittp.reng.internal.image.parseRawRgbaContainer
 import com.rohittp.reng.internal.image.parseEtc2Container
 import com.rohittp.reng.internal.resource.ResolvedResourceContent
 import com.rohittp.reng.internal.resource.ResourceClassGate
@@ -151,6 +154,16 @@ internal class RenGClassGateRunner(private val limits: ResourceLimits) : ClassGa
      * and decoded-image ceiling, which is all there is to validate -- every block decodes.
      */
     private fun runDecodeStickerImage(content: ResolvedResourceContent): SuppliedValidationOutcome {
+        // ADR 0092: a raw RGBA container is validated by its framing and the decoded-image ceiling.
+        if (isRawRgbaContainer(content.stored.byteSnapshot)) {
+            return when (parseRawRgbaContainer(content.stored.byteSnapshot, limits.maximumDecodedImageBytes)) {
+                is RawRgbaContainerResult.Admitted -> SuppliedValidationOutcome.Valid
+                RawRgbaContainerResult.Malformed,
+                RawRgbaContainerResult.Unsupported,
+                RawRgbaContainerResult.TooLarge,
+                -> SuppliedValidationOutcome.Failed
+            }
+        }
         if (!isEtc2Container(content.stored.byteSnapshot)) return runDecodePng(content)
         return when (parseEtc2Container(content.stored.byteSnapshot, limits.maximumDecodedImageBytes)) {
             is Etc2ContainerResult.Admitted -> SuppliedValidationOutcome.Valid

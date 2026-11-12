@@ -809,11 +809,15 @@ public final class com/rohittp/reng/ResourceResidency {
 	public final fun component2 ()J
 	public final fun component3 ()J
 	public final fun component4 ()J
+	public final fun component5 ()J
+	public final fun component6 ()J
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBudgetBytes ()J
 	public final fun getEvictedBytes ()J
 	public final fun getEvictedKeyCount ()J
 	public final fun getResidentBytes ()J
+	public final fun getTransientDroppedBytes ()J
+	public final fun getTransientDroppedCount ()J
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
@@ -1007,21 +1011,23 @@ public final class com/rohittp/reng/ShaderValue$Vec4$Companion {
 
 public final class com/rohittp/reng/Sticker {
 	public static final field Companion Lcom/rohittp/reng/Sticker$Companion;
-	public fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;)V
-	public synthetic fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;Z)V
+	public synthetic fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Lcom/rohittp/reng/Placement;
 	public final fun component2 ()Lcom/rohittp/reng/ResourceLocator;
 	public final fun component3 ()F
 	public final fun component4 ()Lcom/rohittp/reng/BlendMode;
 	public final fun component5 ()Lcom/rohittp/reng/StickerShader;
-	public final fun copy (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;)Lcom/rohittp/reng/Sticker;
-	public static synthetic fun copy$default (Lcom/rohittp/reng/Sticker;Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ILjava/lang/Object;)Lcom/rohittp/reng/Sticker;
+	public final fun component6 ()Z
+	public final fun copy (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;Z)Lcom/rohittp/reng/Sticker;
+	public static synthetic fun copy$default (Lcom/rohittp/reng/Sticker;Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILjava/lang/Object;)Lcom/rohittp/reng/Sticker;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBlend ()Lcom/rohittp/reng/BlendMode;
 	public final fun getImage ()Lcom/rohittp/reng/ResourceLocator;
 	public final fun getOpacity ()F
 	public final fun getPlacement ()Lcom/rohittp/reng/Placement;
 	public final fun getShader ()Lcom/rohittp/reng/StickerShader;
+	public final fun getTransient ()Z
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }

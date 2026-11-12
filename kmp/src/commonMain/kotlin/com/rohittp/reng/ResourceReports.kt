@@ -91,12 +91,21 @@ public data class ResourceResidency internal constructor(
     public val evictedKeyCount: Long,
     /** Bytes reclaimed by those evictions. Monotonic. */
     public val evictedBytes: Long,
+    /**
+     * Generations dropped on their last release because only transient stickers used them (ADR 0093).
+     * Not evictions: the budget did not ask. Monotonic.
+     */
+    public val transientDroppedCount: Long,
+    /** Bytes reclaimed by those drops. Monotonic. */
+    public val transientDroppedBytes: Long,
 ) {
     init {
         require(residentBytes >= 0L) { "residentBytes must be non-negative" }
         require(budgetBytes >= 0L) { "budgetBytes must be non-negative" }
         require(evictedKeyCount >= 0L) { "evictedKeyCount must be non-negative" }
         require(evictedBytes >= 0L) { "evictedBytes must be non-negative" }
+        require(transientDroppedCount >= 0L) { "transientDroppedCount must be non-negative" }
+        require(transientDroppedBytes >= 0L) { "transientDroppedBytes must be non-negative" }
     }
 }
 

@@ -348,6 +348,32 @@ internal class GlObjectRegistry(
         return result.publicResult
     }
 
+    /**
+     * Retires exactly [generations]' allocations, whose CPU generations were dropped as transient
+     * (ADR 0093): an unleased one is deleted now, a leased one on its last release. Unlike
+     * [retireResources] it sets no high-water mark, so older generations of the key are untouched.
+     */
+    internal fun retireTransientGenerations(
+        generations: Map<ResourceKey, Set<ResidentGenerationId>>,
+        binding: GlBinding,
+    ) {
+        if (generations.isEmpty()) return
+        val delete = lock.locked {
+            val handles = mutableListOf<GlObjectHandle>()
+            allocations.values.toList().forEach { entry ->
+                if (entry.identity.generationId !in generations[entry.identity.ownerKey].orEmpty()) return@forEach
+                entry.retired = true
+                allocationUnleasedOrder.remove(entry.identity)
+                if (entry.leaseCount == 0) {
+                    removeAllocationLocked(entry.identity)
+                    handles += entry.handles
+                }
+            }
+            handles
+        }
+        deleteGlObjects(binding, delete)
+    }
+
     internal fun allocationOwnerKeys(): Set<ResourceKey> = lock.locked {
         allocations.values.mapTo(linkedSetOf()) { it.identity.ownerKey }.apply {
             addAll(textureByteSizes.keys)

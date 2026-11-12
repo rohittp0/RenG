@@ -586,7 +586,10 @@ class ResidentCacheTest {
         val cache = ResidentCache(residentByteBudget = 64L)
         cache.install(keyNamed("counted-first"), storedA, null)
         assertEquals(
-            ResourceResidency(residentBytes = 64L, budgetBytes = 64L, evictedKeyCount = 0L, evictedBytes = 0L),
+            ResourceResidency(
+                residentBytes = 64L, budgetBytes = 64L, evictedKeyCount = 0L, evictedBytes = 0L,
+                transientDroppedCount = 0L, transientDroppedBytes = 0L,
+            ),
             cache.report(ResourceSelector.All, noGpuObjects).cpuResidency,
         )
 
@@ -595,7 +598,10 @@ class ResidentCacheTest {
         // One key left for the budget, taking its 64 bytes with it, and the resident total is back
         // inside the budget rather than merely reported as over it.
         assertEquals(
-            ResourceResidency(residentBytes = 64L, budgetBytes = 64L, evictedKeyCount = 1L, evictedBytes = 64L),
+            ResourceResidency(
+                residentBytes = 64L, budgetBytes = 64L, evictedKeyCount = 1L, evictedBytes = 64L,
+                transientDroppedCount = 0L, transientDroppedBytes = 0L,
+            ),
             cache.report(ResourceSelector.All, noGpuObjects).cpuResidency,
         )
     }
@@ -631,6 +637,87 @@ class ResidentCacheTest {
         assertEquals(0L, residency.residentBytes)
         assertEquals(0L, residency.evictedKeyCount)
         assertEquals(0L, residency.evictedBytes)
+    }
+}
+
+/** ADR 0093: a generation only transient stickers used leaves the cache on its last release. */
+class ResidentCacheTransientTest {
+    @Test
+    fun aTransientGenerationIsDroppedOnItsLastReleaseAndQueuedForItsTexture() {
+        val cache = ResidentCache()
+        val transient = keyNamed("transient")
+        val kept = keyNamed("kept")
+        val transientLease = cache.installAndTakeLease(transient, storedA, null)
+        val keptLease = cache.installAndTakeLease(kept, storedB, null)
+        cache.markUse(transientLease.generation, transient = true)
+        cache.markUse(keptLease.generation, transient = false)
+
+        cache.releaseLease(transientLease)
+        cache.releaseLease(keptLease)
+
+        assertNull(cache.current(transient))
+        assertFalse(cache.wasFreed(transient), "a transient drop is not the consumer's free")
+        assertNotNull(cache.current(kept))
+        val residency = cache.report(ResourceSelector.All, noGpuObjects).cpuResidency
+        assertEquals(64L, residency.residentBytes)
+        assertEquals(1L, residency.transientDroppedCount)
+        assertEquals(64L, residency.transientDroppedBytes)
+        assertEquals(0L, residency.evictedKeyCount, "a transient drop is not an eviction")
+        assertEquals(
+            mapOf(transient to setOf(transientLease.generation.id)),
+            cache.drainDroppedTransientGenerations(),
+        )
+        assertTrue(cache.drainDroppedTransientGenerations().isEmpty(), "a drain takes what it returns")
+    }
+
+    @Test
+    fun aTransientGenerationStaysWhileAnotherFrameStillLeasesIt() {
+        val cache = ResidentCache()
+        val first = cache.installAndTakeLease(key, storedA, null)
+        val second = assertNotNull(cache.observeAndTakeLease(key))
+        cache.markUse(first.generation, transient = true)
+        cache.markUse(second.generation, transient = true)
+
+        cache.releaseLease(first)
+        assertSame(first.generation, cache.current(key))
+        cache.releaseLease(second)
+        assertNull(cache.current(key))
+    }
+
+    @Test
+    fun anyNonTransientUseKeepsTheLruBehaviour() {
+        val cache = ResidentCache()
+        val first = cache.installAndTakeLease(key, storedA, null)
+        val second = assertNotNull(cache.observeAndTakeLease(key))
+        cache.markUse(first.generation, transient = true)
+        cache.markUse(second.generation, transient = false)
+        cache.releaseLease(first)
+        cache.releaseLease(second)
+
+        assertNotNull(cache.current(key))
+        assertEquals(listOf(key), cache.evictableKeys())
+        assertTrue(cache.drainDroppedTransientGenerations().isEmpty())
+    }
+
+    @Test
+    fun usesAreForgottenOnceNothingLeasesTheGeneration() {
+        val cache = ResidentCache()
+        val persistent = cache.installAndTakeLease(key, storedA, null)
+        cache.markUse(persistent.generation, transient = false)
+        cache.releaseLease(persistent)
+
+        val transient = assertNotNull(cache.observeAndTakeLease(key))
+        cache.markUse(transient.generation, transient = true)
+        cache.releaseLease(transient)
+        assertNull(cache.current(key))
+    }
+
+    @Test
+    fun anUnmarkedLeaseKeepsTodaysBehaviour() {
+        val cache = ResidentCache()
+        cache.releaseLease(cache.installAndTakeLease(key, storedA, null))
+        assertNotNull(cache.current(key))
+        assertEquals(0L, cache.report(ResourceSelector.All, noGpuObjects).cpuResidency.transientDroppedCount)
     }
 }
 

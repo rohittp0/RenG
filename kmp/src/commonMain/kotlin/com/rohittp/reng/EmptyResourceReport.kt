@@ -11,5 +11,7 @@ internal fun emptyResourceReport(): ResourceReport = ResourceReport(
         budgetBytes = 0L,
         evictedKeyCount = 0L,
         evictedBytes = 0L,
+        transientDroppedCount = 0L,
+        transientDroppedBytes = 0L,
     ),
 )

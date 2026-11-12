@@ -106,7 +106,7 @@ internal val ResourceClass.acceptValue: String
         ResourceClass.MODEL_TEXTURE,
         -> "image/png"
         // ADR 0084: the ETC2 container first, because it is the form a producer can upload without decoding.
-        ResourceClass.STICKER_IMAGE -> "image/x-reng-etc2, image/png"
+        ResourceClass.STICKER_IMAGE -> "image/x-reng-etc2, image/x-reng-rgba, image/png"
         ResourceClass.MODEL_GLB -> "model/gltf-binary"
         ResourceClass.BASEMAP_GLYPH_RANGE -> "application/x-protobuf"
     }

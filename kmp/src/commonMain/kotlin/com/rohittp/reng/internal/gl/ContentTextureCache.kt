@@ -4,6 +4,7 @@ import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.internal.cache.ResidentGenerationId
 import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.RawRgbaImage
 
 /** Consumer and model textures, uploaded once per identity and leased from [GlObjectRegistry] per draw. */
 internal class ContentTextureCache(
@@ -101,6 +102,25 @@ internal class ContentTextureCache(
         leases = leases,
         textureBytes = { if (native) image.payloadByteCount else image.rgbaByteCount },
         upload = { uploadCompressedTexture(binding, image, native) },
+    )
+
+    /** [cachedTexture] for a raw RGBA sticker (ADR 0092): uploaded from its stored bytes, one RGBA8 level. */
+    internal fun cachedRawRgbaTexture(
+        key: ResourceKey,
+        generationId: ResidentGenerationId,
+        image: RawRgbaImage,
+        leases: MutableList<GpuAllocationLease>,
+        binding: GlBinding,
+    ): Int = leaseOrUploadTexture(
+        identity = GpuResourceIdentity(
+            ownerKey = key,
+            generationId = generationId,
+            subresource = GpuSubresource.Texture,
+            uploadVariant = GpuUploadVariant(TextureContent.IMAGE, defaultSamplerStateFor(TextureContent.IMAGE)),
+        ),
+        leases = leases,
+        textureBytes = { image.rgbaByteCount },
+        upload = { uploadRawRgbaTexture(binding, image) },
     )
 
     private fun leaseOrUploadTexture(

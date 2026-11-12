@@ -244,5 +244,5 @@ class JvmDefensiveCopyTest {
 
     private fun emptyUsage(): ResourceUsage = ResourceUsage(0L, 0L, 0L, false)
 
-    private fun emptyResidency(): ResourceResidency = ResourceResidency(0L, 0L, 0L, 0L)
+    private fun emptyResidency(): ResourceResidency = ResourceResidency(0L, 0L, 0L, 0L, 0L, 0L)
 }

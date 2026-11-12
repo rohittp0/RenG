@@ -67,7 +67,7 @@ class RendererCompressedStickerTest {
             binding.uniformMatrix4fvValues.getValue(MVP),
         )
         assertEquals(
-            "image/x-reng-etc2, image/png",
+            "image/x-reng-etc2, image/x-reng-rgba, image/png",
             transport.requests.single { it.resourceClass == ResourceClass.STICKER_IMAGE }.metadata.accept,
         )
         renderer.close()

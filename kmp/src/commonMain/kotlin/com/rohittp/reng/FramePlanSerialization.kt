@@ -379,6 +379,7 @@ private class StickerSurrogate(
     @SerialName("opacity") val opacity: Float = 1f,
     @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
     @SerialName("shader") val shader: StickerShader? = null,
+    @SerialName("transient") val transient: Boolean = false,
 )
 
 internal object StickerSerializer : KSerializer<Sticker> {
@@ -387,12 +388,12 @@ internal object StickerSerializer : KSerializer<Sticker> {
     override fun serialize(encoder: Encoder, value: Sticker) {
         encoder.encodeSerializableValue(
             delegate,
-            StickerSurrogate(value.placement, value.image, value.opacity, value.blend, value.shader),
+            StickerSurrogate(value.placement, value.image, value.opacity, value.blend, value.shader, value.transient),
         )
     }
     override fun deserialize(decoder: Decoder): Sticker {
         val it = decoder.decodeSerializableValue(delegate)
-        return Sticker(it.placement, it.image, it.opacity, it.blend, it.shader)
+        return Sticker(it.placement, it.image, it.opacity, it.blend, it.shader, it.transient)
     }
 }
 

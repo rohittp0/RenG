@@ -233,6 +233,12 @@ public data class Sticker(
      * existing component.
      */
     public val shader: StickerShader? = null,
+    /**
+     * Drop [image]'s resident bytes and texture as soon as no open Prepared Frame uses it, rather than
+     * keeping them for reuse (ADR 0093). For an image drawn once, such as a video frame. Declared last
+     * for the append-only ABI.
+     */
+    public val transient: Boolean = false,
 ) {
     init {
         require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {

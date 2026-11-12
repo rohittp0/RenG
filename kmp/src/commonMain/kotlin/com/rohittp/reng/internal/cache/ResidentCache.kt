@@ -94,6 +94,17 @@ internal class ResidentGeneration(
         return model to model.decodedCpuBytes
     }
 
+    // ADR 0093: how the frames leasing this generation used it, since it last had no lease.
+    private var usedTransiently: Boolean = false
+    private var usedPersistently: Boolean = false
+
+    /** True when only transient stickers used it while leased: its last release drops it. */
+    val dropsOnLastRelease: Boolean get() = usedTransiently && !usedPersistently
+
+    fun markUse(transient: Boolean) {
+        if (transient) usedTransiently = true else usedPersistently = true
+    }
+
     fun addLease() {
         leaseCount += 1
     }
@@ -101,6 +112,12 @@ internal class ResidentGeneration(
     fun removeLease() {
         check(leaseCount > 0) { "cannot release a lease from a generation with no outstanding lease" }
         leaseCount -= 1
+    }
+
+    /** Forgets this lease period's uses once nothing leases the generation. */
+    fun clearUses() {
+        usedTransiently = false
+        usedPersistently = false
     }
 }
 
@@ -205,6 +222,14 @@ internal class ResidentCache(
      */
     private var evictedKeyCount: Long = 0L
     private var evictedBytes: Long = 0L
+
+    /** Transient generations dropped on their last release (ADR 0093), counted apart from eviction. */
+    private var transientDroppedCount: Long = 0L
+    private var transientDroppedBytes: Long = 0L
+
+    /** Dropped transient generations whose GPU textures the next draw deletes (ADR 0093). */
+    private val droppedTransientGenerations: MutableMap<ResourceKey, MutableSet<ResidentGenerationId>> =
+        LinkedHashMap()
 
     /**
      * True once [closeAll] has run. [closeAll] empties [entries] exactly as eviction empties a key, so
@@ -376,12 +401,35 @@ internal class ResidentCache(
         Lease(generation)
     }
 
+    /**
+     * Records how a frame holding a lease on [generation] uses it (ADR 0093). A generation only
+     * transient stickers used is dropped on its last release; any other use keeps the LRU behaviour.
+     */
+    fun markUse(generation: ResidentGeneration, transient: Boolean): Unit = locked {
+        check(generation.leaseCount > 0) { "only a leased generation can be marked" }
+        generation.markUse(transient)
+    }
+
+    /** Takes the dropped transient generations whose GPU textures are still to be deleted. */
+    fun drainDroppedTransientGenerations(): Map<ResourceKey, Set<ResidentGenerationId>> = locked {
+        if (droppedTransientGenerations.isEmpty()) return@locked emptyMap()
+        val drained = LinkedHashMap<ResourceKey, Set<ResidentGenerationId>>(droppedTransientGenerations)
+        droppedTransientGenerations.clear()
+        drained
+    }
+
     fun releaseLease(lease: Lease): Unit = locked {
         lease.markReleased()
         val generation = lease.generation
         generation.removeLease()
         if (generation.leaseCount == 0) {
+            val drops = generation.dropsOnLastRelease
+            generation.clearUses()
             val entry = entries[generation.key]
+            if (drops && entry != null) {
+                dropTransient(generation, entry)
+                return@locked
+            }
             // The last lease on a current generation makes its key a candidate, at its last touch.
             if (entry != null && entry.current === generation) {
                 enqueueCandidate(generation.key, entry)
@@ -448,6 +496,8 @@ internal class ResidentCache(
                 budgetBytes = residentByteBudget,
                 evictedKeyCount = evictedKeyCount,
                 evictedBytes = evictedBytes,
+                transientDroppedCount = transientDroppedCount,
+                transientDroppedBytes = transientDroppedBytes,
             ),
         )
     }
@@ -477,6 +527,10 @@ internal class ResidentCache(
         // nothing can read would only be state to get wrong.
         evictedKeyCount = 0L
         evictedBytes = 0L
+        transientDroppedCount = 0L
+        transientDroppedBytes = 0L
+        // The registry deletes every texture on close, so nothing is left for these to name.
+        droppedTransientGenerations.clear()
     }
 
     private fun newGeneration(
@@ -559,6 +613,26 @@ internal class ResidentCache(
             entry.current = null
             if (isEmptyAndUnfreed(entry)) entries.remove(key)
         }
+    }
+
+    /**
+     * Drops a transient [generation] whose last lease just went (ADR 0093): removed as eviction removes
+     * a key, never marked freed, and queued for its GPU texture's deletion.
+     */
+    private fun dropTransient(generation: ResidentGeneration, entry: KeyEntry) {
+        val removed = when {
+            entry.current === generation -> {
+                entry.current = null
+                true
+            }
+            else -> entry.retired.remove(generation)
+        }
+        if (!removed) return
+        residentBytes -= generation.byteSize
+        transientDroppedCount += 1L
+        transientDroppedBytes += generation.byteSize
+        droppedTransientGenerations.getOrPut(generation.key) { linkedSetOf() } += generation.id
+        removeIfEmptyAndUnfreed(generation.key, entry)
     }
 
     /** The eviction candidates as the queue holds them, least recently touched first; for tests. */

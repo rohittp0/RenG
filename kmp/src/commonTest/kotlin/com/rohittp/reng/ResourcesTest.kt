@@ -156,7 +156,7 @@ class ResourcesTest {
             ResourceClass.BASEMAP_SPRITE_JSON to Pair(4L * mib, "application/json"),
             ResourceClass.BASEMAP_SPRITE_IMAGE to Pair(32L * mib, "image/png"),
             ResourceClass.BASEMAP_GEO_JSON to Pair(64L * mib, "application/json"),
-            ResourceClass.STICKER_IMAGE to Pair(32L * mib, "image/x-reng-etc2, image/png"),
+            ResourceClass.STICKER_IMAGE to Pair(32L * mib, "image/x-reng-etc2, image/x-reng-rgba, image/png"),
             ResourceClass.MODEL_GLB to Pair(256L * mib, "model/gltf-binary"),
             ResourceClass.MODEL_TEXTURE to Pair(32L * mib, "image/png"),
             // The one class whose ceiling is an internal constant rather than a ResourceLimits field:

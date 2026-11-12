@@ -203,11 +203,13 @@ class ResourceReportsTest {
         // All four are counts or byte totals, and the two eviction figures are cumulative and
         // monotonic (ADR 0048), so a negative one means the accounting under it has gone wrong
         // rather than that some resource has negative size.
-        ResourceResidency(residentBytes = 0L, budgetBytes = 0L, evictedKeyCount = 0L, evictedBytes = 0L)
+        noEvictions.copy()
         assertFailsWith<IllegalArgumentException> { noEvictions.copy(residentBytes = -1L) }
         assertFailsWith<IllegalArgumentException> { noEvictions.copy(budgetBytes = -1L) }
         assertFailsWith<IllegalArgumentException> { noEvictions.copy(evictedKeyCount = -1L) }
         assertFailsWith<IllegalArgumentException> { noEvictions.copy(evictedBytes = -1L) }
+        assertFailsWith<IllegalArgumentException> { noEvictions.copy(transientDroppedCount = -1L) }
+        assertFailsWith<IllegalArgumentException> { noEvictions.copy(transientDroppedBytes = -1L) }
     }
 
     @Test
@@ -258,6 +260,8 @@ class ResourceReportsTest {
         budgetBytes = 0L,
         evictedKeyCount = 0L,
         evictedBytes = 0L,
+        transientDroppedCount = 0L,
+        transientDroppedBytes = 0L,
     )
 
     private fun assertRedacted(text: String, vararg sensitiveValues: String) {

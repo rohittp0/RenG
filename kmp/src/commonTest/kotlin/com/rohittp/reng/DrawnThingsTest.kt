@@ -194,6 +194,26 @@ class DrawnThingsTest {
         assertEquals(BlendMode.MULTIPLY, blend)
     }
 
+    /** ADR 0093: `transient` defaults false and is `component6`, so no existing component moved. */
+    @Test
+    fun aStickerIsNotTransientUnlessAskedAndTransientIsItsLastComponent() {
+        val placement = Placement(
+            AnchoringMode.SCREEN, Vector3(0.0, 0.0, 0.0), AnchoringMode.SCREEN, Vector3(0.0, 0.0, 0.0),
+            AnchoringMode.SCREEN, 1.0,
+        )
+        val plain = Sticker(placement, ResourceLocator("frame.rrgb"))
+        val transient = plain.copy(transient = true)
+        assertEquals(false, plain.transient)
+        assertNotEquals(plain, transient)
+
+        val (_, image, opacity, blend, shader, isTransient) = transient
+        assertEquals(ResourceLocator("frame.rrgb"), image)
+        assertEquals(1f, opacity)
+        assertEquals(BlendMode.OVER, blend)
+        assertEquals(null, shader)
+        assertEquals(true, isTransient)
+    }
+
     @Test
     fun aConsumerMayNotClaimAnyNameUnderRengsGeometryPrefix() {
         val geometry = Geometry(

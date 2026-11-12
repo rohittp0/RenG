@@ -336,10 +336,25 @@ _Avoid_: Layer, pass, stage
 ### Drawn things
 
 **Sticker**:
-A **Placement** paired with one image identified by a **Resource Locator** -- a PNG or an **ETC2 Container**,
-told apart by magic bytes -- drawn as a centred local XY quad whose width and height are the image's level-zero
-pixel dimensions, with +x right, +y up, and +z normal.
+A **Placement** paired with one image identified by a **Resource Locator** -- a PNG, an **ETC2 Container** or a
+**Raw RGBA Container**, told apart by magic bytes -- drawn as a centred local XY quad whose width and height are the
+image's level-zero pixel dimensions, with +x right, +y up, and +z normal. A **Transient Sticker** is one whose
+image is dropped as soon as no open **Prepared Frame** leases it (ADR 0093).
 _Avoid_: Marker, pin, decal, sprite
+
+**Raw RGBA Container**:
+Uncompressed RGBA8 for a **Sticker** image (ADR 0092): the little-endian header `RRGB`, version 1, a flags byte
+whose bit 0 says the texels are already premultiplied, two zero bytes and a `u32` width and height, then exactly
+`width * height * 4` sRGB-encoded bytes, top row first. Admitted as a view of the stored bytes, never decoded or
+attached; straight texels are premultiplied at upload exactly as a PNG's are. One level, no mip chain.
+_Avoid_: Bitmap, raw frame, uncompressed PNG
+
+**Transient Sticker**:
+A **Sticker** with `transient = true` (ADR 0093): when the last lease on its image's resident generation goes,
+the generation is dropped at once rather than left to the LRU, and its texture is deleted at the next draw.
+A generation any open frame also uses non-transiently keeps the normal LRU behaviour. Meant for an image used
+once, such as a decoded video frame.
+_Avoid_: Ephemeral sticker, one-shot image, uncached sticker
 
 **ETC2 Container**:
 The one compressed form a **Sticker** image may take (ADR 0084): the little-endian header `RET2`, version 1,
@@ -717,7 +732,7 @@ selected **Resource Limits** byte ceiling, and only optional `ifNoneMatch`, `ifM
 metadata; their textual representation redacts the locator and all metadata values. A conditional `NORMAL`
 request sends exactly one validator, preferring a nonblank ETag over a nonblank last-modified value. Accept is
 fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract, except that a
-sticker image accepts `image/x-reng-etc2, image/png` (ADR 0084). The response's content type never decides an
+sticker image accepts `image/x-reng-etc2, image/x-reng-rgba, image/png` (ADRs 0084, 0092). The response's content type never decides an
 image's form; its magic bytes do. Responses
 carry status, defensively copied bytes, and optional `contentType`, `etag`, `lastModified`, and
 `freshUntilEpochMillis`. Consumer response constructors snapshot and redact but deliberately admit malformed
@@ -837,6 +852,8 @@ _Avoid_: Log message, arbitrary metadata, exception cause
   are errors and are never clamped, wrapped, or repaired
 - Unleased CPU generations are evicted least-recently-used to the resident CPU byte ceiling after install,
   decoded-image/model attachment, and the last lease release; eviction forgets a key and never marks it freed
+- A generation only **Transient Sticker**s used is dropped on its last lease release, counted apart from
+  eviction, never marked freed; its GPU texture is deleted at the next draw
 - Unleased measured GPU textures and model buffers are independently evicted least-recently-used to their byte
   ceilings as soon as their last draw lease releases. Generation identity prevents reuse across reload or free
 - Consumer-authored Geometry and Backdrop pipelines share a count-bounded LRU; one frame also has a distinct-key

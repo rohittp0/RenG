@@ -4,6 +4,7 @@ import com.rohittp.reng.internal.glb.GltfSampler
 import com.rohittp.reng.internal.image.CompressedImage
 import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.Etc2Format
+import com.rohittp.reng.internal.image.RawRgbaImage
 import com.rohittp.reng.internal.image.decodeEtc2Rows
 
 /**
@@ -161,6 +162,32 @@ private fun uploadPremultipliedInChunks(
     binding: GlBinding,
     image: DecodedImage,
     sampler: TextureSamplerState,
+): Int = image.readRgbaBytes { source ->
+    uploadRgbaInChunks(binding, source, 0, image.width, image.height, premultiply = true, sampler = sampler)
+}
+
+/**
+ * Uploads a raw RGBA sticker straight from its stored container (ADR 0092): copied when its producer
+ * premultiplied it, premultiplied with a PNG's rounding otherwise. One level, never a mip chain.
+ */
+internal fun uploadRawRgbaTexture(binding: GlBinding, image: RawRgbaImage): Int = image.readRgba { bytes, offset, _ ->
+    uploadRgbaInChunks(
+        binding, bytes, offset, image.width, image.height,
+        premultiply = !image.premultiplied,
+        sampler = defaultSamplerStateFor(TextureContent.IMAGE),
+    )
+}
+
+/** Allocates level zero and fills it from [source] at [sourceStart] a bounded chunk at a time. */
+@Suppress("LongParameterList")
+private fun uploadRgbaInChunks(
+    binding: GlBinding,
+    source: ByteArray,
+    sourceStart: Int,
+    width: Int,
+    height: Int,
+    premultiply: Boolean,
+    sampler: TextureSamplerState,
 ): Int {
     val names = IntArray(1)
     binding.genTextures(1, names)
@@ -170,8 +197,8 @@ private fun uploadPremultipliedInChunks(
         target = GL_TEXTURE_2D,
         level = 0,
         internalFormat = GL_RGBA8,
-        width = image.width,
-        height = image.height,
+        width = width,
+        height = height,
         border = 0,
         format = GL_RGBA,
         type = GL_UNSIGNED_BYTE,
@@ -179,34 +206,33 @@ private fun uploadPremultipliedInChunks(
     )
 
     val maximumChunkPixels = PREMULTIPLY_UPLOAD_CHUNK_BYTES / RGBA_CHANNELS
-    image.readRgbaBytes { source ->
-        val rowPixels = image.width
-        if (rowPixels <= maximumChunkPixels) {
-            val rowsPerChunk = maxOf(1, maximumChunkPixels / rowPixels)
-            val chunk = ByteArray(minOf(image.height, rowsPerChunk) * rowPixels * RGBA_CHANNELS)
-            var y = 0
-            while (y < image.height) {
-                val rows = minOf(rowsPerChunk, image.height - y)
-                val pixels = rows * rowPixels
-                premultiplyRange(source, y * rowPixels * RGBA_CHANNELS, pixels, chunk)
-                binding.texSubImage2D(
-                    GL_TEXTURE_2D, 0, 0, y, rowPixels, rows, GL_RGBA, GL_UNSIGNED_BYTE, chunk,
-                )
-                y += rows
-            }
+    fun fill(sourceOffset: Int, pixels: Int, chunk: ByteArray) {
+        if (premultiply) {
+            premultiplyRange(source, sourceOffset, pixels, chunk)
         } else {
-            val chunk = ByteArray(maximumChunkPixels * RGBA_CHANNELS)
-            for (y in 0 until image.height) {
-                var x = 0
-                while (x < rowPixels) {
-                    val pixels = minOf(maximumChunkPixels, rowPixels - x)
-                    val sourceOffset = (y * rowPixels + x) * RGBA_CHANNELS
-                    premultiplyRange(source, sourceOffset, pixels, chunk)
-                    binding.texSubImage2D(
-                        GL_TEXTURE_2D, 0, x, y, pixels, 1, GL_RGBA, GL_UNSIGNED_BYTE, chunk,
-                    )
-                    x += pixels
-                }
+            source.copyInto(chunk, 0, sourceOffset, sourceOffset + pixels * RGBA_CHANNELS)
+        }
+    }
+    val rowPixels = width
+    if (rowPixels <= maximumChunkPixels) {
+        val rowsPerChunk = maxOf(1, maximumChunkPixels / rowPixels)
+        val chunk = ByteArray(minOf(height, rowsPerChunk) * rowPixels * RGBA_CHANNELS)
+        var y = 0
+        while (y < height) {
+            val rows = minOf(rowsPerChunk, height - y)
+            fill(sourceStart + y * rowPixels * RGBA_CHANNELS, rows * rowPixels, chunk)
+            binding.texSubImage2D(GL_TEXTURE_2D, 0, 0, y, rowPixels, rows, GL_RGBA, GL_UNSIGNED_BYTE, chunk)
+            y += rows
+        }
+    } else {
+        val chunk = ByteArray(maximumChunkPixels * RGBA_CHANNELS)
+        for (y in 0 until height) {
+            var x = 0
+            while (x < rowPixels) {
+                val pixels = minOf(maximumChunkPixels, rowPixels - x)
+                fill(sourceStart + (y * rowPixels + x) * RGBA_CHANNELS, pixels, chunk)
+                binding.texSubImage2D(GL_TEXTURE_2D, 0, x, y, pixels, 1, GL_RGBA, GL_UNSIGNED_BYTE, chunk)
+                x += pixels
             }
         }
     }

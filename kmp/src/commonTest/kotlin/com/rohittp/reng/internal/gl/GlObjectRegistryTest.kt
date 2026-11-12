@@ -699,6 +699,33 @@ class GlObjectRegistryTest {
         assertNull(registry.leaseAllocation(identity))
     }
 
+    @Test fun aTransientGenerationIsDeletedAtOnceWhenUnleasedAndOnItsLastReleaseOtherwise() {
+        val binding = RecordingGlBinding()
+        val registry = GlObjectRegistry()
+        val older = gpuIdentity(stickerKey, 6L)
+        val unleased = gpuIdentity(stickerKey, 7L)
+        val leased = gpuIdentity(glbKey, 8L)
+        registry.releaseAllocation(
+            registry.registerAllocation(older, listOf(GlObjectHandle(GlObjectType.TEXTURE, 99)), 4L, 0L, 99),
+            binding,
+        )
+        registry.releaseAllocation(
+            registry.registerAllocation(unleased, listOf(GlObjectHandle(GlObjectType.TEXTURE, 100)), 4L, 0L, 100),
+            binding,
+        )
+        val lease = registry.registerAllocation(leased, listOf(GlObjectHandle(GlObjectType.TEXTURE, 101)), 4L, 0L, 101)
+
+        registry.retireTransientGenerations(
+            mapOf(stickerKey to setOf(ResidentGenerationId(7L)), glbKey to setOf(ResidentGenerationId(8L))),
+            binding,
+        )
+        assertEquals(listOf(100), binding.deletedNames)
+        assertNull(registry.leaseAllocation(unleased))
+        registry.releaseAllocation(lease, binding)
+        assertEquals(listOf(100, 101), binding.deletedNames)
+        assertNotNull(registry.leaseAllocation(older), "an older generation of the same key is untouched")
+    }
+
     @Test fun releasingAClaimFromALostContextCannotTouchAReplacementAllocation() {
         val binding = RecordingGlBinding()
         val registry = GlObjectRegistry()

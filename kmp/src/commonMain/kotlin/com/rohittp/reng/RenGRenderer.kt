@@ -123,9 +123,14 @@ import com.rohittp.reng.internal.image.DecodedImage
 import com.rohittp.reng.internal.image.Etc2ContainerResult
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.PngPrescan
+import com.rohittp.reng.internal.image.RawRgbaContainerResult
+import com.rohittp.reng.internal.image.RawRgbaImage
+import com.rohittp.reng.internal.image.TextureImage
 import com.rohittp.reng.internal.image.decodePng
 import com.rohittp.reng.internal.image.isEtc2Container
+import com.rohittp.reng.internal.image.isRawRgbaContainer
 import com.rohittp.reng.internal.image.parseEtc2Container
+import com.rohittp.reng.internal.image.parseRawRgbaContainer
 import com.rohittp.reng.internal.image.pngHeaderDimensions
 import com.rohittp.reng.internal.image.prescanPng
 import com.rohittp.reng.internal.label.LabelFadeState
@@ -1138,7 +1143,7 @@ internal class RenGRenderer(
                     placement = sticker.placement,
                     resourceKey = reference.resourceKey,
                     generationId = generationIdFor(reference.resourceKey),
-                    image = acquired.compressedImagesByKey[reference.resourceKey]
+                    image = acquired.admittedStickerImagesByKey[reference.resourceKey]
                         ?: requireNotNull(decodedByKey[reference.resourceKey]) {
                             "a successful sticker acquisition must decode or admit every traversed image"
                         },
@@ -1162,7 +1167,15 @@ internal class RenGRenderer(
                             ground = shader.ground,
                         )
                     },
+                    transient = sticker.transient,
                 )
+            }
+            // ADR 0093: a sticker image key is transient for this frame only if every sticker using it is.
+            stickers.groupBy { it.resourceKey }.forEach { (key, uses) ->
+                val generation = requireNotNull(acquired.leasedGenerations[key]) {
+                    "a successful resource operation must leave this frame a lease on its generation"
+                }
+                residentCache.markUse(generation, transient = uses.all { it.transient })
             }
 
             // Task 9b item 3: both of Geometry's live Map references are snapshotted right here,
@@ -1959,7 +1972,7 @@ internal class RenGRenderer(
         if (references.isEmpty()) {
             return FrameAcquisition(
                 decodedImagesByKey = emptyMap(),
-                compressedImagesByKey = emptyMap(),
+                admittedStickerImagesByKey = emptyMap(),
                 basemapTiles = emptyList(),
                 preparedStyle = null,
                 basemapStyleDigest = null,
@@ -2148,7 +2161,7 @@ internal class RenGRenderer(
         }
 
         val decodedByKey = LinkedHashMap<ResourceKey, DecodedImage>(imageReferences.size)
-        val compressedByKey = HashMap<ResourceKey, CompressedImage>()
+        val admittedByKey = HashMap<ResourceKey, TextureImage>()
         for (reference in imageReferences) {
             currentCoroutineContext().ensureActive()
             val generation = leasedGenerations[reference.resourceKey]
@@ -2158,11 +2171,19 @@ internal class RenGRenderer(
             // whose gate admits it: any other class's container falls through to the PNG decode below and
             // fails there. Nothing is decoded and nothing is attached -- the image is a view of the bytes
             // this frame's lease already charged, and reading its header again is cheaper than a memo.
+            // ADR 0092: a raw RGBA container is admitted the same way, as a view.
+            if (
+                reference.resourceClass == ResourceClass.STICKER_IMAGE &&
+                isRawRgbaContainer(generation.stored.byteSnapshot)
+            ) {
+                admittedByKey[reference.resourceKey] = admitRawRgbaSticker(generation, reference)
+                continue
+            }
             if (
                 reference.resourceClass == ResourceClass.STICKER_IMAGE &&
                 isEtc2Container(generation.stored.byteSnapshot)
             ) {
-                compressedByKey[reference.resourceKey] = admitEtc2Sticker(generation, reference)
+                admittedByKey[reference.resourceKey] = admitEtc2Sticker(generation, reference)
                 continue
             }
             // Decoded once per generation, not once per frame (ADR 0059). The only consumer of these
@@ -2206,7 +2227,7 @@ internal class RenGRenderer(
         }
         return FrameAcquisition(
             decodedImagesByKey = decodedByKey,
-            compressedImagesByKey = compressedByKey,
+            admittedStickerImagesByKey = admittedByKey,
             basemapTiles = basemapTiles,
             preparedStyle = observedStyle,
             basemapStyleDigest = basemapStyleDigest,
@@ -2237,6 +2258,20 @@ internal class RenGRenderer(
         )
     ) {
         is Etc2ContainerResult.Admitted -> admitted.image
+        else -> throw imageDecodeFailure(reference)
+    }
+
+    /** Admits [generation]'s raw RGBA container (ADR 0092) under its class gate's ceiling and failure. */
+    private fun admitRawRgbaSticker(
+        generation: ResidentGeneration,
+        reference: StaticResourceReference.External,
+    ): RawRgbaImage = when (
+        val admitted = parseRawRgbaContainer(
+            generation.stored.byteSnapshot,
+            configuration.resourceLimits.maximumDecodedImageBytes,
+        )
+    ) {
+        is RawRgbaContainerResult.Admitted -> admitted.image
         else -> throw imageDecodeFailure(reference)
     }
 
@@ -2736,6 +2771,9 @@ internal class RenGRenderer(
 
         val resolvedCamera = resolveFrameCamera(frame.camera, frame.projectionMode)
 
+        // ADR 0093: textures of transient sticker images whose frames have closed, deleted on this thread.
+        glObjectRegistry.retireTransientGenerations(residentCache.drainDroppedTransientGenerations(), binding)
+
         // Every ground texture lease this draw takes is released in the `finally` below -- on the
         // failure returns inside, and on a throw out of drawFrame. An unreleased lease is permanently
         // exempt from eviction (`GlObjectRegistry.evictOverBudget` iterates only unleased keys), so a
@@ -2867,6 +2905,13 @@ internal class RenGRenderer(
                     generationId = preparedSticker.generationId,
                     image = image,
                     content = TextureContent.IMAGE,
+                    leases = gpuAllocationLeases,
+                    binding = binding,
+                )
+                is RawRgbaImage -> contentTextures.cachedRawRgbaTexture(
+                    key = preparedSticker.resourceKey,
+                    generationId = preparedSticker.generationId,
+                    image = image,
                     leases = gpuAllocationLeases,
                     binding = binding,
                 )

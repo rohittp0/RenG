@@ -486,7 +486,8 @@ private external fun basemapStyleUrl(): JsString
 @JsFun("() => Number(new URLSearchParams(window.location.search).get('bench') || 0)")
 private external fun benchFrameCount(): Int
 
-@JsFun("() => new URLSearchParams(window.location.search).get('labels') === 'off'")
+// Labels are off unless `?labels=on`: label layout was ~1.6 s a frame in the benchmark.
+@JsFun("() => new URLSearchParams(window.location.search).get('labels') !== 'on'")
 private external fun labelsOff(): Boolean
 
 @JsFun("message => console.log(message)")

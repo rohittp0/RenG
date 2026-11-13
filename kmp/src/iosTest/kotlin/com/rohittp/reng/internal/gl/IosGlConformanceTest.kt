@@ -5,7 +5,9 @@ import com.rohittp.reng.GROUND_CULL_READBACK_PIXELS
 import com.rohittp.reng.GLOBE_GROUND_READBACK_PIXELS
 import com.rohittp.reng.LATITUDE_PROBE_PIXELS
 import com.rohittp.reng.MODEL_READBACK_PIXELS
+import com.rohittp.reng.EXTERNAL_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runBasemapReadbackSuite
+import com.rohittp.reng.runExternalFrameReadbackSuite
 import com.rohittp.reng.DEPTH_READBACK_PIXELS
 import com.rohittp.reng.DISPLACEMENT_READBACK_PIXELS
 import com.rohittp.reng.SHADING_READBACK_PIXELS
@@ -353,6 +355,19 @@ class IosGlConformanceTest {
             binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
             binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
             runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /** ADR 0095: a source-owned 2D texture (iOS has no external OES), its v transform, and both fallbacks. */
+    @Test fun theExternalFrameReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+            binding.scissor(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+            runExternalFrameReadbackSuite(binding, fixture.probe)
         } finally {
             fixture.destroy()
         }

@@ -13,6 +13,7 @@ import com.rohittp.reng.FramebufferName
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.RawResourceKey
+import com.rohittp.reng.RenGMetricName
 import com.rohittp.reng.Renderer
 import com.rohittp.reng.RendererConfiguration
 import com.rohittp.reng.ResourceLocator
@@ -29,6 +30,8 @@ import com.rohittp.reng.makeWebGl2ContextCurrent
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.await
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlin.js.JsAny
 import kotlin.js.JsString
 import kotlin.js.Promise
@@ -65,6 +68,8 @@ private class Demo(
     private val basemapEnabled: Boolean,
 ) {
     private val scope = MainScope()
+    private val outputSize = "${width}x$height"
+    private val labelsEnabled = basemapEnabled && !labelsOff()
     private val diagnostics = ArrayList<String>()
     private val renderer: Renderer = createRenderer(
         configuration = RendererConfiguration(
@@ -91,7 +96,83 @@ private class Demo(
 
     fun start() {
         setStatus(statusText(), isError = false)
-        requestFrame(::onAnimationFrame)
+        val benchFrames = benchFrameCount()
+        if (benchFrames > 0) {
+            scope.launch {
+                try {
+                    runBenchmark(frames = benchFrames)
+                } catch (failure: Throwable) {
+                    showFailure(failure)
+                }
+            }
+        } else {
+            requestFrame(::onAnimationFrame)
+        }
+    }
+
+    /**
+     * `?bench=N`: the same camera flight as the animation, sampled at N fixed points instead of by
+     * wall-clock time, run twice. The first pass is cold (style, tiles and glyphs come over the
+     * network); the second runs with every raw resource already in the in-memory store, so it
+     * measures RenG's own work. Each frame is presented (one animation frame) before the next.
+     */
+    private suspend fun runBenchmark(frames: Int) {
+        val passes = ArrayList<String>()
+        var frameIndex = 0L
+        for (pass in listOf("cold", "warm")) {
+            val prepare = DoubleArray(frames)
+            val draw = DoubleArray(frames)
+            val tiles = LongArray(frames)
+            val before = renderer.queryMetrics().counters
+            val passStart = performanceNow()
+            for (sample in 0 until frames) {
+                val counters = renderer.queryMetrics().counters
+                val plan = framePlanAt(frameIndex = frameIndex++, phase = sample.toDouble() / frames)
+                val prepareStart = performanceNow()
+                val prepared = renderer.prepare(plan = plan)
+                prepare[sample] = performanceNow() - prepareStart
+                try {
+                    val drawStart = performanceNow()
+                    renderer.draw(preparedFrame = prepared, renderTarget = renderTarget)
+                    draw[sample] = performanceNow() - drawStart
+                } finally {
+                    prepared.close()
+                }
+                tiles[sample] = (renderer.queryMetrics().counters[RenGMetricName.ENGINE_TILES_RENDERED] ?: 0L) -
+                    (counters[RenGMetricName.ENGINE_TILES_RENDERED] ?: 0L)
+                drawnFrames++
+                setStatus("bench $pass ${sample + 1}/$frames", isError = false)
+                awaitAnimationFrame()
+            }
+            val wall = performanceNow() - passStart
+            val after = renderer.queryMetrics().counters
+            fun delta(name: RenGMetricName): Long = (after[name] ?: 0L) - (before[name] ?: 0L)
+            val sorted = prepare.sortedArray()
+            passes += buildString {
+                append("{\"pass\":\"$pass\",\"frames\":$frames")
+                append(",\"wallMs\":${wall.roundTo1()},\"fps\":${(frames * 1000.0 / wall).roundTo1()}")
+                append(",\"prepareAvgMs\":${prepare.average().roundTo1()}")
+                append(",\"prepareP50Ms\":${sorted[frames / 2].roundTo1()}")
+                append(",\"prepareP95Ms\":${sorted[(frames * 95) / 100].roundTo1()}")
+                append(",\"prepareMaxMs\":${sorted.last().roundTo1()}")
+                append(",\"drawAvgMs\":${draw.average().roundTo1()}")
+                append(",\"tilesRendered\":${delta(RenGMetricName.ENGINE_TILES_RENDERED)}")
+                append(",\"tileDrawMs\":${(delta(RenGMetricName.ENGINE_TILE_DRAW_NANOS) / 1e6).roundTo1()}")
+                append(",\"tilePngEncodeMs\":${(delta(RenGMetricName.ENGINE_TILE_PNG_ENCODE_NANOS) / 1e6).roundTo1()}")
+                append(",\"tilePngBytes\":${delta(RenGMetricName.ENGINE_TILE_PNG_BYTES)}")
+                append(",\"renderedTileCacheHits\":${delta(RenGMetricName.RENDERED_TILE_CACHE_HITS)}")
+                append(",\"resourceRequests\":${delta(RenGMetricName.ENGINE_RESOURCE_REQUESTS)}")
+                append(",\"wireBytes\":${delta(RenGMetricName.ENGINE_RESOURCE_WIRE_BYTES)}")
+                append(",\"perFramePrepareMs\":[${prepare.joinToString(",") { it.roundTo1().toString() }}]")
+                append(",\"perFrameTiles\":[${tiles.joinToString(",")}]")
+                append("}")
+            }
+        }
+        val report = "{\"size\":\"${outputSize}\",\"basemap\":$basemapEnabled,\"labels\":$labelsEnabled," +
+            "\"style\":\"$BASEMAP_STYLE_URL\",\"passes\":[${passes.joinToString(",")}]}"
+        consoleLog("BENCH $report".toJsString())
+        setBenchResult(report)
+        setStatus("bench done", isError = false)
     }
 
     private fun onAnimationFrame(timestampMillis: Double) {
@@ -126,8 +207,10 @@ private class Demo(
         }
     }
 
-    private fun framePlan(frameIndex: Long, timestampMillis: Double): FramePlan {
-        val phase = (timestampMillis % LOOP_MILLIS) / LOOP_MILLIS
+    private fun framePlan(frameIndex: Long, timestampMillis: Double): FramePlan =
+        framePlanAt(frameIndex = frameIndex, phase = (timestampMillis % LOOP_MILLIS) / LOOP_MILLIS)
+
+    private fun framePlanAt(frameIndex: Long, phase: Double): FramePlan {
         val travel = 0.5 - 0.5 * cos(phase * 2.0 * PI)
         return FramePlan(
             frameIndex = frameIndex,
@@ -139,7 +222,7 @@ private class Demo(
                 pitch = 5.0 + 40.0 * travel,
             ),
             drawBasemap = basemapEnabled,
-            drawLabels = basemapEnabled,
+            drawLabels = labelsEnabled,
             geometries = listOf(ROUTE_GEOMETRY),
             backdrop = if (basemapEnabled) null else SOLID_BACKDROP,
             bloom = ROUTE_BLOOM,
@@ -230,6 +313,14 @@ private fun showFailure(failure: Throwable) {
     val text = "$type: ${failure.message ?: "no message"}"
     setStatus(text, isError = true)
     consoleError(text.toJsString())
+}
+
+private fun Double.roundTo1(): Double = kotlin.math.round(this * 10.0) / 10.0
+
+private suspend fun awaitAnimationFrame() {
+    suspendCancellableCoroutine { continuation ->
+        requestFrame { continuation.resume(Unit) }
+    }
 }
 
 private fun formatNumber(value: Double): String = ((value * 10.0).toInt() / 10.0).toString()
@@ -391,6 +482,18 @@ private external fun requestFrame(callback: (Double) -> Unit): Int
 
 @JsFun("() => new URLSearchParams(window.location.search).get('style') || new URL('style.json', window.location.href).href")
 private external fun basemapStyleUrl(): JsString
+
+@JsFun("() => Number(new URLSearchParams(window.location.search).get('bench') || 0)")
+private external fun benchFrameCount(): Int
+
+@JsFun("() => new URLSearchParams(window.location.search).get('labels') === 'off'")
+private external fun labelsOff(): Boolean
+
+@JsFun("message => console.log(message)")
+private external fun consoleLog(message: JsString)
+
+@JsFun("text => { let pre = document.getElementById('bench'); if (!pre) { pre = document.createElement('pre'); pre.id = 'bench'; pre.style.display = 'none'; document.body.appendChild(pre); } pre.textContent = text; document.title = 'BENCH DONE'; }")
+private external fun setBenchResult(text: String)
 
 @JsFun("() => performance.now()")
 private external fun performanceNow(): Double

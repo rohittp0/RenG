@@ -488,12 +488,8 @@ class GroundPipelineTest {
         assertFalse(binding.log.any { it == "enable(0x8037)" }, "polygon offset is never enabled")
         assertEquals(
             listOf(
-                "bindTexture(${hex(GL_TEXTURE_2D)},11)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},21)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},21)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},11)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},12)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},22)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},22)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},12)",
             ),
@@ -877,10 +873,7 @@ class GroundPipelineTest {
         assertEquals(
             listOf(
                 "bindTexture(${hex(GL_TEXTURE_2D)},11)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},11)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},12)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},12)",
-                "bindTexture(${hex(GL_TEXTURE_2D)},13)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},13)",
             ),
             binds,

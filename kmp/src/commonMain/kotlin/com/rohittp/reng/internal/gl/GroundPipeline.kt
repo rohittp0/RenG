@@ -1587,6 +1587,11 @@ private fun bindGroundCapTile(
     mixed: Boolean,
 ) {
     if (locations.mode >= 0) binding.uniform1i(locations.mode, tile.capMode)
+    // An ordinary tile never reaches the cap branch, so it needs none of the cap's inputs. Above all
+    // it must not select the strip units: one `activeTexture` per tile on every frame is the fixed
+    // texture walk ADR 0055 removed (`RendererCapturedRegionTest` pins its ceiling). The uniforms
+    // and bindings below are left as the last cap tile set them, which mode 0 never reads.
+    if (tile.capMode == 0) return
     if (locations.spanTiles >= 0) binding.uniform1f(locations.spanTiles, tile.capSpanTiles)
     if (locations.worldU >= 0) {
         binding.uniform2f(locations.worldU, tile.capWorldUStart, tile.capWorldUWidth)

@@ -23,6 +23,7 @@ import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.Store
 import com.rohittp.reng.StoredRawResource
+import com.rohittp.reng.StoredRawResourceMetadata
 import com.rohittp.reng.Transport
 import com.rohittp.reng.TransportRequest
 import com.rohittp.reng.TransportResponse
@@ -38,6 +39,7 @@ import com.rohittp.rentile.MapSessionProvider
 import com.rohittp.rentile.PreparedStyle
 import com.rohittp.rentile.RasterAcquisitionDensity
 import com.rohittp.rentile.RawResourceKey as TileRawResourceKey
+import com.rohittp.rentile.RawResourceMetadata as TileRawResourceMetadata
 import com.rohittp.rentile.RawResourceStore as TileRawResourceStore
 import com.rohittp.rentile.RenderOptions
 import com.rohittp.rentile.RenderPriority
@@ -64,6 +66,7 @@ import kotlin.js.Promise
 import kotlin.js.toJsString
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.log2
 import kotlin.wasm.unsafe.withScopedMemoryAllocator
 
 // Served from the demo's own origin: the catalogue that hosts the app's styles sends no CORS header.
@@ -78,26 +81,31 @@ fun main() {
     }
     if (isWorkerScope()) {
         waitForWorkerSetup { setup ->
-            try {
-                startDemo(prepareWorker(setup))
-            } catch (failure: Throwable) {
-                showFailure(failure)
+            MainScope().launch {
+                try {
+                    startDemo(prepareWorker(setup))
+                } catch (failure: Throwable) {
+                    showFailure(failure)
+                }
             }
         }
         return
     }
 
-    try {
-        val browser = prepareBrowser()
-        if (browser.workerStarted) return
-        startDemo(browser)
-    } catch (failure: Throwable) {
-        showFailure(failure)
+    MainScope().launch {
+        try {
+            clearIndexedDbIfRequested()
+            val browser = prepareBrowser()
+            if (!browser.workerStarted) startDemo(browser)
+        } catch (failure: Throwable) {
+            showFailure(failure)
+        }
     }
 }
 
-private fun startDemo(browser: BrowserSetup) {
+private suspend fun startDemo(browser: BrowserSetup) {
     try {
+        val store = createRengStore()
         installTileWorkerPoolIfRequested()
         val context = browser.context ?: error("canvas.getContext(\"webgl2\") returned null")
         makeWebGl2ContextCurrent(context)
@@ -105,8 +113,10 @@ private fun startDemo(browser: BrowserSetup) {
         Demo(
             width = browser.width,
             height = browser.height,
+            renderScale = browser.scale,
             rendererName = browser.renderer.toString(),
             basemapEnabled = !browser.basemapOff,
+            store = store,
         ).start()
     } catch (failure: Throwable) {
         showFailure(failure)
@@ -116,8 +126,10 @@ private fun startDemo(browser: BrowserSetup) {
 private class Demo(
     width: Int,
     height: Int,
+    private val renderScale: Double,
     private val rendererName: String,
     private val basemapEnabled: Boolean,
+    store: Store,
 ) {
     private val scope = MainScope()
     private val outputSize = "${width}x$height"
@@ -127,7 +139,7 @@ private class Demo(
         configuration = RendererConfiguration(
             outputPixelSize = OutputPixelSize(width = width, height = height),
             transport = BrowserTransport(),
-            store = MemoryStore(),
+            store = store,
             basemapStyle = ResourceLocator(value = BASEMAP_STYLE_URL),
             diagnosticSink = DiagnosticSink(::recordDiagnostic),
             maximumReadAheadRasterisedTileBytes = if (readAheadOn()) 256L * 1024 * 1024 else 0L,
@@ -175,7 +187,8 @@ private class Demo(
     private fun counter(name: RenGMetricName): Long = renderer.queryMetrics().counters[name] ?: 0L
 
     private fun finishTrace() {
-        val report = "{\"size\":\"$outputSize\",\"style\":\"$BASEMAP_STYLE_URL\",\"labels\":$labelsEnabled," +
+        val report = "{\"size\":\"$outputSize\",\"scale\":$renderScale," +
+            "\"style\":\"$BASEMAP_STYLE_URL\",\"labels\":$labelsEnabled," +
             "\"ticks\":$traceTicks,\"skippedTicks\":$traceSkippedTicks," +
             "\"longTasks\":${longTasksJson()},\"frames\":[${traceFrames.joinToString(",")}]}"
         consoleLog("TRACE done".toJsString())
@@ -215,7 +228,10 @@ private class Demo(
                 tiles[sample] = (renderer.queryMetrics().counters[RenGMetricName.ENGINE_TILES_RENDERED] ?: 0L) -
                     (counters[RenGMetricName.ENGINE_TILES_RENDERED] ?: 0L)
                 drawnFrames++
-                setStatus("bench $pass ${sample + 1}/$frames", isError = false)
+                setStatus(
+                    "bench $pass ${sample + 1}/$frames\nscale: $renderScale\ncanvas: $outputSize",
+                    isError = false,
+                )
                 awaitAnimationFrame()
             }
             val wall = performanceNow() - passStart
@@ -242,11 +258,12 @@ private class Demo(
                 append("}")
             }
         }
-        val report = "{\"size\":\"${outputSize}\",\"basemap\":$basemapEnabled,\"labels\":$labelsEnabled," +
+        val report = "{\"size\":\"${outputSize}\",\"scale\":$renderScale," +
+            "\"basemap\":$basemapEnabled,\"labels\":$labelsEnabled," +
             "\"style\":\"$BASEMAP_STYLE_URL\",\"passes\":[${passes.joinToString(",")}]}"
         consoleLog("BENCH $report".toJsString())
         setBenchResult(report)
-        setStatus("bench done", isError = false)
+        setStatus("bench done\nscale: $renderScale\ncanvas: $outputSize", isError = false)
     }
 
     private fun onAnimationFrame(timestampMillis: Double) {
@@ -341,7 +358,7 @@ private class Demo(
             camera = Camera(
                 latitude = 50.4 + (48.8566 - 50.4) * travel,
                 unwrappedLongitude = 1.1 + (2.3522 - 1.1) * travel,
-                zoom = 3.2 + (10.8 - 3.2) * travel,
+                zoom = 3.2 + (10.8 - 3.2) * travel + log2(renderScale),
                 bearing = phase * 360.0,
                 pitch = 5.0 + 40.0 * travel,
             ),
@@ -371,6 +388,8 @@ private class Demo(
 
     private fun statusText(): String = buildString {
         appendLine("renderer: $rendererName")
+        appendLine("scale: $renderScale")
+        appendLine("canvas: $outputSize")
         appendLine("frame: $drawnFrames")
         appendLine("fps: ${formatNumber(framesPerSecond)}")
         appendLine("prepare avg: ${average(prepareMillis)} ms")
@@ -395,6 +414,138 @@ private class MemoryStore : Store {
     override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
         resources[key] = resource
     }
+}
+
+private class IndexedDbStore(private val database: IndexedDbDatabase) : Store {
+    override suspend fun read(key: RawResourceKey): StoredRawResource? = try {
+        val record = indexedDbRead(
+            database = database,
+            objectStore = RENG_OBJECT_STORE.toJsString(),
+            key = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+        ).await() ?: return null
+        StoredRawResource(
+            bytes = record.body.copyToByteArray(),
+            contentDigest = record.contentDigest.toString(),
+            metadata = StoredRawResourceMetadata(
+                contentType = record.contentType?.toString(),
+                etag = record.etag?.toString(),
+                lastModified = record.lastModified?.toString(),
+                freshUntilEpochMillis = record.freshUntilEpochMillis.optionalEpochMillis(),
+                storedAtEpochMillis = record.storedAtEpochMillis.toLong(),
+            ),
+        )
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("RenG read", failure)
+        null
+    }
+
+    override suspend fun write(key: RawResourceKey, resource: StoredRawResource) {
+        try {
+            val metadata = resource.metadata
+            writeIndexedDbRecord(
+                database = database,
+                objectStore = RENG_OBJECT_STORE,
+                key = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()),
+                resource = resource.bytes,
+                contentDigest = resource.contentDigest,
+                contentType = metadata.contentType,
+                etag = metadata.etag,
+                lastModified = metadata.lastModified,
+                freshUntilEpochMillis = metadata.freshUntilEpochMillis,
+                storedAtEpochMillis = metadata.storedAtEpochMillis,
+                write = ::indexedDbWrite,
+            )
+        } catch (failure: Throwable) {
+            logStoreFailureOnce("RenG write", failure)
+        }
+    }
+}
+
+private suspend fun createRengStore(): Store {
+    if (!persistentStoreRequested()) return MemoryStore()
+    return try {
+        IndexedDbStore(openIndexedDbOnce())
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("open", failure)
+        MemoryStore()
+    }
+}
+
+private const val INDEXED_DB_NAME = "reng-demo-store"
+private const val RENG_OBJECT_STORE = "reng"
+private const val RENTILE_OBJECT_STORE = "rentile"
+private const val DATA_RECORD = "data"
+private const val METADATA_RECORD = "meta"
+private var indexedDbPromise: Promise<IndexedDbDatabase>? = null
+private val loggedStoreFailures = HashSet<String>()
+
+private suspend fun openIndexedDbOnce(): IndexedDbDatabase =
+    (indexedDbPromise ?: openIndexedDb(INDEXED_DB_NAME.toJsString()).also { indexedDbPromise = it }).await()
+
+private suspend fun clearIndexedDbIfRequested() {
+    if (!clearStoreRequested()) return
+    try {
+        deleteIndexedDb(INDEXED_DB_NAME.toJsString()).await()
+        indexedDbPromise = null
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("clear", failure)
+    }
+}
+
+private fun indexedDbKey(recordKind: String, stableId: String, resourceClass: String): String =
+    "$recordKind|${resourceClass.length}:$resourceClass$stableId"
+
+private fun Double.optionalEpochMillis(): Long? = takeIf { it >= 0.0 }?.toLong()
+
+private fun logStoreFailureOnce(operation: String, failure: Throwable) {
+    if (!loggedStoreFailures.add(operation)) return
+    val type = failure::class.simpleName ?: "Throwable"
+    consoleError("IndexedDB $operation failed; continuing without it: $type: ${failure.message ?: "no message"}".toJsString())
+}
+
+private suspend fun writeIndexedDbRecord(
+    database: IndexedDbDatabase,
+    objectStore: String,
+    key: String,
+    resource: ByteArray,
+    contentDigest: String,
+    contentType: String?,
+    etag: String?,
+    lastModified: String?,
+    freshUntilEpochMillis: Long?,
+    storedAtEpochMillis: Long,
+    write: (
+        IndexedDbDatabase,
+        JsString,
+        JsString,
+        Int,
+        Int,
+        JsString,
+        JsString?,
+        JsString?,
+        JsString?,
+        Double,
+        Double,
+    ) -> Promise<JsAny>,
+) {
+    val promise = withScopedMemoryAllocator { allocator ->
+        val pointer = allocator.allocate(resource.size)
+        for (index in resource.indices) (pointer + index).storeByte(resource[index])
+        write(
+            database,
+            objectStore.toJsString(),
+            key.toJsString(),
+            pointer.address.toInt(),
+            resource.size,
+            contentDigest.toJsString(),
+            contentType?.toJsString(),
+            etag?.toJsString(),
+            lastModified?.toJsString(),
+            freshUntilEpochMillis?.toDouble() ?: -1.0,
+            storedAtEpochMillis.toDouble(),
+        )
+    }
+    promise.await()
 }
 
 private class BrowserTransport : Transport {
@@ -447,6 +598,7 @@ private fun installTileWorkerPoolIfRequested() {
         workerCount = workerCount,
         skipSkia = skipSkia(),
         compareCount = if (skipSkia()) compareTileCount().coerceAtLeast(0) else 0,
+        persistentStore = persistentStoreRequested(),
     )
     tileWorkerPool = pool
     installBasemapTileRenderer { styleLocator, zoom, column, row, outputSizePx ->
@@ -458,30 +610,38 @@ private fun installTileWorkerPoolIfRequested() {
 
 private fun startTileWorker() {
     val scope = MainScope()
-    val renderer = TileWorkerRenderer(skipSkia = tileWorkerSkipsSkia())
-    installTileWorkerMessageHandler { request ->
-        scope.launch {
-            try {
-                val rgba = renderer.render(
-                    styleLocator = request.style.toString(),
-                    tile = TileId(request.zoom, request.column, request.row),
-                    outputSizePx = request.outputSizePx,
-                    compare = request.compare,
-                )
-                postTileWorkerSuccess(request.id, rgba)
-            } catch (failure: Throwable) {
-                val type = failure::class.simpleName ?: "Throwable"
-                postTileWorkerFailure(request.id, "$type: ${failure.message ?: "no message"}".toJsString())
+    scope.launch {
+        val renderer = TileWorkerRenderer(
+            skipSkia = tileWorkerSkipsSkia(),
+            store = createTileWorkerStore(),
+        )
+        installTileWorkerMessageHandler { request ->
+            scope.launch {
+                try {
+                    val rgba = renderer.render(
+                        styleLocator = request.style.toString(),
+                        tile = TileId(request.zoom, request.column, request.row),
+                        outputSizePx = request.outputSizePx,
+                        compare = request.compare,
+                    )
+                    postTileWorkerSuccess(request.id, rgba)
+                } catch (failure: Throwable) {
+                    val type = failure::class.simpleName ?: "Throwable"
+                    postTileWorkerFailure(request.id, "$type: ${failure.message ?: "no message"}".toJsString())
+                }
             }
         }
     }
 }
 
-private class TileWorkerRenderer(private val skipSkia: Boolean) {
+private class TileWorkerRenderer(
+    private val skipSkia: Boolean,
+    store: TileRawResourceStore,
+) {
     private val engine: BasemapRasterizer = Rentile.create(
         RentileConfiguration(
             transport = TileWorkerTransport(),
-            rawResourceStore = TileWorkerStore(),
+            rawResourceStore = store,
             sessionProvider = MapSessionProvider.None,
             credentialProvider = CredentialProvider.None,
             clock = RentileClock.System,
@@ -588,6 +748,91 @@ private class TileWorkerStore : TileRawResourceStore {
     }
 }
 
+private class IndexedDbTileWorkerStore(private val database: IndexedDbDatabase) : TileRawResourceStore {
+    override suspend fun read(key: TileRawResourceKey): TileStoredRawResource? = try {
+        val record = indexedDbRead(
+            database = database,
+            objectStore = RENTILE_OBJECT_STORE.toJsString(),
+            key = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+        ).await() ?: return null
+        TileStoredRawResource(
+            bytes = record.body.copyToByteArray(),
+            contentDigest = record.contentDigest.toString(),
+            metadata = record.toTileMetadata(),
+        )
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("Rentile read", failure)
+        null
+    }
+
+    override suspend fun write(key: TileRawResourceKey, resource: TileStoredRawResource) {
+        try {
+            val metadata = resource.metadata
+            val bytes = resource.bytes
+            val promise = withScopedMemoryAllocator { allocator ->
+                val pointer = allocator.allocate(bytes.size)
+                for (index in bytes.indices) (pointer + index).storeByte(bytes[index])
+                indexedDbWriteRentile(
+                    database = database,
+                    dataKey = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+                    metadataKey = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+                    address = pointer.address.toInt(),
+                    length = bytes.size,
+                    contentDigest = resource.contentDigest.toJsString(),
+                    contentType = metadata.contentType?.toJsString(),
+                    etag = metadata.etag?.toJsString(),
+                    lastModified = metadata.lastModified?.toJsString(),
+                    freshUntilEpochMillis = metadata.freshUntilEpochMillis?.toDouble() ?: -1.0,
+                    storedAtEpochMillis = metadata.storedAtEpochMillis.toDouble(),
+                )
+            }
+            promise.await()
+        } catch (failure: Throwable) {
+            logStoreFailureOnce("Rentile write", failure)
+        }
+    }
+
+    override suspend fun remove(key: TileRawResourceKey) {
+        try {
+            indexedDbRemoveRentile(
+                database = database,
+                dataKey = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+                metadataKey = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+            ).await()
+        } catch (failure: Throwable) {
+            logStoreFailureOnce("Rentile remove", failure)
+        }
+    }
+
+    override suspend fun metadata(key: TileRawResourceKey): TileRawResourceMetadata? = try {
+        indexedDbReadMetadata(
+            database = database,
+            key = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
+        ).await()?.toTileMetadata()
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("Rentile metadata read", failure)
+        null
+    }
+}
+
+private fun IndexedDbMetadataRecord.toTileMetadata(): TileRawResourceMetadata = TileRawResourceMetadata(
+    contentType = contentType?.toString(),
+    etag = etag?.toString(),
+    lastModified = lastModified?.toString(),
+    freshUntilEpochMillis = freshUntilEpochMillis.optionalEpochMillis(),
+    storedAtEpochMillis = storedAtEpochMillis.toLong(),
+)
+
+private suspend fun createTileWorkerStore(): TileRawResourceStore {
+    if (!persistentStoreRequested()) return TileWorkerStore()
+    return try {
+        IndexedDbTileWorkerStore(openIndexedDbOnce())
+    } catch (failure: Throwable) {
+        logStoreFailureOnce("open", failure)
+        TileWorkerStore()
+    }
+}
+
 private class TileWorkerTransport : TileResourceTransport {
     override suspend fun execute(request: TileTransportRequest): TileTransportResponse {
         val payload = fetchResource(
@@ -691,6 +936,7 @@ private external interface BrowserSetup : JsAny {
     val context: JsAny?
     val width: Int
     val height: Int
+    val scale: Double
     val renderer: JsString
     val basemapOff: Boolean
     val workerStarted: Boolean
@@ -700,7 +946,23 @@ private external interface WorkerSetup : JsAny {
     val canvas: JsAny
     val width: Int
     val height: Int
+    val scale: Double
     val query: JsString
+}
+
+private external interface IndexedDbDatabase : JsAny
+
+private external interface IndexedDbMetadataRecord : JsAny {
+    val contentType: JsString?
+    val etag: JsString?
+    val lastModified: JsString?
+    val freshUntilEpochMillis: Double
+    val storedAtEpochMillis: Double
+}
+
+private external interface IndexedDbRecord : IndexedDbMetadataRecord {
+    val body: JsUint8Array
+    val contentDigest: JsString
 }
 
 private external interface FetchPayload : JsAny {
@@ -735,7 +997,7 @@ private external interface BrowserRasterResult : JsAny {
 }
 
 @JsFun(
-    """(workerCount, skipSkia, compareCount) => {
+    """(workerCount, skipSkia, compareCount, persistentStore) => {
         const queue = [];
         const workers = [];
         const notices = new Set();
@@ -769,6 +1031,7 @@ private external interface BrowserRasterResult : JsAny {
             url.search = '';
             url.searchParams.set('role', 'tile');
             if (skipSkia) url.searchParams.set('skia', 'skip');
+            if (persistentStore) url.searchParams.set('store', 'idb');
             const worker = new Worker(url);
             const state = { worker, current: null, broken: false };
             worker.onmessage = event => {
@@ -820,6 +1083,7 @@ private external fun createTileWorkerPool(
     workerCount: Int,
     skipSkia: Boolean,
     compareCount: Int,
+    persistentStore: Boolean,
 ): TileWorkerPool
 
 @JsFun("(pool, style, zoom, column, row, outputSizePx) => pool.render(style, zoom, column, row, outputSizePx)")
@@ -1063,9 +1327,13 @@ private external fun renderBrowserRaster(
         const params = new URLSearchParams(query);
         const workerOn = params.get('worker') === 'on';
         const dpr = window.devicePixelRatio || 1;
-        const scale = Math.max(0.01, Math.min(dpr, 2048 / window.innerWidth, 2048 / window.innerHeight));
-        const width = Math.max(1, Math.floor(window.innerWidth * scale));
-        const height = Math.max(1, Math.floor(window.innerHeight * scale));
+        const parsedScale = Number(params.get('scale'));
+        const renderScale = params.has('scale') && Number.isFinite(parsedScale)
+            ? Math.max(0.25, Math.min(1, parsedScale))
+            : 1;
+        const pixelRatio = Math.max(0.01, Math.min(dpr, 2048 / window.innerWidth, 2048 / window.innerHeight));
+        const width = Math.max(1, Math.floor(window.innerWidth * pixelRatio * renderScale));
+        const height = Math.max(1, Math.floor(window.innerHeight * pixelRatio * renderScale));
         canvas.width = width;
         canvas.height = height;
 
@@ -1142,11 +1410,12 @@ private external fun renderBrowserRaster(
                 text: 'Worker: ' + (event.message || 'failed to load'),
                 isError: true
             });
-            worker.postMessage({ canvas: offscreen, width, height, query }, [offscreen]);
+            worker.postMessage({ canvas: offscreen, width, height, scale: renderScale, query }, [offscreen]);
             return {
                 context: null,
                 width,
                 height,
+                scale: renderScale,
                 renderer: 'worker starting',
                 basemapOff: params.get('basemap') === 'off',
                 workerStarted: true
@@ -1166,6 +1435,7 @@ private external fun renderBrowserRaster(
             context,
             width,
             height,
+            scale: renderScale,
             renderer: String(renderer),
             basemapOff: params.get('basemap') === 'off',
             workerStarted: false
@@ -1193,6 +1463,7 @@ private external fun prepareBrowser(): BrowserSetup
             context,
             width: setup.width,
             height: setup.height,
+            scale: setup.scale,
             renderer: String(renderer),
             basemapOff: new URLSearchParams(globalThis.__rengQuery).get('basemap') === 'off',
             workerStarted: false
@@ -1209,6 +1480,176 @@ private external fun isTileWorkerScope(): Boolean
 
 @JsFun("callback => self.__rengSetup.then(callback)")
 private external fun waitForWorkerSetup(callback: (WorkerSetup) -> Unit)
+
+@JsFun(
+    """name => new Promise((resolve, reject) => {
+        if (!globalThis.indexedDB) {
+            reject(new Error('IndexedDB is unavailable'));
+            return;
+        }
+        const request = globalThis.indexedDB.open(String(name), 1);
+        request.onupgradeneeded = () => {
+            const database = request.result;
+            if (!database.objectStoreNames.contains('reng')) database.createObjectStore('reng');
+            if (!database.objectStoreNames.contains('rentile')) database.createObjectStore('rentile');
+        };
+        request.onsuccess = () => {
+            const database = request.result;
+            if (!database.objectStoreNames.contains('reng') || !database.objectStoreNames.contains('rentile')) {
+                database.close();
+                reject(new Error('IndexedDB schema is missing an object store; use ?store=clear'));
+                return;
+            }
+            database.onversionchange = () => database.close();
+            resolve(database);
+        };
+        request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+        request.onblocked = () => reject(new Error('IndexedDB open was blocked'));
+    })""",
+)
+private external fun openIndexedDb(name: JsString): Promise<IndexedDbDatabase>
+
+@JsFun(
+    """name => new Promise((resolve, reject) => {
+        if (!globalThis.indexedDB) {
+            reject(new Error('IndexedDB is unavailable'));
+            return;
+        }
+        const request = globalThis.indexedDB.deleteDatabase(String(name));
+        request.onsuccess = () => resolve({});
+        request.onerror = () => reject(request.error || new Error('IndexedDB delete failed'));
+        request.onblocked = () => reject(new Error('IndexedDB delete was blocked by another page'));
+    })""",
+)
+private external fun deleteIndexedDb(name: JsString): Promise<JsAny>
+
+@JsFun(
+    """(database, objectStore, key) => new Promise((resolve, reject) => {
+        const transaction = database.transaction(String(objectStore), 'readonly');
+        const request = transaction.objectStore(String(objectStore)).get(String(key));
+        let result = null;
+        request.onsuccess = () => {
+            const record = request.result;
+            result = record == null ? null : { ...record, body: new Uint8Array(record.bytes) };
+        };
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || request.error || new Error('IndexedDB read failed'));
+        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB read aborted'));
+    })""",
+)
+private external fun indexedDbRead(
+    database: IndexedDbDatabase,
+    objectStore: JsString,
+    key: JsString,
+): Promise<IndexedDbRecord?>
+
+@JsFun(
+    """(database, objectStore, key, address, length, contentDigest, contentType, etag, lastModified,
+        freshUntilEpochMillis, storedAtEpochMillis) => {
+        const bytes = new Uint8Array(length);
+        bytes.set(new Uint8Array(wasmExports.memory.buffer, address >>> 0, length));
+        const record = {
+            bytes: bytes.buffer,
+            contentDigest: String(contentDigest),
+            contentType: contentType == null ? null : String(contentType),
+            etag: etag == null ? null : String(etag),
+            lastModified: lastModified == null ? null : String(lastModified),
+            freshUntilEpochMillis,
+            storedAtEpochMillis
+        };
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(String(objectStore), 'readwrite');
+            transaction.objectStore(String(objectStore)).put(record, String(key));
+            transaction.oncomplete = () => resolve({});
+            transaction.onerror = () => reject(transaction.error || new Error('IndexedDB write failed'));
+            transaction.onabort = () => reject(transaction.error || new Error('IndexedDB write aborted'));
+        });
+    }""",
+)
+private external fun indexedDbWrite(
+    database: IndexedDbDatabase,
+    objectStore: JsString,
+    key: JsString,
+    address: Int,
+    length: Int,
+    contentDigest: JsString,
+    contentType: JsString?,
+    etag: JsString?,
+    lastModified: JsString?,
+    freshUntilEpochMillis: Double,
+    storedAtEpochMillis: Double,
+): Promise<JsAny>
+
+@JsFun(
+    """(database, dataKey, metadataKey, address, length, contentDigest, contentType, etag, lastModified,
+        freshUntilEpochMillis, storedAtEpochMillis) => {
+        const bytes = new Uint8Array(length);
+        bytes.set(new Uint8Array(wasmExports.memory.buffer, address >>> 0, length));
+        const metadata = {
+            contentDigest: String(contentDigest),
+            contentType: contentType == null ? null : String(contentType),
+            etag: etag == null ? null : String(etag),
+            lastModified: lastModified == null ? null : String(lastModified),
+            freshUntilEpochMillis,
+            storedAtEpochMillis
+        };
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction('rentile', 'readwrite');
+            const store = transaction.objectStore('rentile');
+            store.put({ ...metadata, bytes: bytes.buffer }, String(dataKey));
+            store.put(metadata, String(metadataKey));
+            transaction.oncomplete = () => resolve({});
+            transaction.onerror = () => reject(transaction.error || new Error('IndexedDB Rentile write failed'));
+            transaction.onabort = () => reject(transaction.error || new Error('IndexedDB Rentile write aborted'));
+        });
+    }""",
+)
+private external fun indexedDbWriteRentile(
+    database: IndexedDbDatabase,
+    dataKey: JsString,
+    metadataKey: JsString,
+    address: Int,
+    length: Int,
+    contentDigest: JsString,
+    contentType: JsString?,
+    etag: JsString?,
+    lastModified: JsString?,
+    freshUntilEpochMillis: Double,
+    storedAtEpochMillis: Double,
+): Promise<JsAny>
+
+@JsFun(
+    """(database, key) => new Promise((resolve, reject) => {
+        const transaction = database.transaction('rentile', 'readonly');
+        const request = transaction.objectStore('rentile').get(String(key));
+        let result = null;
+        request.onsuccess = () => { result = request.result == null ? null : request.result; };
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || request.error || new Error('IndexedDB metadata read failed'));
+        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB metadata read aborted'));
+    })""",
+)
+private external fun indexedDbReadMetadata(
+    database: IndexedDbDatabase,
+    key: JsString,
+): Promise<IndexedDbMetadataRecord?>
+
+@JsFun(
+    """(database, dataKey, metadataKey) => new Promise((resolve, reject) => {
+        const transaction = database.transaction('rentile', 'readwrite');
+        const store = transaction.objectStore('rentile');
+        store.delete(String(dataKey));
+        store.delete(String(metadataKey));
+        transaction.oncomplete = () => resolve({});
+        transaction.onerror = () => reject(transaction.error || new Error('IndexedDB Rentile remove failed'));
+        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB Rentile remove aborted'));
+    })""",
+)
+private external fun indexedDbRemoveRentile(
+    database: IndexedDbDatabase,
+    dataKey: JsString,
+    metadataKey: JsString,
+): Promise<JsAny>
 
 @JsFun(
     """(ifNoneMatch, ifModifiedSince, accept) => {
@@ -1252,6 +1693,20 @@ private external fun fetchResource(
     method: JsString,
     headers: JsAny,
 ): Promise<FetchPayload>
+
+@JsFun(
+    """() => {
+        const query = typeof window === 'undefined'
+            ? (globalThis.__rengQuery || self.location.search)
+            : window.location.search;
+        const mode = new URLSearchParams(query).get('store');
+        return mode === 'idb' || mode === 'clear';
+    }""",
+)
+private external fun persistentStoreRequested(): Boolean
+
+@JsFun("() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('store') === 'clear'")
+private external fun clearStoreRequested(): Boolean
 
 @JsFun("callback => globalThis.requestAnimationFrame(callback)")
 private external fun requestFrame(callback: (Double) -> Unit): Int

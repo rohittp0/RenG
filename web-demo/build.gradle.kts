@@ -66,6 +66,7 @@ kotlin {
     sourceSets {
         wasmJsMain.dependencies {
             implementation(project(":kmp"))
+            implementation("com.rohittp.rentile:kmp:0.19.0-wasm2")
             implementation(libs.kotlinx.coroutines.core)
         }
         getByName("wasmJsMain").resources.srcDir(unpackSkikoWasmRuntime)

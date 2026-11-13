@@ -1,5 +1,7 @@
 package com.rohittp.reng
 
+import com.rohittp.reng.internal.firewall.BasemapTileRenderer
+import com.rohittp.reng.internal.firewall.installedBasemapTileRenderer
 import kotlin.js.JsAny
 import kotlin.js.unsafeCast
 
@@ -13,6 +15,22 @@ public fun makeWebGl2ContextCurrent(context: JsAny) {
 /** Clears the consumer-owned WebGL2 context currently selected for RenG. */
 public fun clearCurrentWebGl2Context() {
     currentWebGl2Context = null
+}
+
+/**
+ * Installs a process-local raw basemap tile renderer. Each browser worker has a separate Wasm
+ * instance, so installing this in a render worker cannot affect the page or a tile worker.
+ */
+public fun installBasemapTileRenderer(
+    renderer: suspend (
+        styleLocator: String,
+        zoom: Int,
+        column: Int,
+        row: Int,
+        outputSizePx: Int,
+    ) -> ByteArray,
+) {
+    installedBasemapTileRenderer = BasemapTileRenderer(renderer)
 }
 
 internal external interface WebGl2Context : JsAny {

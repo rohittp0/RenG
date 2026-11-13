@@ -71,6 +71,8 @@ import com.rohittp.rentile.ValidatedDemTile
 import com.rohittp.reng.internal.thread.PlatformLock
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /**
@@ -570,6 +572,7 @@ internal class BasemapEngineHost(
                 contentDigest = contentDigest,
                 lease = lease,
                 prepared = existing.prepared,
+                styleLocator = existing.styleLocator,
                 tileJsonDocuments = existing.tileJsonDocuments,
             )
             return existing.prepared
@@ -599,6 +602,7 @@ internal class BasemapEngineHost(
             contentDigest = contentDigest,
             lease = lease,
             prepared = prepared,
+            styleLocator = baseUri,
             tileJsonDocuments = harvestTileJsonDocuments(),
         )
         return prepared
@@ -947,13 +951,49 @@ internal class BasemapEngineHost(
         }
 
         return if (asRawPixels) {
-            val batch = engineCall { engine.renderRaw(prepared.batch, priority = forwarding(priority, forReadAhead)) }
-            batch.tiles.map { rendered ->
-                carry(
-                    rendered.id,
-                    rendered.contentKey,
-                    BasemapTilePixels.Raw(rendered.rgbaBytes, rendered.widthPx, rendered.heightPx),
-                )
+            val renderer = installedBasemapTileRenderer
+            val styleLocator = compiledStyles.values
+                .firstOrNull { it.prepared === prepared.style }
+                ?.styleLocator
+            if (renderer != null && styleLocator != null) {
+                // Priority does not affect pixels, but retain the same foreground/read-ahead observation
+                // as the in-process branch.
+                forwarding(priority, forReadAhead)
+                coroutineScope {
+                    prepared.tiles.map { tile ->
+                        async {
+                            val id = engineTileIdOf(tile)
+                            val rgba = renderer.render(
+                                styleLocator = styleLocator,
+                                zoom = id.z,
+                                column = id.x,
+                                row = id.y,
+                                outputSizePx = tileOutputSizePixels,
+                            )
+                            require(rgba.size.toLong() == tileOutputSizePixels.toLong() * tileOutputSizePixels * 4L) {
+                                "external basemap tile renderer returned ${rgba.size} bytes for " +
+                                    "a ${tileOutputSizePixels}x$tileOutputSizePixels tile"
+                            }
+                            carry(
+                                id,
+                                prepared.batch.contentKeys[id]
+                                    ?: error("the prepared batch has no content key for $id"),
+                                BasemapTilePixels.Raw(rgba, tileOutputSizePixels, tileOutputSizePixels),
+                            )
+                        }
+                    }.awaitAll()
+                }
+            } else {
+                val batch = engineCall {
+                    engine.renderRaw(prepared.batch, priority = forwarding(priority, forReadAhead))
+                }
+                batch.tiles.map { rendered ->
+                    carry(
+                        rendered.id,
+                        rendered.contentKey,
+                        BasemapTilePixels.Raw(rendered.rgbaBytes, rendered.widthPx, rendered.heightPx),
+                    )
+                }
             }
         } else {
             val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority, forReadAhead)) }
@@ -1562,6 +1602,8 @@ internal class BasemapEngineHost(
         val contentDigest: String,
         val lease: Lease,
         val prepared: PreparedStyle,
+        /** The base URI passed with the prefetched style; a remote style's locator in browser hosts. */
+        val styleLocator: String?,
         /**
          * Every TileJSON document the engine fetched while compiling [prepared], parsed, by url. The
          * compiled style already holds the tile templates these yielded and will not fetch them again, so

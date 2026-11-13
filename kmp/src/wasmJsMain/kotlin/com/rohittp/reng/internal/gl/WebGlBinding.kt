@@ -1,9 +1,12 @@
+@file:OptIn(kotlin.wasm.unsafe.UnsafeWasmMemoryApi::class)
+
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.WebGl2Context
 import com.rohittp.reng.currentWebGl2Context
 import kotlin.js.JsAny
 import kotlin.js.toJsString
+import kotlin.wasm.unsafe.withScopedMemoryAllocator
 
 internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     private val framebuffers = ObjectNames()
@@ -124,21 +127,27 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     override fun texImage2D(
         target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
         border: Int, format: Int, type: Int, pixels: ByteArray?,
-    ) = gl.texImage2D(
-        target, level, internalFormat, width, height, border, format, type,
-        pixels?.let(::byteView),
-    )
+    ) {
+        if (pixels == null) {
+            gl.texImage2D(target, level, internalFormat, width, height, border, format, type, null)
+        } else {
+            withByteView(pixels) { view ->
+                gl.texImage2D(target, level, internalFormat, width, height, border, format, type, view)
+            }
+        }
+    }
     override fun texSubImage2D(
         target: Int, level: Int, xOffset: Int, yOffset: Int, width: Int, height: Int,
         format: Int, type: Int, pixels: ByteArray,
-    ) = gl.texSubImage2D(target, level, xOffset, yOffset, width, height, format, type, byteView(pixels))
+    ) = withByteView(pixels) { view ->
+        gl.texSubImage2D(target, level, xOffset, yOffset, width, height, format, type, view)
+    }
     override fun compressedTexImage2D(
         target: Int, level: Int, internalFormat: Int, width: Int, height: Int,
         border: Int, imageSize: Int, data: ByteArray, dataOffset: Int,
-    ) = gl.compressedTexImage2D(
-        target, level, internalFormat, width, height, border,
-        byteView(data.copyOfRange(dataOffset, dataOffset + imageSize)),
-    )
+    ) = withByteView(data, offset = dataOffset, length = imageSize) { view ->
+        gl.compressedTexImage2D(target, level, internalFormat, width, height, border, view)
+    }
     override fun texStorage2D(target: Int, levels: Int, internalFormat: Int, width: Int, height: Int) =
         gl.texStorage2D(target, levels, internalFormat, width, height)
     override fun texParameteri(target: Int, pname: Int, value: Int) = gl.texParameteri(target, pname, value)
@@ -151,9 +160,11 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     override fun pixelStorei(pname: Int, value: Int) = gl.pixelStorei(pname, value)
     override fun readPixels(x: Int, y: Int, width: Int, height: Int, format: Int, type: Int, out: ByteArray) {
         require(out.isNotEmpty()) { "a pixel read needs a destination" }
-        val view = newUint8Array(out.size)
-        gl.readPixels(x, y, width, height, format, type, view)
-        for (index in out.indices) out[index] = view[index].toByte()
+        withScopedMemoryAllocator { allocator ->
+            val pointer = allocator.allocate(out.size)
+            gl.readPixels(x, y, width, height, format, type, linearMemoryByteView(pointer.address.toInt(), out.size))
+            for (index in out.indices) out[index] = (pointer + index).loadByte()
+        }
     }
 
     override fun genBuffers(count: Int, out: IntArray) = generate(count, out, buffers) { gl.createBuffer() }
@@ -162,11 +173,11 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     override fun bindBufferBase(target: Int, index: Int, buffer: Int) = gl.bindBufferBase(target, index, buffers[buffer])
     override fun bufferData(target: Int, size: Int, data: ByteArray?, usage: Int) {
         if (data == null || data.isEmpty()) gl.bufferData(target, size, usage)
-        else gl.bufferData(target, byteView(data.copyOf(minOf(size, data.size))), usage)
+        else withByteView(data, length = minOf(size, data.size)) { view -> gl.bufferData(target, view, usage) }
     }
     override fun bufferSubData(target: Int, offset: Int, size: Int, data: ByteArray) {
         if (size == 0) return
-        gl.bufferSubData(target, offset, byteView(data.copyOf(minOf(size, data.size))))
+        withByteView(data, length = minOf(size, data.size)) { view -> gl.bufferSubData(target, offset, view) }
     }
     override fun genVertexArrays(count: Int, out: IntArray) = generate(count, out, vertexArrays) { gl.createVertexArray() }
     override fun deleteVertexArrays(count: Int, names: IntArray) = delete(count, names, vertexArrays, gl::deleteVertexArray)
@@ -268,10 +279,19 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
         for (index in 0 until count) write(index, jsNumberAt(value, index))
     }
 
-    private fun byteView(bytes: ByteArray): JsAny {
-        val view = newUint8Array(bytes.size)
-        for (index in bytes.indices) view[index] = bytes[index].toInt()
-        return view
+    private inline fun <T> withByteView(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size - offset,
+        block: (JsAny) -> T,
+    ): T {
+        require(offset >= 0 && length >= 0 && offset <= bytes.size - length) { "byte view is outside the source" }
+        if (length == 0) return block(linearMemoryByteView(address = 0, length = 0))
+        return withScopedMemoryAllocator { allocator ->
+            val pointer = allocator.allocate(length)
+            for (index in 0 until length) (pointer + index).storeByte(bytes[offset + index])
+            block(linearMemoryByteView(pointer.address.toInt(), length))
+        }
     }
 
     private fun generate(count: Int, out: IntArray, names: ObjectNames, create: () -> JsAny?) {
@@ -345,8 +365,9 @@ private external interface JsFloatArray : JsAny {
     operator fun set(index: Int, value: Float)
 }
 
-@JsFun("size => new Uint8Array(size)")
-private external fun newUint8Array(size: Int): JsIntArray
+// Generated Kotlin glue places @JsFun bodies beside a module-scoped `wasmExports` reference.
+@JsFun("(address, length) => new Uint8Array(wasmExports.memory.buffer, address >>> 0, length)")
+private external fun linearMemoryByteView(address: Int, length: Int): JsAny
 
 @JsFun("size => new Int32Array(size)")
 private external fun newInt32Array(size: Int): JsIntArray

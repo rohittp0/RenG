@@ -42,11 +42,61 @@
       border-color: rgba(255, 80, 80, 0.55);
       background: rgba(38, 4, 8, 0.92);
     }
+
+    #smoothness {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 1;
+      display: none;
+      width: 180px;
+      padding: 9px 11px;
+      border: 1px solid rgba(91, 210, 255, 0.35);
+      border-radius: 7px;
+      color: #dcecff;
+      background: rgba(3, 10, 18, 0.82);
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      pointer-events: none;
+    }
+
+    .worker-mode #smoothness {
+      display: block;
+    }
+
+    #smoothness-track {
+      position: relative;
+      height: 6px;
+      margin-top: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    #smoothness-track::after {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 32px;
+      height: 6px;
+      border-radius: inherit;
+      background: #5bd2ff;
+      content: "";
+      animation: smoothness-sweep 1.2s ease-in-out infinite alternate;
+    }
+
+    @keyframes smoothness-sweep {
+      from { transform: translateX(0); }
+      to { transform: translateX(148px); }
+    }
   </style>
 </head>
 <body>
   <canvas id="map"></canvas>
   <div id="status">Starting RenG…</div>
+  <div id="smoothness">
+    <div id="smoothness-readout">main rAF starting…</div>
+    <div id="smoothness-track"></div>
+  </div>
   <script src="web-demo.js"></script>
 </body>
 </html>

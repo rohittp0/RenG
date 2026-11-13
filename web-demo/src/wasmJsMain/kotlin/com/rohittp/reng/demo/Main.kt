@@ -1,4 +1,7 @@
-@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
+@file:OptIn(
+    kotlin.js.ExperimentalWasmJsInterop::class,
+    kotlin.wasm.unsafe.UnsafeWasmMemoryApi::class,
+)
 
 package com.rohittp.reng.demo
 
@@ -38,6 +41,7 @@ import kotlin.js.Promise
 import kotlin.js.toJsString
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.wasm.unsafe.withScopedMemoryAllocator
 
 // Served from the demo's own origin: the catalogue that hosts the app's styles sends no CORS header.
 // `?style=<absolute url>` overrides it.
@@ -45,8 +49,28 @@ private val BASEMAP_STYLE_URL: String get() = basemapStyleUrl().toString()
 private const val LOOP_MILLIS = 24_000.0
 
 fun main() {
+    if (isWorkerScope()) {
+        waitForWorkerSetup { setup ->
+            try {
+                startDemo(prepareWorker(setup))
+            } catch (failure: Throwable) {
+                showFailure(failure)
+            }
+        }
+        return
+    }
+
     try {
         val browser = prepareBrowser()
+        if (browser.workerStarted) return
+        startDemo(browser)
+    } catch (failure: Throwable) {
+        showFailure(failure)
+    }
+}
+
+private fun startDemo(browser: BrowserSetup) {
+    try {
         val context = browser.context ?: error("canvas.getContext(\"webgl2\") returned null")
         makeWebGl2ContextCurrent(context)
 
@@ -78,6 +102,7 @@ private class Demo(
             store = MemoryStore(),
             basemapStyle = ResourceLocator(value = BASEMAP_STYLE_URL),
             diagnosticSink = DiagnosticSink(::recordDiagnostic),
+            maximumReadAheadRasterisedTileBytes = if (readAheadOn()) 256L * 1024 * 1024 else 0L,
         ),
     )
     private val renderTarget = renderer.mintRenderTarget(
@@ -93,6 +118,7 @@ private class Demo(
     private var framesPerSecond = 0.0
     private var fpsWindowStart = performanceNow()
     private var fpsWindowFrames = 0
+    private val readAheadEnabled = readAheadOn()
 
     fun start() {
         setStatus(statusText(), isError = false)
@@ -145,10 +171,12 @@ private class Demo(
             val passStart = performanceNow()
             for (sample in 0 until frames) {
                 val counters = renderer.queryMetrics().counters
-                val plan = framePlanAt(frameIndex = frameIndex++, phase = sample.toDouble() / frames)
+                val currentFrameIndex = frameIndex++
+                val plan = framePlanAt(frameIndex = currentFrameIndex, phase = sample.toDouble() / frames)
                 val prepareStart = performanceNow()
                 val prepared = renderer.prepare(plan = plan)
                 prepare[sample] = performanceNow() - prepareStart
+                readAheadBenchmark(frameIndex = currentFrameIndex, sample = sample, frames = frames)
                 try {
                     val drawStart = performanceNow()
                     renderer.draw(preparedFrame = prepared, renderTarget = renderTarget)
@@ -222,6 +250,7 @@ private class Demo(
                 val prepared = renderer.prepare(plan = plan)
                 val prepareEnd = performanceNow()
                 prepareMillis += prepareEnd - prepareStart
+                readAheadLive(frameIndex = frameIndex, timestampMillis = timestampMillis)
                 var drawEnd: Double
                 try {
                     val drawStart = performanceNow()
@@ -253,6 +282,29 @@ private class Demo(
 
     private fun framePlan(frameIndex: Long, timestampMillis: Double): FramePlan =
         framePlanAt(frameIndex = frameIndex, phase = (timestampMillis % LOOP_MILLIS) / LOOP_MILLIS)
+
+    private fun readAheadLive(frameIndex: Long, timestampMillis: Double) {
+        if (!readAheadEnabled) return
+        renderer.readAhead(
+            plans = (1L..8L).map { step ->
+                framePlan(frameIndex = frameIndex + step, timestampMillis = timestampMillis + step * 250.0)
+            },
+        )
+    }
+
+    private fun readAheadBenchmark(frameIndex: Long, sample: Int, frames: Int) {
+        if (!readAheadEnabled) return
+        val count = minOf(8, frames - sample - 1)
+        if (count == 0) return
+        renderer.readAhead(
+            plans = (1..count).map { step ->
+                framePlanAt(
+                    frameIndex = frameIndex + step,
+                    phase = (sample + step).toDouble() / frames,
+                )
+            },
+        )
+    }
 
     private fun framePlanAt(frameIndex: Long, phase: Double): FramePlan {
         val travel = 0.5 - 0.5 * cos(phase * 2.0 * PI)
@@ -332,9 +384,14 @@ private class BrowserTransport : Transport {
         require(payload.body.length.toLong() <= request.maximumResponseBytes) {
             "response exceeded the ${request.maximumResponseBytes}-byte limit"
         }
-        val body = ByteArray(payload.body.length)
-        for (index in body.indices) {
-            body[index] = payload.body[index].toByte()
+        val body = if (payload.body.length == 0) {
+            ByteArray(0)
+        } else {
+            withScopedMemoryAllocator { allocator ->
+                val pointer = allocator.allocate(payload.body.length)
+                copyJsBytesToLinearMemory(payload.body, pointer.address.toInt(), payload.body.length)
+                ByteArray(payload.body.length) { index -> (pointer + index).loadByte() }
+            }
         }
 
         return TransportResponse(
@@ -433,6 +490,14 @@ private external interface BrowserSetup : JsAny {
     val height: Int
     val renderer: JsString
     val basemapOff: Boolean
+    val workerStarted: Boolean
+}
+
+private external interface WorkerSetup : JsAny {
+    val canvas: JsAny
+    val width: Int
+    val height: Int
+    val query: JsString
 }
 
 private external interface FetchPayload : JsAny {
@@ -446,18 +511,105 @@ private external interface FetchPayload : JsAny {
 
 private external interface JsUint8Array : JsAny {
     val length: Int
-    operator fun get(index: Int): Int
 }
 
 @JsFun(
     """() => {
         const canvas = document.getElementById('map');
+        const query = window.location.search;
+        const params = new URLSearchParams(query);
+        const workerOn = params.get('worker') === 'on';
         const dpr = window.devicePixelRatio || 1;
         const scale = Math.max(0.01, Math.min(dpr, 2048 / window.innerWidth, 2048 / window.innerHeight));
         const width = Math.max(1, Math.floor(window.innerWidth * scale));
         const height = Math.max(1, Math.floor(window.innerHeight * scale));
         canvas.width = width;
         canvas.height = height;
+
+        const meter = { intervals: [], longTasks: [] };
+        globalThis.__rengMainThread = meter;
+        if (workerOn || Number(params.get('trace') || 0) > 0) {
+            let previousFrame = null;
+            let lastReadout = 0;
+            const readout = document.getElementById('smoothness-readout');
+            const tick = now => {
+                if (previousFrame != null) {
+                    const interval = Math.round((now - previousFrame) * 10) / 10;
+                    meter.intervals.push(interval);
+                    if (readout && now - lastReadout >= 250) {
+                        readout.textContent = 'main rAF ' + interval.toFixed(1) + ' ms';
+                        lastReadout = now;
+                    }
+                }
+                previousFrame = now;
+                window.requestAnimationFrame(tick);
+            };
+            window.requestAnimationFrame(tick);
+            try {
+                new PerformanceObserver(list => {
+                    for (const entry of list.getEntries()) {
+                        meter.longTasks.push([Math.round(entry.startTime), Math.round(entry.duration)]);
+                    }
+                }).observe({ type: 'longtask', buffered: true });
+            } catch (ignored) {}
+        }
+
+        const applyMessage = message => {
+            if (message.kind === 'status') {
+                const status = document.getElementById('status');
+                status.textContent = message.text;
+                status.classList.toggle('error', Boolean(message.isError));
+                return;
+            }
+            if (message.kind === 'result') {
+                let text = message.text;
+                try {
+                    const report = JSON.parse(text);
+                    if (Array.isArray(report.frames)) {
+                        report.mainThread = {
+                            intervals: meter.intervals.slice(),
+                            longTasks: meter.longTasks.slice()
+                        };
+                        text = JSON.stringify(report);
+                    }
+                } catch (ignored) {}
+                let pre = document.getElementById('bench');
+                if (!pre) {
+                    pre = document.createElement('pre');
+                    pre.id = 'bench';
+                    pre.style.display = 'none';
+                    document.body.appendChild(pre);
+                }
+                pre.textContent = text;
+                document.title = 'BENCH DONE';
+            }
+        };
+        globalThis.__rengApplyDemoMessage = applyMessage;
+
+        if (workerOn) {
+            if (typeof canvas.transferControlToOffscreen !== 'function') {
+                throw new Error('OffscreenCanvas transfer is unavailable');
+            }
+            document.body.classList.add('worker-mode');
+            const offscreen = canvas.transferControlToOffscreen();
+            const worker = new Worker(new URL('worker-bootstrap.js', window.location.href));
+            worker.onmessage = event => applyMessage(event.data);
+            worker.onerror = event => applyMessage({
+                kind: 'status',
+                text: 'Worker: ' + (event.message || 'failed to load'),
+                isError: true
+            });
+            worker.postMessage({ canvas: offscreen, width, height, query }, [offscreen]);
+            return {
+                context: null,
+                width,
+                height,
+                renderer: 'worker starting',
+                basemapOff: params.get('basemap') === 'off',
+                workerStarted: true
+            };
+        }
+
         const context = canvas.getContext('webgl2', {
             antialias: false,
             depth: true,
@@ -472,11 +624,45 @@ private external interface JsUint8Array : JsAny {
             width,
             height,
             renderer: String(renderer),
-            basemapOff: new URLSearchParams(window.location.search).get('basemap') === 'off'
+            basemapOff: params.get('basemap') === 'off',
+            workerStarted: false
         };
     }""",
 )
 private external fun prepareBrowser(): BrowserSetup
+
+@JsFun(
+    """setup => {
+        globalThis.__rengQuery = String(setup.query || '');
+        const canvas = setup.canvas;
+        canvas.width = setup.width;
+        canvas.height = setup.height;
+        const context = canvas.getContext('webgl2', {
+            antialias: false,
+            depth: true,
+            stencil: false,
+            alpha: false,
+            premultipliedAlpha: false,
+            preserveDrawingBuffer: false
+        });
+        const renderer = context ? context.getParameter(context.RENDERER) : 'WebGL2 unavailable';
+        return {
+            context,
+            width: setup.width,
+            height: setup.height,
+            renderer: String(renderer),
+            basemapOff: new URLSearchParams(globalThis.__rengQuery).get('basemap') === 'off',
+            workerStarted: false
+        };
+    }""",
+)
+private external fun prepareWorker(setup: WorkerSetup): BrowserSetup
+
+@JsFun("() => typeof window === 'undefined'")
+private external fun isWorkerScope(): Boolean
+
+@JsFun("callback => self.__rengSetup.then(callback)")
+private external fun waitForWorkerSetup(callback: (WorkerSetup) -> Unit)
 
 @JsFun(
     """(ifNoneMatch, ifModifiedSince, accept) => {
@@ -521,32 +707,35 @@ private external fun fetchResource(
     headers: JsAny,
 ): Promise<FetchPayload>
 
-@JsFun("callback => window.requestAnimationFrame(callback)")
+@JsFun("callback => globalThis.requestAnimationFrame(callback)")
 private external fun requestFrame(callback: (Double) -> Unit): Int
 
-@JsFun("() => new URLSearchParams(window.location.search).get('style') || new URL('style.json', window.location.href).href")
+@JsFun("() => { const query = typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search; const href = typeof window === 'undefined' ? self.location.href : window.location.href; return new URLSearchParams(query).get('style') || new URL('style.json', href).href; }")
 private external fun basemapStyleUrl(): JsString
 
-@JsFun("() => Number(new URLSearchParams(window.location.search).get('bench') || 0)")
+@JsFun("() => Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('bench') || 0)")
 private external fun benchFrameCount(): Int
 
 // Labels are off unless `?labels=on`: label layout was ~1.6 s a frame in the benchmark.
-@JsFun("() => new URLSearchParams(window.location.search).get('labels') !== 'on'")
+@JsFun("() => new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('labels') !== 'on'")
 private external fun labelsOff(): Boolean
 
-@JsFun("() => Number(new URLSearchParams(window.location.search).get('trace') || 0)")
+@JsFun("() => Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('trace') || 0)")
 private external fun traceSeconds(): Int
 
-@JsFun("() => { window.__longTasks = []; try { new PerformanceObserver((list) => { for (const e of list.getEntries()) window.__longTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }")
+@JsFun("() => new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('readahead') === 'on'")
+private external fun readAheadOn(): Boolean
+
+@JsFun("() => { globalThis.__rengRenderLongTasks = []; try { new PerformanceObserver((list) => { for (const e of list.getEntries()) globalThis.__rengRenderLongTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }")
 private external fun startLongTaskObserver()
 
-@JsFun("() => JSON.stringify(window.__longTasks || [])")
+@JsFun("() => JSON.stringify(globalThis.__rengRenderLongTasks || [])")
 private external fun longTasksJson(): String
 
 @JsFun("message => console.log(message)")
 private external fun consoleLog(message: JsString)
 
-@JsFun("text => { let pre = document.getElementById('bench'); if (!pre) { pre = document.createElement('pre'); pre.id = 'bench'; pre.style.display = 'none'; document.body.appendChild(pre); } pre.textContent = text; document.title = 'BENCH DONE'; }")
+@JsFun("text => { const message = { kind: 'result', text }; if (typeof window === 'undefined') self.postMessage(message); else globalThis.__rengApplyDemoMessage(message); }")
 private external fun setBenchResult(text: String)
 
 @JsFun("() => performance.now()")
@@ -554,12 +743,15 @@ private external fun performanceNow(): Double
 
 @JsFun(
     """(text, isError) => {
-        const status = document.getElementById('status');
-        status.textContent = text;
-        status.classList.toggle('error', isError);
+        const message = { kind: 'status', text, isError };
+        if (typeof window === 'undefined') self.postMessage(message);
+        else globalThis.__rengApplyDemoMessage(message);
     }""",
 )
 private external fun setStatus(text: String, isError: Boolean)
+
+@JsFun("(source, address, length) => new Uint8Array(wasmExports.memory.buffer, address >>> 0, length).set(source)")
+private external fun copyJsBytesToLinearMemory(source: JsUint8Array, address: Int, length: Int)
 
 @JsFun("message => console.error(message)")
 private external fun consoleError(message: JsString)

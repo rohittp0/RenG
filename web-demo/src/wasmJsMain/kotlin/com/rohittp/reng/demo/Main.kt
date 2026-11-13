@@ -1331,9 +1331,19 @@ private external fun renderBrowserRaster(
         const renderScale = params.has('scale') && Number.isFinite(parsedScale)
             ? Math.max(0.25, Math.min(1, parsedScale))
             : 1;
-        const pixelRatio = Math.max(0.01, Math.min(dpr, 2048 / window.innerWidth, 2048 / window.innerHeight));
-        const width = Math.max(1, Math.floor(window.innerWidth * pixelRatio * renderScale));
-        const height = Math.max(1, Math.floor(window.innerHeight * pixelRatio * renderScale));
+        // `?size=WxH`: a fixed CSS canvas (e.g. 390x693, a phone's 9:16 preview), centred, instead of
+        // the whole window. Backing pixels are still CSS size x devicePixelRatio x scale.
+        const sizeMatch = /^(\d{2,4})x(\d{2,4})$/.exec(params.get('size') || '');
+        const cssWidth = sizeMatch ? Math.min(Number(sizeMatch[1]), window.innerWidth) : window.innerWidth;
+        const cssHeight = sizeMatch ? Math.min(Number(sizeMatch[2]), window.innerHeight) : window.innerHeight;
+        if (sizeMatch) {
+            canvas.style.width = cssWidth + 'px';
+            canvas.style.height = cssHeight + 'px';
+            canvas.style.margin = Math.max(0, Math.floor((window.innerHeight - cssHeight) / 2)) + 'px auto 0';
+        }
+        const pixelRatio = Math.max(0.01, Math.min(dpr, 2048 / cssWidth, 2048 / cssHeight));
+        const width = Math.max(1, Math.floor(cssWidth * pixelRatio * renderScale));
+        const height = Math.max(1, Math.floor(cssHeight * pixelRatio * renderScale));
         canvas.width = width;
         canvas.height = height;
 

@@ -245,9 +245,18 @@ public data class Sticker(
      * screen-anchored Sticker, whose order is `position.z`. A Model writes depth, so a
      * later layer does not draw over a nearer model.
      *
-     * Declared last for the append-only data-class ABI.
+     * Declared after [transient] for the append-only data-class ABI.
      */
     public val layer: Int = 0,
+    /**
+     * A frame from a consumer-owned external source, drawn instead of [image] when it is ready
+     * (ADR 0095). [image] remains the required fallback and is prepared normally. A sticker with
+     * both [shader] and [external] is drawn from [image] through [shader]; consumer fragment
+     * programs do not sample external textures.
+     *
+     * Declared after [layer], and last, for the append-only data-class ABI.
+     */
+    public val external: ExternalFrame? = null,
 ) {
     init {
         require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
@@ -257,6 +266,41 @@ public data class Sticker(
             "opacity must not be negative zero"
         }
     }
+}
+
+/** A frame from a consumer's external source, drawn instead of fetching [Sticker.image]. */
+@kotlinx.serialization.Serializable
+public data class ExternalFrame(public val sourceId: String, public val frame: Long)
+
+/** The GL texture target an [ExternalFrameLatch] is sampled through. */
+public enum class ExternalTextureTarget {
+    EXTERNAL_OES,
+    TEXTURE_2D,
+}
+
+/** What a source returns for one draw: the GL texture to sample and its texture-coordinate transform. */
+public class ExternalFrameLatch(
+    public val target: ExternalTextureTarget,
+    /** The name RenG created for [ExternalFrameSource.attach], or the source's own 2D texture. */
+    public val textureName: Int,
+    /** A 4x4 column-major matrix applied to `(u, v, 0, 1)`; the identity when no transform is needed. */
+    public val transform: FloatArray,
+) {
+    init {
+        require(transform.size == 16) { "an external frame transform must contain 16 elements" }
+    }
+}
+
+/** Consumer-implemented; every call happens on RenG's GL thread with its context current. */
+public interface ExternalFrameSource {
+    /** Once, before the first latch: [textureName] is a fresh GL texture RenG created for this source. */
+    public fun attach(textureName: Int): Unit
+
+    /** Makes [frame] current and returns how to sample it, or `null` when it is not ready yet. */
+    public fun latch(frame: Long): ExternalFrameLatch?
+
+    /** The source is unregistered or the context is going away; release GL-side objects. */
+    public fun detach(): Unit
 }
 
 /**

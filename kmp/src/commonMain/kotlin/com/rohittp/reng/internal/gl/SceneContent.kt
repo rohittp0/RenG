@@ -60,6 +60,8 @@ internal class SceneSticker(
     val blend: BlendMode = BlendMode.OVER,
     /** The consumer program it is drawn with, or `null` for the plain sticker (ADR 0087). */
     val shader: SceneStickerShader? = null,
+    /** A latched external texture, or `null` for the sticker image (ADR 0095). */
+    val external: ResolvedExternalSticker? = null,
 )
 
 /**
@@ -1381,6 +1383,7 @@ internal class SceneContent(
             opacity = sticker.opacity,
             blend = sticker.blend,
             shader = sticker.shader?.let(::resolvedStickerShader),
+            external = sticker.external,
         )
     }
 
@@ -1411,6 +1414,7 @@ internal class SceneContent(
             opacity = sticker.opacity,
             blend = sticker.blend,
             shader = sticker.shader?.let(::resolvedStickerShader),
+            external = sticker.external,
         )
     }
 }

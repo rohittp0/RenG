@@ -18,6 +18,8 @@ import com.rohittp.reng.runBloomPerElementReadbackSuite
 import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
 import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
 import com.rohittp.reng.runStickerOpacityReadbackSuite
+import com.rohittp.reng.EXTERNAL_FRAME_READBACK_PIXELS
+import com.rohittp.reng.runExternalFrameReadbackSuite
 import com.rohittp.reng.STICKER_SHADER_READBACK_PIXELS
 import com.rohittp.reng.runStickerShaderReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
@@ -561,6 +563,25 @@ class MacosGlConformanceTest {
                 binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
                 binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
                 runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    /** ADR 0095: real 2D external texture sampling, v transform, and both fallback arms. */
+    @Test fun theExternalFrameReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { renderer ->
+            val fixture = CglCoreProfileContext.createOrNull(renderer)
+            if (fixture == null) {
+                println("RenG external-frame readback: skipped, $renderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+                binding.scissor(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+                runExternalFrameReadbackSuite(binding, fixture.probe)
             } finally {
                 fixture.destroy()
             }

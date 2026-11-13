@@ -355,6 +355,15 @@ public sealed interface Renderer : AutoCloseable {
 
     public fun mintRenderTarget(framebufferName: FramebufferName): RenderTarget
 
+    /**
+     * Registers [source] under [id]. This call is thread-safe; replacing a source detaches the old
+     * one on RenG's GL thread at the next [draw].
+     */
+    public fun registerExternalSource(id: String, source: ExternalFrameSource): Unit
+
+    /** Unregisters [id], detaching an attached source on RenG's GL thread at the next [draw]. */
+    public fun unregisterExternalSource(id: String): Unit
+
     public fun draw(preparedFrame: PreparedFrame, renderTarget: RenderTarget): Unit
 
     /**

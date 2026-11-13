@@ -26,7 +26,11 @@
           "scaleMode": "SCREEN",
           "scale": 1.5
         },
-        "image": "reng-harness:sticker-f.png"
+        "image": "reng-harness:sticker-f.png",
+        "external": {
+          "sourceId": "unregistered-corpus-source",
+          "frame": 0
+        }
       }
     ]
   }

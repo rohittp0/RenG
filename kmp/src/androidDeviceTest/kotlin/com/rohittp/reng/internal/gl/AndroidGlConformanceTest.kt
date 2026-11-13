@@ -37,6 +37,7 @@ import com.rohittp.reng.runVertexTextureFetchProbeSuite
 import com.rohittp.reng.runModelReadbackSuite
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -106,6 +107,32 @@ class AndroidGlConformanceTest {
                     "maxCombinedTextureImageUnits=${adopted.profile.maxCombinedTextureImageUnits}",
             )
             assertEquals(ShaderDialect.GLES, adopted.profile.dialect)
+        }
+    }
+
+    /** ADR 0095's device-only compile gate for `samplerExternalOES`. */
+    @Test fun theExternalOesStickerProgramCompilesWhenTheDriverAdvertisesIt() {
+        withCurrentContext { binding ->
+            if (EXTERNAL_OES_EXTENSION_NAME !in readExtensionNames(binding)) {
+                println(
+                    "RenG external-OES compile: skipped because the driver does not advertise " +
+                        EXTERNAL_OES_EXTENSION_NAME,
+                )
+                return@withCurrentContext
+            }
+            val cache = GlProgramCache()
+            val pipeline = when (val result = createStickerPipeline(binding, ShaderDialect.GLES, cache)) {
+                is StickerPipelineResult.Created -> result.pipeline
+                is StickerPipelineResult.Failed -> throw AssertionError("plain sticker pipeline failed: $result")
+            }
+            try {
+                assertNotNull(
+                    ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline),
+                    "an advertised $EXTERNAL_OES_EXTENSION_NAME must compile the built-in OES variant",
+                )
+            } finally {
+                deleteStickerPipeline(binding, cache, pipeline)
+            }
         }
     }
 

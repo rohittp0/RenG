@@ -252,6 +252,25 @@ class GlStateSnapshotTest {
         assertTrue(binding.log.contains("bindTexture(0xDE1,7)"), binding.log.toString())
     }
 
+    @Test fun anExternalOesBindingIsSavedAndRestoredIndependentlyOfThe2dBinding() {
+        val binding = populatedBinding().apply {
+            integers[GL_TEXTURE_BINDING_EXTERNAL_OES] = intArrayOf(17)
+        }
+        val tracking = TextureUnitCapturingBinding(binding)
+        binding.log.clear()
+
+        tracking.activeTexture(GL_TEXTURE0 + 1)
+        tracking.bindTexture(GL_TEXTURE_EXTERNAL_OES, 99)
+
+        assertEquals(1, binding.log.count { it == "getIntegerv(0x8D67)" })
+        assertEquals(1, binding.log.count { it == "getIntegerv(0x8069)" })
+
+        binding.log.clear()
+        tracking.restoreTouchedUnits()
+        assertTrue(binding.log.contains("bindTexture(0x8D65,17)"), binding.log.toString())
+        assertTrue(binding.log.contains("bindTexture(0xDE1,7)"), binding.log.toString())
+    }
+
     @Test fun aSamplerBoundToAUnitThatIsNotActiveStillSavesThatUnit() {
         val binding = populatedBinding()
         val tracking = TextureUnitCapturingBinding(binding)

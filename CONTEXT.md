@@ -210,7 +210,8 @@ _Avoid_: Surface, device, GL session, EGL context
 **Restore Set**:
 The closed, documented set of GL state RenG reads before it draws and restores before it returns: the draw
 and read framebuffer, renderbuffer, program, vertex array, array buffer, pixel unpack buffer and uniform
-buffer bindings; the active texture unit and the texture and sampler binding on every unit RenG uses; blend
+buffer bindings; the active texture unit and the 2D texture, external-OES texture when used, and sampler bindings
+on every unit RenG uses; blend
 enable, separate factors, separate equations and colour; depth test enable, function, write mask and range;
 cull enable, mode and winding; viewport; scissor enable and box; the colour write mask; the colour and depth
 clear values; the unpack alignment, row length, skip rows and skip pixels and the pack alignment; and, on a
@@ -345,8 +346,21 @@ _Avoid_: z-index, phase
 A **Placement** paired with one image identified by a **Resource Locator** -- a PNG, an **ETC2 Container** or a
 **Raw RGBA Container**, told apart by magic bytes -- drawn as a centred local XY quad whose width and height are the
 image's level-zero pixel dimensions, with +x right, +y up, and +z normal. A **Transient Sticker** is one whose
-image is dropped as soon as no open **Prepared Frame** leases it (ADR 0093).
+image is dropped as soon as no open **Prepared Frame** leases it (ADR 0093). A Sticker may name an **External
+Frame** to replace that image at draw time; the image remains its required fallback and still determines the quad.
 _Avoid_: Marker, pin, decal, sprite
+
+**External Frame**:
+A consumer-selected sample from a live source, identified by a source id and a frame number and optionally drawn
+by a **Sticker** in place of its prepared fallback image. It names the sample to present, not transported image
+bytes or a resource to cache.
+_Avoid_: Video bytes, decoded image, animation frame, transport response
+
+**External Frame Source**:
+A consumer-owned producer that makes an **External Frame** available to the current **Render Context** when RenG
+draws it. Its lifetime follows registration and the Render Context that samples it; it is not a **Transport** or a
+stored resource.
+_Avoid_: Image provider, resource route, frame cache, transport adapter
 
 **Raw RGBA Container**:
 Uncompressed RGBA8 for a **Sticker** image (ADR 0092): the little-endian header `RRGB`, version 1, a flags byte

@@ -89,6 +89,17 @@ final enum class com.rohittp.reng/DiagnosticSeverity : kotlin/Enum<com.rohittp.r
     final fun values(): kotlin/Array<com.rohittp.reng/DiagnosticSeverity> // com.rohittp.reng/DiagnosticSeverity.values|values#static(){}[0]
 }
 
+final enum class com.rohittp.reng/ExternalTextureTarget : kotlin/Enum<com.rohittp.reng/ExternalTextureTarget> { // com.rohittp.reng/ExternalTextureTarget|null[0]
+    enum entry EXTERNAL_OES // com.rohittp.reng/ExternalTextureTarget.EXTERNAL_OES|null[0]
+    enum entry TEXTURE_2D // com.rohittp.reng/ExternalTextureTarget.TEXTURE_2D|null[0]
+
+    final val entries // com.rohittp.reng/ExternalTextureTarget.entries|#static{}entries[0]
+        final fun <get-entries>(): kotlin.enums/EnumEntries<com.rohittp.reng/ExternalTextureTarget> // com.rohittp.reng/ExternalTextureTarget.entries.<get-entries>|<get-entries>#static(){}[0]
+
+    final fun valueOf(kotlin/String): com.rohittp.reng/ExternalTextureTarget // com.rohittp.reng/ExternalTextureTarget.valueOf|valueOf#static(kotlin.String){}[0]
+    final fun values(): kotlin/Array<com.rohittp.reng/ExternalTextureTarget> // com.rohittp.reng/ExternalTextureTarget.values|values#static(){}[0]
+}
+
 final enum class com.rohittp.reng/PipelineStage : kotlin/Enum<com.rohittp.reng/PipelineStage> { // com.rohittp.reng/PipelineStage|null[0]
     enum entry BASEMAP_RENDER // com.rohittp.reng/PipelineStage.BASEMAP_RENDER|null[0]
     enum entry CONFIGURATION // com.rohittp.reng/PipelineStage.CONFIGURATION|null[0]
@@ -284,6 +295,12 @@ abstract fun interface com.rohittp.reng/Transport { // com.rohittp.reng/Transpor
     abstract suspend fun execute(com.rohittp.reng/TransportRequest): com.rohittp.reng/TransportResponse // com.rohittp.reng/Transport.execute|execute(com.rohittp.reng.TransportRequest){}[0]
 }
 
+abstract interface com.rohittp.reng/ExternalFrameSource { // com.rohittp.reng/ExternalFrameSource|null[0]
+    abstract fun attach(kotlin/Int) // com.rohittp.reng/ExternalFrameSource.attach|attach(kotlin.Int){}[0]
+    abstract fun detach() // com.rohittp.reng/ExternalFrameSource.detach|detach(){}[0]
+    abstract fun latch(kotlin/Long): com.rohittp.reng/ExternalFrameLatch? // com.rohittp.reng/ExternalFrameSource.latch|latch(kotlin.Long){}[0]
+}
+
 abstract interface com.rohittp.reng/Store { // com.rohittp.reng/Store|null[0]
     abstract suspend fun read(com.rohittp.reng/RawResourceKey): com.rohittp.reng/StoredRawResource? // com.rohittp.reng/Store.read|read(com.rohittp.reng.RawResourceKey){}[0]
     abstract suspend fun write(com.rohittp.reng/RawResourceKey, com.rohittp.reng/StoredRawResource) // com.rohittp.reng/Store.write|write(com.rohittp.reng.RawResourceKey;com.rohittp.reng.StoredRawResource){}[0]
@@ -453,6 +470,8 @@ sealed interface com.rohittp.reng/Renderer : kotlin/AutoCloseable { // com.rohit
     abstract fun queryMetrics(): com.rohittp.reng/MetricReport // com.rohittp.reng/Renderer.queryMetrics|queryMetrics(){}[0]
     abstract fun queryResources(com.rohittp.reng/ResourceSelector = ...): com.rohittp.reng/ResourceReport // com.rohittp.reng/Renderer.queryResources|queryResources(com.rohittp.reng.ResourceSelector){}[0]
     abstract fun readAhead(kotlin.collections/List<com.rohittp.reng/FramePlan>) // com.rohittp.reng/Renderer.readAhead|readAhead(kotlin.collections.List<com.rohittp.reng.FramePlan>){}[0]
+    abstract fun registerExternalSource(kotlin/String, com.rohittp.reng/ExternalFrameSource) // com.rohittp.reng/Renderer.registerExternalSource|registerExternalSource(kotlin.String;com.rohittp.reng.ExternalFrameSource){}[0]
+    abstract fun unregisterExternalSource(kotlin/String) // com.rohittp.reng/Renderer.unregisterExternalSource|unregisterExternalSource(kotlin.String){}[0]
     abstract suspend fun awaitReadAheadIdle() // com.rohittp.reng/Renderer.awaitReadAheadIdle|awaitReadAheadIdle(){}[0]
     abstract suspend fun cancelPreparations() // com.rohittp.reng/Renderer.cancelPreparations|cancelPreparations(){}[0]
     abstract suspend fun prepare(com.rohittp.reng/FramePlan, com.rohittp.reng/ResourceAccessMode = ..., com.rohittp.reng/RenGRenderPriority = ...): com.rohittp.reng/PreparedFrame // com.rohittp.reng/Renderer.prepare|prepare(com.rohittp.reng.FramePlan;com.rohittp.reng.ResourceAccessMode;com.rohittp.reng.RenGRenderPriority){}[0]
@@ -771,6 +790,46 @@ final class com.rohittp.reng/Diagnostic { // com.rohittp.reng/Diagnostic|null[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Diagnostic.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Diagnostic.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Diagnostic.toString|toString(){}[0]
+}
+
+final class com.rohittp.reng/ExternalFrame { // com.rohittp.reng/ExternalFrame|null[0]
+    constructor <init>(kotlin/String, kotlin/Long) // com.rohittp.reng/ExternalFrame.<init>|<init>(kotlin.String;kotlin.Long){}[0]
+
+    final val frame // com.rohittp.reng/ExternalFrame.frame|{}frame[0]
+        final fun <get-frame>(): kotlin/Long // com.rohittp.reng/ExternalFrame.frame.<get-frame>|<get-frame>(){}[0]
+    final val sourceId // com.rohittp.reng/ExternalFrame.sourceId|{}sourceId[0]
+        final fun <get-sourceId>(): kotlin/String // com.rohittp.reng/ExternalFrame.sourceId.<get-sourceId>|<get-sourceId>(){}[0]
+
+    final fun component1(): kotlin/String // com.rohittp.reng/ExternalFrame.component1|component1(){}[0]
+    final fun component2(): kotlin/Long // com.rohittp.reng/ExternalFrame.component2|component2(){}[0]
+    final fun copy(kotlin/String = ..., kotlin/Long = ...): com.rohittp.reng/ExternalFrame // com.rohittp.reng/ExternalFrame.copy|copy(kotlin.String;kotlin.Long){}[0]
+    final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/ExternalFrame.equals|equals(kotlin.Any?){}[0]
+    final fun hashCode(): kotlin/Int // com.rohittp.reng/ExternalFrame.hashCode|hashCode(){}[0]
+    final fun toString(): kotlin/String // com.rohittp.reng/ExternalFrame.toString|toString(){}[0]
+
+    final object $serializer : kotlinx.serialization.internal/GeneratedSerializer<com.rohittp.reng/ExternalFrame> { // com.rohittp.reng/ExternalFrame.$serializer|null[0]
+        final val descriptor // com.rohittp.reng/ExternalFrame.$serializer.descriptor|{}descriptor[0]
+            final fun <get-descriptor>(): kotlinx.serialization.descriptors/SerialDescriptor // com.rohittp.reng/ExternalFrame.$serializer.descriptor.<get-descriptor>|<get-descriptor>(){}[0]
+
+        final fun childSerializers(): kotlin/Array<kotlinx.serialization/KSerializer<*>> // com.rohittp.reng/ExternalFrame.$serializer.childSerializers|childSerializers(){}[0]
+        final fun deserialize(kotlinx.serialization.encoding/Decoder): com.rohittp.reng/ExternalFrame // com.rohittp.reng/ExternalFrame.$serializer.deserialize|deserialize(kotlinx.serialization.encoding.Decoder){}[0]
+        final fun serialize(kotlinx.serialization.encoding/Encoder, com.rohittp.reng/ExternalFrame) // com.rohittp.reng/ExternalFrame.$serializer.serialize|serialize(kotlinx.serialization.encoding.Encoder;com.rohittp.reng.ExternalFrame){}[0]
+    }
+
+    final object Companion { // com.rohittp.reng/ExternalFrame.Companion|null[0]
+        final fun serializer(): kotlinx.serialization/KSerializer<com.rohittp.reng/ExternalFrame> // com.rohittp.reng/ExternalFrame.Companion.serializer|serializer(){}[0]
+    }
+}
+
+final class com.rohittp.reng/ExternalFrameLatch { // com.rohittp.reng/ExternalFrameLatch|null[0]
+    constructor <init>(com.rohittp.reng/ExternalTextureTarget, kotlin/Int, kotlin/FloatArray) // com.rohittp.reng/ExternalFrameLatch.<init>|<init>(com.rohittp.reng.ExternalTextureTarget;kotlin.Int;kotlin.FloatArray){}[0]
+
+    final val target // com.rohittp.reng/ExternalFrameLatch.target|{}target[0]
+        final fun <get-target>(): com.rohittp.reng/ExternalTextureTarget // com.rohittp.reng/ExternalFrameLatch.target.<get-target>|<get-target>(){}[0]
+    final val textureName // com.rohittp.reng/ExternalFrameLatch.textureName|{}textureName[0]
+        final fun <get-textureName>(): kotlin/Int // com.rohittp.reng/ExternalFrameLatch.textureName.<get-textureName>|<get-textureName>(){}[0]
+    final val transform // com.rohittp.reng/ExternalFrameLatch.transform|{}transform[0]
+        final fun <get-transform>(): kotlin/FloatArray // com.rohittp.reng/ExternalFrameLatch.transform.<get-transform>|<get-transform>(){}[0]
 }
 
 final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
@@ -1228,10 +1287,12 @@ final class com.rohittp.reng/ShaderPair { // com.rohittp.reng/ShaderPair|null[0]
 }
 
 final class com.rohittp.reng/Sticker { // com.rohittp.reng/Sticker|null[0]
-    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ..., kotlin/Boolean = ..., kotlin/Int = ...) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?;kotlin.Boolean;kotlin.Int){}[0]
+    constructor <init>(com.rohittp.reng/Placement, com.rohittp.reng/ResourceLocator, kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ..., kotlin/Boolean = ..., kotlin/Int = ..., com.rohittp.reng/ExternalFrame? = ...) // com.rohittp.reng/Sticker.<init>|<init>(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?;kotlin.Boolean;kotlin.Int;com.rohittp.reng.ExternalFrame?){}[0]
 
     final val blend // com.rohittp.reng/Sticker.blend|{}blend[0]
         final fun <get-blend>(): com.rohittp.reng/BlendMode // com.rohittp.reng/Sticker.blend.<get-blend>|<get-blend>(){}[0]
+    final val external // com.rohittp.reng/Sticker.external|{}external[0]
+        final fun <get-external>(): com.rohittp.reng/ExternalFrame? // com.rohittp.reng/Sticker.external.<get-external>|<get-external>(){}[0]
     final val image // com.rohittp.reng/Sticker.image|{}image[0]
         final fun <get-image>(): com.rohittp.reng/ResourceLocator // com.rohittp.reng/Sticker.image.<get-image>|<get-image>(){}[0]
     final val layer // com.rohittp.reng/Sticker.layer|{}layer[0]
@@ -1252,7 +1313,8 @@ final class com.rohittp.reng/Sticker { // com.rohittp.reng/Sticker|null[0]
     final fun component5(): com.rohittp.reng/StickerShader? // com.rohittp.reng/Sticker.component5|component5(){}[0]
     final fun component6(): kotlin/Boolean // com.rohittp.reng/Sticker.component6|component6(){}[0]
     final fun component7(): kotlin/Int // com.rohittp.reng/Sticker.component7|component7(){}[0]
-    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ..., kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ..., kotlin/Boolean = ..., kotlin/Int = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?;kotlin.Boolean;kotlin.Int){}[0]
+    final fun component8(): com.rohittp.reng/ExternalFrame? // com.rohittp.reng/Sticker.component8|component8(){}[0]
+    final fun copy(com.rohittp.reng/Placement = ..., com.rohittp.reng/ResourceLocator = ..., kotlin/Float = ..., com.rohittp.reng/BlendMode = ..., com.rohittp.reng/StickerShader? = ..., kotlin/Boolean = ..., kotlin/Int = ..., com.rohittp.reng/ExternalFrame? = ...): com.rohittp.reng/Sticker // com.rohittp.reng/Sticker.copy|copy(com.rohittp.reng.Placement;com.rohittp.reng.ResourceLocator;kotlin.Float;com.rohittp.reng.BlendMode;com.rohittp.reng.StickerShader?;kotlin.Boolean;kotlin.Int;com.rohittp.reng.ExternalFrame?){}[0]
     final fun equals(kotlin/Any?): kotlin/Boolean // com.rohittp.reng/Sticker.equals|equals(kotlin.Any?){}[0]
     final fun hashCode(): kotlin/Int // com.rohittp.reng/Sticker.hashCode|hashCode(){}[0]
     final fun toString(): kotlin/String // com.rohittp.reng/Sticker.toString|toString(){}[0]

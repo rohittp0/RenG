@@ -31,6 +31,9 @@ internal class TextureUnitCapturingBinding(
     /** Prior state per `GL_TEXTUREi` token, in the order the draw first touched them. */
     private val saved: LinkedHashMap<Int, GlTextureUnitState> = LinkedHashMap()
 
+    /** Prior external-OES bindings, populated only on a context and unit where RenG binds that target. */
+    private val savedExternalOes: MutableMap<Int, Int> = mutableMapOf()
+
     /**
      * The `GL_TEXTURE_2D` binding on each consumer texture unit (`0 until MAXIMUM_CONSUMER_TEXTURES`)
      * as this region last set it, or [UNTOUCHED_UNIT] where the region has not bound one -- where
@@ -45,9 +48,13 @@ internal class TextureUnitCapturingBinding(
     }
 
     override fun bindTexture(target: Int, texture: Int) {
-        // Only GL_TEXTURE_2D is part of the Restore Set, and it is the only target RenG binds.
-        if (target == GL_TEXTURE_2D) {
+        if (target == GL_TEXTURE_2D || target == GL_TEXTURE_EXTERNAL_OES) {
             rememberUnit(activeUnit)
+            if (target == GL_TEXTURE_EXTERNAL_OES && activeUnit !in savedExternalOes) {
+                savedExternalOes[activeUnit] = delegate.queryInt(GL_TEXTURE_BINDING_EXTERNAL_OES)
+            }
+        }
+        if (target == GL_TEXTURE_2D) {
             val unit = activeUnit - GL_TEXTURE0
             if (unit in consumerUnitTexture2d.indices) consumerUnitTexture2d[unit] = texture
         }
@@ -89,10 +96,14 @@ internal class TextureUnitCapturingBinding(
         saved.values.forEach { unit ->
             delegate.activeTexture(unit.unit)
             delegate.bindTexture(GL_TEXTURE_2D, unit.texture2d)
+            savedExternalOes[unit.unit]?.let { external ->
+                delegate.bindTexture(GL_TEXTURE_EXTERNAL_OES, external)
+            }
             delegate.bindSampler(unit.unit - GL_TEXTURE0, unit.sampler)
         }
         delegate.activeTexture(originalActiveUnit)
         saved.clear()
+        savedExternalOes.clear()
         consumerUnitTexture2d.fill(UNTOUCHED_UNIT)
         activeUnit = originalActiveUnit
     }

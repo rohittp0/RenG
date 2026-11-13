@@ -21,6 +21,8 @@ internal class PreparedSticker(
     internal val shader: PreparedStickerShader? = null,
     /** [Sticker.transient] (ADR 0093); already marked on the leased generation at prepare. */
     internal val transient: Boolean = false,
+    /** [Sticker.external] (ADR 0095), inert until this sticker reaches a draw. */
+    internal val external: ExternalFrame? = null,
 )
 
 /**

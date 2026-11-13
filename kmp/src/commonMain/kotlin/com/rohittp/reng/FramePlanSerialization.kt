@@ -381,6 +381,7 @@ private class StickerSurrogate(
     @SerialName("shader") val shader: StickerShader? = null,
     @SerialName("transient") val transient: Boolean = false,
     @SerialName("layer") val layer: Int = 0,
+    @SerialName("external") val external: ExternalFrame? = null,
 )
 
 internal object StickerSerializer : KSerializer<Sticker> {
@@ -397,6 +398,7 @@ internal object StickerSerializer : KSerializer<Sticker> {
                 shader = value.shader,
                 transient = value.transient,
                 layer = value.layer,
+                external = value.external,
             ),
         )
     }
@@ -410,6 +412,7 @@ internal object StickerSerializer : KSerializer<Sticker> {
             shader = it.shader,
             transient = it.transient,
             layer = it.layer,
+            external = it.external,
         )
     }
 }

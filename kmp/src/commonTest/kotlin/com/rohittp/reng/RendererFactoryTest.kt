@@ -316,6 +316,69 @@ class RendererFactoryTest {
         assertTrue(binding.log.any { it.startsWith("genTextures") }, "the sticker image must upload a fresh texture")
     }
 
+    @Test
+    fun externalSourceAttachAndLatchAreSharedThenUnregisterDetachesAndDeletes() = runTest {
+        val binding = validGlesBinding()
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val source = RecordingExternalFrameSource()
+        val external = ExternalFrame("video", 37L)
+        renderer.registerExternalSource("video", source)
+        val frame = renderer.prepare(
+            FramePlan(
+                frameIndex = 0L,
+                camera = testCamera(),
+                stickers = listOf(
+                    Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"), external = external),
+                    Sticker(testPlacement(), ResourceLocator("https://example.invalid/a.png"), external = external),
+                ),
+            ),
+        )
+        val target = renderer.mintRenderTarget(FramebufferName(0u))
+
+        renderer.draw(frame, target)
+
+        assertEquals(1, source.attachCalls)
+        assertEquals(1, source.latchCalls, "one (sourceId, frame) is latched once per draw")
+        val ownedTexture = assertNotNull(source.attachedTexture)
+
+        renderer.unregisterExternalSource("video")
+        renderer.draw(frame, target)
+
+        assertEquals(1, source.detachCalls)
+        assertEquals(1, source.latchCalls)
+        assertTrue(ownedTexture in binding.deletedNames)
+        frame.close()
+        renderer.close()
+    }
+
+    @Test
+    fun rendererCloseDetachesAnAttachedExternalSourceAndDeletesItsTexture() = runTest {
+        val binding = validGlesBinding()
+        val renderer = createRenderer(testConfiguration(transport = CountingTransport()), binding, fixedProbe())
+        val source = RecordingExternalFrameSource()
+        renderer.registerExternalSource("video", source)
+        val frame = renderer.prepare(
+            FramePlan(
+                frameIndex = 0L,
+                camera = testCamera(),
+                stickers = listOf(
+                    Sticker(
+                        testPlacement(),
+                        ResourceLocator("https://example.invalid/a.png"),
+                        external = ExternalFrame("video", 1L),
+                    ),
+                ),
+            ),
+        )
+        renderer.draw(frame, renderer.mintRenderTarget(FramebufferName(0u)))
+        val ownedTexture = assertNotNull(source.attachedTexture)
+
+        renderer.close()
+
+        assertEquals(1, source.detachCalls)
+        assertTrue(ownedTexture in binding.deletedNames)
+    }
+
     // ---- Task 9b item 1: texture lifetime — reuse on repeat draws, delete on close ------------------
 
     @Test
@@ -1806,6 +1869,40 @@ private class CountingTransport : Transport {
             body = onePixelPng,
             metadata = TransportResponseMetadata(freshUntilEpochMillis = Long.MAX_VALUE),
         )
+    }
+}
+
+private class RecordingExternalFrameSource : ExternalFrameSource {
+    var attachCalls: Int = 0
+        private set
+    var latchCalls: Int = 0
+        private set
+    var detachCalls: Int = 0
+        private set
+    var attachedTexture: Int? = null
+        private set
+
+    override fun attach(textureName: Int) {
+        attachCalls += 1
+        attachedTexture = textureName
+    }
+
+    override fun latch(frame: Long): ExternalFrameLatch {
+        latchCalls += 1
+        return ExternalFrameLatch(
+            target = ExternalTextureTarget.TEXTURE_2D,
+            textureName = requireNotNull(attachedTexture),
+            transform = floatArrayOf(
+                1f, 0f, 0f, 0f,
+                0f, 1f, 0f, 0f,
+                0f, 0f, 1f, 0f,
+                0f, 0f, 0f, 1f,
+            ),
+        )
+    }
+
+    override fun detach() {
+        detachCalls += 1
     }
 }
 

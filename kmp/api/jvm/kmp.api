@@ -309,6 +309,56 @@ public final class com/rohittp/reng/DiagnosticSink$Companion {
 	public final fun getNone ()Lcom/rohittp/reng/DiagnosticSink;
 }
 
+public final class com/rohittp/reng/ExternalFrame {
+	public static final field Companion Lcom/rohittp/reng/ExternalFrame$Companion;
+	public fun <init> (Ljava/lang/String;J)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()J
+	public final fun copy (Ljava/lang/String;J)Lcom/rohittp/reng/ExternalFrame;
+	public static synthetic fun copy$default (Lcom/rohittp/reng/ExternalFrame;Ljava/lang/String;JILjava/lang/Object;)Lcom/rohittp/reng/ExternalFrame;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFrame ()J
+	public final fun getSourceId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final synthetic class com/rohittp/reng/ExternalFrame$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Lcom/rohittp/reng/ExternalFrame$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Lcom/rohittp/reng/ExternalFrame;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Lcom/rohittp/reng/ExternalFrame;)V
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class com/rohittp/reng/ExternalFrame$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
+public final class com/rohittp/reng/ExternalFrameLatch {
+	public fun <init> (Lcom/rohittp/reng/ExternalTextureTarget;I[F)V
+	public final fun getTarget ()Lcom/rohittp/reng/ExternalTextureTarget;
+	public final fun getTextureName ()I
+	public final fun getTransform ()[F
+}
+
+public abstract interface class com/rohittp/reng/ExternalFrameSource {
+	public abstract fun attach (I)V
+	public abstract fun detach ()V
+	public abstract fun latch (J)Lcom/rohittp/reng/ExternalFrameLatch;
+}
+
+public final class com/rohittp/reng/ExternalTextureTarget : java/lang/Enum {
+	public static final field EXTERNAL_OES Lcom/rohittp/reng/ExternalTextureTarget;
+	public static final field TEXTURE_2D Lcom/rohittp/reng/ExternalTextureTarget;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lcom/rohittp/reng/ExternalTextureTarget;
+	public static fun values ()[Lcom/rohittp/reng/ExternalTextureTarget;
+}
+
 public final class com/rohittp/reng/FramePlan {
 	public static final field Companion Lcom/rohittp/reng/FramePlan$Companion;
 	public fun <init> (JLcom/rohittp/reng/Camera;Lcom/rohittp/reng/ProjectionMode;ZZLjava/util/List;Ljava/util/List;Ljava/util/List;Lcom/rohittp/reng/Backdrop;Lcom/rohittp/reng/Bloom;Lcom/rohittp/reng/BasemapSelection;Ljava/lang/Boolean;)V
@@ -620,6 +670,8 @@ public abstract interface class com/rohittp/reng/Renderer : java/lang/AutoClosea
 	public abstract fun queryResources (Lcom/rohittp/reng/ResourceSelector;)Lcom/rohittp/reng/ResourceReport;
 	public static synthetic fun queryResources$default (Lcom/rohittp/reng/Renderer;Lcom/rohittp/reng/ResourceSelector;ILjava/lang/Object;)Lcom/rohittp/reng/ResourceReport;
 	public abstract fun readAhead (Ljava/util/List;)V
+	public abstract fun registerExternalSource (Ljava/lang/String;Lcom/rohittp/reng/ExternalFrameSource;)V
+	public abstract fun unregisterExternalSource (Ljava/lang/String;)V
 }
 
 public final class com/rohittp/reng/Renderer$DefaultImpls {
@@ -1016,8 +1068,8 @@ public final class com/rohittp/reng/ShaderValue$Vec4$Companion {
 
 public final class com/rohittp/reng/Sticker {
 	public static final field Companion Lcom/rohittp/reng/Sticker$Companion;
-	public fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZI)V
-	public synthetic fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZIILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILcom/rohittp/reng/ExternalFrame;)V
+	public synthetic fun <init> (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILcom/rohittp/reng/ExternalFrame;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Lcom/rohittp/reng/Placement;
 	public final fun component2 ()Lcom/rohittp/reng/ResourceLocator;
 	public final fun component3 ()F
@@ -1025,10 +1077,12 @@ public final class com/rohittp/reng/Sticker {
 	public final fun component5 ()Lcom/rohittp/reng/StickerShader;
 	public final fun component6 ()Z
 	public final fun component7 ()I
-	public final fun copy (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZI)Lcom/rohittp/reng/Sticker;
-	public static synthetic fun copy$default (Lcom/rohittp/reng/Sticker;Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZIILjava/lang/Object;)Lcom/rohittp/reng/Sticker;
+	public final fun component8 ()Lcom/rohittp/reng/ExternalFrame;
+	public final fun copy (Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILcom/rohittp/reng/ExternalFrame;)Lcom/rohittp/reng/Sticker;
+	public static synthetic fun copy$default (Lcom/rohittp/reng/Sticker;Lcom/rohittp/reng/Placement;Lcom/rohittp/reng/ResourceLocator;FLcom/rohittp/reng/BlendMode;Lcom/rohittp/reng/StickerShader;ZILcom/rohittp/reng/ExternalFrame;ILjava/lang/Object;)Lcom/rohittp/reng/Sticker;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBlend ()Lcom/rohittp/reng/BlendMode;
+	public final fun getExternal ()Lcom/rohittp/reng/ExternalFrame;
 	public final fun getImage ()Lcom/rohittp/reng/ResourceLocator;
 	public final fun getLayer ()I
 	public final fun getOpacity ()F

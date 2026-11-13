@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.BlendMode
+import com.rohittp.reng.ExternalTextureTarget
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ShaderValue
@@ -48,6 +49,7 @@ class StickerPipelineTest {
         )
         assertEquals(TEXTURE_LOCATION, pipeline.pipeline.textureUniformLocation)
         assertEquals(OPACITY_LOCATION, pipeline.pipeline.opacityUniformLocation)
+        assertEquals(TEXTURE_TRANSFORM_LOCATION, pipeline.pipeline.textureTransformUniformLocation)
     }
 
     @Test fun deletionRemovesTheQuadAndTheProgram() {
@@ -209,12 +211,13 @@ class StickerPipelineTest {
     // not merely left untested because the fake happened to answer every query the same way. This test
     // pins that behaviour directly: with both names declared, drawing must actually issue the uniform
     // binds, at the exact locations createStickerPipeline resolved.
-    @Test fun drawingBindsBothDeclaredUniformsAtTheirResolvedLocations() {
+    @Test fun drawingBindsEveryDeclaredUniformAtItsResolvedLocation() {
         val binding = newBinding()
         val pipeline = createdPipeline(binding)
         assertEquals(MODEL_VIEW_PROJECTION_LOCATION, pipeline.modelViewProjectionUniformLocation)
         assertEquals(TEXTURE_LOCATION, pipeline.textureUniformLocation)
         assertEquals(OPACITY_LOCATION, pipeline.opacityUniformLocation)
+        assertEquals(TEXTURE_TRANSFORM_LOCATION, pipeline.textureTransformUniformLocation)
 
         binding.log.clear()
         drawStickers(binding, pipeline, StickerWorld(mapAnchored = listOf(resolvedSticker())))
@@ -228,6 +231,7 @@ class StickerPipelineTest {
             "the texture uniform must be bound to texture unit 0 when the shader declares it",
         )
         assertTrue(binding.log.any { it == "uniform1f($OPACITY_LOCATION,1.0)" })
+        assertContentEquals(IDENTITY_TEXTURE_TRANSFORM, binding.uniformMatrix4fvValues[TEXTURE_TRANSFORM_LOCATION])
     }
 
     // The mirror image of the test above: when the shader declares neither name (RecordingGlBinding's
@@ -245,6 +249,91 @@ class StickerPipelineTest {
 
         assertFalse(binding.log.any { it.startsWith("uniformMatrix4fv") })
         assertFalse(binding.log.any { it.startsWith("uniform1i") })
+    }
+
+    @Test fun aTransformed2dExternalTextureUsesThePlainProgramAndUploadsItsMatrix() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        val transform = FloatArray(16) { index -> index + 0.25f }
+        binding.log.clear()
+
+        drawStickers(
+            binding,
+            pipeline,
+            StickerWorld(
+                mapAnchored = listOf(
+                    resolvedSticker(texture = 1).withExternal(
+                        ResolvedExternalSticker(ExternalTextureTarget.TEXTURE_2D, 77, transform),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(binding.log.any { it == "bindTexture(0xDE1,77)" })
+        assertContentEquals(transform, binding.uniformMatrix4fvValues[TEXTURE_TRANSFORM_LOCATION])
+    }
+
+    @Test fun theOesVariantIsLazyAndItsExtensionPrecedesDeclarations() {
+        val binding = newBinding().apply { strings[GL_EXTENSIONS] = EXTERNAL_OES_EXTENSION_NAME }
+        val cache = GlProgramCache()
+        val pipeline = (createStickerPipeline(binding, ShaderDialect.GLES, cache) as StickerPipelineResult.Created)
+            .pipeline
+        val shadersBefore = binding.shaderSources.size
+
+        val first = assertNotNull(ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline))
+        val second = assertNotNull(ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline))
+
+        assertEquals(first, second)
+        assertEquals(shadersBefore + 2, binding.shaderSources.size, "the variant must compile exactly once")
+        val source = binding.shaderSources.values.single { EXTERNAL_OES_EXTENSION_NAME in it }
+        assertTrue(source.startsWith("#version 300 es\n#extension $EXTERNAL_OES_EXTENSION_NAME : require\nprecision"))
+    }
+
+    @Test fun aMissingOesExtensionPermanentlyUsesTheFallback() {
+        val binding = newBinding().apply { strings[GL_EXTENSIONS] = "GL_OES_texture_float" }
+        val cache = GlProgramCache()
+        val pipeline = (createStickerPipeline(binding, ShaderDialect.GLES, cache) as StickerPipelineResult.Created)
+            .pipeline
+        val shadersBefore = binding.shaderSources.size
+
+        assertNull(ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline))
+        assertNull(ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline))
+
+        assertTrue(pipeline.externalOesUnsupported)
+        assertEquals(shadersBefore, binding.shaderSources.size)
+    }
+
+    @Test fun anOesDrawBindsAndUnbindsTheExternalTargetThenRestoresThePlainProgram() {
+        val binding = newBinding().apply { strings[GL_EXTENSIONS] = EXTERNAL_OES_EXTENSION_NAME }
+        val cache = GlProgramCache()
+        val pipeline = (createStickerPipeline(binding, ShaderDialect.GLES, cache) as StickerPipelineResult.Created)
+            .pipeline
+        val oes = assertNotNull(ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline))
+        binding.log.clear()
+
+        drawStickers(
+            binding,
+            pipeline,
+            StickerWorld(
+                mapAnchored = listOf(
+                    resolvedSticker().withExternal(
+                        ResolvedExternalSticker(
+                            ExternalTextureTarget.EXTERNAL_OES,
+                            81,
+                            IDENTITY_TEXTURE_TRANSFORM,
+                            oes,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val bind = binding.log.indexOf("bindTexture(0x8D65,81)")
+        val draw = binding.log.indexOfFirst { it.startsWith("drawArrays") }
+        val unbind = binding.log.indexOf("bindTexture(0x8D65,0)")
+        assertTrue(bind in 0 until draw)
+        assertTrue(unbind > draw)
+        assertTrue(binding.log.drop(unbind).contains("useProgram(${pipeline.program})"))
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -369,6 +458,7 @@ class StickerPipelineTest {
                 "useProgram(${consumer.program})",
                 "uniformMatrix4fv($MODEL_VIEW_PROJECTION_LOCATION,1,false)",
                 "uniform1f($OPACITY_LOCATION,0.5)",
+                "uniformMatrix4fv($TEXTURE_TRANSFORM_LOCATION,1,false)",
                 "uniformMatrix4fv($WINDOW_TO_GROUND_LOCATION,1,false)",
                 "uniform2f($GROUND_ORIGIN_LOCATION,12.0,34.0)",
                 "uniform1f($GROUND_PRESENT_LOCATION,1.0)",
@@ -398,18 +488,53 @@ class StickerPipelineTest {
         assertEquals(2, binding.log.count { it.startsWith("blendFuncSeparate") })
     }
 
+    @Test fun aConsumerStickerIgnoresItsExternalTextureAndDrawsItsImage() {
+        val binding = newConsumerBinding()
+        val plain = createdPipeline(binding)
+        val consumer = (
+            createConsumerStickerPipeline(binding, ShaderDialect.GLES, GlProgramCache(), CONSUMER_SOURCE)
+                as ConsumerStickerPipelineResult.Created
+            ).pipeline
+        val sticker = resolvedSticker(texture = 41)
+            .withExternal(
+                ResolvedExternalSticker(
+                    ExternalTextureTarget.TEXTURE_2D,
+                    77,
+                    IDENTITY_TEXTURE_TRANSFORM,
+                ),
+            )
+            .withShader(ResolvedStickerShader(consumer, emptyMap(), emptyMap(), StickerGroundMapping.NONE))
+        binding.log.clear()
+
+        drawStickers(binding, plain, StickerWorld(mapAnchored = listOf(sticker)))
+
+        assertTrue(binding.log.contains("bindTexture(0xDE1,41)"))
+        assertFalse(binding.log.contains("bindTexture(0xDE1,77)"))
+    }
+
     private fun ResolvedSticker.withShader(shader: ResolvedStickerShader): ResolvedSticker = ResolvedSticker(
         modelViewProjection = modelViewProjection,
         texture = texture,
         opacity = opacity,
         blend = blend,
         shader = shader,
+        external = external,
+    )
+
+    private fun ResolvedSticker.withExternal(external: ResolvedExternalSticker): ResolvedSticker = ResolvedSticker(
+        modelViewProjection = modelViewProjection,
+        texture = texture,
+        opacity = opacity,
+        blend = blend,
+        shader = shader,
+        external = external,
     )
 
     private fun newConsumerBinding(): RecordingGlBinding = RecordingGlBinding().withDeclaredNames(
         STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to MODEL_VIEW_PROJECTION_LOCATION,
         STICKER_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
         STICKER_OPACITY_UNIFORM_NAME to OPACITY_LOCATION,
+        STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME to TEXTURE_TRANSFORM_LOCATION,
         STICKER_WINDOW_TO_GROUND_UNIFORM_NAME to WINDOW_TO_GROUND_LOCATION,
         STICKER_GROUND_ORIGIN_UNIFORM_NAME to GROUND_ORIGIN_LOCATION,
         STICKER_GROUND_PRESENT_UNIFORM_NAME to GROUND_PRESENT_LOCATION,
@@ -437,12 +562,14 @@ class StickerPipelineTest {
         STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME to MODEL_VIEW_PROJECTION_LOCATION,
         STICKER_TEXTURE_UNIFORM_NAME to TEXTURE_LOCATION,
         STICKER_OPACITY_UNIFORM_NAME to OPACITY_LOCATION,
+        STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME to TEXTURE_TRANSFORM_LOCATION,
     )
 
     private companion object {
         const val MODEL_VIEW_PROJECTION_LOCATION: Int = 3
         const val TEXTURE_LOCATION: Int = 7
         const val OPACITY_LOCATION: Int = 9
+        const val TEXTURE_TRANSFORM_LOCATION: Int = 10
         const val WINDOW_TO_GROUND_LOCATION: Int = 11
         const val TINT_LOCATION: Int = 12
         const val MASK_A_LOCATION: Int = 13

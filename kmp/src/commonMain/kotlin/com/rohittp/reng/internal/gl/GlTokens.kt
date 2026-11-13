@@ -28,8 +28,10 @@ internal const val GL_DEPTH_ATTACHMENT: Int = 0x8D00
 internal const val GL_MAX_COLOR_ATTACHMENTS: Int = 0x8CDF
 
 internal const val GL_TEXTURE_2D: Int = 0x0DE1
+internal const val GL_TEXTURE_EXTERNAL_OES: Int = 0x8D65
 internal const val GL_TEXTURE0: Int = 0x84C0
 internal const val GL_TEXTURE_BINDING_2D: Int = 0x8069
+internal const val GL_TEXTURE_BINDING_EXTERNAL_OES: Int = 0x8D67
 internal const val GL_ACTIVE_TEXTURE: Int = 0x84E0
 internal const val GL_SAMPLER_BINDING: Int = 0x8919
 internal const val GL_MAX_TEXTURE_SIZE: Int = 0x0D33

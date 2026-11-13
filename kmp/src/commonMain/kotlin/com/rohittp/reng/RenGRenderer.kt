@@ -51,6 +51,9 @@ import com.rohittp.reng.internal.gl.GpuSubresource
 import com.rohittp.reng.internal.gl.GpuTextureResidency
 import com.rohittp.reng.internal.gl.GroundEdgeStrips
 import com.rohittp.reng.internal.gl.GroundPipeline
+import com.rohittp.reng.internal.gl.GL_TEXTURE_2D
+import com.rohittp.reng.internal.gl.GL_TEXTURE_EXTERNAL_OES
+import com.rohittp.reng.internal.gl.GL_TEXTURE0
 import com.rohittp.reng.internal.gl.IconBatch
 import com.rohittp.reng.internal.gl.IconPipeline
 import com.rohittp.reng.internal.gl.InternalPipelineRole
@@ -69,6 +72,7 @@ import com.rohittp.reng.internal.gl.SceneGroundTile
 import com.rohittp.reng.internal.gl.SceneModel
 import com.rohittp.reng.internal.gl.SceneSticker
 import com.rohittp.reng.internal.gl.SceneStickerShader
+import com.rohittp.reng.internal.gl.ResolvedExternalSticker
 import com.rohittp.reng.internal.gl.SceneTerrain
 import com.rohittp.reng.internal.gl.SceneTileDem
 import com.rohittp.reng.internal.gl.ShaderDialect
@@ -101,6 +105,7 @@ import com.rohittp.reng.internal.gl.demDecodeCoefficients
 import com.rohittp.reng.internal.gl.drawFrame
 import com.rohittp.reng.internal.gl.ensureGlobeGroundMixedPrograms
 import com.rohittp.reng.internal.gl.ensureGroundMixedPrograms
+import com.rohittp.reng.internal.gl.ensureExternalOesStickerProgram
 import com.rohittp.reng.internal.gl.jointMatricesForSkin
 import com.rohittp.reng.internal.gl.modelPrimitiveAllocationBytes
 import com.rohittp.reng.internal.gl.requireResolvedAtDrawTime
@@ -113,6 +118,7 @@ import com.rohittp.reng.internal.gl.uploadPremultipliedTexture
 import com.rohittp.reng.internal.gl.uploadSpriteAtlas
 import com.rohittp.reng.internal.gl.uploadTexture
 import com.rohittp.reng.internal.gl.withCapturedGlState
+import com.rohittp.reng.internal.gl.supportsExternalOes
 import com.rohittp.reng.internal.groundPresentedProvisionallyDiagnostic
 import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.DerivedResourceKey
@@ -193,6 +199,7 @@ import com.rohittp.reng.internal.terrain.frameGroundCellsPerTileSide
 import com.rohittp.reng.internal.terrain.planPaddedDemTexture
 import com.rohittp.reng.internal.terrain.terrainCellsPerTileSide
 import com.rohittp.reng.internal.thread.CallingThread
+import com.rohittp.reng.internal.thread.PlatformLock
 import com.rohittp.reng.internal.thread.currentCallingThread
 import com.rohittp.reng.internal.thread.isCurrentThread
 import com.rohittp.rentile.PreparedStyle
@@ -200,6 +207,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
+
+private class AttachedExternalSource(
+    val source: ExternalFrameSource,
+    val textureName: Int,
+)
 
 // This file lives in the `com.rohittp.reng` package rather than under `internal/` on disk because
 // Renderer, PreparedFrame, and RenderTarget are all `sealed`, and Kotlin requires a sealed type's
@@ -301,6 +313,10 @@ internal class RenGRenderer(
     private val terrainAcquisition: TerrainAcquisition = TerrainAcquisition(basemapEngineHost)
     private val consumerPipelines = ConsumerPipelineCache(configuration.maximumCachedConsumerPipelines)
     private val contentTextures = ContentTextureCache(glObjectRegistry = glObjectRegistry)
+    private val externalSourceLock = PlatformLock()
+    private val registeredExternalSources: MutableMap<String, ExternalFrameSource> = linkedMapOf()
+    private val attachedExternalSources: MutableMap<String, AttachedExternalSource> = linkedMapOf()
+    private var externalSourcesClosed: Boolean = false
 
     /**
      * Every model program compiled so far, keyed by the variant that selects it: each one on the first
@@ -1180,6 +1196,7 @@ internal class RenGRenderer(
                         )
                     },
                     transient = sticker.transient,
+                    external = sticker.external,
                 )
             }
             // ADR 0093: a sticker image key is transient for this frame only if every sticker using it is.
@@ -2654,6 +2671,9 @@ internal class RenGRenderer(
         bloomResourceManager.forgetContext()
         consumerPipelines.forgetAll()
         modelPipelines.clear()
+        // The consumer has declared the context and every name in it gone. Keep registrations so a
+        // replacement context can attach fresh names, but do not call a GL-scoped callback here.
+        attachedExternalSources.clear()
     }
 
     override fun adoptCurrentRenderContext(): Unit = driver.withOperationGate {
@@ -2717,6 +2737,122 @@ internal class RenGRenderer(
             if (outcome is RendererLifecycleOutcome.Failed) throw outcome.failure.toException()
             RenGRenderTarget(ownerIdentity, framebufferName, driver.snapshot.contextGeneration)
         }
+
+    override fun registerExternalSource(id: String, source: ExternalFrameSource) {
+        externalSourceLock.withLock {
+            if (!externalSourcesClosed) registeredExternalSources[id] = source
+        }
+    }
+
+    override fun unregisterExternalSource(id: String) {
+        externalSourceLock.withLock {
+            if (!externalSourcesClosed) registeredExternalSources.remove(id)
+        }
+    }
+
+    /** Applies register/unregister replacements at the start of a draw, on its captured GL thread. */
+    private fun reconcileExternalSources(
+        binding: GlBinding,
+        externalOesAvailable: Boolean,
+    ): Map<String, ExternalFrameSource> {
+        val registered = externalSourceLock.withLock { LinkedHashMap(registeredExternalSources) }
+        val iterator = attachedExternalSources.iterator()
+        while (iterator.hasNext()) {
+            val (id, attached) = iterator.next()
+            if (registered[id] === attached.source) continue
+            iterator.remove()
+            detachExternalSource(attached, binding, externalOesAvailable)
+        }
+        return registered
+    }
+
+    private fun resolveExternalFrame(
+        reference: ExternalFrame,
+        sources: Map<String, ExternalFrameSource>,
+        pipeline: StickerPipeline,
+        profile: RenderContextProfile,
+        externalOesAvailable: Boolean,
+        binding: GlBinding,
+    ): ResolvedExternalSticker? {
+        val source = sources[reference.sourceId] ?: return null
+        // Capture both targets before entering consumer code. A SurfaceTexture callback may bind its
+        // attached OES name through platform GL rather than through RenG's binding.
+        binding.activeTexture(GL_TEXTURE0)
+        binding.bindTexture(GL_TEXTURE_2D, 0)
+        if (externalOesAvailable) binding.bindTexture(GL_TEXTURE_EXTERNAL_OES, 0)
+        val attached = attachedExternalSources[reference.sourceId] ?: run {
+            val names = IntArray(1)
+            binding.genTextures(1, names)
+            try {
+                source.attach(names[0])
+            } catch (@Suppress("TooGenericExceptionCaught") failure: Throwable) {
+                binding.deleteTextures(1, names)
+                throw failure
+            }
+            AttachedExternalSource(source, names[0]).also {
+                attachedExternalSources[reference.sourceId] = it
+            }
+        }
+
+        val latch = try {
+            attached.source.latch(reference.frame)
+        } finally {
+            binding.activeTexture(GL_TEXTURE0)
+        } ?: return null
+
+        return when (latch.target) {
+            ExternalTextureTarget.TEXTURE_2D -> ResolvedExternalSticker(
+                target = latch.target,
+                texture = latch.textureName,
+                transform = latch.transform.copyOf(),
+            )
+            ExternalTextureTarget.EXTERNAL_OES -> {
+                if (!externalOesAvailable) {
+                    pipeline.externalOesUnsupported = true
+                    return null
+                }
+                val program = ensureExternalOesStickerProgram(
+                    binding = binding,
+                    dialect = profile.dialect,
+                    cache = programs,
+                    pipeline = pipeline,
+                    deriver = geometryKeyDeriver,
+                ) ?: return null
+                ResolvedExternalSticker(
+                    target = latch.target,
+                    texture = latch.textureName,
+                    transform = latch.transform.copyOf(),
+                    oesProgram = program,
+                )
+            }
+        }
+    }
+
+    private fun detachExternalSource(
+        attached: AttachedExternalSource,
+        binding: GlBinding,
+        externalOesAvailable: Boolean = false,
+    ) {
+        binding.activeTexture(GL_TEXTURE0)
+        binding.bindTexture(GL_TEXTURE_2D, 0)
+        if (externalOesAvailable) binding.bindTexture(GL_TEXTURE_EXTERNAL_OES, 0)
+        try {
+            attached.source.detach()
+        } finally {
+            binding.activeTexture(GL_TEXTURE0)
+            binding.deleteTextures(1, intArrayOf(attached.textureName))
+        }
+    }
+
+    private fun closeExternalSources() {
+        externalSourceLock.withLock {
+            externalSourcesClosed = true
+            registeredExternalSources.clear()
+        }
+        val attached = attachedExternalSources.values.toList()
+        attachedExternalSources.clear()
+        attached.forEach { detachExternalSource(it, binding) }
+    }
 
     // ---- Drawing ----------------------------------------------------------------------------------
 
@@ -2809,6 +2945,11 @@ internal class RenGRenderer(
             // `drawFrame` still opens a region of its own for every other caller, and finds this one
             // already open and joins it.
             withCapturedGlState(binding, profile) { captured ->
+                val hasExternalSourceWork = attachedExternalSources.isNotEmpty() ||
+                    frame.stickers.any { it.external != null && it.shader == null }
+                val externalOesAvailable = hasExternalSourceWork && profile.dialect == ShaderDialect.GLES &&
+                    supportsExternalOes(captured)
+                val externalSources = reconcileExternalSources(captured, externalOesAvailable)
                 when (
                     val resolved = resolveGroundTiles(
                         frame = frame,
@@ -2842,6 +2983,8 @@ internal class RenGRenderer(
                             gpuAllocationLeases = gpuAllocationLeases,
                             consumerPipelineLeases = consumerPipelineLeases,
                             stagedDiagnostics = stagedDiagnostics,
+                            externalSources = externalSources,
+                            externalOesAvailable = externalOesAvailable,
                             binding = captured,
                         )
                     }
@@ -2918,12 +3061,35 @@ internal class RenGRenderer(
         gpuAllocationLeases: MutableList<GpuAllocationLease>,
         consumerPipelineLeases: MutableList<ConsumerPipelineLease<*>>,
         stagedDiagnostics: MutableList<Diagnostic>,
+        externalSources: Map<String, ExternalFrameSource>,
+        externalOesAvailable: Boolean,
         /** The captured binding (ADR 0054), shadowing the renderer's own for this draw. */
         binding: GlBinding,
     ): FailureDescriptor? {
         var stickersWithoutGround = 0
+        val latchedExternalFrames = mutableMapOf<ExternalFrame, ResolvedExternalSticker?>()
         val sceneStickers = frame.stickers.map { preparedSticker ->
-            val texture = when (val image = preparedSticker.image) {
+            // ADR 0095: a consumer program always uses the prepared image. Otherwise a latch is
+            // shared by every sticker naming the same (sourceId, frame) in this draw, including null.
+            val external = if (preparedSticker.shader == null) {
+                preparedSticker.external?.let { reference ->
+                    if (latchedExternalFrames.containsKey(reference)) {
+                        latchedExternalFrames[reference]
+                    } else {
+                        resolveExternalFrame(
+                            reference = reference,
+                            sources = externalSources,
+                            pipeline = sticker,
+                            profile = profile,
+                            externalOesAvailable = externalOesAvailable,
+                            binding = binding,
+                        ).also { latchedExternalFrames[reference] = it }
+                    }
+                }
+            } else {
+                null
+            }
+            val texture = external?.texture ?: when (val image = preparedSticker.image) {
                 is DecodedImage -> contentTextures.cachedTexture(
                     key = preparedSticker.resourceKey,
                     generationId = preparedSticker.generationId,
@@ -2994,6 +3160,7 @@ internal class RenGRenderer(
                 opacity = preparedSticker.opacity,
                 blend = preparedSticker.blend,
                 shader = sceneShader,
+                external = external,
             )
         }
         if (stickersWithoutGround > 0) stagedDiagnostics += stickerGroundUnavailableDiagnostic(stickersWithoutGround)
@@ -3962,6 +4129,7 @@ internal class RenGRenderer(
                 // Owner-wide terminal close invalidates and releases Prepared Frames before clearing
                 // resident generations. This also detaches their callback to this renderer.
                 frameOwnership.drainPreparedFrames()
+                closeExternalSources()
                 offscreenSurface?.let { deleteOffscreenSurface(binding, it) }
                 compositePipeline?.let { deleteCompositePipeline(binding, programs, it) }
                 stickerPipeline?.let { deleteStickerPipeline(binding, programs, it) }

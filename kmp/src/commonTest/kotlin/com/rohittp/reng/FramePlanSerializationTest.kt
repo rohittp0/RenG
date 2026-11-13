@@ -61,6 +61,7 @@ class FramePlanSerializationTest {
                         ),
                         transient = true,
                         layer = 7,
+                        external = ExternalFrame(sourceId = "video-one", frame = 41L),
                     ),
                 ),
                 models = listOf(
@@ -173,7 +174,9 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image", "opacity", "blend", "shader", "transient", "layer",
+            "placement", "image", "opacity", "blend", "shader", "transient", "layer", "external",
+            // ExternalFrame
+            "sourceId", "frame",
             // StickerShader + GroundRectangle (its corners share Geometry's key names)
             "ground",
             // Model
@@ -407,6 +410,19 @@ class StickerShaderSerializationTest {
         assertTrue("\"transient\"" !in json.encodeToString(plain), "the default must not be written")
         assertTrue("\"transient\":true" in json.encodeToString(transient))
         assertEquals(false, json.decodeFromString<Sticker>(json.encodeToString(plain)).transient)
+    }
+
+    /** ADR 0095: `external` round-trips, is omitted at its default, and an older document reads as null. */
+    @Test
+    fun aStickerWithAndWithoutExternalRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("poster.png"))
+        val external = plain.copy(external = ExternalFrame("video", 1_000_000_000_000L))
+        for (sticker in listOf(plain, external)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"external\"" !in json.encodeToString(plain), "the default must not be written")
+        assertTrue("\"sourceId\":\"video\"" in json.encodeToString(external))
+        assertEquals(null, json.decodeFromString<Sticker>(json.encodeToString(plain)).external)
     }
 
     private companion object {

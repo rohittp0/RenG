@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.BlendMode
+import com.rohittp.reng.ExternalTextureTarget
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceKey
@@ -25,9 +26,10 @@ internal const val STICKER_VERTEX_SOURCE: String =
         "layout(location = 0) in vec2 rengStickerPosition;\n" +
         "layout(location = 1) in vec2 rengStickerTexCoord;\n" +
         "uniform mat4 rengStickerModelViewProjection;\n" +
+        "uniform mat4 rengStickerTextureTransform;\n" +
         "out vec2 rengStickerUv;\n" +
         "void main() {\n" +
-        "    rengStickerUv = rengStickerTexCoord;\n" +
+        "    rengStickerUv = (rengStickerTextureTransform * vec4(rengStickerTexCoord, 0.0, 1.0)).xy;\n" +
         "    gl_Position = rengStickerModelViewProjection * vec4(rengStickerPosition, 0.0, 1.0);\n" +
         "}\n"
 
@@ -45,9 +47,27 @@ internal const val STICKER_FRAGMENT_SOURCE: String =
 internal val STICKER_SHADER_PAIR: ShaderPair =
     ShaderPair(vertexSource = STICKER_VERTEX_SOURCE, fragmentSource = STICKER_FRAGMENT_SOURCE)
 
+/** The external-OES fragment variant. The extension directive must precede every declaration. */
+internal const val STICKER_EXTERNAL_OES_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "#extension GL_OES_EGL_image_external_essl3 : require\n" +
+        "precision highp float;\n" +
+        "uniform samplerExternalOES rengStickerTexture;\n" +
+        "uniform float rengStickerOpacity;\n" +
+        "in vec2 rengStickerUv;\n" +
+        "layout(location = 0) out vec4 rengStickerColour;\n" +
+        "void main() {\n" +
+        "    rengStickerColour = texture(rengStickerTexture, rengStickerUv) * rengStickerOpacity;\n" +
+        "}\n"
+
+internal val STICKER_EXTERNAL_OES_SHADER_PAIR: ShaderPair =
+    ShaderPair(vertexSource = STICKER_VERTEX_SOURCE, fragmentSource = STICKER_EXTERNAL_OES_FRAGMENT_SOURCE)
+
 internal const val STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME: String = "rengStickerModelViewProjection"
 internal const val STICKER_TEXTURE_UNIFORM_NAME: String = "rengStickerTexture"
 internal const val STICKER_OPACITY_UNIFORM_NAME: String = "rengStickerOpacity"
+internal const val STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME: String = "rengStickerTextureTransform"
+internal const val EXTERNAL_OES_EXTENSION_NAME: String = "GL_OES_EGL_image_external_essl3"
 
 /**
  * The window-pixel-to-ground-rectangle homography a consumer sticker program reads through
@@ -160,6 +180,20 @@ internal class StickerPipeline(
     val modelViewProjectionUniformLocation: Int,
     val textureUniformLocation: Int,
     val opacityUniformLocation: Int = -1,
+    val textureTransformUniformLocation: Int = -1,
+) {
+    internal var externalOesProgram: ExternalOesStickerProgram? = null
+    internal var externalOesUnsupported: Boolean = false
+}
+
+/** The lazily compiled OES variant; it shares [StickerPipeline]'s quad and vertex buffer. */
+internal class ExternalOesStickerProgram(
+    val key: ResourceKey,
+    val program: Int,
+    val modelViewProjectionUniformLocation: Int,
+    val textureUniformLocation: Int,
+    val opacityUniformLocation: Int,
+    val textureTransformUniformLocation: Int,
 )
 
 internal sealed interface StickerPipelineResult {
@@ -214,8 +248,58 @@ internal fun createStickerPipeline(
             ),
             textureUniformLocation = binding.getUniformLocation(program, STICKER_TEXTURE_UNIFORM_NAME),
             opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
+            textureTransformUniformLocation =
+                binding.getUniformLocation(program, STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME),
         ),
     )
+}
+
+/** Whether the current context advertises the ESSL3 external-image extension. */
+internal fun supportsExternalOes(binding: GlBinding): Boolean = binding.getString(GL_EXTENSIONS)
+    .orEmpty()
+    .split(' ')
+    .any { it == EXTERNAL_OES_EXTENSION_NAME }
+
+/**
+ * Returns the OES program, compiling it only on its first use. A missing extension or any compile/link
+ * failure permanently marks OES unsupported for this [StickerPipeline]'s context.
+ */
+internal fun ensureExternalOesStickerProgram(
+    binding: GlBinding,
+    dialect: ShaderDialect,
+    cache: GlProgramCache,
+    pipeline: StickerPipeline,
+    deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
+): ExternalOesStickerProgram? {
+    pipeline.externalOesProgram?.let { return it }
+    if (dialect != ShaderDialect.GLES || pipeline.externalOesUnsupported || !supportsExternalOes(binding)) {
+        pipeline.externalOesUnsupported = true
+        return null
+    }
+    val key = deriver.internalPipeline(InternalPipelineRole.STICKER, STICKER_EXTERNAL_OES_SHADER_PAIR).key
+    val vertexPlan = scanShaderProfile(STICKER_VERTEX_SOURCE)
+    val fragmentPlan = scanShaderProfile(STICKER_EXTERNAL_OES_FRAGMENT_SOURCE)
+    if (vertexPlan == null || fragmentPlan == null) {
+        pipeline.externalOesUnsupported = true
+        return null
+    }
+    val program = when (val result = cache.getOrCompile(binding, dialect, key, vertexPlan, fragmentPlan)) {
+        is GlProgramResult.Linked -> result.program
+        is GlProgramResult.Failed -> {
+            pipeline.externalOesUnsupported = true
+            return null
+        }
+    }
+    return ExternalOesStickerProgram(
+        key = key,
+        program = program,
+        modelViewProjectionUniformLocation =
+            binding.getUniformLocation(program, STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME),
+        textureUniformLocation = binding.getUniformLocation(program, STICKER_TEXTURE_UNIFORM_NAME),
+        opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
+        textureTransformUniformLocation =
+            binding.getUniformLocation(program, STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME),
+    ).also { created -> pipeline.externalOesProgram = created }
 }
 
 internal fun deleteStickerPipeline(
@@ -225,6 +309,9 @@ internal fun deleteStickerPipeline(
 ) {
     binding.deleteVertexArrays(1, intArrayOf(pipeline.vertexArray))
     binding.deleteBuffers(1, intArrayOf(pipeline.vertexBuffer))
+    pipeline.externalOesProgram?.let { external ->
+        cache.remove(external.key)?.let { binding.deleteProgram(it) }
+    }
     cache.remove(pipeline.key)?.let { binding.deleteProgram(it) }
 }
 
@@ -241,6 +328,7 @@ internal class ConsumerStickerPipeline(
     val modelViewProjectionUniformLocation: Int,
     val textureUniformLocation: Int,
     val opacityUniformLocation: Int,
+    val textureTransformUniformLocation: Int,
     val windowToGroundUniformLocation: Int,
     val groundOriginUniformLocation: Int = -1,
     val groundPresentUniformLocation: Int = -1,
@@ -303,6 +391,8 @@ internal fun createConsumerStickerPipeline(
                 binding.getUniformLocation(program, STICKER_MODEL_VIEW_PROJECTION_UNIFORM_NAME),
             textureUniformLocation = binding.getUniformLocation(program, STICKER_TEXTURE_UNIFORM_NAME),
             opacityUniformLocation = binding.getUniformLocation(program, STICKER_OPACITY_UNIFORM_NAME),
+            textureTransformUniformLocation =
+                binding.getUniformLocation(program, STICKER_TEXTURE_TRANSFORM_UNIFORM_NAME),
             windowToGroundUniformLocation =
                 binding.getUniformLocation(program, STICKER_WINDOW_TO_GROUND_UNIFORM_NAME),
             groundOriginUniformLocation = binding.getUniformLocation(program, STICKER_GROUND_ORIGIN_UNIFORM_NAME),
@@ -346,6 +436,15 @@ internal class ResolvedSticker(
     val blend: BlendMode = BlendMode.OVER,
     /** The consumer program it is drawn with instead of the plain one, or `null` (ADR 0087). */
     val shader: ResolvedStickerShader? = null,
+    /** A latched external texture, or `null` for the prepared image fallback (ADR 0095). */
+    val external: ResolvedExternalSticker? = null,
+)
+
+internal class ResolvedExternalSticker(
+    val target: ExternalTextureTarget,
+    val texture: Int,
+    val transform: FloatArray,
+    val oesProgram: ExternalOesStickerProgram? = null,
 )
 
 /**
@@ -446,6 +545,10 @@ internal fun drawOneSticker(binding: GlBinding, pipeline: StickerPipeline, stick
         drawOneConsumerSticker(binding, pipeline, sticker, shader)
         return
     }
+    sticker.external?.let { external ->
+        drawOneExternalSticker(binding, pipeline, sticker, external)
+        return
+    }
     if (pipeline.modelViewProjectionUniformLocation >= 0) {
         binding.uniformMatrix4fv(
             pipeline.modelViewProjectionUniformLocation,
@@ -455,10 +558,48 @@ internal fun drawOneSticker(binding: GlBinding, pipeline: StickerPipeline, stick
         )
     }
     binding.bindTexture(GL_TEXTURE_2D, sticker.texture)
+    if (pipeline.textureTransformUniformLocation >= 0) {
+        binding.uniformMatrix4fv(pipeline.textureTransformUniformLocation, 1, false, IDENTITY_TEXTURE_TRANSFORM)
+    }
     if (pipeline.opacityUniformLocation >= 0) {
         binding.uniform1f(pipeline.opacityUniformLocation, sticker.opacity)
     }
     binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+}
+
+private fun drawOneExternalSticker(
+    binding: GlBinding,
+    pipeline: StickerPipeline,
+    sticker: ResolvedSticker,
+    external: ResolvedExternalSticker,
+) {
+    val program = when (external.target) {
+        ExternalTextureTarget.TEXTURE_2D -> null
+        ExternalTextureTarget.EXTERNAL_OES -> requireNotNull(external.oesProgram)
+    }
+    val programName = program?.program ?: pipeline.program
+    binding.useProgram(programName)
+    val modelViewProjectionLocation = program?.modelViewProjectionUniformLocation
+        ?: pipeline.modelViewProjectionUniformLocation
+    val textureLocation = program?.textureUniformLocation ?: pipeline.textureUniformLocation
+    val opacityLocation = program?.opacityUniformLocation ?: pipeline.opacityUniformLocation
+    val transformLocation = program?.textureTransformUniformLocation ?: pipeline.textureTransformUniformLocation
+    if (modelViewProjectionLocation >= 0) {
+        binding.uniformMatrix4fv(modelViewProjectionLocation, 1, false, sticker.modelViewProjection)
+    }
+    if (textureLocation >= 0) binding.uniform1i(textureLocation, 0)
+    if (opacityLocation >= 0) binding.uniform1f(opacityLocation, sticker.opacity)
+    if (transformLocation >= 0) binding.uniformMatrix4fv(transformLocation, 1, false, external.transform)
+    val target = when (external.target) {
+        ExternalTextureTarget.TEXTURE_2D -> GL_TEXTURE_2D
+        ExternalTextureTarget.EXTERNAL_OES -> GL_TEXTURE_EXTERNAL_OES
+    }
+    binding.bindTexture(target, external.texture)
+    binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
+    if (external.target == ExternalTextureTarget.EXTERNAL_OES) {
+        binding.bindTexture(GL_TEXTURE_EXTERNAL_OES, 0)
+        binding.useProgram(pipeline.program)
+    }
 }
 
 /**
@@ -484,6 +625,14 @@ private fun drawOneConsumerSticker(
     }
     if (consumer.opacityUniformLocation >= 0) {
         binding.uniform1f(consumer.opacityUniformLocation, sticker.opacity)
+    }
+    if (consumer.textureTransformUniformLocation >= 0) {
+        binding.uniformMatrix4fv(
+            consumer.textureTransformUniformLocation,
+            1,
+            false,
+            IDENTITY_TEXTURE_TRANSFORM,
+        )
     }
     if (consumer.windowToGroundUniformLocation >= 0) {
         binding.uniformMatrix4fv(consumer.windowToGroundUniformLocation, 1, false, shader.ground.windowToGround)
@@ -522,3 +671,10 @@ internal fun applyPremultipliedBlendMode(binding: GlBinding, blend: BlendMode) {
 
 private const val STICKER_STRIDE_BYTES: Int = 16
 private const val STICKER_UV_OFFSET_BYTES: Int = 8
+
+internal val IDENTITY_TEXTURE_TRANSFORM: FloatArray = floatArrayOf(
+    1f, 0f, 0f, 0f,
+    0f, 1f, 0f, 0f,
+    0f, 0f, 1f, 0f,
+    0f, 0f, 0f, 1f,
+)

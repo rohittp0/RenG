@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.Camera
+import com.rohittp.reng.ContextOwnership
 import com.rohittp.reng.FramebufferName
 import com.rohittp.reng.Geometry
 import com.rohittp.reng.OutputPixelSize
@@ -58,6 +59,54 @@ private fun frameGlyphQuads(): List<ResolvedGlyphQuad> = (0 until 2).map { index
 }
 
 class GlFrameDrawerTest {
+    @Test fun exclusiveContextDrawIssuesNoStateQueriesAndDoesNotPollTheErrorQueue() {
+        val world = drawWorld()
+        world.binding.log.clear()
+        world.binding.errorQueue = mutableListOf(GL_INVALID_OPERATION, GL_NO_ERROR)
+
+        assertNull(world.draw(ContextOwnership.EXCLUSIVE) { })
+
+        assertTrue(
+            world.binding.log.none { call ->
+                call.startsWith("getIntegerv") ||
+                    call.startsWith("getIntegeri_v") ||
+                    call.startsWith("getFloatv") ||
+                    call.startsWith("getBooleanv") ||
+                    call.startsWith("isEnabled")
+            },
+            "exclusive drawing must not capture GL state: ${world.binding.log}",
+        )
+        assertEquals(
+            listOf(GL_INVALID_OPERATION, GL_NO_ERROR),
+            world.binding.errorQueue,
+            "an unchecked exclusive frame must make no glGetError round trip",
+        )
+    }
+
+    @Test fun sharedContextDrawRetainsStateCaptureRestoreAndPerFrameErrorChecks() {
+        val world = drawWorld()
+        world.binding.log.clear()
+        world.binding.errorQueue = mutableListOf(GL_NO_ERROR, GL_NO_ERROR)
+
+        assertNull(world.draw(ContextOwnership.SHARED) { })
+
+        assertTrue(world.binding.log.any { it.startsWith("getIntegerv") })
+        assertTrue(world.binding.log.any { it.startsWith("isEnabled") })
+        assertTrue(world.binding.log.any { it == "bindFramebuffer(0x8CA9,$ORIGINAL_DRAW_FRAMEBUFFER)" })
+        assertTrue(world.binding.errorQueue.isEmpty(), "shared drawing must retain both error-queue checks")
+    }
+
+    @Test fun checkedExclusiveContextRestoresFullPerFrameErrorChecking() {
+        val world = drawWorld()
+        world.binding.log.clear()
+        world.binding.errorQueue = mutableListOf(GL_NO_ERROR, GL_INVALID_OPERATION, GL_NO_ERROR)
+
+        val failure = assertNotNull(world.draw(ContextOwnership.EXCLUSIVE_CHECKED) { })
+
+        assertEquals(RenGErrorCode.GPU_OPERATION_FAILED, failure.code)
+        assertTrue(world.binding.log.none { it.startsWith("getIntegerv") || it.startsWith("isEnabled") })
+    }
+
     /**
      * DEVIATION FROM BRIEF (sanctioned, discovered while running this test red-then-green): the
      * brief's third assertion required the composite pass's rebind to the caller's target to be
@@ -330,8 +379,17 @@ class GlFrameDrawerTest {
         val pipeline: CompositePipeline,
         val target: FramebufferName,
     ) {
-        fun draw(content: (GlBinding) -> Unit): FailureDescriptor? =
-            drawFrame(binding, profile, surface, pipeline, target, GlFrameContent { content(it) })
+        fun draw(
+            ownership: ContextOwnership = ContextOwnership.SHARED,
+            content: (GlBinding) -> Unit,
+        ): FailureDescriptor? = drawFrame(
+            binding.withContextOwnership(ownership),
+            profile,
+            surface,
+            pipeline,
+            target,
+            GlFrameContent { content(it) },
+        )
     }
 
     private fun drawWorld(

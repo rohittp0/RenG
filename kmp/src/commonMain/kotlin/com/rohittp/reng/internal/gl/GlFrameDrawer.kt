@@ -32,9 +32,10 @@ internal const val REVERSE_Z_FAR_DEPTH: Float = 0.0f
  * would multiply alpha a second time. That second multiplication is invisible under an opaque
  * basemap and wrong the moment a consumer composites RenG's output over their own background.
  *
- * The entire body runs inside [withCapturedGlState], so the caller's GL state is captured before
- * either pass and restored afterward unconditionally — including when [content] leaves state dirty
- * or a driver error is detected at the end.
+ * The entire body runs inside [withCapturedGlState]. A shared context is captured before either pass
+ * and restored afterward unconditionally — including when [content] leaves state dirty or a driver
+ * error is detected at the end. An opted-in exclusive context establishes RenG's required state but
+ * has no consumer state to capture or restore (ADR 0092).
  *
  * **Depth comparison (ADR 0025) and depth writes (ADR 0027).** The test is [GL_GEQUAL], not
  * `GL_GREATER`. Under strict `GL_GREATER` a fragment at exactly the depth already in the buffer is
@@ -64,7 +65,7 @@ internal fun drawFrame(
     targetFramebuffer: FramebufferName,
     content: GlFrameContent = EmptyGlFrameContent,
 ): FailureDescriptor? {
-    GlErrorQueue.drainOnEntry(binding)
+    if (binding.checksEveryOperation) GlErrorQueue.drainOnEntry(binding)
 
     // The region establishes RenG's pixel-unpack state when it opens (see withCapturedGlState), so
     // every upload in it -- including those made before this frame draws -- reads it.
@@ -105,7 +106,7 @@ internal fun drawFrame(
         binding.bindVertexArray(composite.vertexArray)
         binding.drawArrays(GL_TRIANGLE_STRIP, 0, 4)
 
-        if (GlErrorQueue.firstOwnError(binding) == GL_NO_ERROR) {
+        if (!binding.checksEveryOperation || GlErrorQueue.firstOwnError(binding) == GL_NO_ERROR) {
             null
         } else {
             glOperationFailure(PipelineStage.DRAW, resourceKey = null)

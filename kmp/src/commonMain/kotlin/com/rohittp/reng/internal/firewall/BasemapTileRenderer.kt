@@ -1,6 +1,9 @@
 package com.rohittp.reng.internal.firewall
 
-/** Optional platform renderer for one already-prepared raw basemap tile. */
+import com.rohittp.reng.BasemapTileRenderResult
+import com.rohittp.reng.ResourceAccessMode
+
+/** Optional platform renderer for one raw basemap tile which RenG has not acquired itself. */
 internal fun interface BasemapTileRenderer {
     suspend fun render(
         styleLocator: String,
@@ -8,7 +11,9 @@ internal fun interface BasemapTileRenderer {
         column: Int,
         row: Int,
         outputSizePx: Int,
-    ): ByteArray
+        outputRequestKey: String,
+        accessMode: ResourceAccessMode,
+    ): BasemapTileRenderResult
 }
 
 /** Process-local because a Wasm worker has its own module instance and therefore its own renderer. */

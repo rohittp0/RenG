@@ -15,6 +15,7 @@ import com.rohittp.reng.internal.gl.RenderContextIdentity
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.adoptRenderContext
 import com.rohittp.reng.internal.gl.openPlatformGlBinding
+import com.rohittp.reng.internal.gl.withContextOwnership
 import com.rohittp.reng.internal.metrics.EngineMetricRecorder
 import com.rohittp.reng.internal.lifecycle.GpuLedger
 import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
@@ -66,15 +67,16 @@ internal fun createRenderer(
 ): Renderer {
     val identity: RenderContextIdentity = probe.currentContextIdentity()
         ?: throw renGFailure(RenGErrorCode.NO_CURRENT_RENDER_CONTEXT, PipelineStage.CONTEXT_ADOPTION)
+    val configuredBinding = binding.withContextOwnership(configuration.contextOwnership)
 
-    val profile = when (val adoption = adoptRenderContext(binding)) {
+    val profile = when (val adoption = adoptRenderContext(configuredBinding)) {
         is RenderContextAdoption.Adopted -> adoption.profile
         is RenderContextAdoption.Rejected -> throw adoption.failure.toException()
     }
 
     val programs = GlProgramCache()
     val glState = when (
-        val result = createInternalGlState(binding, profile, programs, configuration)
+        val result = createInternalGlState(configuredBinding, profile, programs, configuration)
     ) {
         is InternalGlStateResult.Created -> result.state
         is InternalGlStateResult.Failed -> throw result.failure.toException()
@@ -129,7 +131,7 @@ internal fun createRenderer(
     )
 
     val driver = GlLifecycleDriver(
-        binding = binding,
+        binding = configuredBinding,
         probe = probe,
         registry = objectRegistry,
         programs = programs,
@@ -145,7 +147,7 @@ internal fun createRenderer(
 
     return RenGRenderer(
         configuration = configuration,
-        binding = binding,
+        binding = configuredBinding,
         driver = driver,
         preparationDriver = preparationDriver,
         residentCache = residentCache,

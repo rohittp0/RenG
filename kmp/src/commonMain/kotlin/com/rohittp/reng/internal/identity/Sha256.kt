@@ -2,32 +2,35 @@ package com.rohittp.reng.internal.identity
 
 internal object PureKotlinSha256 : Sha256Function {
     override fun digest(bytes: CanonicalBytes): Sha256Digest {
+        val source = bytes.byteSnapshot
         val state = INITIAL_STATE.copyOf()
         val schedule = IntArray(SCHEDULE_WORDS)
 
         var offset = 0
-        while (bytes.size - offset >= BLOCK_BYTES) {
-            compress(bytes, offset, state, schedule)
+        while (source.size - offset >= BLOCK_BYTES) {
+            compress(source, offset, state, schedule)
             offset += BLOCK_BYTES
         }
 
-        val remainder = bytes.size - offset
-        val tailSize = if (remainder <= MAX_SINGLE_BLOCK_REMAINDER) BLOCK_BYTES else BLOCK_BYTES * 2
-        val tail = ByteArray(tailSize)
-        bytes.copyRangeInto(
-            destination = tail,
-            destinationOffset = 0,
-            startIndex = offset,
-            endIndex = bytes.size,
-        )
-        tail[remainder] = 0x80.toByte()
-        writeBitLength(bytes.size.toLong() * Byte.SIZE_BITS.toLong(), tail)
-
-        offset = 0
-        while (offset < tail.size) {
-            compress(tail, offset, state, schedule)
-            offset += BLOCK_BYTES
+        // Build the padded final block directly in the reused schedule. This avoids allocating and
+        // then rereading a 64- or 128-byte tail for every digest.
+        schedule.fill(0)
+        val remainder = source.size - offset
+        for (index in 0 until remainder) {
+            val shift = 24 - (index and 3) * Byte.SIZE_BITS
+            schedule[index ushr 2] = schedule[index ushr 2] or
+                ((source[offset + index].toInt() and 0xff) shl shift)
         }
+        val paddingShift = 24 - (remainder and 3) * Byte.SIZE_BITS
+        schedule[remainder ushr 2] = schedule[remainder ushr 2] or (0x80 shl paddingShift)
+        val bitLength = source.size.toLong() * Byte.SIZE_BITS.toLong()
+        if (remainder > MAX_SINGLE_BLOCK_REMAINDER) {
+            compressSchedule(state, schedule)
+            schedule.fill(0)
+        }
+        schedule[14] = (bitLength ushr Int.SIZE_BITS).toInt()
+        schedule[15] = bitLength.toInt()
+        compressSchedule(state, schedule)
 
         val digest = ByteArray(DIGEST_BYTES)
         state.forEachIndexed { index, word ->
@@ -37,26 +40,27 @@ internal object PureKotlinSha256 : Sha256Function {
     }
 
     private fun compress(
-        block: CanonicalBytes,
-        blockOffset: Int,
-        state: IntArray,
-        schedule: IntArray,
-    ) {
-        for (index in 0 until INITIAL_SCHEDULE_WORDS) {
-            schedule[index] = readIntBigEndian(block, blockOffset + index * Int.SIZE_BYTES)
-        }
-        compressSchedule(state, schedule)
-    }
-
-    private fun compress(
         block: ByteArray,
         blockOffset: Int,
         state: IntArray,
         schedule: IntArray,
     ) {
-        for (index in 0 until INITIAL_SCHEDULE_WORDS) {
-            schedule[index] = readIntBigEndian(block, blockOffset + index * Int.SIZE_BYTES)
-        }
+        schedule[0] = readIntBigEndian(block, blockOffset)
+        schedule[1] = readIntBigEndian(block, blockOffset + 4)
+        schedule[2] = readIntBigEndian(block, blockOffset + 8)
+        schedule[3] = readIntBigEndian(block, blockOffset + 12)
+        schedule[4] = readIntBigEndian(block, blockOffset + 16)
+        schedule[5] = readIntBigEndian(block, blockOffset + 20)
+        schedule[6] = readIntBigEndian(block, blockOffset + 24)
+        schedule[7] = readIntBigEndian(block, blockOffset + 28)
+        schedule[8] = readIntBigEndian(block, blockOffset + 32)
+        schedule[9] = readIntBigEndian(block, blockOffset + 36)
+        schedule[10] = readIntBigEndian(block, blockOffset + 40)
+        schedule[11] = readIntBigEndian(block, blockOffset + 44)
+        schedule[12] = readIntBigEndian(block, blockOffset + 48)
+        schedule[13] = readIntBigEndian(block, blockOffset + 52)
+        schedule[14] = readIntBigEndian(block, blockOffset + 56)
+        schedule[15] = readIntBigEndian(block, blockOffset + 60)
         compressSchedule(state, schedule)
     }
 
@@ -106,22 +110,8 @@ internal object PureKotlinSha256 : Sha256Function {
         state[7] += h
     }
 
-    private fun writeBitLength(bitLength: Long, destination: ByteArray) {
-        val offset = destination.size - Long.SIZE_BYTES
-        for (index in 0 until Long.SIZE_BYTES) {
-            destination[offset + index] =
-                (bitLength ushr ((Long.SIZE_BYTES - 1 - index) * Byte.SIZE_BITS)).toByte()
-        }
-    }
-
-    private fun readIntBigEndian(source: CanonicalBytes, offset: Int): Int =
-        ((source.byteAt(offset).toInt() and 0xff) shl 24) or
-            ((source.byteAt(offset + 1).toInt() and 0xff) shl 16) or
-            ((source.byteAt(offset + 2).toInt() and 0xff) shl 8) or
-            (source.byteAt(offset + 3).toInt() and 0xff)
-
     private fun readIntBigEndian(source: ByteArray, offset: Int): Int =
-        ((source[offset].toInt() and 0xff) shl 24) or
+        (source[offset].toInt() shl 24) or
             ((source[offset + 1].toInt() and 0xff) shl 16) or
             ((source[offset + 2].toInt() and 0xff) shl 8) or
             (source[offset + 3].toInt() and 0xff)
@@ -134,7 +124,7 @@ internal object PureKotlinSha256 : Sha256Function {
     }
 
     private fun rotateRight(value: Int, distance: Int): Int =
-        (value ushr distance) or (value shl (Int.SIZE_BITS - distance))
+        value.rotateRight(distance)
 
     private const val BLOCK_BYTES: Int = 64
     private const val DIGEST_BYTES: Int = 32

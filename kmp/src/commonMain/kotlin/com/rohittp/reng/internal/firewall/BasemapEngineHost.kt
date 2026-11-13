@@ -432,15 +432,28 @@ internal class BasemapEngineHost(
             // Re-checked after publication: a close that ran between requireOpen and here has already
             // cleared this slot once, and must not be undone by the assignment above.
             requireOpen()
-            val summary = coroutineScope {
-                engineCall {
-                    engine.warmRawResources(style, tiles.map(::engineTileIdOf), renderOptions, EngineResourceAccessMode.NORMAL)
+            // An installed renderer owns colour-tile acquisition. Its workers fetch while drawing,
+            // so asking this engine to warm the same bytes would restore the duplicate download this
+            // seam exists to remove. The after-warm rasterisation below still runs and uses the same
+            // external renderer path as a foreground preparation.
+            val summary = if (installedBasemapTileRenderer == null) {
+                coroutineScope {
+                    engineCall {
+                        engine.warmRawResources(
+                            style,
+                            tiles.map(::engineTileIdOf),
+                            renderOptions,
+                            EngineResourceAccessMode.NORMAL,
+                        )
+                    }
                 }
+            } else {
+                null
             }
             val warmed = ReadAheadWarmSummary(
-                fetched = summary.fetched,
-                alreadyCached = summary.alreadyCached,
-                failed = summary.failed,
+                fetched = summary?.fetched ?: 0,
+                alreadyCached = summary?.alreadyCached ?: 0,
+                failed = summary?.failed ?: 0,
             )
             metricRecorder.record(RenGMetricName.READ_AHEAD_FETCHED, warmed.fetched.toLong())
             metricRecorder.record(RenGMetricName.READ_AHEAD_ALREADY_CACHED, warmed.alreadyCached.toLong())
@@ -783,8 +796,11 @@ internal class BasemapEngineHost(
     ): PreparedBasemapTiles {
         requireOpen()
         val distinct = tiles.distinct()
+        offloadedPreparation(style, distinct, accessMode)?.let { offloaded ->
+            return PreparedBasemapTiles(batch = null, style = style, tiles = distinct, offloaded = offloaded)
+        }
         val batch = engineCall { prepareEngineBatch(style, distinct, accessMode) }
-        return PreparedBasemapTiles(batch, style, distinct)
+        return PreparedBasemapTiles(batch, style, distinct, offloaded = null)
     }
 
     /**
@@ -815,6 +831,11 @@ internal class BasemapEngineHost(
     ): BasemapTilePreparation {
         requireOpen()
         val distinct = tiles.distinct()
+        offloadedPreparation(style, distinct, accessMode = null)?.let { offloaded ->
+            return BasemapTilePreparation.Prepared(
+                PreparedBasemapTiles(batch = null, style = style, tiles = distinct, offloaded = offloaded),
+            )
+        }
         val batch = try {
             prepareEngineBatch(style, distinct, accessMode = null)
         } catch (cancellation: CancellationException) {
@@ -828,7 +849,29 @@ internal class BasemapEngineHost(
             val unavailable = unavailableColourTilesOf(engineFailure, distinct) ?: throw failure
             return BasemapTilePreparation.ColourUnavailable(unavailable, failure)
         }
-        return BasemapTilePreparation.Prepared(PreparedBasemapTiles(batch, style, distinct))
+        return BasemapTilePreparation.Prepared(PreparedBasemapTiles(batch, style, distinct, offloaded = null))
+    }
+
+    /** Builds the external renderer's request identities without acquiring any raw tile resource. */
+    private fun offloadedPreparation(
+        style: PreparedStyle,
+        distinct: List<CanonicalBasemapTile>,
+        accessMode: RenGResourceAccessMode?,
+    ): OffloadedBasemapTiles? {
+        val renderer = installedBasemapTileRenderer ?: return null
+        val styleLocator = compiledStyles.values
+            .firstOrNull { it.prepared === style }
+            ?.styleLocator
+            ?: error("an externally rendered style must belong to this basemap engine host")
+        val requestKeys = distinct.associateWith { tile ->
+            engineCall { engine.outputRequestKey(style, engineTileIdOf(tile), renderOptions) }
+        }
+        return OffloadedBasemapTiles(
+            renderer,
+            styleLocator,
+            requestKeys,
+            accessMode ?: activeOperation?.accessMode ?: RenGResourceAccessMode.NORMAL,
+        )
     }
 
     /** The one `prepareBatch` both preparation entry points make, so their arguments cannot drift apart. */
@@ -924,7 +967,24 @@ internal class BasemapEngineHost(
          * [lastReadAheadRenderPriority] and not [lastForwardedRenderPriority].
          */
         forReadAhead: Boolean = false,
-    ): List<RenderedBasemapTile> {
+    ): List<RenderedBasemapTile> = when (
+        val outcome = renderTilesReportingUnavailableColour(prepared, asRawPixels, priority, forReadAhead)
+    ) {
+        is BasemapTileRendering.Rendered -> outcome.tiles
+        is BasemapTileRendering.ColourUnavailable -> throw outcome.failure
+    }
+
+    /**
+     * The reporting form used by ADR 0057's opt-in provisional path. An external renderer acquires
+     * one tile per call, so a failed call names that tile exactly; successful sibling calls remain
+     * available to the frame and are never requested a second time.
+     */
+    suspend fun renderTilesReportingUnavailableColour(
+        prepared: PreparedBasemapTiles,
+        asRawPixels: Boolean,
+        priority: RenGRenderPriority = RenGRenderPriority.NORMAL,
+        forReadAhead: Boolean = false,
+    ): BasemapTileRendering {
         requireOpen()
         val styleDigest = prepared.style.digest
         val tilesById = prepared.tiles.associateBy(::engineTileIdOf)
@@ -946,60 +1006,87 @@ internal class BasemapEngineHost(
                 tile = tile,
                 pixels = pixels,
                 contentKey = contentKey,
-                substitutions = prepared.batch.substitutions[id].orEmpty(),
+                substitutions = prepared.batch?.substitutions?.get(id).orEmpty(),
             )
         }
 
-        return if (asRawPixels) {
-            val renderer = installedBasemapTileRenderer
-            val styleLocator = compiledStyles.values
-                .firstOrNull { it.prepared === prepared.style }
-                ?.styleLocator
-            if (renderer != null && styleLocator != null) {
-                // Priority does not affect pixels, but retain the same foreground/read-ahead observation
-                // as the in-process branch.
-                forwarding(priority, forReadAhead)
-                coroutineScope {
-                    prepared.tiles.map { tile ->
-                        async {
-                            val id = engineTileIdOf(tile)
-                            val rgba = renderer.render(
-                                styleLocator = styleLocator,
+        val offloaded = prepared.offloaded
+        if (offloaded != null) {
+            // Priority does not affect pixels, but retain the same foreground/read-ahead observation
+            // as the in-process branch. External rendering is always raw: acquisition and drawing are
+            // one worker operation, and the hook's contract is premultiplied RGBA.
+            forwarding(priority, forReadAhead)
+            val attempts = coroutineScope {
+                prepared.tiles.map { tile ->
+                    async {
+                        val id = engineTileIdOf(tile)
+                        val rendered = try {
+                            offloaded.renderer.render(
+                                styleLocator = offloaded.styleLocator,
                                 zoom = id.z,
                                 column = id.x,
                                 row = id.y,
                                 outputSizePx = tileOutputSizePixels,
+                                outputRequestKey = offloaded.requestKeys.getValue(tile),
+                                accessMode = offloaded.accessMode,
                             )
-                            require(rgba.size.toLong() == tileOutputSizePixels.toLong() * tileOutputSizePixels * 4L) {
-                                "external basemap tile renderer returned ${rgba.size} bytes for " +
-                                    "a ${tileOutputSizePixels}x$tileOutputSizePixels tile"
-                            }
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (@Suppress("TooGenericExceptionCaught") failure: Throwable) {
+                            return@async OffloadedTileAttempt.Failed(tile)
+                        }
+                        val rgba = rendered.rgbaBytes
+                        require(rgba.size.toLong() == tileOutputSizePixels.toLong() * tileOutputSizePixels * 4L) {
+                            "external basemap tile renderer returned ${rgba.size} bytes for " +
+                                "a ${tileOutputSizePixels}x$tileOutputSizePixels tile"
+                        }
+                        OffloadedTileAttempt.Succeeded(
                             carry(
                                 id,
-                                prepared.batch.contentKeys[id]
-                                    ?: error("the prepared batch has no content key for $id"),
+                                rendered.contentKey,
                                 BasemapTilePixels.Raw(rgba, tileOutputSizePixels, tileOutputSizePixels),
-                            )
-                        }
-                    }.awaitAll()
-                }
-            } else {
-                val batch = engineCall {
-                    engine.renderRaw(prepared.batch, priority = forwarding(priority, forReadAhead))
-                }
-                batch.tiles.map { rendered ->
-                    carry(
-                        rendered.id,
-                        rendered.contentKey,
-                        BasemapTilePixels.Raw(rendered.rgbaBytes, rendered.widthPx, rendered.heightPx),
-                    )
-                }
+                            ),
+                        )
+                    }
+                }.awaitAll()
             }
+            val succeeded = attempts.mapNotNull { (it as? OffloadedTileAttempt.Succeeded)?.tile }
+            val failed = attempts.mapNotNullTo(LinkedHashSet()) { (it as? OffloadedTileAttempt.Failed)?.tile }
+            if (failed.isEmpty()) return BasemapTileRendering.Rendered(succeeded)
+            val first = failed.first()
+            val key = rememberedTileKey(styleDigest, first)
+            return BasemapTileRendering.ColourUnavailable(
+                rendered = succeeded,
+                tiles = failed,
+                failure = FailureDescriptor(
+                    code = RenGErrorCode.RESOURCE_UNAVAILABLE,
+                    stage = PipelineStage.RESOURCE_LOOKUP,
+                    diagnostic = failureContextDiagnostic(
+                        stage = PipelineStage.RESOURCE_LOOKUP,
+                        resourceClass = key.resourceClass,
+                        resourceKey = key,
+                    ),
+                ).toException(),
+            )
+        }
+
+        val batch = checkNotNull(prepared.batch) { "an in-process render requires a prepared engine batch" }
+        return if (asRawPixels) {
+            val rendered = engineCall {
+                engine.renderRaw(batch, priority = forwarding(priority, forReadAhead))
+            }
+            BasemapTileRendering.Rendered(rendered.tiles.map { tile ->
+                carry(
+                    tile.id,
+                    tile.contentKey,
+                    BasemapTilePixels.Raw(tile.rgbaBytes, tile.widthPx, tile.heightPx),
+                )
+            })
         } else {
-            val batch = engineCall { engine.render(prepared.batch, priority = forwarding(priority, forReadAhead)) }
-            batch.tiles.map { rendered ->
-                carry(rendered.id, rendered.contentKey, BasemapTilePixels.Encoded(rendered.pngBytes))
-            }
+            val rendered = engineCall { engine.render(batch, priority = forwarding(priority, forReadAhead)) }
+            BasemapTileRendering.Rendered(rendered.tiles.map { tile ->
+                carry(tile.id, tile.contentKey, BasemapTilePixels.Encoded(tile.pngBytes))
+            })
         }
     }
 
@@ -1642,18 +1729,42 @@ internal sealed interface BasemapTilePreparation {
 }
 
 /**
- * One prepared, fully-acquired basemap batch, plus the RenG tiles it was asked for. [close] is
- * idempotent, non-blocking, and non-throwing, because Rentile documents `PreparedBatch.close()` as
- * exactly that.
+ * One basemap batch plus the RenG tiles it was asked for. [batch] is fully acquired for the
+ * in-process path; [offloaded] instead carries only pre-acquisition request identities, leaving the
+ * external renderer as the sole owner of colour-tile acquisition. [close] is idempotent and cannot
+ * throw on either path.
  */
 internal class PreparedBasemapTiles(
-    internal val batch: PreparedBatch,
+    internal val batch: PreparedBatch?,
     internal val style: PreparedStyle,
     internal val tiles: List<CanonicalBasemapTile>,
+    internal val offloaded: OffloadedBasemapTiles?,
 ) : AutoCloseable {
     override fun close() {
-        batch.close()
+        batch?.close()
     }
+}
+
+internal class OffloadedBasemapTiles(
+    val renderer: BasemapTileRenderer,
+    val styleLocator: String,
+    val requestKeys: Map<CanonicalBasemapTile, String>,
+    val accessMode: RenGResourceAccessMode,
+)
+
+private sealed interface OffloadedTileAttempt {
+    class Succeeded(val tile: RenderedBasemapTile) : OffloadedTileAttempt
+    class Failed(val tile: CanonicalBasemapTile) : OffloadedTileAttempt
+}
+
+internal sealed interface BasemapTileRendering {
+    class Rendered(val tiles: List<RenderedBasemapTile>) : BasemapTileRendering
+
+    class ColourUnavailable(
+        val rendered: List<RenderedBasemapTile>,
+        val tiles: Set<CanonicalBasemapTile>,
+        val failure: RenGException,
+    ) : BasemapTileRendering
 }
 
 /**

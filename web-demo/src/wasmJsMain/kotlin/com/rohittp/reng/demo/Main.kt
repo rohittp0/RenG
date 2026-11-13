@@ -6,9 +6,11 @@
 package com.rohittp.reng.demo
 
 import com.rohittp.reng.Backdrop
+import com.rohittp.reng.BasemapTileRenderResult
 import com.rohittp.reng.BlendMode
 import com.rohittp.reng.Bloom
 import com.rohittp.reng.Camera
+import com.rohittp.reng.ContextOwnership
 import com.rohittp.reng.Diagnostic
 import com.rohittp.reng.DiagnosticSink
 import com.rohittp.reng.FramePlan
@@ -83,6 +85,7 @@ private suspend fun startDemo(browser: BrowserSetup) {
         installTileWorkerPoolIfRequested()
         val context = browser.context ?: error("canvas.getContext(\"webgl2\") returned null")
         makeWebGl2ContextCurrent(context)
+        rememberGl(context)
 
         Demo(
             width = browser.width,
@@ -117,6 +120,13 @@ private class Demo(
             basemapStyle = ResourceLocator(value = BASEMAP_STYLE_URL),
             diagnosticSink = DiagnosticSink(::recordDiagnostic),
             maximumReadAheadRasterisedTileBytes = if (readAheadOn()) 256L * 1024 * 1024 else 0L,
+            // A render worker owns its OffscreenCanvas context unless `?context=shared` overrides it.
+            // The main-thread demo stays shared unless `?context=exclusive` opts in explicitly.
+            contextOwnership = if (exclusiveContextRequested()) {
+                ContextOwnership.EXCLUSIVE
+            } else {
+                ContextOwnership.SHARED
+            },
             // `?budget=N` (RenG ADR 0057): rasterise at most N new tiles a frame and draw the rest from a
             // resident ancestor until a later frame reaches them. A preview setting; an export leaves it
             // unlimited so every frame is exact.
@@ -188,6 +198,7 @@ private class Demo(
             val prepare = DoubleArray(frames)
             val draw = DoubleArray(frames)
             val tiles = LongArray(frames)
+            val hashes = ArrayList<String>()
             val before = renderer.queryMetrics().counters
             val passStart = performanceNow()
             for (sample in 0 until frames) {
@@ -202,6 +213,8 @@ private class Demo(
                     val drawStart = performanceNow()
                     renderer.draw(preparedFrame = prepared, renderTarget = renderTarget)
                     draw[sample] = performanceNow() - drawStart
+                    // `?hash=on`: a fingerprint of the drawn frame, to compare context modes pixel for pixel.
+                    if (hashFrames()) hashes += hashDrawnFrame().toString()
                 } finally {
                     prepared.close()
                 }
@@ -235,6 +248,7 @@ private class Demo(
                 append(",\"wireBytes\":${delta(RenGMetricName.ENGINE_RESOURCE_WIRE_BYTES)}")
                 append(",\"perFramePrepareMs\":[${prepare.joinToString(",") { it.roundTo1().toString() }}]")
                 append(",\"perFrameTiles\":[${tiles.joinToString(",")}]")
+                append(",\"frameHashes\":[${hashes.joinToString(",") { "\"$it\"" }}]")
                 append("}")
             }
         }
@@ -577,10 +591,21 @@ private fun installTileWorkerPoolIfRequested() {
         persistentStore = persistentStoreRequested(),
     )
     tileWorkerPool = pool
-    installBasemapTileRenderer { styleLocator, zoom, column, row, outputSizePx ->
-        requestTileFromPool(pool, styleLocator.toJsString(), zoom, column, row, outputSizePx)
-            .await()
-            .copyToByteArray()
+    installBasemapTileRenderer { styleLocator, zoom, column, row, outputSizePx, outputRequestKey, accessMode ->
+        val rendered = requestTileFromPool(
+            pool,
+            styleLocator.toJsString(),
+            zoom,
+            column,
+            row,
+            outputSizePx,
+            outputRequestKey.toJsString(),
+            accessMode.name.toJsString(),
+        ).await()
+        BasemapTileRenderResult(
+            rgbaBytes = rendered.rgba.copyToByteArray(),
+            contentKey = rendered.contentKey.toString(),
+        )
     }
 }
 
@@ -707,6 +732,11 @@ private external interface JsUint8Array : JsAny {
 
 private external interface TileWorkerPool : JsAny
 
+private external interface TileWorkerRenderResult : JsAny {
+    val rgba: JsUint8Array
+    val contentKey: JsString
+}
+
 @JsFun(
     """(workerCount, persistentStore) => {
         const queue = [];
@@ -729,7 +759,9 @@ private external interface TileWorkerPool : JsAny
                     zoom: job.zoom,
                     column: job.column,
                     row: job.row,
-                    outputSizePx: job.outputSizePx
+                    outputSizePx: job.outputSizePx,
+                    outputRequestKey: job.outputRequestKey,
+                    accessMode: job.accessMode
                 });
             }
         };
@@ -746,7 +778,10 @@ private external interface TileWorkerPool : JsAny
                 if (!job || message.id !== job.id) return;
                 state.current = null;
                 if (message.kind === 'tileResult') {
-                    job.resolve(new Uint8Array(message.rgba));
+                    job.resolve({
+                        rgba: new Uint8Array(message.rgba),
+                        contentKey: String(message.contentKey)
+                    });
                 } else {
                     job.reject(new Error(message.message || 'tile worker failed'));
                 }
@@ -765,10 +800,11 @@ private external interface TileWorkerPool : JsAny
         }
 
         return {
-            render(style, zoom, column, row, outputSizePx) {
+            render(style, zoom, column, row, outputSizePx, outputRequestKey, accessMode) {
                 return new Promise((resolve, reject) => {
                     queue.push({
-                        id: nextId++, style, zoom, column, row, outputSizePx, resolve, reject
+                        id: nextId++, style, zoom, column, row, outputSizePx,
+                        outputRequestKey, accessMode, resolve, reject
                     });
                     pump();
                 });
@@ -781,7 +817,10 @@ private external fun createTileWorkerPool(
     persistentStore: Boolean,
 ): TileWorkerPool
 
-@JsFun("(pool, style, zoom, column, row, outputSizePx) => pool.render(style, zoom, column, row, outputSizePx)")
+@JsFun(
+    """(pool, style, zoom, column, row, outputSizePx, outputRequestKey, accessMode) =>
+        pool.render(style, zoom, column, row, outputSizePx, outputRequestKey, accessMode)""",
+)
 private external fun requestTileFromPool(
     pool: TileWorkerPool,
     style: JsString,
@@ -789,7 +828,9 @@ private external fun requestTileFromPool(
     column: Int,
     row: Int,
     outputSizePx: Int,
-): Promise<JsUint8Array>
+    outputRequestKey: JsString,
+    accessMode: JsString,
+): Promise<TileWorkerRenderResult>
 
 @JsFun(
     """() => {
@@ -1131,6 +1172,16 @@ private external fun labelsOff(): Boolean
 @JsFun("() => Number(new URLSearchParams(globalThis.__rengQuery ?? self.location.search).get('budget') || 0)")
 private external fun tileBudget(): Int
 
+@JsFun("() => new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('hash') === 'on'")
+private external fun hashFrames(): Boolean
+
+@JsFun("gl => { globalThis.__rengGl = gl; }")
+private external fun rememberGl(gl: JsAny)
+
+// FNV-1a over the default framebuffer's RGBA, read straight after draw (before the frame is presented).
+@JsFun("() => { const gl = globalThis.__rengGl; const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null); const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight; const px = new Uint8Array(w * h * 4); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead); let x = 0x811c9dc5; for (let i = 0; i < px.length; i++) { x ^= px[i]; x = Math.imul(x, 0x01000193) >>> 0; } return x.toString(16); }")
+private external fun hashDrawnFrame(): JsString
+
 @JsFun("() => Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('trace') || 0)")
 private external fun traceSeconds(): Int
 
@@ -1139,6 +1190,18 @@ private external fun readAheadOn(): Boolean
 
 @JsFun("() => Math.floor(Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('tileworkers') || 0))")
 private external fun tileWorkerCount(): Int
+
+@JsFun(
+    """() => {
+        const query = typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search;
+        const params = new URLSearchParams(query);
+        const forced = params.get('context');
+        if (forced === 'shared') return false;
+        if (forced === 'exclusive') return true;
+        return params.get('worker') === 'on';
+    }""",
+)
+private external fun exclusiveContextRequested(): Boolean
 
 @JsFun("() => { globalThis.__rengRenderLongTasks = []; try { new PerformanceObserver((list) => { for (const e of list.getEntries()) globalThis.__rengRenderLongTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }")
 private external fun startLongTaskObserver()

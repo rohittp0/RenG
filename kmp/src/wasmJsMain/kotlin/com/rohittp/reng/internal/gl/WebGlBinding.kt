@@ -305,6 +305,7 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
 
     private class ObjectNames {
         private val values = mutableListOf<JsAny?>(null)
+        private val namesByObject = newObjectNameMap()
 
         operator fun get(name: Int): JsAny? = if (name == 0) null else values.getOrNull(name)
 
@@ -313,21 +314,21 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
         fun add(value: JsAny?): Int {
             val actual = value ?: error("WebGL object allocation failed")
             values += actual
-            return values.lastIndex
+            val name = values.lastIndex
+            objectNameMapSet(namesByObject, actual, name)
+            return name
         }
 
         fun nameFor(value: JsAny?): Int {
             if (value == null) return 0
-            for (index in 1 until values.size) {
-                if (sameJsObject(values[index], value)) return index
-            }
-            return add(value)
+            return objectNameMapGet(namesByObject, value).takeIf { it != 0 } ?: add(value)
         }
 
         fun delete(name: Int, action: (JsAny?) -> Unit) {
             if (name == 0) return
             val value = get(name) ?: return
             action(value)
+            objectNameMapDelete(namesByObject, value)
             values[name] = null
         }
     }
@@ -341,8 +342,19 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
 internal actual fun openPlatformGlBinding(): GlBindingResult =
     currentWebGl2Context?.let { GlBindingResult.Bound(WebGlBinding(it)) } ?: unsupportedRenderContext()
 
-@JsFun("(a, b) => a === b")
-private external fun sameJsObject(a: JsAny?, b: JsAny?): Boolean
+private external interface JsObjectNameMap : JsAny
+
+@JsFun("() => new Map()")
+private external fun newObjectNameMap(): JsObjectNameMap
+
+@JsFun("(map, value) => map.get(value) || 0")
+private external fun objectNameMapGet(map: JsObjectNameMap, value: JsAny): Int
+
+@JsFun("(map, value, name) => map.set(value, name)")
+private external fun objectNameMapSet(map: JsObjectNameMap, value: JsAny, name: Int)
+
+@JsFun("(map, value) => map.delete(value)")
+private external fun objectNameMapDelete(map: JsObjectNameMap, value: JsAny)
 
 @JsFun("value => value == null ? null : String(value)")
 private external fun jsStringValue(value: JsAny?): JsString?

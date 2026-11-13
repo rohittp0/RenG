@@ -121,9 +121,9 @@ internal class GlLifecycleDriver(
         RendererLifecycleAction.ObserveAdoptableCurrentContext -> observeAdoption()
 
         is RendererLifecycleAction.DeleteDeferred -> {
-            GlErrorQueue.drainOnEntry(binding)
+            if (binding.checksEveryOperation) GlErrorQueue.drainOnEntry(binding)
             deleteGlObjects(binding, registry.takeQueued(action.deletion.id))
-            if (GlErrorQueue.firstOwnError(binding) == GL_NO_ERROR) {
+            if (!binding.checksEveryOperation || GlErrorQueue.firstOwnError(binding) == GL_NO_ERROR) {
                 RendererLifecycleObservation.DeferredDeletionAcknowledged(action.deletion.id)
             } else {
                 RendererLifecycleObservation.DeferredDeletionFailed(

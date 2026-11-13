@@ -1,10 +1,26 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.ContextOwnership
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
+
+/** Carries renderer-lifetime context policy without widening every GL helper's parameter list. */
+private class ContextOwnershipGlBinding(
+    delegate: GlBinding,
+    val ownership: ContextOwnership,
+) : GlBinding by delegate
+
+internal fun GlBinding.withContextOwnership(ownership: ContextOwnership): GlBinding =
+    if (ownership == ContextOwnership.SHARED) this else ContextOwnershipGlBinding(this, ownership)
+
+internal val GlBinding.restoresConsumerState: Boolean
+    get() = this !is ContextOwnershipGlBinding
+
+internal val GlBinding.checksEveryOperation: Boolean
+    get() = (this as? ContextOwnershipGlBinding)?.ownership != ContextOwnership.EXCLUSIVE
 
 internal object GlErrorQueue {
     internal const val MAXIMUM_DRAIN_ITERATIONS: Int = 32

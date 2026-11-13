@@ -267,7 +267,8 @@ private fun GlBinding.setEnabled(cap: Int, enabled: Boolean) {
 
 /**
  * Runs [block] with [binding]'s corrected save-and-restore set captured beforehand and restored
- * afterward unconditionally, including when [block] throws.
+ * afterward unconditionally, including when [block] throws. ADR 0092's explicitly exclusive binding
+ * skips both operations and establishes only RenG's required unpack state.
  *
  * Restoring in a `finally` is what turns ADR 0006 from a happy-path promise into a guarantee: a
  * frame that fails halfway through still hands the context back exactly as it was found.
@@ -277,6 +278,13 @@ internal inline fun <T> withCapturedGlState(
     profile: RenderContextProfile,
     block: (GlBinding) -> T,
 ): T {
+    if (!binding.restoresConsumerState) {
+        // An exclusive context has no consumer state to preserve. Uploads still receive the exact
+        // unpack state they require; every draw pass establishes its other state before relying on it.
+        establishUnpackState(binding)
+        return block(binding)
+    }
+
     // Already capturing: run inside the region that is open and leave both the capture and the
     // restore to whoever opened it (ADR 0054). The same root/join shape ADR 0051 gave `withOperation`,
     // and for the same reason -- an invariant that held for one caller has to survive being called

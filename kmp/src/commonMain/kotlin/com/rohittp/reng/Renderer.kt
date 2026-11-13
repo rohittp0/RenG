@@ -19,6 +19,18 @@ public sealed interface RenderTarget {
 /** The largest `maximumReadAheadRasterisedTileBytes` accepted: 1 GiB (ADR 0077). */
 private const val MAXIMUM_READ_AHEAD_RASTERISED_TILE_BYTES: Long = 1024L * 1024L * 1024L
 
+/** How exclusively RenG owns the current render context. */
+public enum class ContextOwnership {
+    /** Other code may use the context, so RenG restores state and checks every operation. */
+    SHARED,
+
+    /** Only RenG uses the context; state restoration and non-actionable error checks are skipped. */
+    EXCLUSIVE,
+
+    /** Exclusive state ownership, with the full error checking used by [SHARED]. */
+    EXCLUSIVE_CHECKED,
+}
+
 /**
  * Everything a renderer is fixed by for its whole life: where it draws, what it draws through, and
  * the handful of options that are properties of the renderer rather than of any one [FramePlan].
@@ -44,6 +56,7 @@ public class RendererConfiguration(
     presentFailedTilesProvisionally: Boolean = false,
     additionalBasemapStyles: List<ResourceLocator> = emptyList(),
     extendGroundPastPoles: Boolean = false,
+    contextOwnership: ContextOwnership = ContextOwnership.SHARED,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -177,6 +190,13 @@ public class RendererConfiguration(
      * renderers.
      */
     public val extendGroundPastPoles: Boolean
+
+    /**
+     * Whether RenG shares the current GL context. [ContextOwnership.SHARED] is the byte-identical
+     * default. Exclusive modes skip state capture and restoration; [ContextOwnership.EXCLUSIVE]
+     * also limits `glGetError` to actionable allocation and framebuffer checks.
+     */
+    public val contextOwnership: ContextOwnership
     private val additionalBasemapStyleSnapshot: List<ResourceLocator>
     private val basemapStyleSetSnapshot: List<ResourceLocator>
     public val additionalBasemapStyles: List<ResourceLocator>
@@ -228,6 +248,7 @@ public class RendererConfiguration(
         this.maximumReadAheadRasterisedTileBytes = maximumReadAheadRasterisedTileBytes
         this.presentFailedTilesProvisionally = presentFailedTilesProvisionally
         this.extendGroundPastPoles = extendGroundPastPoles
+        this.contextOwnership = contextOwnership
         this.additionalBasemapStyleSnapshot = ArrayList(additionalBasemapStyles)
         this.basemapStyleSetSnapshot = ArrayList(configuredBasemapStyles)
     }

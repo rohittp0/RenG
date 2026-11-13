@@ -1,7 +1,9 @@
 package com.rohittp.reng.internal.preparation
 
 import com.rohittp.reng.PreparedGroundInstance
+import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.RGBA_BYTES_PER_PIXEL
+import com.rohittp.reng.RenGErrorCode
 import com.rohittp.reng.RenGMetricName
 import com.rohittp.reng.RenGRenderPriority
 import com.rohittp.reng.RendererConfiguration
@@ -13,12 +15,15 @@ import com.rohittp.reng.internal.basemap.tileTimeRoutes
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
 import com.rohittp.reng.internal.firewall.BasemapTilePixels
 import com.rohittp.reng.internal.firewall.BasemapTilePreparation
+import com.rohittp.reng.internal.firewall.BasemapTileRendering
 import com.rohittp.reng.internal.firewall.PreparedBasemapTiles
 import com.rohittp.reng.internal.firewall.RenderedBasemapTile
 import com.rohittp.reng.internal.gl.GlObjectRegistry
 import com.rohittp.reng.internal.gl.GroundTileWindow
 import com.rohittp.reng.internal.gl.ancestorOf
 import com.rohittp.reng.internal.gl.windowWithin
+import com.rohittp.reng.internal.failure.FailureDescriptor
+import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.metrics.EngineMetricRecorder
 import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.planning.CanonicalBasemapTile
@@ -293,14 +298,52 @@ internal class GroundTileProvisioner(
             }
         }
         if (preparedFresh == null) return alreadyRendered
-        val freshlyRendered = preparedFresh.use { prepared ->
-            basemapEngineHost.renderTiles(
-                prepared,
-                asRawPixels = renderFreshAsRaw,
-                // The foreground goes first (ADR 0077): with a read-ahead worker drawing at NORMAL in
-                // the same gate, the frame being prepared is the one thing that must never wait for it.
-                priority = if (cache != null) RenGRenderPriority.URGENT else priority,
-            )
+        val renderOutcome = preparedFresh.use { prepared ->
+            // The external renderer's contract is raw RGBA, so it cannot take the encoded fallback
+            // used when this budget is full. Refuse before asking a worker for bytes RenG is not
+            // allowed to retain, rather than silently holding them outside the configured ceiling.
+            if (prepared.offloaded != null && !renderFreshAsRaw) {
+                throw FailureDescriptor(
+                    code = RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    stage = PipelineStage.RESOURCE_LOOKUP,
+                ).toException()
+            }
+            val renderPriority = if (cache != null) RenGRenderPriority.URGENT else priority
+            if (configuration.presentFailedTilesProvisionally && prepared.offloaded != null) {
+                basemapEngineHost.renderTilesReportingUnavailableColour(
+                    prepared,
+                    asRawPixels = true,
+                    priority = renderPriority,
+                )
+            } else {
+                BasemapTileRendering.Rendered(
+                    basemapEngineHost.renderTiles(
+                        prepared,
+                        asRawPixels = renderFreshAsRaw,
+                        // The foreground goes first (ADR 0077): with a read-ahead worker drawing at
+                        // NORMAL in the same gate, the frame being prepared must never wait for it.
+                        priority = renderPriority,
+                    ),
+                )
+            }
+        }
+        val freshlyRendered = when (renderOutcome) {
+            is BasemapTileRendering.Rendered -> renderOutcome.tiles
+            is BasemapTileRendering.ColourUnavailable -> {
+                val presentable = presentableFailedTiles(
+                    failed = renderOutcome.tiles,
+                    requested = missing,
+                    hasResidentAncestor = { tile -> residentAncestorOf(style.digest, tile) != null },
+                ) ?: throw renderOutcome.failure
+                missing.removeAll(presentable)
+                if (holdsRawPixels) {
+                    rawReservation.shrinkTo(
+                        rawReservation.heldBytes + checkNotNull(checkedRawTileBytes(renderOutcome.rendered.size)),
+                    )
+                }
+                metricRecorder.record(RenGMetricName.TILES_PRESENTED_AFTER_FAILURE, presentable.size.toLong())
+                renderOutcome.rendered
+            }
         }
         // Held from here by array, so a later frame of the batch that remembers one of them holds it
         // for nothing rather than being charged for it a second time.

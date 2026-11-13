@@ -18,8 +18,10 @@ public fun clearCurrentWebGl2Context() {
 }
 
 /**
- * Installs a process-local raw basemap tile renderer. Each browser worker has a separate Wasm
- * instance, so installing this in a render worker cannot affect the page or a tile worker.
+ * Installs a process-local raw basemap tile renderer. RenG supplies Rentile's pre-acquisition
+ * [outputRequestKey] and does not acquire the tile's colour resources itself. Each browser worker
+ * has a separate Wasm instance, so installing this in a render worker cannot affect the page or a
+ * tile worker.
  */
 public fun installBasemapTileRenderer(
     renderer: suspend (
@@ -28,7 +30,9 @@ public fun installBasemapTileRenderer(
         column: Int,
         row: Int,
         outputSizePx: Int,
-    ) -> ByteArray,
+        outputRequestKey: String,
+        accessMode: ResourceAccessMode,
+    ) -> BasemapTileRenderResult,
 ) {
     installedBasemapTileRenderer = BasemapTileRenderer(renderer)
 }

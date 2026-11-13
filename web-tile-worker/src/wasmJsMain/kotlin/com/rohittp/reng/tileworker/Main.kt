@@ -44,12 +44,14 @@ fun main() {
         installMessageHandler { request ->
             scope.launch {
                 try {
-                    val rgba = renderer.render(
+                    val rendered = renderer.render(
                         styleLocator = request.style.toString(),
                         tile = TileId(request.zoom, request.column, request.row),
                         outputSizePx = request.outputSizePx,
+                        outputRequestKey = request.outputRequestKey.toString(),
+                        resourceAccess = resourceAccessMode(request.accessMode.toString()),
                     )
-                    postSuccess(request.id, rgba)
+                    postSuccess(request.id, rendered)
                 } catch (failure: Throwable) {
                     val type = failure::class.simpleName ?: "Throwable"
                     postFailure(request.id, "$type: ${failure.message ?: "no message"}".toJsString())
@@ -72,29 +74,51 @@ private class TileRenderer(store: RawResourceStore) {
     )
     private val styles = HashMap<String, PreparedStyle>()
 
-    suspend fun render(styleLocator: String, tile: TileId, outputSizePx: Int): ByteArray {
+    suspend fun render(
+        styleLocator: String,
+        tile: TileId,
+        outputSizePx: Int,
+        outputRequestKey: String,
+        resourceAccess: ResourceAccessMode,
+    ): WorkerRenderedTile {
         val style = styles[styleLocator] ?: engine.prepare(StyleInput.Remote(styleLocator)).also {
             styles[styleLocator] = it
+        }
+        val options = RenderOptions(
+            outputSizePx = outputSizePx,
+            rasterAcquisitionDensity = RasterAcquisitionDensity.OUTPUT_ZOOM,
+        )
+        require(engine.outputRequestKey(style, tile, options) == outputRequestKey) {
+            "the render worker and tile worker disagree on the output request identity"
         }
         val batch = engine.prepareBatch(
             style = style,
             tiles = listOf(tile),
-            options = RenderOptions(
-                outputSizePx = outputSizePx,
-                rasterAcquisitionDensity = RasterAcquisitionDensity.OUTPUT_ZOOM,
-            ),
-            resourceAccess = ResourceAccessMode.NORMAL,
+            options = options,
+            resourceAccess = resourceAccess,
             substitutionPolicy = TileSubstitutionPolicy.Disabled,
         )
         return try {
-            engine.renderRaw(batch, tiles = listOf(tile), priority = RenderPriority.NORMAL)
+            val rendered = engine.renderRaw(batch, tiles = listOf(tile), priority = RenderPriority.NORMAL)
                 .tiles
                 .single()
-                .rgbaBytes
+            WorkerRenderedTile(rendered.rgbaBytes, rendered.contentKey)
         } finally {
             batch.close()
         }
     }
+}
+
+private class WorkerRenderedTile(
+    val rgbaBytes: ByteArray,
+    val contentKey: String,
+)
+
+private fun resourceAccessMode(value: String): ResourceAccessMode = when (value) {
+    "NORMAL" -> ResourceAccessMode.NORMAL
+    "CACHE_ONLY" -> ResourceAccessMode.CACHE_ONLY
+    "RELOAD" -> ResourceAccessMode.RELOAD
+    else -> error("unknown resource access mode")
 }
 
 private class MemoryStore : RawResourceStore {
@@ -224,11 +248,12 @@ private fun JsUint8Array.copyToByteArray(): ByteArray {
     }
 }
 
-private fun postSuccess(id: Int, rgba: ByteArray) {
+private fun postSuccess(id: Int, rendered: WorkerRenderedTile) {
+    val rgba = rendered.rgbaBytes
     withScopedMemoryAllocator { allocator ->
         val pointer = allocator.allocate(rgba.size)
         for (index in rgba.indices) (pointer + index).storeByte(rgba[index])
-        postSuccessFromMemory(id, pointer.address.toInt(), rgba.size)
+        postSuccessFromMemory(id, pointer.address.toInt(), rgba.size, rendered.contentKey.toJsString())
     }
 }
 
@@ -256,6 +281,8 @@ private external interface TileWorkerRequest : JsAny {
     val column: Int
     val row: Int
     val outputSizePx: Int
+    val outputRequestKey: JsString
+    val accessMode: JsString
 }
 
 private external interface IndexedDbDatabase : JsAny
@@ -298,13 +325,13 @@ private external interface JsUint8Array : JsAny {
 private external fun installMessageHandler(callback: (TileWorkerRequest) -> Unit)
 
 @JsFun(
-    """(id, address, length) => {
+    """(id, address, length, contentKey) => {
         const rgba = new Uint8Array(length);
         rgba.set(new Uint8Array(wasmExports.memory.buffer, address >>> 0, length));
-        self.postMessage({ kind: 'tileResult', id, rgba: rgba.buffer }, [rgba.buffer]);
+        self.postMessage({ kind: 'tileResult', id, rgba: rgba.buffer, contentKey: String(contentKey) }, [rgba.buffer]);
     }""",
 )
-private external fun postSuccessFromMemory(id: Int, address: Int, length: Int)
+private external fun postSuccessFromMemory(id: Int, address: Int, length: Int, contentKey: JsString)
 
 @JsFun("(id, message) => self.postMessage({ kind: 'tileError', id, message: String(message) })")
 private external fun postFailure(id: Int, message: JsString)

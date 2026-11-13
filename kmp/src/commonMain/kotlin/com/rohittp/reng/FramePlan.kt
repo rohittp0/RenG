@@ -40,6 +40,19 @@ public class FramePlan(
     bloom: Bloom? = null,
     /** The configured basemap style or two-style blend drawn by this frame (ADR 0086). */
     basemap: BasemapSelection? = null,
+    /**
+     * Whether this frame extends Mercator ground past the poles (ADR 0094), or `null` to follow
+     * [RendererConfiguration.extendGroundPastPoles].
+     *
+     * **A per-frame override, not a second switch.** `true` and `false` win over the configuration
+     * for this frame alone, in both directions, so a consumer can draw the pole bands on one frame and
+     * leave its own [backdrop] showing past the map's edge on the next. `null` is what every frame
+     * written before this field existed means, and it changes nothing about them.
+     *
+     * Appended after [basemap] for the ABI reason [backdrop] records: every earlier parameter is
+     * positional in shipped consumer code. Globe frames ignore it, as they ignore the configuration.
+     */
+    extendGroundPastPoles: Boolean? = null,
 ) {
     public val frameIndex: Long
     public val camera: Camera
@@ -67,6 +80,7 @@ public class FramePlan(
     public val backdrop: Backdrop?
     public val bloom: Bloom?
     public val basemap: BasemapSelection?
+    public val extendGroundPastPoles: Boolean?
 
     init {
         require(frameIndex >= 0L) { "frameIndex must be non-negative" }
@@ -87,6 +101,7 @@ public class FramePlan(
         this.backdrop = backdrop
         this.bloom = bloom
         this.basemap = basemap
+        this.extendGroundPastPoles = extendGroundPastPoles
     }
 
     override fun equals(other: Any?): Boolean =
@@ -101,7 +116,8 @@ public class FramePlan(
             geometrySnapshot == other.geometrySnapshot &&
             backdrop == other.backdrop &&
             bloom == other.bloom &&
-            basemap == other.basemap
+            basemap == other.basemap &&
+            extendGroundPastPoles == other.extendGroundPastPoles
 
     override fun hashCode(): Int {
         var result = frameIndex.hashCode()
@@ -115,6 +131,7 @@ public class FramePlan(
         result = 31 * result + backdrop.hashCode()
         result = 31 * result + bloom.hashCode()
         result = 31 * result + basemap.hashCode()
+        result = 31 * result + extendGroundPastPoles.hashCode()
         return result
     }
 

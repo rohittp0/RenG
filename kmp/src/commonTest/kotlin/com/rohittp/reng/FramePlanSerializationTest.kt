@@ -116,6 +116,7 @@ class FramePlanSerializationTest {
                         ),
                     ),
                 ),
+                extendGroundPastPoles = false,
             )
         }
 
@@ -146,7 +147,7 @@ class FramePlanSerializationTest {
         val expectedKeys = listOf(
             // FramePlan
             "frameIndex", "camera", "projectionMode", "drawBasemap", "drawLabels",
-            "stickers", "models", "geometries", "bloom", "basemap",
+            "stickers", "models", "geometries", "bloom", "basemap", "extendGroundPastPoles",
             // Camera
             "latitude", "unwrappedLongitude", "zoom", "bearing", "pitch",
             // Placement
@@ -216,6 +217,19 @@ class FramePlanSerializationTest {
         assertEquals(minimal, json.decodeFromString(FramePlan.serializer(), document))
         val keys = (json.parseToJsonElement(document) as JsonObject).keys
         assertEquals(setOf("frameIndex", "camera"), keys, "a minimal plan wrote more than it had to")
+    }
+
+    @Test
+    fun theFramesPoleChoiceRoundTripsAndADocumentWithoutItMeansNull() {
+        val camera = Camera(latitude = 0.0, unwrappedLongitude = 0.0, zoom = 0.0, bearing = 0.0, pitch = 0.0)
+        for (value in listOf(true, false, null)) {
+            val plan = FramePlan(frameIndex = 0L, camera = camera, extendGroundPastPoles = value)
+            val document = json.encodeToString(FramePlan.serializer(), plan)
+            assertEquals(plan, json.decodeFromString(FramePlan.serializer(), document))
+            assertEquals(value != null, "\"extendGroundPastPoles\"" in document)
+        }
+        val older = """{"frameIndex":0,"camera":{"latitude":0.0,"unwrappedLongitude":0.0,"zoom":0.0,"bearing":0.0,"pitch":0.0}}"""
+        assertEquals(null, json.decodeFromString(FramePlan.serializer(), older).extendGroundPastPoles)
     }
 
     @Test

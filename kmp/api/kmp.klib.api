@@ -774,7 +774,7 @@ final class com.rohittp.reng/Diagnostic { // com.rohittp.reng/Diagnostic|null[0]
 }
 
 final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
-    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ..., com.rohittp.reng/Backdrop? = ..., com.rohittp.reng/Bloom? = ..., com.rohittp.reng/BasemapSelection? = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>;com.rohittp.reng.Backdrop?;com.rohittp.reng.Bloom?;com.rohittp.reng.BasemapSelection?){}[0]
+    constructor <init>(kotlin/Long, com.rohittp.reng/Camera, com.rohittp.reng/ProjectionMode = ..., kotlin/Boolean = ..., kotlin/Boolean = ..., kotlin.collections/List<com.rohittp.reng/Sticker> = ..., kotlin.collections/List<com.rohittp.reng/Model> = ..., kotlin.collections/List<com.rohittp.reng/Geometry> = ..., com.rohittp.reng/Backdrop? = ..., com.rohittp.reng/Bloom? = ..., com.rohittp.reng/BasemapSelection? = ..., kotlin/Boolean? = ...) // com.rohittp.reng/FramePlan.<init>|<init>(kotlin.Long;com.rohittp.reng.Camera;com.rohittp.reng.ProjectionMode;kotlin.Boolean;kotlin.Boolean;kotlin.collections.List<com.rohittp.reng.Sticker>;kotlin.collections.List<com.rohittp.reng.Model>;kotlin.collections.List<com.rohittp.reng.Geometry>;com.rohittp.reng.Backdrop?;com.rohittp.reng.Bloom?;com.rohittp.reng.BasemapSelection?;kotlin.Boolean?){}[0]
 
     final val backdrop // com.rohittp.reng/FramePlan.backdrop|{}backdrop[0]
         final fun <get-backdrop>(): com.rohittp.reng/Backdrop? // com.rohittp.reng/FramePlan.backdrop.<get-backdrop>|<get-backdrop>(){}[0]
@@ -788,6 +788,8 @@ final class com.rohittp.reng/FramePlan { // com.rohittp.reng/FramePlan|null[0]
         final fun <get-drawBasemap>(): kotlin/Boolean // com.rohittp.reng/FramePlan.drawBasemap.<get-drawBasemap>|<get-drawBasemap>(){}[0]
     final val drawLabels // com.rohittp.reng/FramePlan.drawLabels|{}drawLabels[0]
         final fun <get-drawLabels>(): kotlin/Boolean // com.rohittp.reng/FramePlan.drawLabels.<get-drawLabels>|<get-drawLabels>(){}[0]
+    final val extendGroundPastPoles // com.rohittp.reng/FramePlan.extendGroundPastPoles|{}extendGroundPastPoles[0]
+        final fun <get-extendGroundPastPoles>(): kotlin/Boolean? // com.rohittp.reng/FramePlan.extendGroundPastPoles.<get-extendGroundPastPoles>|<get-extendGroundPastPoles>(){}[0]
     final val frameIndex // com.rohittp.reng/FramePlan.frameIndex|{}frameIndex[0]
         final fun <get-frameIndex>(): kotlin/Long // com.rohittp.reng/FramePlan.frameIndex.<get-frameIndex>|<get-frameIndex>(){}[0]
     final val geometries // com.rohittp.reng/FramePlan.geometries|{}geometries[0]

@@ -19,6 +19,12 @@ import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
 import com.rohittp.reng.internal.shader.containsExtensionDirective
 
+/**
+ * [extendGroundPastPoles] is the renderer's configured default; the frame's own
+ * [FramePlan.extendGroundPastPoles] wins over it when set. Resolving it here, the one place every
+ * Mercator tile selection passes through, keeps prepare, read-ahead and the draw (which only ever
+ * sees the cap instances selected here) in agreement.
+ */
 internal fun planMercatorSpatial(
     plan: FramePlan,
     outputPixelSize: OutputPixelSize,
@@ -56,7 +62,7 @@ internal fun planMercatorSpatial(
                 camera = camera,
                 selectedLod = lodObservation.selectedLod,
                 maximumBasemapTileInstances = maximumBasemapTileInstances,
-                extendGroundPastPoles = extendGroundPastPoles,
+                extendGroundPastPoles = plan.extendGroundPastPoles ?: extendGroundPastPoles,
             )
         ) {
             is TileSelectionOutcome.OverBudget -> return basemapTileBudgetFailure(selection)

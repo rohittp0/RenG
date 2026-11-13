@@ -19,3 +19,7 @@ ADR 0086 first mixes the primary and target tile colours to obtain the sharp map
 ## Consequences
 
 Existing renderers keep finite Mercator ground and unchanged selection when the option is off. When on, caps share edge-tile colour, blend, and DEM acquisitions; labels and resource requests therefore never use out-of-range rows. Cap instances count toward the ordinary instance budget, and overlapping per-band caps retain the existing coarse-to-fine draw order.
+
+## Per-frame override (2026-11-13)
+
+`FramePlan.extendGroundPastPoles: Boolean?`, appended after `basemap`, lets one frame decide for itself: `true` or `false` wins over `RendererConfiguration.extendGroundPastPoles` in either direction, and `null` (the default, and what every older serialized plan decodes to) follows the configuration. A consumer that paints its own backdrop past the map's edge on some frames and wants the pole bands on others needs this; Geoanimator turns the bands off exactly on frames that carry a backdrop. The value is resolved once, in `planMercatorSpatial`, which every Mercator tile selection passes through — prepare and read-ahead alike — and the draw only ever sees the cap instances selected there, so planning and drawing cannot disagree. Globe frames ignore it, as they ignore the configuration.

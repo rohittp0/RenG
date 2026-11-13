@@ -311,8 +311,8 @@ public final class com/rohittp/reng/DiagnosticSink$Companion {
 
 public final class com/rohittp/reng/FramePlan {
 	public static final field Companion Lcom/rohittp/reng/FramePlan$Companion;
-	public fun <init> (JLcom/rohittp/reng/Camera;Lcom/rohittp/reng/ProjectionMode;ZZLjava/util/List;Ljava/util/List;Ljava/util/List;Lcom/rohittp/reng/Backdrop;Lcom/rohittp/reng/Bloom;Lcom/rohittp/reng/BasemapSelection;)V
-	public synthetic fun <init> (JLcom/rohittp/reng/Camera;Lcom/rohittp/reng/ProjectionMode;ZZLjava/util/List;Ljava/util/List;Ljava/util/List;Lcom/rohittp/reng/Backdrop;Lcom/rohittp/reng/Bloom;Lcom/rohittp/reng/BasemapSelection;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (JLcom/rohittp/reng/Camera;Lcom/rohittp/reng/ProjectionMode;ZZLjava/util/List;Ljava/util/List;Ljava/util/List;Lcom/rohittp/reng/Backdrop;Lcom/rohittp/reng/Bloom;Lcom/rohittp/reng/BasemapSelection;Ljava/lang/Boolean;)V
+	public synthetic fun <init> (JLcom/rohittp/reng/Camera;Lcom/rohittp/reng/ProjectionMode;ZZLjava/util/List;Ljava/util/List;Ljava/util/List;Lcom/rohittp/reng/Backdrop;Lcom/rohittp/reng/Bloom;Lcom/rohittp/reng/BasemapSelection;Ljava/lang/Boolean;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBackdrop ()Lcom/rohittp/reng/Backdrop;
 	public final fun getBasemap ()Lcom/rohittp/reng/BasemapSelection;
@@ -320,6 +320,7 @@ public final class com/rohittp/reng/FramePlan {
 	public final fun getCamera ()Lcom/rohittp/reng/Camera;
 	public final fun getDrawBasemap ()Z
 	public final fun getDrawLabels ()Z
+	public final fun getExtendGroundPastPoles ()Ljava/lang/Boolean;
 	public final fun getFrameIndex ()J
 	public final fun getGeometries ()Ljava/util/List;
 	public final fun getModels ()Ljava/util/List;

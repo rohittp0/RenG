@@ -25,6 +25,7 @@ import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -168,6 +169,34 @@ class FrameSpatialPlannerTest {
             caps.map(BasemapTileInstance::unwrappedX),
         )
         assertTrue(caps.all { it.tileY == 0 })
+    }
+
+    @Test
+    fun aFramesOwnPoleChoiceWinsOverTheConfiguredOneInBothDirections() {
+        val camera = Camera(
+            latitude = MERCATOR_MAXIMUM_LATITUDE_DEGREES,
+            unwrappedLongitude = 0.0,
+            zoom = 2.0,
+            bearing = 45.0,
+            pitch = 0.0,
+        )
+        fun hasCaps(frameOverride: Boolean?, configured: Boolean): Boolean =
+            requireNotNull(
+                planSuccess(
+                    plan = FramePlan(frameIndex = 1L, camera = camera, extendGroundPastPoles = frameOverride),
+                    outputPixelSize = OutputPixelSize(width = 512, height = 512),
+                    maximumBasemapTileInstances = 64,
+                    basemapStyleConfigured = true,
+                    extendGroundPastPoles = configured,
+                ).tileSelection,
+            ).instances.any { it.cap != null }
+
+        // `null` follows the configuration, so this fixture really does select caps when enabled.
+        assertTrue(hasCaps(frameOverride = null, configured = true))
+        assertFalse(hasCaps(frameOverride = null, configured = false))
+        // An explicit value wins whichever way the configuration points.
+        assertFalse(hasCaps(frameOverride = false, configured = true))
+        assertTrue(hasCaps(frameOverride = true, configured = false))
     }
 
     @Test

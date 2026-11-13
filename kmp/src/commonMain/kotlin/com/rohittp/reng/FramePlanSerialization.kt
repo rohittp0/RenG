@@ -729,6 +729,7 @@ private class FramePlanSurrogate(
     @SerialName("backdrop") val backdrop: Backdrop? = null,
     @SerialName("bloom") val bloom: Bloom? = null,
     @SerialName("basemap") val basemap: BasemapSelection? = null,
+    @SerialName("extendGroundPastPoles") val extendGroundPastPoles: Boolean? = null,
 )
 
 internal object FramePlanSerializer : KSerializer<FramePlan> {
@@ -749,6 +750,7 @@ internal object FramePlanSerializer : KSerializer<FramePlan> {
                 backdrop = value.backdrop,
                 bloom = value.bloom,
                 basemap = value.basemap,
+                extendGroundPastPoles = value.extendGroundPastPoles,
             ),
         )
     }
@@ -766,6 +768,7 @@ internal object FramePlanSerializer : KSerializer<FramePlan> {
             backdrop = it.backdrop,
             bloom = it.bloom,
             basemap = it.basemap,
+            extendGroundPastPoles = it.extendGroundPastPoles,
         )
     }
 }

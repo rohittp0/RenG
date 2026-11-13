@@ -1,11 +1,63 @@
+import org.gradle.api.file.ArchiveOperations
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
 import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsEnvSpec
+import org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin
+import javax.inject.Inject
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.maven.publish)
     alias(libs.plugins.kotlin.serialization)
+}
+
+abstract class UnpackSkikoWasmRuntime : DefaultTask() {
+    @get:InputFiles
+    abstract val runtimeJar: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Inject
+    abstract val fileSystemOperations: FileSystemOperations
+
+    @get:Inject
+    abstract val archiveOperations: ArchiveOperations
+
+    @TaskAction
+    fun unpack() {
+        fileSystemOperations.sync {
+            from(archiveOperations.zipTree(runtimeJar.singleFile)) {
+                include("skiko.mjs", "skiko.wasm")
+            }
+            into(outputDir)
+        }
+    }
+}
+
+val skikoWasmRuntime by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+
+dependencies {
+    skikoWasmRuntime("org.jetbrains.skiko:skiko-js-wasm-runtime:0.150.2")
+}
+
+val unpackSkikoWasmRuntime = tasks.register<UnpackSkikoWasmRuntime>("unpackSkikoWasmRuntime") {
+    runtimeJar.from(skikoWasmRuntime)
+    outputDir.set(layout.buildDirectory.dir("generated/skikoWasmRuntime"))
+}
+
+rootProject.plugins.withType<WasmNodeJsRootPlugin>().configureEach {
+    rootProject.extensions.configure<WasmNodeJsEnvSpec> {
+        download = false
+    }
 }
 
 kotlin {
@@ -56,6 +108,18 @@ kotlin {
     linuxX64()
     linuxArm64()
 
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+    wasmJs {
+        browser {
+            testTask {
+                useKarma {
+                    useChromeHeadlessNoSandbox()
+                    useConfigDirectory(project.layout.projectDirectory.dir("karma.config.d").asFile)
+                }
+            }
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             implementation(libs.rentile.kmp)
@@ -71,6 +135,7 @@ kotlin {
             // A concrete format for the round-trip gate; `-core` defines no encoding.
             implementation(libs.kotlinx.serialization.json)
         }
+        getByName("wasmJsTest").resources.srcDir(unpackSkikoWasmRuntime)
         // The JVM and Android actuals of the hashing, inflate and threading seams are the same
         // `java.*` code, so they live once, in a source set both platforms depend on.
         val jvmAndAndroidMain by creating {
@@ -106,6 +171,10 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
         }
     }
+}
+
+extensions.configure<WasmNodeJsEnvSpec> {
+    download = false
 }
 
 // ADR 0091. Only Apple Silicon macOS natives: the JVM GL gate runs where CGL is, and nowhere else.
@@ -167,6 +236,7 @@ val targetR2PublicationTasks = listOf(
     "publishMacosArm64PublicationToR2Repository",
     "publishLinuxX64PublicationToR2Repository",
     "publishLinuxArm64PublicationToR2Repository",
+    "publishWasmJsPublicationToR2Repository",
 )
 
 tasks.withType<PublishToMavenRepository>()

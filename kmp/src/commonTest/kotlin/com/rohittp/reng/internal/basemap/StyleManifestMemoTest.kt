@@ -10,7 +10,7 @@ import kotlin.test.assertSame
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 
 /** The memo that keeps an unchanged style from being parsed again on every prepare. */
 class StyleManifestMemoTest {
@@ -83,7 +83,7 @@ class StyleManifestMemoTest {
     }
 
     @Test
-    fun concurrentCallersAllSeeOneManifest() = runBlocking {
+    fun concurrentCallersAllSeeOneManifest() = runTest {
         val memo = StyleManifestMemo(capacity = 2) { bytes, baseUri -> deriveBasemapStyleManifest(bytes, baseUri) }
         val results = (1..8).map {
             async(Dispatchers.Default) {

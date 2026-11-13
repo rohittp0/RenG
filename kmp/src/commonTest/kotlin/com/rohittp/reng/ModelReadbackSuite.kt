@@ -19,7 +19,6 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /**
  * Cycle F-2's gate: draw a real GLB through the **public** API onto a real driver, read the whole
@@ -91,7 +90,7 @@ import kotlinx.coroutines.runBlocking
  * `kotlin.AssertionError at null:-1` as its entire diagnostic. Where a case cannot survive a software
  * rasteriser it skips out loud rather than being tolerated into meaninglessness.
  */
-internal fun runModelReadbackSuite(
+internal suspend fun runModelReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     @Suppress("UNUSED_PARAMETER") dialect: ShaderDialect,
@@ -142,7 +141,7 @@ private const val MODEL_READBACK_CASE_COUNT: Int = 8
 private class ModelCollectedFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    fun run(name: String, case: () -> Unit) {
+    suspend fun run(name: String, case: suspend () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -241,7 +240,7 @@ private fun modelPlan(frameIndex: Long, models: List<Model>, geometries: List<Ge
  * case 6 bounds coverage from above — only a "the draw happened" one, and it is deliberately far
  * below the true figure so a rasteriser that rounds a boundary differently cannot trip it.
  */
-private fun assertTheModelDrawsAndIsNotBlack(world: ModelReadbackWorld) {
+private suspend fun assertTheModelDrawsAndIsNotBlack(world: ModelReadbackWorld) {
     val frame = world.render(modelPlan(frameIndex = 1L, models = listOf(wedge(timeSeconds = null))))
     val drawn = frame.pixelsDifferingFrom(MODEL_ABSENT)
     assertTrue(
@@ -267,7 +266,7 @@ private fun assertTheModelDrawsAndIsNotBlack(world: ModelReadbackWorld) {
  * moving one's, against a tolerance of [MODEL_CHANNEL_TOLERANCE]. Two triangles rather than one
  * because a single sample cannot tell a correct texture from one whose coordinates are constant.
  */
-private fun assertTheTextureIsApplied(world: ModelReadbackWorld) {
+private suspend fun assertTheTextureIsApplied(world: ModelReadbackWorld) {
     val frame = world.render(modelPlan(frameIndex = 2L, models = listOf(wedge(timeSeconds = null))))
     listOf(
         "static" to (STATIC_TRIANGLE_CORNERS to STATIC_TRIANGLE_TEXEL),
@@ -283,7 +282,7 @@ private fun assertTheTextureIsApplied(world: ModelReadbackWorld) {
     }
 }
 
-private fun assertHalfOpacityCompositesOverTheClearColour(world: ModelReadbackWorld) {
+private suspend fun assertHalfOpacityCompositesOverTheClearColour(world: ModelReadbackWorld) {
     val frame = world.render(
         modelPlan(
             frameIndex = 11L,
@@ -326,7 +325,7 @@ private fun assertHalfOpacityCompositesOverTheClearColour(world: ModelReadbackWo
  * pixels. A rig that moves less than a twentieth of its own triangle is not one this suite is
  * pretending to certify — case 3 answers "does it deform at all", not "does it deform correctly".
  */
-private fun assertSkinningDeforms(world: ModelReadbackWorld) {
+private suspend fun assertSkinningDeforms(world: ModelReadbackWorld) {
     val early = world.render(modelPlan(frameIndex = 3L, models = listOf(wedge(timeSeconds = 0.35))))
     val late = world.render(modelPlan(frameIndex = 4L, models = listOf(wedge(timeSeconds = 1.55))))
 
@@ -361,7 +360,7 @@ private fun assertSkinningDeforms(world: ModelReadbackWorld) {
  * near, identical. There is no tolerance here on purpose: the same inputs through the same driver
  * produce the same bytes, and any difference at all is state leaking between frames.
  */
-private fun assertAnimationIsBoundToTime(world: ModelReadbackWorld) {
+private suspend fun assertAnimationIsBoundToTime(world: ModelReadbackWorld) {
     val first = world.render(modelPlan(frameIndex = 5L, models = listOf(wedge(timeSeconds = 0.7))))
     val second = world.render(modelPlan(frameIndex = 6L, models = listOf(wedge(timeSeconds = 0.7))))
     assertTrue(
@@ -389,7 +388,7 @@ private fun assertAnimationIsBoundToTime(world: ModelReadbackWorld) {
  * on declaration order. The two outcomes are opposite, which is what makes this a test rather than a
  * demonstration.
  */
-private fun assertOcclusionIsReal(world: ModelReadbackWorld) {
+private suspend fun assertOcclusionIsReal(world: ModelReadbackWorld) {
     val overGround = world.render(
         modelPlan(
             frameIndex = 7L,
@@ -428,7 +427,7 @@ private fun assertOcclusionIsReal(world: ModelReadbackWorld) {
  * rasteriser boundary rounding on each side; the smallest defect it still detects is a two-pixel
  * excursion, against a footprint whose own half-width is about 36 pixels.
  */
-private fun assertCoverageIsBounded(world: ModelReadbackWorld) {
+private suspend fun assertCoverageIsBounded(world: ModelReadbackWorld) {
     val frame = world.render(modelPlan(frameIndex = 9L, models = listOf(wedge(timeSeconds = 1.55))))
     val minColumn = projectedColumn(WEDGE_SWEPT_LOCAL_BOUNDS.minX) - BOUNDS_MARGIN_PIXELS
     val maxColumn = projectedColumn(WEDGE_SWEPT_LOCAL_BOUNDS.maxX) + BOUNDS_MARGIN_PIXELS
@@ -496,7 +495,7 @@ private fun assertCoverageIsBounded(world: ModelReadbackWorld) {
  * There is no tolerance on the identity claim and there must not be: the same prepared bytes through
  * the same driver produce the same pixels, and any difference at all is state leaking between draws.
  */
-private fun assertOnePreparedFrameDrawsTheSameTwice(world: ModelReadbackWorld) {
+private suspend fun assertOnePreparedFrameDrawsTheSameTwice(world: ModelReadbackWorld) {
     val (first, second) = world.drawTwiceFromOnePreparation(
         modelPlan(
             frameIndex = 10L,
@@ -590,9 +589,9 @@ private class ModelReadbackWorld(
 ) {
     private val renderTarget: RenderTarget = renderer.mintRenderTarget(FramebufferName(target.toUInt()))
 
-    fun render(plan: FramePlan): ReadFrame {
+    suspend fun render(plan: FramePlan): ReadFrame {
         clearTarget(binding, target)
-        runBlocking { renderer.prepare(plan) }.use { prepared ->
+        renderer.prepare(plan).use { prepared ->
             renderer.draw(prepared, renderTarget)
         }
         return readFrame(binding, target)
@@ -606,8 +605,8 @@ private class ModelReadbackWorld(
      * starts from exactly the pixels the first did. Drawing onto the first draw's own output would
      * make any opaque frame trivially identical and turn this into a fourth vacuous check.
      */
-    fun drawTwiceFromOnePreparation(plan: FramePlan): Pair<ReadFrame, ReadFrame> =
-        runBlocking { renderer.prepare(plan) }.use { prepared ->
+    suspend fun drawTwiceFromOnePreparation(plan: FramePlan): Pair<ReadFrame, ReadFrame> =
+        renderer.prepare(plan).use { prepared ->
             clearTarget(binding, target)
             renderer.draw(prepared, renderTarget)
             val first = readFrame(binding, target)

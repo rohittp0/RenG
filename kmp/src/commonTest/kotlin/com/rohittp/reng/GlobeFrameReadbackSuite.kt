@@ -37,7 +37,6 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /**
  * Cycle G task 12's gate: a `ProjectionMode.GLOBE` frame drawn through the **public** API, read back
@@ -119,7 +118,7 @@ import kotlinx.coroutines.runBlocking
  * joins tiles across a world-copy boundary correctly and has since `0.3.0` — a globe frame rendered
  * as a Mercator one has a perfectly continuous antimeridian. That is why the second exists.
  */
-internal fun runGlobeFrameReadbackSuite(
+internal suspend fun runGlobeFrameReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -184,7 +183,7 @@ internal fun runGlobeFrameReadbackSuite(
 private class CollectedGlobeFrameFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    fun run(name: String, case: () -> Unit) {
+    suspend fun run(name: String, case: suspend () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -242,7 +241,7 @@ private const val GLOBE_FRAME_CASE_COUNT: Int = 5
  * exists to catch is nothing like its size, since a ground drawn flat covers the corners too and a
  * ground that never drew leaves all 65,536 pixels empty.
  */
-private fun assertTheGroundStopsExactlyAtTheLimb(fixture: GlobeFrameFixture) {
+private suspend fun assertTheGroundStopsExactlyAtTheLimb(fixture: GlobeFrameFixture) {
     val frame = fixture.render(
         FramePlan(
             frameIndex = fixture.nextFrameIndex(),
@@ -322,7 +321,7 @@ private fun assertTheGroundStopsExactlyAtTheLimb(fixture: GlobeFrameFixture) {
  * `(x = 0, y = 1)`. A near hemisphere culled instead of a far one leaves the identical disc and
  * fills its centre with the other colour.
  */
-private fun assertNothingOnTheFarHemisphereDraws(fixture: GlobeFrameFixture) {
+private suspend fun assertNothingOnTheFarHemisphereDraws(fixture: GlobeFrameFixture) {
     val camera = globeFrameCamera()
     val frame = fixture.render(
         FramePlan(
@@ -412,7 +411,7 @@ private fun assertNothingOnTheFarHemisphereDraws(fixture: GlobeFrameFixture) {
  * frame's own centre column: a fixture whose seam lies on a screen axis cannot tell a continuous
  * meridian from a renderer that happens to be symmetric about that axis.
  */
-private fun assertTilesMeetAcrossTheAntimeridian(fixture: GlobeFrameFixture) {
+private suspend fun assertTilesMeetAcrossTheAntimeridian(fixture: GlobeFrameFixture) {
     val camera = antimeridianCamera()
     val frame = fixture.render(
         FramePlan(
@@ -500,7 +499,7 @@ private fun assertTilesMeetAcrossTheAntimeridian(fixture: GlobeFrameFixture) {
  * [measureLargeQuadRasterisation] exists to measure, and on a driver that drops it the missing
  * pixels would be the driver's rather than RenG's.
  */
-private fun assertTheTwoModesAgreeAtTheCentreAndPartAtTheEdge(
+private suspend fun assertTheTwoModesAgreeAtTheCentreAndPartAtTheEdge(
     fixture: GlobeFrameFixture,
     groundCoverageIsTrustworthy: Boolean,
 ) {
@@ -635,7 +634,7 @@ private fun assertTheTwoModesAgreeAtTheCentreAndPartAtTheEdge(
  * ground must still not appear. Setting `drawLabels` false would restore the old
  * both-switches-off frame and quietly stop testing the split at all.
  */
-private fun assertDrawBasemapFalseLeavesAGlobeFrameUntouched(fixture: GlobeFrameFixture) {
+private suspend fun assertDrawBasemapFalseLeavesAGlobeFrameUntouched(fixture: GlobeFrameFixture) {
     val frame = fixture.render(
         FramePlan(
             frameIndex = fixture.nextFrameIndex(),
@@ -689,7 +688,7 @@ private class GlobeFrameFixture(
     fun nextFrameIndex(): Long = frameIndex++
 
     /** Draws [plan] into a freshly [ABSENT]-cleared target and reads the whole frame back. */
-    fun render(plan: FramePlan): GlobeFrame {
+    suspend fun render(plan: FramePlan): GlobeFrame {
         binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
         binding.disable(GL_SCISSOR_TEST)
         binding.colorMask(true, true, true, true)
@@ -700,8 +699,8 @@ private class GlobeFrameFixture(
 
         // prepare() is suspending and reaches the Rentile engine on Dispatchers.Default; draw() is
         // synchronous GL work that must happen on the thread holding the context, so the two are
-        // split rather than run inside one runBlocking body.
-        val frame = runBlocking { renderer.prepare(plan) }
+        // split rather than run inside one blocking body.
+        val frame = renderer.prepare(plan)
         try {
             renderer.draw(frame, renderTarget)
         } finally {

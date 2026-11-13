@@ -23,7 +23,6 @@ import com.rohittp.reng.internal.gl.ShaderDialect
 import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 internal const val STICKER_SHADER_READBACK_PIXELS: Int = 128
 
@@ -52,7 +51,7 @@ private const val MAXIMUM_DIFFERING_DIVISOR: Int = 200
  *   edge rounding the other way, and only at one pixel in [MAXIMUM_DIFFERING_DIVISOR], because a
  *   stretch too small to move any edge a whole pixel would otherwise pass.
  */
-internal fun runStickerShaderReadbackSuite(
+internal suspend fun runStickerShaderReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -74,7 +73,7 @@ internal fun runStickerShaderReadbackSuite(
     var frameIndex = 0L
     try {
         val renderTarget = renderer.mintRenderTarget(FramebufferName(target.toUInt()))
-        fun drawFrame(plan: FramePlan): IntArray =
+        suspend fun drawFrame(plan: FramePlan): IntArray =
             clearDrawAndReadFrame(binding, renderer, target, renderTarget, plan)
 
         PASS_THROUGH_CASES.forEach { case ->
@@ -507,7 +506,7 @@ private fun groundStickerPlan(frameIndex: Long, case: GroundCase): FramePlan = F
 // Readback
 // ---------------------------------------------------------------------------------------------
 
-private fun clearDrawAndReadFrame(
+private suspend fun clearDrawAndReadFrame(
     binding: GlBinding,
     renderer: Renderer,
     targetFramebuffer: Int,
@@ -523,7 +522,7 @@ private fun clearDrawAndReadFrame(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    runBlocking { renderer.prepare(plan) }.use { renderer.draw(it, renderTarget) }
+    renderer.prepare(plan).use { renderer.draw(it, renderTarget) }
 
     val bytes = ByteArray(STICKER_SHADER_READBACK_PIXELS * STICKER_SHADER_READBACK_PIXELS * 4)
     binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)
@@ -627,7 +626,7 @@ private fun createStickerShaderReadbackTarget(binding: GlBinding): Int {
 private class StickerShaderCollectedFailures {
     private val failures = ArrayList<String>()
 
-    fun run(name: String, block: () -> Unit) {
+    inline fun run(name: String, block: () -> Unit) {
         try {
             block()
         } catch (failure: Throwable) {

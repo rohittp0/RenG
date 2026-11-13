@@ -26,7 +26,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.time.TimeSource
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 
 /**
  * What one frame's tile-route phase actually costs, measured rather than assumed.
@@ -112,11 +112,10 @@ import kotlinx.coroutines.runBlocking
  */
 class BasemapRouteDerivationCostTest {
 
-    // `runBlocking` rather than `runTest`: `preregister` is `suspend` (it serializes writers on the
-    // registry's own mutex), and this test measures wall-clock cost, so it runs on a real dispatcher
-    // rather than a virtual-time scheduler.
+    // `preregister` is `suspend` (it serializes writers on the registry's own mutex), while the
+    // measured body uses wall-clock time and no scheduler-controlled delay.
     @Test
-    fun derivesAndPreregistersAWholeFramesTileRoutesAndReportsTheCost() = runBlocking {
+    fun derivesAndPreregistersAWholeFramesTileRoutesAndReportsTheCost() = runTest {
         val manifest = threeSourceManifest()
 
         val realistic = measure(manifest, tileCount = REALISTIC_VIEWPORT_TILES)

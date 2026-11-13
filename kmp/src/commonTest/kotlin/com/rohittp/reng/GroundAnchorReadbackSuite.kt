@@ -39,7 +39,6 @@ import kotlin.math.sinh
 import kotlin.math.sqrt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /**
  * **Cycle E-terrain task 19's gate: everything a frame can anchor to the ground, over real relief,
@@ -114,7 +113,7 @@ import kotlinx.coroutines.runBlocking
  * residual varying by a factor of two across them. Case 3 asserts pitch 0, which is where the spike's
  * own lift ladder was measured and where its 102,370-of-102,400 figure comes from.
  */
-internal fun runGroundAnchorReadbackSuite(
+internal suspend fun runGroundAnchorReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -210,7 +209,7 @@ internal fun runGroundAnchorReadbackSuite(
 private class CollectedGroundAnchorFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    fun run(name: String, case: () -> Unit) {
+    suspend fun run(name: String, case: suspend () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -266,7 +265,7 @@ private const val GROUND_ANCHOR_CASE_COUNT: Int = 5
  * would barely move — so the case would rest entirely on the burial half and would pass against a
  * build that resolved the altitude and then discarded it.
  */
-private fun assertGroundRelativeAndAbsoluteStickersPartInOneFrameOverRelief(fixture: GroundAnchorFixture) {
+private suspend fun assertGroundRelativeAndAbsoluteStickersPartInOneFrameOverRelief(fixture: GroundAnchorFixture) {
     val ridingIsRelative = fixture.renderTerrain(
         PLACEMENT_CAMERA, AnchorRelief.RIDGE,
         stickers = listOf(
@@ -355,7 +354,7 @@ private fun assertGroundRelativeAndAbsoluteStickersPartInOneFrameOverRelief(fixt
  * **flat at zero** quad must be gone, because without it "the ridge buries things" is an assumption
  * rather than a measurement and a build whose ground wrote no depth at all would pass the first two.
  */
-private fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixture: GroundAnchorFixture) {
+private suspend fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixture: GroundAnchorFixture) {
     val draped = fixture.renderTerrain(
         DRAPE_CAMERA, AnchorRelief.RIDGE,
         geometries = listOf(ridgeGeometry(AltitudeMode.GROUND_RELATIVE, 0.0)),
@@ -429,7 +428,7 @@ private fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixtu
  * edge, and a quad that ended *inside* the frame put that fringe into the contested set and read 97.99
  * per cent while measuring its own control's footprint.
  */
-private fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: GroundAnchorFixture) {
+private suspend fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: GroundAnchorFixture) {
     val groundOnly = fixture.renderTerrain(DRAPE_CAMERA, AnchorRelief.RIDGE)
     val raised = fixture.renderTerrain(
         DRAPE_CAMERA, AnchorRelief.RIDGE,
@@ -522,7 +521,7 @@ private fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: GroundAnchor
  * corner texels and answer 15.6 m where the frame's grid reads 984.4. The cell rule is
  * `GroundSurfaceTest`'s and case 1's above.
  */
-private fun assertALabelRidesTheFeatureItNames(fixture: GroundAnchorFixture) {
+private suspend fun assertALabelRidesTheFeatureItNames(fixture: GroundAnchorFixture) {
     val overTheRidge = fixture.renderLabelRamp(AnchorRelief.RIDGE)
     val overSeaLevel = fixture.renderLabelRamp(AnchorRelief.SEA_LEVEL)
 
@@ -616,7 +615,7 @@ private fun assertALabelRidesTheFeatureItNames(fixture: GroundAnchorFixture) {
  * byte-identical whatever the terrain does. Labels over a terrainless style are
  * `LabelIntegrationReadbackSuite`'s subject; the byte comparison is this one's.
  */
-private fun assertAFrameWithNoTerrainIsUnchangedByEveryAnchorMode(fixture: GroundAnchorFixture) {
+private suspend fun assertAFrameWithNoTerrainIsUnchangedByEveryAnchorMode(fixture: GroundAnchorFixture) {
     val absolute = fixture.renderPlain(
         PLACEMENT_CAMERA,
         stickers = listOf(anchorSticker(RIDING_STICKER_URL, AltitudeMode.ABSOLUTE)),
@@ -767,7 +766,7 @@ private class GroundAnchorFixture(
 ) {
     private var frameIndex: Long = 0L
 
-    fun renderTerrain(
+    suspend fun renderTerrain(
         camera: Camera,
         relief: AnchorRelief,
         stickers: List<Sticker> = emptyList(),
@@ -777,7 +776,7 @@ private class GroundAnchorFixture(
         return render(terrainRenderer, terrainTarget, plan(camera, stickers, geometries, drawLabels = false))
     }
 
-    fun renderPlain(
+    suspend fun renderPlain(
         camera: Camera,
         stickers: List<Sticker> = emptyList(),
         geometries: List<Geometry> = emptyList(),
@@ -792,7 +791,7 @@ private class GroundAnchorFixture(
      * A fresh ramp per arm rather than one ramp and a DEM swap: a label's fade is keyed on the label,
      * and this fixture does not need to know whether moving its anchor makes it a different one.
      */
-    fun renderLabelRamp(relief: AnchorRelief): AnchorFrame {
+    suspend fun renderLabelRamp(relief: AnchorRelief): AnchorFrame {
         transport.relief = relief
         var frame: AnchorFrame? = null
         repeat(LABEL_FADE_RAMP) {
@@ -828,7 +827,7 @@ private class GroundAnchorFixture(
         geometries = geometries,
     )
 
-    private fun render(renderer: Renderer, renderTarget: RenderTarget, plan: FramePlan): AnchorFrame {
+    private suspend fun render(renderer: Renderer, renderTarget: RenderTarget, plan: FramePlan): AnchorFrame {
         binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
         binding.disable(GL_SCISSOR_TEST)
         binding.colorMask(true, true, true, true)
@@ -839,8 +838,8 @@ private class GroundAnchorFixture(
 
         // prepare() is suspending and reaches the Rentile engine on Dispatchers.Default; draw() is
         // synchronous GL work that must happen on the thread holding the context, so the two are split
-        // rather than run inside one runBlocking body.
-        val frame = runBlocking { renderer.prepare(plan) }
+        // rather than run inside one blocking body.
+        val frame = renderer.prepare(plan)
         try {
             renderer.draw(frame, renderTarget)
         } finally {

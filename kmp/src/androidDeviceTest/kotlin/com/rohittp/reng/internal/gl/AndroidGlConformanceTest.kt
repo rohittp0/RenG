@@ -39,6 +39,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 /**
  * Android's half of the GL gate, and the only place `AndroidGlBinding` is executed at all. It shipped
@@ -172,7 +173,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
             binding.scissor(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
-            runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -272,7 +273,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
             binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
-            runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -296,7 +297,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
             binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
-            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -309,7 +310,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
             binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
-            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -321,7 +322,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
             binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
-            runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -334,7 +335,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
             binding.scissor(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
-            runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -374,7 +375,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, GLOBE_FRAME_READBACK_PIXELS, GLOBE_FRAME_READBACK_PIXELS)
             binding.scissor(0, 0, GLOBE_FRAME_READBACK_PIXELS, GLOBE_FRAME_READBACK_PIXELS)
-            runGlobeFrameReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runGlobeFrameReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -397,7 +398,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, TERRAIN_FRAME_READBACK_PIXELS, TERRAIN_FRAME_READBACK_PIXELS)
             binding.scissor(0, 0, TERRAIN_FRAME_READBACK_PIXELS, TERRAIN_FRAME_READBACK_PIXELS)
-            runTerrainFrameReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runTerrainFrameReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -451,7 +452,7 @@ class AndroidGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, MODEL_READBACK_PIXELS, MODEL_READBACK_PIXELS)
             binding.scissor(0, 0, MODEL_READBACK_PIXELS, MODEL_READBACK_PIXELS)
-            runModelReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runModelReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }

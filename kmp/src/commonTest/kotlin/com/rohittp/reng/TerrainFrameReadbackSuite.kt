@@ -24,7 +24,6 @@ import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /**
  * **Cycle E-terrain task 12's gate: a terrain frame drawn through the *public* API, read back off a
@@ -145,7 +144,7 @@ import kotlinx.coroutines.runBlocking
  * mutations could falsify, and an assertion no mutation can falsify is the definition of the vacuous
  * check this cycle has now found nine of.
  */
-internal fun runTerrainFrameReadbackSuite(
+internal suspend fun runTerrainFrameReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -259,7 +258,7 @@ internal fun runTerrainFrameReadbackSuite(
 private class CollectedTerrainFrameFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    fun run(name: String, case: () -> Unit) {
+    suspend fun run(name: String, case: suspend () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -324,7 +323,7 @@ private const val TERRAIN_FRAME_CASE_COUNT: Int = 9
  * Both projections, because ADR 0039 and the shared `GROUND_ELEVATION_SOURCE` move the two grounds
  * together and a seam closed in one projection is half a claim.
  */
-private fun assertAdjacentDisplacedTilesLeaveNoCrackInEitherProjection(fixture: TerrainFrameFixture) {
+private suspend fun assertAdjacentDisplacedTilesLeaveNoCrackInEitherProjection(fixture: TerrainFrameFixture) {
     ProjectionMode.entries.forEach { mode ->
         val flat = fixture.renderTerrain(SEAM_CAMERA, mode, DemRelief.SEA_LEVEL)
         val relief = fixture.renderTerrain(SEAM_CAMERA, mode, DemRelief.ALTERNATING_BY_TILE_COLUMN)
@@ -414,7 +413,7 @@ private fun assertAdjacentDisplacedTilesLeaveNoCrackInEitherProjection(fixture: 
  * The corners are asserted cleared as well, because every number above is a distance from a frame
  * edge and would be meaningless if the disc had grown to fill the frame.
  */
-private fun assertTheGlobeLimbFollowsTheReliefBeneathIt(fixture: TerrainFrameFixture) {
+private suspend fun assertTheGlobeLimbFollowsTheReliefBeneathIt(fixture: TerrainFrameFixture) {
     val flat = fixture.renderTerrain(LIMB_CAMERA, ProjectionMode.GLOBE, DemRelief.SEA_LEVEL)
     val eastern = fixture.renderTerrain(LIMB_CAMERA, ProjectionMode.GLOBE, DemRelief.EASTERN_HALF)
     val everywhere = fixture.renderTerrain(LIMB_CAMERA, ProjectionMode.GLOBE, DemRelief.SUMMIT)
@@ -515,7 +514,7 @@ private fun assertTheGlobeLimbFollowsTheReliefBeneathIt(fixture: TerrainFrameFix
  * two styles, so it additionally covers acquisition running at all, the granularity rule, and the
  * frame picking the ground program it picks.
  */
-private fun assertAFlatDemDrawsExactlyWhatANoTerrainStyleDraws(fixture: TerrainFrameFixture) {
+private suspend fun assertAFlatDemDrawsExactlyWhatANoTerrainStyleDraws(fixture: TerrainFrameFixture) {
     val mercatorPlain = fixture.renderPlain(SEAM_CAMERA, ProjectionMode.MERCATOR)
     val mercatorFlat = fixture.renderTerrain(SEAM_CAMERA, ProjectionMode.MERCATOR, DemRelief.SEA_LEVEL)
     assertTrue(
@@ -566,7 +565,7 @@ private fun assertAFlatDemDrawsExactlyWhatANoTerrainStyleDraws(fixture: TerrainF
  * landing on integer pixels differently. The single Mercator pixel is the reason this arm is a budget
  * rather than an equality.
  */
-private fun assertFlatDemLeavesTheFrameAlone(
+private suspend fun assertFlatDemLeavesTheFrameAlone(
     mode: ProjectionMode,
     plain: TerrainFrame,
     flat: TerrainFrame,
@@ -644,7 +643,7 @@ private fun assertFlatDemLeavesTheFrameAlone(
  * fraction from `globeMetresToLogicalPixels` and would fail if the globe borrowed Mercator's
  * latitude term.
  */
-private fun assertTheTwoProjectionsDisplaceTheSameGroundAndPartByCurvature(fixture: TerrainFrameFixture) {
+private suspend fun assertTheTwoProjectionsDisplaceTheSameGroundAndPartByCurvature(fixture: TerrainFrameFixture) {
     val mercatorFlat = fixture.renderTerrain(SEAM_CAMERA, ProjectionMode.MERCATOR, DemRelief.SEA_LEVEL)
     val mercatorRaised = fixture.renderTerrain(SEAM_CAMERA, ProjectionMode.MERCATOR, DemRelief.SUMMIT)
     val globeFlat = fixture.renderTerrain(SEAM_CAMERA, ProjectionMode.GLOBE, DemRelief.SEA_LEVEL)
@@ -785,7 +784,7 @@ private enum class DemRelief {
  * reads a cell's corners or the texel underneath is invisible on a plateau -- that is
  * `GroundSurfaceTest`'s subject, and the relief cases below are where it reaches a pixel.
  */
-private fun assertAGroundRelativePlacementRidesTheSurfaceInBothProjections(fixture: TerrainFrameFixture) {
+private suspend fun assertAGroundRelativePlacementRidesTheSurfaceInBothProjections(fixture: TerrainFrameFixture) {
     ProjectionMode.entries.forEach { mode ->
         val camera = if (mode == ProjectionMode.MERCATOR) ANCHOR_CAMERA else LIMB_CAMERA
         val atSeaLevel = fixture.renderTerrain(
@@ -851,7 +850,7 @@ private fun assertAGroundRelativePlacementRidesTheSurfaceInBothProjections(fixtu
  *   "the ridge buries things" would be an assumption rather than a measurement, and a build whose
  *   ground wrote no depth at all would pass the first two.
  */
-private fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixture: TerrainFrameFixture) {
+private suspend fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixture: TerrainFrameFixture) {
     val draped = fixture.renderFine(
         RIDGE_CAMERA, ProjectionMode.MERCATOR, DemRelief.RIDGE,
         geometries = listOf(ridgeGeometry(AltitudeMode.GROUND_RELATIVE, 0.0)),
@@ -938,7 +937,7 @@ private fun assertADrapedGeometryFollowsTheRidgeRatherThanCuttingThroughIt(fixtu
  * **One camera.** The spike swept five pitch-and-bearing pairs and found the residual varying by a
  * factor of two across them; this asserts pitch 0, which is where its own lift ladder was measured.
  */
-private fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: TerrainFrameFixture) {
+private suspend fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: TerrainFrameFixture) {
     val groundOnly = fixture.renderFine(RIDGE_CAMERA, ProjectionMode.MERCATOR, DemRelief.RIDGE)
     val raised = fixture.renderFine(
         RIDGE_CAMERA, ProjectionMode.MERCATOR, DemRelief.RIDGE,
@@ -1002,7 +1001,7 @@ private fun assertTheCoplanarDrapeSurvivesTheGroundItRides(fixture: TerrainFrame
  * The raised frame is the sensitivity control on the same terms as everywhere else in this file: two
  * frames agree trivially if the instrument cannot see altitude at all.
  */
-private fun assertWithoutTerrainAGroundRelativeAltitudeIsAbsolute(fixture: TerrainFrameFixture) {
+private suspend fun assertWithoutTerrainAGroundRelativeAltitudeIsAbsolute(fixture: TerrainFrameFixture) {
     ProjectionMode.entries.forEach { mode ->
         val camera = if (mode == ProjectionMode.MERCATOR) ANCHOR_CAMERA else LIMB_CAMERA
         val absolute = fixture.renderPlain(
@@ -1077,7 +1076,7 @@ private fun assertWithoutTerrainAGroundRelativeAltitudeIsAbsolute(fixture: Terra
  * differ by an enum. The terrain under this footprint runs 36 to 214 km, so the absolute one is buried
  * over most of it and the drape over none.
  */
-private fun assertAGlobeGeometryDrapesToo(fixture: TerrainFrameFixture) {
+private suspend fun assertAGlobeGeometryDrapesToo(fixture: TerrainFrameFixture) {
     val draped = fixture.renderTerrain(
         LIMB_CAMERA, ProjectionMode.GLOBE, DemRelief.RIDGE,
         geometries = listOf(
@@ -1215,7 +1214,7 @@ private class TerrainFrameFixture(
 ) {
     private var frameIndex: Long = 0L
 
-    fun renderTerrain(
+    suspend fun renderTerrain(
         camera: Camera,
         mode: ProjectionMode,
         relief: DemRelief,
@@ -1227,7 +1226,7 @@ private class TerrainFrameFixture(
     }
 
     /** [renderTerrain] against the `exaggeration: 1.5` style — see [FINE_TERRAIN_STYLE_JSON]. */
-    fun renderFine(
+    suspend fun renderFine(
         camera: Camera,
         mode: ProjectionMode,
         relief: DemRelief,
@@ -1238,7 +1237,7 @@ private class TerrainFrameFixture(
         return render(fineRenderer, fineTarget, camera, mode, stickers, geometries)
     }
 
-    fun renderPlain(
+    suspend fun renderPlain(
         camera: Camera,
         mode: ProjectionMode,
         stickers: List<Sticker> = emptyList(),
@@ -1256,7 +1255,7 @@ private class TerrainFrameFixture(
             ) as SpatialOutcome.Success<ResolvedGlobeCamera>
             ).value
 
-    private fun render(
+    private suspend fun render(
         renderer: Renderer,
         renderTarget: RenderTarget,
         camera: Camera,
@@ -1274,7 +1273,7 @@ private class TerrainFrameFixture(
 
         // prepare() is suspending and reaches the Rentile engine on Dispatchers.Default; draw() is
         // synchronous GL work that must happen on the thread holding the context, so the two are
-        // split rather than run inside one runBlocking body.
+        // split rather than run inside one blocking body.
         val plan = FramePlan(
             frameIndex = frameIndex++,
             camera = camera,
@@ -1283,7 +1282,7 @@ private class TerrainFrameFixture(
             stickers = stickers,
             geometries = geometries,
         )
-        val frame = runBlocking { renderer.prepare(plan) }
+        val frame = renderer.prepare(plan)
         try {
             renderer.draw(frame, renderTarget)
         } finally {

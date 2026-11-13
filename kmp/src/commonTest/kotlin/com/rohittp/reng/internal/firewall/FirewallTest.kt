@@ -41,7 +41,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
@@ -806,8 +805,8 @@ class FirewallTest {
      * mutex before running each route's block, so concurrent routes' Transport calls run their bodies,
      * including the digest write, in real parallel under any multi-threaded dispatcher (ADR 0016's
      * 256-tile batch at concurrency eight is exactly this shape). This test deliberately uses
-     * [runBlocking] with [Dispatchers.Default] -- a real, multi-threaded dispatcher on both the JVM and
-     * Kotlin/Native -- rather than [runTest], to put real concurrent pressure on that map, released
+     * [runTest] with [Dispatchers.Default] -- a real, multi-threaded dispatcher on both the JVM and
+     * Kotlin/Native -- to put real concurrent pressure on that map, released
      * through a starting gate (the [MutableStateFlow] count plus [CompletableDeferred]) so every
      * route's write actually contends for the map at close to the same instant rather than being
      * staggered across the thread pool by ordinary `launch` scheduling.
@@ -840,7 +839,7 @@ class FirewallTest {
      * map, not a test that cannot fail.
      */
     @Test
-    fun neverLosesAConcurrentlyLatchedTransportDigestUnderRealParallelism() = runBlocking {
+    fun neverLosesAConcurrentlyLatchedTransportDigestUnderRealParallelism() = runTest {
         val routeCount = 50_000
         val routes = (0 until routeCount).map { index ->
             ResourceRouteKey(
@@ -935,7 +934,7 @@ class FirewallTest {
      * currently-passing exercise of exactly the access pattern that broke.
      */
     @Test
-    fun neverRefusesAnAlreadyDeclaredRouteWhileMoreAreDeclaredConcurrently() = runBlocking {
+    fun neverRefusesAnAlreadyDeclaredRouteWhileMoreAreDeclaredConcurrently() = runTest {
         val anchor = rasterRoute
         val laterRouteCount = LATER_ROUTE_COUNT
         val laterRoutes = (0 until laterRouteCount).map { index ->

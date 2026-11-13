@@ -11,7 +11,7 @@ import kotlin.test.assertNotEquals
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 
 /**
  * The memo that stops a shader pair's canonical form and keys being re-encoded and re-hashed on every
@@ -154,7 +154,7 @@ class ShaderKeyMemoTest {
     }
 
     @Test
-    fun concurrentCallersAllSeeTheKeyASingleThreadDerives() = runBlocking {
+    fun concurrentCallersAllSeeTheKeyASingleThreadDerives() = runTest {
         val deriver = ResourceKeyDeriver(shaderPairs = ShaderPairMemo(capacity = 8))
         val expected: List<ResourceKey> = (0 until 100).map { ResourceKeyDeriver().geometryProgram(pair("p$it")).key }
         val seen = (1..8).map {

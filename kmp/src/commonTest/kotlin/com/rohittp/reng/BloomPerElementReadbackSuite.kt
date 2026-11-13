@@ -27,7 +27,6 @@ import kotlin.math.sinh
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /** The per-element bloom suite's square output: wide enough for two halos and a far band apart. */
 internal const val BLOOM_PER_ELEMENT_PIXELS: Int = 256
@@ -41,7 +40,7 @@ internal const val BLOOM_PER_ELEMENT_PIXELS: Int = 256
  * knee and with neutral light, so the soft shoulder and the hue steer leave the bloom a plain add
  * and halo light can be compared by subtraction.
  */
-internal fun runBloomPerElementReadbackSuite(
+internal suspend fun runBloomPerElementReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -68,7 +67,7 @@ internal fun runBloomPerElementReadbackSuite(
     var frameIndex = 0L
     try {
         val renderTarget = renderer.mintRenderTarget(FramebufferName(target.framebuffer.toUInt()))
-        fun draw(bloom: Bloom?, emitters: List<Geometry>): ByteArray {
+        suspend fun draw(bloom: Bloom?, emitters: List<Geometry>): ByteArray {
             diagnostics.clear()
             return drawAndRead(
                 binding, renderer, renderTarget, target.framebuffer,
@@ -389,7 +388,7 @@ private fun pixelGeo(x: Int, y: Int, altitude: Double): Vector3 {
     return Vector3(latitude, longitude, altitude)
 }
 
-private fun drawAndRead(
+private suspend fun drawAndRead(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -405,7 +404,7 @@ private fun drawAndRead(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {
@@ -465,7 +464,7 @@ private fun ByteArray.sha256(): String = PureKotlinSha256.digest(CanonicalBytes(
 private class PerElementFailures {
     private val failures = ArrayList<String>()
 
-    fun run(name: String, block: () -> Unit) {
+    inline fun run(name: String, block: () -> Unit) {
         try {
             block()
         } catch (failure: Throwable) {

@@ -36,7 +36,6 @@ import kotlin.io.encoding.Base64
 import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 /**
  * Cycle E's gate: draw a known camera over known ground through the **public** API, read the whole
@@ -97,7 +96,7 @@ import kotlinx.coroutines.runBlocking
  * pixels and the one case that cannot survive it is skipped out loud rather than tolerated into
  * meaninglessness.
  */
-internal fun runBasemapReadbackSuite(
+internal suspend fun runBasemapReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -215,7 +214,7 @@ internal fun runBasemapReadbackSuite(
 private class CollectedFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    fun run(name: String, case: () -> Unit) {
+    inline fun run(name: String, case: () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -290,7 +289,7 @@ private fun assertGroundEdgeStripBuildPreservesFramebufferBindings(binding: GlBi
  * target-style pass applies the target contribution once per covering tile, turning a requested
  * half mix into a visible three-quarter band. Every dense interior sample must remain the midpoint.
  */
-private fun assertPitchedBlendStaysUniformAcrossOverlappingLodBands(
+private suspend fun assertPitchedBlendStaysUniformAcrossOverlappingLodBands(
     binding: GlBinding,
     probe: RenderContextProbe,
     targetFramebuffer: Int,
@@ -398,7 +397,7 @@ private fun tileAreasOverlap(first: BasemapTileInstance, second: BasemapTileInst
         maxOf(firstTop, secondTop) < minOf(firstTop + firstSide, secondTop + secondSide)
 }
 
-private fun assertTwoBasemapStylesBlend(
+private suspend fun assertTwoBasemapStylesBlend(
     binding: GlBinding,
     probe: RenderContextProbe,
     targetFramebuffer: Int,
@@ -594,7 +593,7 @@ private fun assertRegionContains(
  * camera cannot catch an x/y transposition, and this cycle has already shipped one suite of exact-url
  * assertions that could not, because every fixture happened to be symmetric.
  */
-private fun assertGroundCoversTheFrameInTheFixturesOwnArrangement(
+private suspend fun assertGroundCoversTheFrameInTheFixturesOwnArrangement(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -650,7 +649,7 @@ private fun assertGroundCoversTheFrameInTheFixturesOwnArrangement(
  * must still not appear, because the ground draw follows `drawBasemap` alone. Setting `drawLabels`
  * false here would restore the old both-switches-off frame and quietly stop testing the split at all.
  */
-private fun assertDrawBasemapFalseLeavesTheFrameUntouched(
+private suspend fun assertDrawBasemapFalseLeavesTheFrameUntouched(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1031,7 +1030,7 @@ private fun assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
  * depth for a sticker to lose to — but it remains the right thing to name in the failure message,
  * because it is still what a consumer would see if some future pass started writing depth again.
  */
-private fun assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(
+private suspend fun assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1091,7 +1090,7 @@ private fun assertTheLaterOfTwoCoplanarMapAnchoredThingsWins(
  * The sweep varies pitch and bearing together. Pitch is what the defect needs; bearing is what stops
  * a fix that happens to work along one screen axis reading as a fix.
  */
-private fun assertACoplanarGeometryKeepsEveryGroundCoveredPixelAcrossACameraSweep(
+private suspend fun assertACoplanarGeometryKeepsEveryGroundCoveredPixelAcrossACameraSweep(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1193,7 +1192,7 @@ private fun assertACoplanarGeometryKeepsEveryGroundCoveredPixelAcrossACameraSwee
  * this still detects is a gain or loss of 21 pixels -- two percent of the quad, or about two thirds
  * of one of its 32 rows. The defect ADR 0027 removed took away half the quad, 512 pixels.
  */
-private fun assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(
+private suspend fun assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1372,7 +1371,7 @@ private fun IntArray.distanceTo(other: IntArray): Int = indices.maxOf { abs(this
 private fun IntArray.describe(): String = "(${this[0]},${this[1]},${this[2]},${this[3]})"
 
 /** Draws [plan] into a freshly [ABSENT]-cleared [targetFramebuffer] and reads the whole frame back. */
-private fun clearAndDraw(
+private suspend fun clearAndDraw(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1390,8 +1389,8 @@ private fun clearAndDraw(
 
     // prepare() is suspending and reaches the Rentile engine on Dispatchers.Default; draw() is
     // synchronous GL work that must happen on the thread holding the context, so the two are split
-    // rather than run inside one runBlocking body.
-    val frame = runBlocking { renderer.prepare(plan) } as RenGPreparedFrame
+    // rather than run inside a blocking body.
+    val frame = renderer.prepare(plan) as RenGPreparedFrame
     try {
         assertPreparedFrame(frame)
         renderer.draw(frame, renderTarget)

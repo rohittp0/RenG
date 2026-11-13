@@ -42,6 +42,7 @@ import com.rohittp.reng.runModelReadbackSuite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 /**
  * The Apple core-profile readback gates, shared by `macosArm64Test` (Kotlin/Native over
@@ -92,7 +93,7 @@ class MacosGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, MODEL_READBACK_PIXELS, MODEL_READBACK_PIXELS)
             binding.scissor(0, 0, MODEL_READBACK_PIXELS, MODEL_READBACK_PIXELS)
-            runModelReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            runBlocking { runModelReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
         } finally {
             fixture.destroy()
         }
@@ -370,7 +371,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, GLOBE_FRAME_READBACK_PIXELS, GLOBE_FRAME_READBACK_PIXELS)
                 binding.scissor(0, 0, GLOBE_FRAME_READBACK_PIXELS, GLOBE_FRAME_READBACK_PIXELS)
-                runGlobeFrameReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runGlobeFrameReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -470,7 +471,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
                 binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
-                runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -506,7 +507,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
                 binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
-                runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -525,7 +526,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
                 binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
-                runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -544,7 +545,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
                 binding.scissor(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
-                runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -562,7 +563,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
                 binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
-                runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -615,7 +616,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, TERRAIN_FRAME_READBACK_PIXELS, TERRAIN_FRAME_READBACK_PIXELS)
                 binding.scissor(0, 0, TERRAIN_FRAME_READBACK_PIXELS, TERRAIN_FRAME_READBACK_PIXELS)
-                runTerrainFrameReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runTerrainFrameReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -650,7 +651,7 @@ class MacosGlConformanceTest {
                 val binding = bindOrFail()
                 binding.viewport(0, 0, GROUND_ANCHOR_READBACK_PIXELS, GROUND_ANCHOR_READBACK_PIXELS)
                 binding.scissor(0, 0, GROUND_ANCHOR_READBACK_PIXELS, GROUND_ANCHOR_READBACK_PIXELS)
-                runGroundAnchorReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+                runBlocking { runGroundAnchorReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
             } finally {
                 fixture.destroy()
             }
@@ -672,7 +673,7 @@ class MacosGlConformanceTest {
             )
             binding.viewport(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
             binding.scissor(0, 0, BASEMAP_READBACK_PIXELS, BASEMAP_READBACK_PIXELS)
-            runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            runBlocking { runBasemapReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP) }
         } finally {
             fixture.destroy()
         }

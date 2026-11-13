@@ -33,11 +33,10 @@ import kotlin.io.encoding.Base64
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 internal const val BLOOM_READBACK_PIXELS: Int = 128
 
-internal fun runBloomReadbackSuite(
+internal suspend fun runBloomReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -492,7 +491,7 @@ private fun geoAtPixel(x: Int, y: Int, altitude: Double): Vector3 {
     return Vector3(latitude, longitude, altitude)
 }
 
-private fun clearDrawAndReadBloom(
+private suspend fun clearDrawAndReadBloom(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -508,7 +507,7 @@ private fun clearDrawAndReadBloom(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {
@@ -562,7 +561,7 @@ private fun maxChannelDelta(first: IntArray, second: IntArray): Int =
 private class BloomCollectedFailures {
     private val failures = ArrayList<String>()
 
-    fun run(name: String, block: () -> Unit) {
+    inline fun run(name: String, block: () -> Unit) {
         try {
             block()
         } catch (failure: Throwable) {

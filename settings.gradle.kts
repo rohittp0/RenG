@@ -18,12 +18,13 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         exclusiveContent {
-            forRepository {
+            forRepositories(
                 maven {
                     name = "Rentile"
                     url = uri("https://maven.rohittp.com")
-                }
-            }
+                },
+                mavenLocal(),
+            )
             filter {
                 includeGroup("com.rohittp.rentile")
             }
@@ -41,4 +42,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "RenG"
 include(":kmp")
- 
+

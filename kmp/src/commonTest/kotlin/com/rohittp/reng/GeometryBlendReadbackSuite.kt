@@ -19,11 +19,10 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 internal const val GEOMETRY_BLEND_READBACK_PIXELS: Int = 32
 
-internal fun runGeometryBlendReadbackSuite(
+internal suspend fun runGeometryBlendReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -112,7 +111,7 @@ private fun expectedGeometryBlendPixel(mode: BlendMode): IntArray {
     return (rgb + 255).toIntArray()
 }
 
-private fun clearAndDrawGeometryBlend(
+private suspend fun clearAndDrawGeometryBlend(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -128,7 +127,7 @@ private fun clearAndDrawGeometryBlend(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {
@@ -180,7 +179,7 @@ private fun createGeometryBlendReadbackTarget(binding: GlBinding): Int {
 private class GeometryBlendCollectedFailures {
     private val failures = ArrayList<String>()
 
-    fun run(name: String, block: () -> Unit) {
+    inline fun run(name: String, block: () -> Unit) {
         try {
             block()
         } catch (failure: Throwable) {

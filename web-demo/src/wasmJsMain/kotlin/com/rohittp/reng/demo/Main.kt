@@ -106,8 +106,26 @@ private class Demo(
                 }
             }
         } else {
+            traceEndMillis = traceSeconds().let { if (it > 0) performanceNow() + it * 1000.0 else -1.0 }
+            if (traceEndMillis > 0) startLongTaskObserver()
             requestFrame(::onAnimationFrame)
         }
+    }
+
+    // `?trace=SECONDS`: record every frame of the live animation, then report.
+    private var traceEndMillis = -1.0
+    private var traceTicks = 0
+    private var traceSkippedTicks = 0
+    private val traceFrames = ArrayList<String>()
+
+    private fun counter(name: RenGMetricName): Long = renderer.queryMetrics().counters[name] ?: 0L
+
+    private fun finishTrace() {
+        val report = "{\"size\":\"$outputSize\",\"style\":\"$BASEMAP_STYLE_URL\",\"labels\":$labelsEnabled," +
+            "\"ticks\":$traceTicks,\"skippedTicks\":$traceSkippedTicks," +
+            "\"longTasks\":${longTasksJson()},\"frames\":[${traceFrames.joinToString(",")}]}"
+        consoleLog("TRACE done".toJsString())
+        setBenchResult(report)
     }
 
     /**
@@ -176,23 +194,49 @@ private class Demo(
     }
 
     private fun onAnimationFrame(timestampMillis: Double) {
+        if (traceEndMillis > 0 && performanceNow() >= traceEndMillis) {
+            if (!preparing) {
+                traceEndMillis = -1.0
+                finishTrace()
+                return
+            }
+        }
         requestFrame(::onAnimationFrame)
-        if (preparing || failed) return
+        if (traceEndMillis > 0) traceTicks++
+        if (preparing || failed) {
+            if (traceEndMillis > 0) traceSkippedTicks++
+            return
+        }
 
         preparing = true
         val frameIndex = nextFrameIndex++
         scope.launch {
             try {
+                val tracing = traceEndMillis > 0
+                val tiles0 = if (tracing) counter(RenGMetricName.ENGINE_TILES_RENDERED) else 0L
+                val requests0 = if (tracing) counter(RenGMetricName.ENGINE_RESOURCE_REQUESTS) else 0L
+                val bytes0 = if (tracing) counter(RenGMetricName.ENGINE_RESOURCE_WIRE_BYTES) else 0L
+                val tileNanos0 = if (tracing) counter(RenGMetricName.ENGINE_TILE_DRAW_NANOS) else 0L
                 val plan = framePlan(frameIndex = frameIndex, timestampMillis = timestampMillis)
                 val prepareStart = performanceNow()
                 val prepared = renderer.prepare(plan = plan)
-                prepareMillis += performanceNow() - prepareStart
+                val prepareEnd = performanceNow()
+                prepareMillis += prepareEnd - prepareStart
+                var drawEnd: Double
                 try {
                     val drawStart = performanceNow()
                     renderer.draw(preparedFrame = prepared, renderTarget = renderTarget)
-                    drawMillis += performanceNow() - drawStart
+                    drawEnd = performanceNow()
+                    drawMillis += drawEnd - drawStart
                 } finally {
                     prepared.close()
+                }
+                if (tracing) {
+                    traceFrames += "[${timestampMillis.roundTo1()},${prepareStart.roundTo1()},${prepareEnd.roundTo1()}," +
+                        "${drawEnd.roundTo1()},${counter(RenGMetricName.ENGINE_TILES_RENDERED) - tiles0}," +
+                        "${counter(RenGMetricName.ENGINE_RESOURCE_REQUESTS) - requests0}," +
+                        "${counter(RenGMetricName.ENGINE_RESOURCE_WIRE_BYTES) - bytes0}," +
+                        "${((counter(RenGMetricName.ENGINE_TILE_DRAW_NANOS) - tileNanos0) / 1e6).roundTo1()}]"
                 }
 
                 drawnFrames++
@@ -489,6 +533,15 @@ private external fun benchFrameCount(): Int
 // Labels are off unless `?labels=on`: label layout was ~1.6 s a frame in the benchmark.
 @JsFun("() => new URLSearchParams(window.location.search).get('labels') !== 'on'")
 private external fun labelsOff(): Boolean
+
+@JsFun("() => Number(new URLSearchParams(window.location.search).get('trace') || 0)")
+private external fun traceSeconds(): Int
+
+@JsFun("() => { window.__longTasks = []; try { new PerformanceObserver((list) => { for (const e of list.getEntries()) window.__longTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }")
+private external fun startLongTaskObserver()
+
+@JsFun("() => JSON.stringify(window.__longTasks || [])")
+private external fun longTasksJson(): String
 
 @JsFun("message => console.log(message)")
 private external fun consoleLog(message: JsString)

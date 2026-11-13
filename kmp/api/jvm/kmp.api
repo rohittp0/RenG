@@ -626,11 +626,12 @@ public final class com/rohittp/reng/Renderer$DefaultImpls {
 }
 
 public final class com/rohittp/reng/RendererConfiguration {
-	public fun <init> (Lcom/rohittp/reng/OutputPixelSize;Lcom/rohittp/reng/Transport;Lcom/rohittp/reng/Store;Lcom/rohittp/reng/ResourceLocator;Lcom/rohittp/reng/ResourceLimits;IIILcom/rohittp/reng/DiagnosticSink;ZIIIJZLjava/util/List;)V
-	public synthetic fun <init> (Lcom/rohittp/reng/OutputPixelSize;Lcom/rohittp/reng/Transport;Lcom/rohittp/reng/Store;Lcom/rohittp/reng/ResourceLocator;Lcom/rohittp/reng/ResourceLimits;IIILcom/rohittp/reng/DiagnosticSink;ZIIIJZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lcom/rohittp/reng/OutputPixelSize;Lcom/rohittp/reng/Transport;Lcom/rohittp/reng/Store;Lcom/rohittp/reng/ResourceLocator;Lcom/rohittp/reng/ResourceLimits;IIILcom/rohittp/reng/DiagnosticSink;ZIIIJZLjava/util/List;Z)V
+	public synthetic fun <init> (Lcom/rohittp/reng/OutputPixelSize;Lcom/rohittp/reng/Transport;Lcom/rohittp/reng/Store;Lcom/rohittp/reng/ResourceLocator;Lcom/rohittp/reng/ResourceLimits;IIILcom/rohittp/reng/DiagnosticSink;ZIIIJZLjava/util/List;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun getAdditionalBasemapStyles ()Ljava/util/List;
 	public final fun getBasemapStyle ()Lcom/rohittp/reng/ResourceLocator;
 	public final fun getDiagnosticSink ()Lcom/rohittp/reng/DiagnosticSink;
+	public final fun getExtendGroundPastPoles ()Z
 	public final fun getMaximumBasemapTileInstances ()I
 	public final fun getMaximumCachedConsumerPipelines ()I
 	public final fun getMaximumConcurrentResourceOperations ()I

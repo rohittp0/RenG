@@ -103,16 +103,11 @@ class GroundShadingTest {
         }
     }
 
-    /**
-     * One shaded fragment stage for both projections, the identical object rather than an equal one
-     * — [GROUND_FRAGMENT_SOURCE]'s own argument, which `GlobeGroundPipelineTest` already makes for
-     * the unshaded pair: the globe and the Mercator ground must sample and light the identical
-     * texture identically, and a second copy would make a drift a silent edit.
-     */
-    @Test fun bothProjectionsShareOneShadedFragmentStage() {
-        assertSame(GROUND_SHADED_FRAGMENT_SOURCE, TERRAIN_SHADED_GROUND_SHADER_PAIR.fragmentSource)
+    /** ADR 0094's cap-only inputs stay in Mercator variants while the globe keeps the shared originals. */
+    @Test fun mercatorCapFragmentsStayOutOfGlobePrograms() {
+        assertSame(MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE, TERRAIN_SHADED_GROUND_SHADER_PAIR.fragmentSource)
         assertSame(GROUND_SHADED_FRAGMENT_SOURCE, TERRAIN_SHADED_GLOBE_GROUND_SHADER_PAIR.fragmentSource)
-        assertSame(GROUND_FRAGMENT_SOURCE, TERRAIN_GROUND_SHADER_PAIR.fragmentSource)
+        assertSame(MERCATOR_GROUND_FRAGMENT_SOURCE, TERRAIN_GROUND_SHADER_PAIR.fragmentSource)
         assertSame(GROUND_FRAGMENT_SOURCE, TERRAIN_GLOBE_GROUND_SHADER_PAIR.fragmentSource)
     }
 
@@ -205,7 +200,7 @@ class GroundShadingTest {
             )
             assertEquals(
                 shading,
-                binding.shaderSources.values.any { it.contains(GROUND_SHADED_FRAGMENT_SOURCE) },
+                binding.shaderSources.values.any { it.contains(MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE) },
                 "a pipeline with terrainShading=$shading compiled the wrong fragment stage",
             )
             assertTrue(pipeline.terrain.program > 0)

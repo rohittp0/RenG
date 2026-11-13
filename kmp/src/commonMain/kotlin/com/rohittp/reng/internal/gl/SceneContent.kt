@@ -22,6 +22,7 @@ import com.rohittp.reng.internal.planning.BasemapTileInstance
 import com.rohittp.reng.internal.planning.BasemapTileQuad
 import com.rohittp.reng.internal.planning.DrawRegime
 import com.rohittp.reng.internal.planning.DrawnThingReference
+import com.rohittp.reng.internal.planning.GroundCap
 import com.rohittp.reng.internal.planning.ResolvedGeometry
 import com.rohittp.reng.internal.planning.ResolvedPlacement
 import com.rohittp.reng.internal.planning.SpatialOutcome
@@ -140,6 +141,10 @@ internal class SceneGroundTile(
     val blendTexture: Int? = null,
     /** The target style's own provisional window; it is independent of [colourWindow] (ADR 0086). */
     val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /** Primary LOD-zero edge strips, present on cap and world-edge-row instances when available. */
+    val worldStrips: GroundEdgeStrips? = null,
+    /** ADR 0086 target style's derived LOD-zero edge strips, independently optional. */
+    val blendWorldStrips: GroundEdgeStrips? = null,
     /**
      * This tile's own padded DEM texture and the sub-rectangle of it this tile occupies, or `null`
      * when the frame declares no terrain or Rentile returned no DEM for this canonical tile.
@@ -1026,6 +1031,29 @@ internal class SceneContent(
         }
         fun mercatorTiles(source: List<SceneGroundTile>, camera: ResolvedMercatorCamera): List<ResolvedGroundTile> =
             source.map { tile ->
+                val cap = tile.instance.cap
+                val lodScale = (1L shl tile.instance.lod).toDouble()
+                val lastRow = (1L shl tile.instance.lod) - 1L
+                val northEdge = cap == null && tile.instance.tileY.toLong() == 0L
+                val southEdge = cap == null && tile.instance.tileY.toLong() == lastRow
+                fun stripOf(strips: GroundEdgeStrips?): Int? = when {
+                    cap == GroundCap.NORTH || northEdge -> strips?.northTexture
+                    cap == GroundCap.SOUTH || southEdge -> strips?.southTexture
+                    else -> null
+                }
+                fun oppositeStripOf(strips: GroundEdgeStrips?): Int? =
+                    strips?.southTexture?.takeIf { northEdge && southEdge }
+                val worldStrip = stripOf(tile.worldStrips)
+                val blendWorldStrip = stripOf(tile.blendWorldStrips)
+                val capMode = when {
+                    worldStrip == null -> 0
+                    cap == GroundCap.NORTH -> GROUND_CAP_MODE_NORTH
+                    cap == GroundCap.SOUTH -> GROUND_CAP_MODE_SOUTH
+                    northEdge && southEdge -> GROUND_CAP_MODE_BOTH_EDGES
+                    northEdge -> GROUND_CAP_MODE_NORTH_EDGE
+                    southEdge -> GROUND_CAP_MODE_SOUTH_EDGE
+                    else -> 0
+                }
                 ResolvedGroundTile(
                     modelViewProjection = composeGroundModelViewProjection(
                         camera,
@@ -1035,10 +1063,38 @@ internal class SceneContent(
                     colourWindow = tile.colourWindow,
                     blendTexture = tile.blendTexture,
                     blendColourWindow = tile.blendColourWindow,
+                    uvV = when (cap) {
+                        GroundCap.NORTH -> NORTH_POLAR_CAP_UV_V
+                        GroundCap.SOUTH -> SOUTH_POLAR_CAP_UV_V
+                        null -> ORDINARY_TILE_UV_V
+                    },
+                    worldStrip = worldStrip,
+                    blendWorldStrip = blendWorldStrip,
+                    oppositeWorldStrip = oppositeStripOf(tile.worldStrips),
+                    blendOppositeWorldStrip = oppositeStripOf(tile.blendWorldStrips),
+                    capMode = capMode,
+                    capSpanTiles = tile.instance.capSpanTiles.toFloat(),
+                    // The canonical column, not the unwrapped one: the strip sampler repeats, and a world copy
+                    // thousands of worlds away would spend the Float's mantissa on the copy index.
+                    capWorldUStart = (tile.instance.canonicalX.toDouble() / lodScale).toFloat(),
+                    capWorldUWidth = (1.0 / lodScale).toFloat(),
+                    capLodScale = lodScale.toFloat(),
+                    capTileSideLogicalPixels = (camera.worldSizeLogicalPixels / lodScale).toFloat(),
+                    worldStripSide = tile.worldStrips?.sidePx?.toFloat() ?: 1f,
+                    blendWorldStripSide = tile.blendWorldStrips?.sidePx?.toFloat() ?: 1f,
                     elevation = tile.elevation?.let { demTile ->
+                        val tileDem = groundTileDemOf(demTile, tile.instance.lod)
                         MercatorGroundTileDem(
-                            dem = groundTileDemOf(demTile, tile.instance.lod),
-                            mercatorY = mercatorTileYEdges(tile.instance.lod, tile.instance.tileY),
+                            dem = when (cap) {
+                                GroundCap.NORTH -> polarCapDem(tileDem, north = true)
+                                GroundCap.SOUTH -> polarCapDem(tileDem, north = false)
+                                null -> tileDem
+                            },
+                            mercatorY = when (cap) {
+                                GroundCap.NORTH -> NORTH_POLAR_CAP_UV_V
+                                GroundCap.SOUTH -> SOUTH_POLAR_CAP_UV_V
+                                null -> mercatorTileYEdges(tile.instance.lod, tile.instance.tileY)
+                            },
                         )
                     },
                 )
@@ -1603,7 +1659,7 @@ internal fun composeGroundModelViewProjection(
 ): FloatArray {
     val mapSpaceModel = DoubleMatrix4.rowMajor(
         quad.sideLogicalPixels, 0.0, 0.0, quad.centreXLogicalPixels,
-        0.0, quad.sideLogicalPixels, 0.0, quad.centreYLogicalPixels,
+        0.0, quad.heightLogicalPixels, 0.0, quad.centreYLogicalPixels,
         0.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 1.0,
     )

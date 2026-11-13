@@ -327,12 +327,13 @@ internal class ReadAheadCoordinator(
         for (plan in plans) {
             val outcome = try {
                 planSpatial(
-                    plan,
-                    configuration.outputPixelSize,
-                    lod,
-                    configuration.maximumBasemapTileInstances,
-                    configuration.basemapStyle != null,
-                    shaderProfileMemo,
+                    plan = plan,
+                    outputPixelSize = configuration.outputPixelSize,
+                    previousSelectedLod = lod,
+                    maximumBasemapTileInstances = configuration.maximumBasemapTileInstances,
+                    basemapStyleConfigured = configuration.basemapStyle != null,
+                    extendGroundPastPoles = configuration.extendGroundPastPoles,
+                    shaderProfileMemo = shaderProfileMemo,
                 )
             } catch (cancellation: CancellationException) {
                 throw cancellation

@@ -8,6 +8,33 @@ import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.shader.scanShaderProfile
 
+/** Number of samples in the small tent placed over a prefiltered pole-cap edge strip. */
+internal const val CAP_BLUR_TAPS: Int = 5
+
+/** Power-of-two count of LOD-zero rows averaged into each pole band's first one-row mip level. */
+internal const val CAP_BAND_ROWS: Int = 8
+
+/** Distance inside the Mercator world over which an edge-row tile becomes its pole-band colour. */
+internal const val CAP_EDGE_FADE_LOGICAL_PIXELS: Float = 160.0f
+
+/**
+ * The most of the world's height, from either Mercator edge, that the edge fade may cover: 0.03 of the
+ * world is 85.05° to about 84.0°, north of every land tip (Kaffeklubben Island, 83.66°N), so a
+ * zoomed-out frame never fades Greenland or Ellesmere into the band colour.
+ */
+internal const val CAP_EDGE_FADE_WORLD_FRACTION: Float = 0.03f
+
+/** How many additional source-tile widths the pole-cap blur gains per cap tile height. */
+internal const val CAP_BLUR_GROWTH: Float = 6.0f
+
+/** Exclusive cap values plus independently composable ordinary-tile world-edge bits. */
+internal const val GROUND_CAP_MODE_NORTH: Int = 1
+internal const val GROUND_CAP_MODE_SOUTH: Int = 2
+internal const val GROUND_CAP_MODE_NORTH_EDGE: Int = 4
+internal const val GROUND_CAP_MODE_SOUTH_EDGE: Int = 8
+internal const val GROUND_CAP_MODE_BOTH_EDGES: Int =
+    GROUND_CAP_MODE_NORTH_EDGE or GROUND_CAP_MODE_SOUTH_EDGE
+
 /**
  * RenG's own ground shader: one shared, cached [GroundGrid] drawn once per basemap tile instance,
  * with the tile's own model-view-projection as the only per-tile uniform.
@@ -33,14 +60,20 @@ internal const val GROUND_VERTEX_SOURCE: String =
     "#version 300 es\n" +
         "layout(location = 0) in vec2 rengGroundGrid;\n" +
         "uniform mat4 rengGroundModelViewProjection;\n" +
+        "uniform vec2 rengGroundUvV;\n" +
         "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundGridUv;\n" +
         "uniform vec3 rengGroundColourWindow;\n" +
         "void main() {\n" +
         "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
-        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    vec2 rengGroundTileUv = vec2(rengGroundGrid.x, mix(rengGroundUvV.x, " +
+        "rengGroundUvV.y, rengGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundGridUv = rengGroundGrid;\n" +
         "    gl_Position = rengGroundModelViewProjection * vec4(position, 0.0, 1.0);\n" +
         "}\n"
 
+/** Globe-compatible ordinary fragment source; Mercator adds its cap branch in the variant below. */
 internal const val GROUND_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
@@ -51,24 +84,66 @@ internal const val GROUND_FRAGMENT_SOURCE: String =
         "    rengGroundColour = texture(rengGroundTexture, rengGroundUv);\n" +
         "}\n"
 
-/** ADR 0086's one-pass vertex stage; the pinned ordinary source remains byte-for-byte unchanged. */
+internal val MERCATOR_GROUND_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform sampler2D rengGroundTexture;\n" +
+        groundCapUniformsGlsl(mixed = false) +
+        "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundGridUv;\n" +
+        "layout(location = 0) out vec4 rengGroundColour;\n" +
+        groundCapBlurGlsl() +
+        "void main() {\n" +
+        "    if (rengGroundCapMode == 0) {\n" +
+        "        rengGroundColour = texture(rengGroundTexture, rengGroundUv);\n" +
+        "        return;\n" +
+        "    }\n" +
+        groundWorldUGlsl() +
+        "    if (rengGroundCapMode == $GROUND_CAP_MODE_NORTH || " +
+        "rengGroundCapMode == $GROUND_CAP_MODE_SOUTH) {\n" +
+        groundCapCoordinatesGlsl(indent = "        ") +
+        "        rengGroundColour = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "        return;\n" +
+        "    }\n" +
+        "    vec4 sharp = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    float blurWidth = min(1.0, 1.0 / rengGroundCapLodScale);\n" +
+        groundEdgeFadeGlsl() +
+        "    vec4 world = rengGroundWorldBlur(rengGroundWorldStrip, rengGroundWorldStripSide, " +
+        "worldU, blurWidth);\n" +
+        "    if (rengGroundCapMode == $GROUND_CAP_MODE_BOTH_EDGES && southFade > northFade) {\n" +
+        "        world = rengGroundWorldBlur(rengGroundOppositeWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "    }\n" +
+        "    rengGroundColour = mix(sharp, world, fade);\n" +
+        "}\n"
+
+/** ADR 0086's one-pass vertex stage, with the texture-v collapse applied before both windows. */
 internal const val GROUND_MIXED_VERTEX_SOURCE: String =
     "#version 300 es\n" +
         "layout(location = 0) in vec2 rengGroundGrid;\n" +
         "uniform mat4 rengGroundModelViewProjection;\n" +
+        "uniform vec2 rengGroundUvV;\n" +
         "out vec2 rengGroundUv;\n" +
         "out vec2 rengGroundBlendUv;\n" +
+        "out vec2 rengGroundGridUv;\n" +
         "uniform vec3 rengGroundColourWindow;\n" +
         "uniform vec3 rengGroundBlendColourWindow;\n" +
         "void main() {\n" +
         "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
-        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
-        "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+        "    vec2 rengGroundTileUv = vec2(rengGroundGrid.x, mix(rengGroundUvV.x, " +
+        "rengGroundUvV.y, rengGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
         "rengGroundBlendColourWindow.yz;\n" +
+        "    rengGroundGridUv = rengGroundGrid;\n" +
         "    gl_Position = rengGroundModelViewProjection * vec4(position, 0.0, 1.0);\n" +
         "}\n"
 
-/** ADR 0086's one-pass mixed fragment stage; both sampled colours are premultiplied. */
+/**
+ * Globe-compatible ADR 0086 mixed fragment source; both colours are premultiplied, and Mercator adds
+ * cap smudging in the variant below.
+ */
 internal val GROUND_MIXED_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
@@ -85,6 +160,69 @@ internal val GROUND_MIXED_FRAGMENT_SOURCE: String =
         "    vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
         "    vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
         "    rengGroundColour = mix(primary, target, rengGroundBlendAmount());\n" +
+        "}\n"
+
+internal val MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform sampler2D rengGroundTexture;\n" +
+        "uniform sampler2D rengGroundBlendTexture;\n" +
+        "uniform int rengGroundBlendKind;\n" +
+        "uniform vec4 rengGroundBlendParams;\n" +
+        "uniform vec2 rengGroundBlendFrameSize;\n" +
+        groundCapUniformsGlsl(mixed = true) +
+        "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundBlendUv;\n" +
+        "in vec2 rengGroundGridUv;\n" +
+        "layout(location = 0) out vec4 rengGroundColour;\n" +
+        groundBlendMaskGlsl() +
+        groundCapBlurGlsl() +
+        "void main() {\n" +
+        "    float blendAmount = rengGroundBlendAmount();\n" +
+        "    if (rengGroundCapMode == 0) {\n" +
+        "        vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "        vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "        rengGroundColour = mix(primary, target, blendAmount);\n" +
+        "        return;\n" +
+        "    }\n" +
+        groundWorldUGlsl() +
+        "    if (rengGroundCapMode == $GROUND_CAP_MODE_NORTH || " +
+        "rengGroundCapMode == $GROUND_CAP_MODE_SOUTH) {\n" +
+        groundCapCoordinatesGlsl(indent = "        ") +
+        "        vec4 primaryWorld = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "        vec4 targetWorld;\n" +
+        "        if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "            targetWorld = rengGroundWorldBlur(rengGroundBlendWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "        } else {\n" +
+        "            targetWorld = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "        }\n" +
+        "        rengGroundColour = mix(primaryWorld, targetWorld, blendAmount);\n" +
+        "        return;\n" +
+        "    }\n" +
+        "    vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "    vec4 sharp = mix(primary, target, blendAmount);\n" +
+        "    float blurWidth = min(1.0, 1.0 / rengGroundCapLodScale);\n" +
+        groundEdgeFadeGlsl() +
+        "    vec4 primaryWorld = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "    vec4 targetWorld = target;\n" +
+        "    if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "        targetWorld = rengGroundWorldBlur(rengGroundBlendWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "    }\n" +
+        "    if (rengGroundCapMode == $GROUND_CAP_MODE_BOTH_EDGES && southFade > northFade) {\n" +
+        "        primaryWorld = rengGroundWorldBlur(rengGroundOppositeWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "        if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "            targetWorld = rengGroundWorldBlur(rengGroundBlendOppositeWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "        }\n" +
+        "    }\n" +
+        "    vec4 world = mix(primaryWorld, targetWorld, blendAmount);\n" +
+        "    rengGroundColour = mix(sharp, world, fade);\n" +
         "}\n"
 
 /**
@@ -132,6 +270,48 @@ internal val GROUND_SHADED_FRAGMENT_SOURCE: String =
         "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
         "}\n"
 
+internal val MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform sampler2D rengGroundTexture;\n" +
+        groundCapUniformsGlsl(mixed = false) +
+        "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundGridUv;\n" +
+        "in vec3 rengGroundNormalEnu;\n" +
+        "layout(location = 0) out vec4 rengGroundColour;\n" +
+        groundCapBlurGlsl() +
+        "void main() {\n" +
+        "    vec4 tile;\n" +
+        "    if (rengGroundCapMode == 0) {\n" +
+        "        tile = texture(rengGroundTexture, rengGroundUv);\n" +
+        "    } else {\n" +
+        groundWorldUGlsl(indent = "        ") +
+        "        if (rengGroundCapMode == $GROUND_CAP_MODE_NORTH || " +
+        "rengGroundCapMode == $GROUND_CAP_MODE_SOUTH) {\n" +
+        groundCapCoordinatesGlsl(indent = "            ") +
+        "            tile = rengGroundWorldBlur(rengGroundWorldStrip, rengGroundWorldStripSide, " +
+        "worldU, blurWidth);\n" +
+        "        } else {\n" +
+        "            vec4 sharp = texture(rengGroundTexture, rengGroundUv);\n" +
+        "            float blurWidth = min(1.0, 1.0 / rengGroundCapLodScale);\n" +
+        groundEdgeFadeGlsl(indent = "            ") +
+        "            vec4 world = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "            if (rengGroundCapMode == $GROUND_CAP_MODE_BOTH_EDGES && " +
+        "southFade > northFade) {\n" +
+        "                world = rengGroundWorldBlur(rengGroundOppositeWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "            }\n" +
+        "            tile = mix(sharp, world, fade);\n" +
+        "        }\n" +
+        "    }\n" +
+        "    float incidence = max(dot(normalize(rengGroundNormalEnu), " +
+        SCENE_LIGHT_DIRECTION_ENU_GLSL + "), 0.0);\n" +
+        "    float shade = 1.0 + (incidence - " + SCENE_LIGHT_FLAT_INCIDENCE_GLSL + ") * " +
+        SCENE_LIGHT_RELIEF_GAIN_GLSL + ";\n" +
+        "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
+        "}\n"
+
 internal val GROUND_SHADED_MIXED_FRAGMENT_SOURCE: String =
     "#version 300 es\n" +
         "precision highp float;\n" +
@@ -155,6 +335,136 @@ internal val GROUND_SHADED_MIXED_FRAGMENT_SOURCE: String =
         SCENE_LIGHT_RELIEF_GAIN_GLSL + ";\n" +
         "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
         "}\n"
+
+internal val MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "uniform sampler2D rengGroundTexture;\n" +
+        "uniform sampler2D rengGroundBlendTexture;\n" +
+        "uniform int rengGroundBlendKind;\n" +
+        "uniform vec4 rengGroundBlendParams;\n" +
+        "uniform vec2 rengGroundBlendFrameSize;\n" +
+        groundCapUniformsGlsl(mixed = true) +
+        "in vec2 rengGroundUv;\n" +
+        "in vec2 rengGroundBlendUv;\n" +
+        "in vec2 rengGroundGridUv;\n" +
+        "in vec3 rengGroundNormalEnu;\n" +
+        "layout(location = 0) out vec4 rengGroundColour;\n" +
+        groundBlendMaskGlsl() +
+        groundCapBlurGlsl() +
+        "void main() {\n" +
+        "    float blendAmount = rengGroundBlendAmount();\n" +
+        "    vec4 tile;\n" +
+        "    if (rengGroundCapMode == 0) {\n" +
+        "        vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "        vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "        tile = mix(primary, target, blendAmount);\n" +
+        "    } else {\n" +
+        groundWorldUGlsl(indent = "        ") +
+        "        if (rengGroundCapMode == $GROUND_CAP_MODE_NORTH || " +
+        "rengGroundCapMode == $GROUND_CAP_MODE_SOUTH) {\n" +
+        groundCapCoordinatesGlsl(indent = "            ") +
+        "            vec4 primaryWorld = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "            vec4 targetWorld;\n" +
+        "            if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "                targetWorld = rengGroundWorldBlur(rengGroundBlendWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "            } else {\n" +
+        "                targetWorld = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "            }\n" +
+        "            tile = mix(primaryWorld, targetWorld, blendAmount);\n" +
+        "        } else {\n" +
+        "            vec4 primary = texture(rengGroundTexture, rengGroundUv);\n" +
+        "            vec4 target = texture(rengGroundBlendTexture, rengGroundBlendUv);\n" +
+        "            vec4 sharp = mix(primary, target, blendAmount);\n" +
+        "            float blurWidth = min(1.0, 1.0 / rengGroundCapLodScale);\n" +
+        groundEdgeFadeGlsl(indent = "            ") +
+        "            vec4 primaryWorld = rengGroundWorldBlur(rengGroundWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "            vec4 targetWorld = target;\n" +
+        "            if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "                targetWorld = rengGroundWorldBlur(rengGroundBlendWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "            }\n" +
+        "            if (rengGroundCapMode == $GROUND_CAP_MODE_BOTH_EDGES && " +
+        "southFade > northFade) {\n" +
+        "                primaryWorld = rengGroundWorldBlur(rengGroundOppositeWorldStrip, " +
+        "rengGroundWorldStripSide, worldU, blurWidth);\n" +
+        "                if (rengGroundBlendWorldAvailable != 0) {\n" +
+        "                    targetWorld = rengGroundWorldBlur(rengGroundBlendOppositeWorldStrip, " +
+        "rengGroundBlendWorldStripSide, worldU, blurWidth);\n" +
+        "                }\n" +
+        "            }\n" +
+        "            vec4 world = mix(primaryWorld, targetWorld, blendAmount);\n" +
+        "            tile = mix(sharp, world, fade);\n" +
+        "        }\n" +
+        "    }\n" +
+        "    float incidence = max(dot(normalize(rengGroundNormalEnu), " +
+        SCENE_LIGHT_DIRECTION_ENU_GLSL + "), 0.0);\n" +
+        "    float shade = 1.0 + (incidence - " + SCENE_LIGHT_FLAT_INCIDENCE_GLSL + ") * " +
+        SCENE_LIGHT_RELIEF_GAIN_GLSL + ";\n" +
+        "    rengGroundColour = vec4(min(tile.rgb * shade, vec3(tile.a)), tile.a);\n" +
+        "}\n"
+
+private fun groundCapUniformsGlsl(mixed: Boolean): String =
+    "uniform sampler2D rengGroundWorldStrip;\n" +
+        (if (mixed) "uniform sampler2D rengGroundBlendWorldStrip;\n" else "") +
+        "uniform sampler2D rengGroundOppositeWorldStrip;\n" +
+        (if (mixed) "uniform sampler2D rengGroundBlendOppositeWorldStrip;\n" else "") +
+        "uniform int rengGroundCapMode;\n" +
+        "uniform float rengGroundCapSpanTiles;\n" +
+        "uniform vec2 rengGroundCapWorldU;\n" +
+        "uniform float rengGroundCapLodScale;\n" +
+        "uniform float rengGroundCapTileSideLogicalPixels;\n" +
+        "uniform float rengGroundWorldStripSide;\n" +
+        (
+            if (mixed) {
+                "uniform float rengGroundBlendWorldStripSide;\n" +
+                    "uniform int rengGroundBlendWorldAvailable;\n"
+            } else {
+                ""
+            }
+            )
+
+private fun groundCapBlurGlsl(): String =
+    "vec4 rengGroundWorldBlur(sampler2D worldStrip, float stripSide, float worldU, float width) {\n" +
+        "    float level = max(log2(float($CAP_BAND_ROWS)), " +
+        "log2(max(1.0, width * stripSide)));\n" +
+        "    float spacing = width / float($CAP_BLUR_TAPS);\n" +
+        "    vec4 sum = textureLod(worldStrip, vec2(worldU - 2.0 * spacing, 0.5), level);\n" +
+        "    sum += 2.0 * textureLod(worldStrip, vec2(worldU - spacing, 0.5), level);\n" +
+        "    sum += 3.0 * textureLod(worldStrip, vec2(worldU, 0.5), level);\n" +
+        "    sum += 2.0 * textureLod(worldStrip, vec2(worldU + spacing, 0.5), level);\n" +
+        "    sum += textureLod(worldStrip, vec2(worldU + 2.0 * spacing, 0.5), level);\n" +
+        "    return sum / 9.0;\n" +
+        "}\n"
+
+private fun groundWorldUGlsl(indent: String = "    "): String =
+    indent + "float worldU = rengGroundCapWorldU.x + " +
+        "rengGroundGridUv.x * rengGroundCapWorldU.y;\n"
+
+private fun groundCapCoordinatesGlsl(indent: String = "    "): String =
+    indent + "float d = (rengGroundCapMode == $GROUND_CAP_MODE_NORTH ? " +
+        "1.0 - rengGroundGridUv.y : rengGroundGridUv.y) * rengGroundCapSpanTiles;\n" +
+        indent + "float blurWidth = min(1.0, (1.0 + $CAP_BLUR_GROWTH * d) / " +
+        "rengGroundCapLodScale);\n"
+
+private fun groundEdgeFadeGlsl(indent: String = "    "): String =
+    indent + "float fadeDistance = min(min($CAP_EDGE_FADE_LOGICAL_PIXELS, " +
+        "0.5 * rengGroundCapTileSideLogicalPixels), $CAP_EDGE_FADE_WORLD_FRACTION * " +
+        "rengGroundCapTileSideLogicalPixels * rengGroundCapLodScale);\n" +
+        indent + "float northFade = 0.0;\n" +
+        indent + "if ((rengGroundCapMode & $GROUND_CAP_MODE_NORTH_EDGE) != 0) {\n" +
+        indent + "    float s = rengGroundGridUv.y * rengGroundCapTileSideLogicalPixels;\n" +
+        indent + "    northFade = 1.0 - smoothstep(0.0, fadeDistance, s);\n" +
+        indent + "}\n" +
+        indent + "float southFade = 0.0;\n" +
+        indent + "if ((rengGroundCapMode & $GROUND_CAP_MODE_SOUTH_EDGE) != 0) {\n" +
+        indent + "    float s = (1.0 - rengGroundGridUv.y) * rengGroundCapTileSideLogicalPixels;\n" +
+        indent + "    southFade = 1.0 - smoothstep(0.0, fadeDistance, s);\n" +
+        indent + "}\n" +
+        indent + "float fade = max(northFade, southFade);\n"
 
 private fun groundBlendMaskGlsl(): String =
     "float rengGroundBlendAmount() {\n" +
@@ -180,10 +490,11 @@ private fun groundBlendMaskGlsl(): String =
         "}\n"
 
 internal val GROUND_SHADER_PAIR: ShaderPair =
-    ShaderPair(vertexSource = GROUND_VERTEX_SOURCE, fragmentSource = GROUND_FRAGMENT_SOURCE)
+    ShaderPair(vertexSource = GROUND_VERTEX_SOURCE, fragmentSource = MERCATOR_GROUND_FRAGMENT_SOURCE)
 
 internal const val GROUND_COLOUR_WINDOW_UNIFORM_NAME: String = "rengGroundColourWindow"
 internal const val GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME: String = "rengGroundBlendColourWindow"
+internal const val GROUND_TILE_UV_V_UNIFORM_NAME: String = "rengGroundUvV"
 
 internal const val GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME: String = "rengGroundModelViewProjection"
 internal const val GROUND_TEXTURE_UNIFORM_NAME: String = "rengGroundTexture"
@@ -193,6 +504,20 @@ internal const val GROUND_ELEVATION_SCALE_UNIFORM_NAME: String = "rengGroundElev
 internal const val GROUND_BLEND_KIND_UNIFORM_NAME: String = "rengGroundBlendKind"
 internal const val GROUND_BLEND_PARAMS_UNIFORM_NAME: String = "rengGroundBlendParams"
 internal const val GROUND_BLEND_FRAME_SIZE_UNIFORM_NAME: String = "rengGroundBlendFrameSize"
+internal const val GROUND_WORLD_STRIP_UNIFORM_NAME: String = "rengGroundWorldStrip"
+internal const val GROUND_BLEND_WORLD_STRIP_UNIFORM_NAME: String = "rengGroundBlendWorldStrip"
+internal const val GROUND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME: String = "rengGroundOppositeWorldStrip"
+internal const val GROUND_BLEND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME: String =
+    "rengGroundBlendOppositeWorldStrip"
+internal const val GROUND_CAP_MODE_UNIFORM_NAME: String = "rengGroundCapMode"
+internal const val GROUND_CAP_SPAN_TILES_UNIFORM_NAME: String = "rengGroundCapSpanTiles"
+internal const val GROUND_CAP_WORLD_U_UNIFORM_NAME: String = "rengGroundCapWorldU"
+internal const val GROUND_CAP_LOD_SCALE_UNIFORM_NAME: String = "rengGroundCapLodScale"
+internal const val GROUND_CAP_TILE_SIDE_LOGICAL_PIXELS_UNIFORM_NAME: String =
+    "rengGroundCapTileSideLogicalPixels"
+internal const val GROUND_WORLD_STRIP_SIDE_UNIFORM_NAME: String = "rengGroundWorldStripSide"
+internal const val GROUND_BLEND_WORLD_STRIP_SIDE_UNIFORM_NAME: String = "rengGroundBlendWorldStripSide"
+internal const val GROUND_BLEND_WORLD_AVAILABLE_UNIFORM_NAME: String = "rengGroundBlendWorldAvailable"
 
 /**
  * The Mercator ground's displacing vertex stage: [GROUND_VERTEX_SOURCE] with
@@ -231,9 +556,9 @@ internal const val GROUND_BLEND_FRAME_SIZE_UNIFORM_NAME: String = "rengGroundBle
  *
  * ## What [shading] adds, and what stays out either way
  *
- * With [shading] false this emits the source three published releases' flat ground is compared
- * against, character for character; with it true it emits that source plus [GROUND_NORMAL_SOURCE],
- * one `out vec3`, and one statement. Terrain shading is a **renderer** option
+ * With [shading] false this emits the ordinary displacing source; with it true it emits that source
+ * plus [GROUND_NORMAL_SOURCE], one `out vec3`, and one statement. Terrain shading is a **renderer**
+ * option
  * (`RendererConfiguration.terrainShading`), fixed for a renderer's whole life, so which of the two
  * is compiled is decided once at setup and no frame can vary it. ADR 0026 leaves the ground unlit
  * and that stays the default.
@@ -253,11 +578,13 @@ private fun terrainGroundVertexSource(shading: Boolean): String =
         "precision highp float;\n" +
         "layout(location = 0) in vec2 rengGroundGrid;\n" +
         "uniform mat4 rengGroundModelViewProjection;\n" +
+        "uniform vec2 rengGroundUvV;\n" +
         "uniform vec2 rengGroundMercatorY;\n" +
         "uniform float rengGroundElevationScale;\n" +
         GROUND_ELEVATION_SOURCE +
         (if (shading) GROUND_NORMAL_SOURCE else "") +
         "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundGridUv;\n" +
         "uniform vec3 rengGroundColourWindow;\n" +
         (if (shading) "out vec3 rengGroundNormalEnu;\n" else "") +
         "void main() {\n" +
@@ -265,7 +592,10 @@ private fun terrainGroundVertexSource(shading: Boolean): String =
         "    float up = rengGroundElevationMetres(rengGroundGrid) * rengGroundElevationScale *\n" +
         "        cosh(3.141592653589793 * (1.0 - 2.0 * mercatorY));\n" +
         "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
-        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    vec2 rengGroundTileUv = vec2(rengGroundGrid.x, mix(rengGroundUvV.x, " +
+        "rengGroundUvV.y, rengGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundGridUv = rengGroundGrid;\n" +
         (
             if (shading) {
                 "    rengGroundNormalEnu = rengGroundEnuNormal(rengGroundGrid, 1.0 /\n" +
@@ -283,10 +613,8 @@ internal val TERRAIN_GROUND_VERTEX_SOURCE: String = terrainGroundVertexSource(sh
  * [TERRAIN_GROUND_VERTEX_SOURCE] with [GROUND_NORMAL_SOURCE] composed in and one varying added, for
  * a renderer whose configuration asked for terrain shading.
  *
- * **The unshaded text is not merely equivalent, it is the same characters**, which is what keeps
- * "off draws what three releases drew" a statement about which program ran. Both come out of one
- * builder that *adds* to the unshaded body rather than restructuring it, so there is no arrangement
- * of this file in which the two drift.
+ * Both variants come out of one builder that adds shading to the unshaded body rather than
+ * restructuring it, so there is no arrangement of this file in which the two drift.
  *
  * `cosh` is evaluated twice, once for the displacement and once for `1 / cos(latitude)`, rather than
  * hoisted into a local. Hoisting would have changed the unshaded text, and every GLSL compiler in
@@ -300,12 +628,14 @@ private fun terrainMixedGroundVertexSource(shading: Boolean): String =
         "precision highp float;\n" +
         "layout(location = 0) in vec2 rengGroundGrid;\n" +
         "uniform mat4 rengGroundModelViewProjection;\n" +
+        "uniform vec2 rengGroundUvV;\n" +
         "uniform vec2 rengGroundMercatorY;\n" +
         "uniform float rengGroundElevationScale;\n" +
         GROUND_ELEVATION_SOURCE +
         (if (shading) GROUND_NORMAL_SOURCE else "") +
         "out vec2 rengGroundUv;\n" +
         "out vec2 rengGroundBlendUv;\n" +
+        "out vec2 rengGroundGridUv;\n" +
         "uniform vec3 rengGroundColourWindow;\n" +
         "uniform vec3 rengGroundBlendColourWindow;\n" +
         (if (shading) "out vec3 rengGroundNormalEnu;\n" else "") +
@@ -314,9 +644,12 @@ private fun terrainMixedGroundVertexSource(shading: Boolean): String =
         "    float up = rengGroundElevationMetres(rengGroundGrid) * rengGroundElevationScale *\n" +
         "        cosh(3.141592653589793 * (1.0 - 2.0 * mercatorY));\n" +
         "    vec2 position = vec2(rengGroundGrid.x - 0.5, 0.5 - rengGroundGrid.y);\n" +
-        "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
-        "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+        "    vec2 rengGroundTileUv = vec2(rengGroundGrid.x, mix(rengGroundUvV.x, " +
+        "rengGroundUvV.y, rengGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
         "rengGroundBlendColourWindow.yz;\n" +
+        "    rengGroundGridUv = rengGroundGrid;\n" +
         (
             if (shading) {
                 "    rengGroundNormalEnu = rengGroundEnuNormal(rengGroundGrid, 1.0 /\n" +
@@ -335,11 +668,11 @@ internal val TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE: String =
     terrainMixedGroundVertexSource(shading = true)
 
 internal val TERRAIN_GROUND_SHADER_PAIR: ShaderPair =
-    ShaderPair(vertexSource = TERRAIN_GROUND_VERTEX_SOURCE, fragmentSource = GROUND_FRAGMENT_SOURCE)
+    ShaderPair(vertexSource = TERRAIN_GROUND_VERTEX_SOURCE, fragmentSource = MERCATOR_GROUND_FRAGMENT_SOURCE)
 
 internal val TERRAIN_SHADED_GROUND_SHADER_PAIR: ShaderPair = ShaderPair(
     vertexSource = TERRAIN_SHADED_GROUND_VERTEX_SOURCE,
-    fragmentSource = GROUND_SHADED_FRAGMENT_SOURCE,
+    fragmentSource = MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE,
 )
 
 /**
@@ -356,6 +689,7 @@ internal class TerrainGroundProgram(
     val key: ResourceKey,
     val program: Int,
     val modelViewProjectionUniformLocation: Int,
+    val tileUvVUniformLocation: Int,
     /**
      * Which part of the bound texture a tile samples (ADR 0057): scale, then u and v offsets.
      *
@@ -367,12 +701,14 @@ internal class TerrainGroundProgram(
     val mercatorYUniformLocation: Int,
     val elevationScaleUniformLocation: Int,
     val elevation: GroundElevationUniformLocations,
+    val cap: GroundCapUniformLocations,
 )
 
 internal class GroundMixedProgram(
     val key: ResourceKey,
     val program: Int,
     val modelViewProjectionUniformLocation: Int,
+    val tileUvVUniformLocation: Int,
     val colourWindowUniformLocation: Int,
     val textureUniformLocation: Int,
     val blendColourWindowUniformLocation: Int,
@@ -383,6 +719,35 @@ internal class GroundMixedProgram(
     val mercatorYUniformLocation: Int = -1,
     val elevationScaleUniformLocation: Int = -1,
     val elevation: GroundElevationUniformLocations? = null,
+    val cap: GroundCapUniformLocations,
+)
+
+/** Uniform locations shared by every flat, terrain, single-style, and mixed Mercator cap program. */
+internal class GroundCapUniformLocations(
+    val worldStrip: Int,
+    val blendWorldStrip: Int,
+    val oppositeWorldStrip: Int,
+    val blendOppositeWorldStrip: Int,
+    val mode: Int,
+    val spanTiles: Int,
+    val worldU: Int,
+    val lodScale: Int,
+    val tileSideLogicalPixels: Int,
+    val worldStripSide: Int,
+    val blendWorldStripSide: Int,
+    val blendWorldAvailable: Int,
+)
+
+/**
+ * The two band-averaged edge strips derived from one LOD-zero world texture. [sourceTexture]
+ * makes the pipeline cache reject an entry after that key has been evicted and uploaded under a new
+ * GL name; the registry owns all three handles under the same [ResourceKey].
+ */
+internal class GroundEdgeStrips(
+    val sourceTexture: Int,
+    val northTexture: Int,
+    val southTexture: Int,
+    val sidePx: Int,
 )
 
 /**
@@ -410,6 +775,7 @@ internal class GroundPipeline(
     val key: ResourceKey,
     val program: Int,
     val modelViewProjectionUniformLocation: Int,
+    val tileUvVUniformLocation: Int,
     /**
      * Which part of the bound texture a tile samples (ADR 0057): scale, then u and v offsets.
      *
@@ -418,6 +784,7 @@ internal class GroundPipeline(
      */
     val colourWindowUniformLocation: Int,
     val textureUniformLocation: Int,
+    val cap: GroundCapUniformLocations,
     /**
      * The displacing program this pipeline draws a tile with a DEM through — see
      * [TerrainGroundProgram] for why it is compiled here rather than on first use.
@@ -426,6 +793,8 @@ internal class GroundPipeline(
     val terrainShading: Boolean,
     var mixed: GroundMixedProgram? = null,
     var terrainMixed: GroundMixedProgram? = null,
+    /** LOD-zero edge strips, owned by the registry and only indexed here for reuse. */
+    val worldStrips: MutableMap<ResourceKey, GroundEdgeStrips> = mutableMapOf(),
     /**
      * Every grid this pipeline has been asked for, keyed by [GroundGrid.cellsPerSide].
      *
@@ -463,7 +832,7 @@ internal fun createGroundPipeline(
     val key = deriver.internalPipeline(InternalPipelineRole.GROUND, GROUND_SHADER_PAIR).key
     val vertexPlan = scanShaderProfile(GROUND_VERTEX_SOURCE)
         ?: return GroundPipelineResult.Failed(glOperationFailure(PipelineStage.GPU_RESOURCE, key))
-    val fragmentPlan = scanShaderProfile(GROUND_FRAGMENT_SOURCE)
+    val fragmentPlan = scanShaderProfile(MERCATOR_GROUND_FRAGMENT_SOURCE)
         ?: return GroundPipelineResult.Failed(glOperationFailure(PipelineStage.GPU_RESOURCE, key))
 
     val program = when (
@@ -502,17 +871,26 @@ internal fun createGroundPipeline(
                 program,
                 GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME,
             ),
+            tileUvVUniformLocation = binding.getUniformLocation(
+                program,
+                GROUND_TILE_UV_V_UNIFORM_NAME,
+            ),
             colourWindowUniformLocation = binding.getUniformLocation(
                 program,
                 GROUND_COLOUR_WINDOW_UNIFORM_NAME,
             ),
             textureUniformLocation = binding.getUniformLocation(program, GROUND_TEXTURE_UNIFORM_NAME),
+            cap = resolveGroundCapUniforms(binding = binding, program = program, mixed = false),
             terrain = TerrainGroundProgram(
                 key = terrainKey,
                 program = terrainProgram,
                 modelViewProjectionUniformLocation = binding.getUniformLocation(
                     terrainProgram,
                     GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME,
+                ),
+                tileUvVUniformLocation = binding.getUniformLocation(
+                    terrainProgram,
+                    GROUND_TILE_UV_V_UNIFORM_NAME,
                 ),
                 colourWindowUniformLocation = binding.getUniformLocation(
                     terrainProgram,
@@ -531,6 +909,7 @@ internal fun createGroundPipeline(
                     GROUND_ELEVATION_SCALE_UNIFORM_NAME,
                 ),
                 elevation = resolveGroundElevationUniforms(binding, terrainProgram),
+                cap = resolveGroundCapUniforms(binding = binding, program = terrainProgram, mixed = false),
             ),
             terrainShading = terrainShading,
         ),
@@ -544,10 +923,117 @@ internal fun deleteGroundPipeline(
     pipeline: GroundPipeline,
 ) {
     deleteGroundGrids(binding, pipeline.grids)
+    pipeline.worldStrips.clear()
     cache.remove(pipeline.key)?.let { binding.deleteProgram(it) }
     cache.remove(pipeline.terrain.key)?.let { binding.deleteProgram(it) }
     pipeline.mixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
     pipeline.terrainMixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
+}
+
+/**
+ * Copies the north and south [CAP_BAND_ROWS] rows of [sourceTexture] into independent RGBA8 textures
+ * and builds their mip pyramids. At level `log2(CAP_BAND_ROWS)` each is one row tall and has averaged
+ * the whole band vertically; every coarser level therefore continues averaging horizontally only.
+ * The temporary read/draw framebuffers are private to this call; both bindings are restored even
+ * when either attachment is incomplete.
+ */
+internal fun buildGroundEdgeStrips(
+    binding: GlBinding,
+    sourceTexture: Int,
+    sourceWidthPx: Int,
+    sourceHeightPx: Int,
+): GroundEdgeStrips? {
+    require(sourceTexture > 0) { "an edge-strip source is a GL texture" }
+    require(sourceWidthPx > 0 && sourceHeightPx > 0) { "an edge-strip source has positive dimensions" }
+    if (sourceHeightPx < CAP_BAND_ROWS) return null
+
+    val previousDrawFramebuffer = IntArray(1)
+    val previousReadFramebuffer = IntArray(1)
+    binding.getIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, previousDrawFramebuffer)
+    binding.getIntegerv(GL_READ_FRAMEBUFFER_BINDING, previousReadFramebuffer)
+
+    val textures = IntArray(2)
+    binding.genTextures(textures.size, textures)
+    textures.forEach { texture ->
+        binding.bindTexture(GL_TEXTURE_2D, texture)
+        binding.texImage2D(
+            target = GL_TEXTURE_2D,
+            level = 0,
+            internalFormat = GL_RGBA8,
+            width = sourceWidthPx,
+            height = CAP_BAND_ROWS,
+            border = 0,
+            format = GL_RGBA,
+            type = GL_UNSIGNED_BYTE,
+            pixels = null,
+        )
+        binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+        binding.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    }
+
+    val framebuffers = IntArray(2)
+    binding.genFramebuffers(framebuffers.size, framebuffers)
+    var complete = false
+    try {
+        binding.bindFramebuffer(GL_READ_FRAMEBUFFER, framebuffers[0])
+        binding.framebufferTexture2D(
+            GL_READ_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D,
+            sourceTexture,
+            0,
+        )
+        binding.readBuffer(GL_COLOR_ATTACHMENT0)
+        if (binding.checkFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffers[1])
+            complete = textures.indices.all { index ->
+                binding.framebufferTexture2D(
+                    GL_DRAW_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_2D,
+                    textures[index],
+                    0,
+                )
+                if (binding.checkFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    false
+                } else {
+                    val sourceY = if (index == 0) 0 else sourceHeightPx - CAP_BAND_ROWS
+                    binding.blitFramebuffer(
+                        sourceX0 = 0,
+                        sourceY0 = sourceY,
+                        sourceX1 = sourceWidthPx,
+                        sourceY1 = sourceY + CAP_BAND_ROWS,
+                        destinationX0 = 0,
+                        destinationY0 = 0,
+                        destinationX1 = sourceWidthPx,
+                        destinationY1 = CAP_BAND_ROWS,
+                        mask = GL_COLOR_BUFFER_BIT,
+                        filter = GL_NEAREST,
+                    )
+                    binding.bindTexture(GL_TEXTURE_2D, textures[index])
+                    binding.generateMipmap(GL_TEXTURE_2D)
+                    true
+                }
+            }
+        }
+    } finally {
+        binding.bindFramebuffer(GL_READ_FRAMEBUFFER, previousReadFramebuffer[0])
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer[0])
+        binding.deleteFramebuffers(framebuffers.size, framebuffers)
+    }
+
+    if (!complete) {
+        binding.deleteTextures(textures.size, textures)
+        return null
+    }
+    return GroundEdgeStrips(
+        sourceTexture = sourceTexture,
+        northTexture = textures[0],
+        southTexture = textures[1],
+        sidePx = sourceWidthPx,
+    )
 }
 
 /** Compiles ADR 0086's two Mercator mixed variants on the first blended frame. */
@@ -561,7 +1047,7 @@ internal fun ensureGroundMixedPrograms(
     if (pipeline.mixed != null && pipeline.terrainMixed != null) return null
     val mixedPair = ShaderPair(
         vertexSource = GROUND_MIXED_VERTEX_SOURCE,
-        fragmentSource = GROUND_MIXED_FRAGMENT_SOURCE,
+        fragmentSource = MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE,
     )
     val mixedKey = deriver.internalPipeline(
         role = InternalPipelineRole.GROUND_MIXED,
@@ -569,7 +1055,7 @@ internal fun ensureGroundMixedPrograms(
     ).key
     val vertexPlan = scanShaderProfile(GROUND_MIXED_VERTEX_SOURCE)
         ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
-    val mixedFragmentPlan = scanShaderProfile(GROUND_MIXED_FRAGMENT_SOURCE)
+    val mixedFragmentPlan = scanShaderProfile(MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE)
         ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
     if (pipeline.mixed == null) {
         val program = when (
@@ -594,9 +1080,9 @@ internal fun ensureGroundMixedPrograms(
             TERRAIN_MIXED_GROUND_VERTEX_SOURCE
         },
         fragmentSource = if (pipeline.terrainShading) {
-            GROUND_SHADED_MIXED_FRAGMENT_SOURCE
+            MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE
         } else {
-            GROUND_MIXED_FRAGMENT_SOURCE
+            MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE
         },
     )
     val terrainMixedKey = deriver.internalPipeline(
@@ -642,6 +1128,7 @@ private fun groundMixedProgram(
         program,
         GROUND_MODEL_VIEW_PROJECTION_UNIFORM_NAME,
     ),
+    tileUvVUniformLocation = binding.getUniformLocation(program, GROUND_TILE_UV_V_UNIFORM_NAME),
     colourWindowUniformLocation = binding.getUniformLocation(program, GROUND_COLOUR_WINDOW_UNIFORM_NAME),
     textureUniformLocation = binding.getUniformLocation(program, GROUND_TEXTURE_UNIFORM_NAME),
     blendColourWindowUniformLocation = binding.getUniformLocation(
@@ -663,6 +1150,45 @@ private fun groundMixedProgram(
         -1
     },
     elevation = if (terrain) resolveGroundElevationUniforms(binding, program) else null,
+    cap = resolveGroundCapUniforms(binding = binding, program = program, mixed = true),
+)
+
+private fun resolveGroundCapUniforms(
+    binding: GlBinding,
+    program: Int,
+    mixed: Boolean,
+): GroundCapUniformLocations = GroundCapUniformLocations(
+    worldStrip = binding.getUniformLocation(program, GROUND_WORLD_STRIP_UNIFORM_NAME),
+    blendWorldStrip = if (mixed) {
+        binding.getUniformLocation(program, GROUND_BLEND_WORLD_STRIP_UNIFORM_NAME)
+    } else {
+        -1
+    },
+    oppositeWorldStrip = binding.getUniformLocation(program, GROUND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME),
+    blendOppositeWorldStrip = if (mixed) {
+        binding.getUniformLocation(program, GROUND_BLEND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME)
+    } else {
+        -1
+    },
+    mode = binding.getUniformLocation(program, GROUND_CAP_MODE_UNIFORM_NAME),
+    spanTiles = binding.getUniformLocation(program, GROUND_CAP_SPAN_TILES_UNIFORM_NAME),
+    worldU = binding.getUniformLocation(program, GROUND_CAP_WORLD_U_UNIFORM_NAME),
+    lodScale = binding.getUniformLocation(program, GROUND_CAP_LOD_SCALE_UNIFORM_NAME),
+    tileSideLogicalPixels = binding.getUniformLocation(
+        program,
+        GROUND_CAP_TILE_SIDE_LOGICAL_PIXELS_UNIFORM_NAME,
+    ),
+    worldStripSide = binding.getUniformLocation(program, GROUND_WORLD_STRIP_SIDE_UNIFORM_NAME),
+    blendWorldStripSide = if (mixed) {
+        binding.getUniformLocation(program, GROUND_BLEND_WORLD_STRIP_SIDE_UNIFORM_NAME)
+    } else {
+        -1
+    },
+    blendWorldAvailable = if (mixed) {
+        binding.getUniformLocation(program, GROUND_BLEND_WORLD_AVAILABLE_UNIFORM_NAME)
+    } else {
+        -1
+    },
 )
 
 /**
@@ -685,7 +1211,51 @@ internal class ResolvedGroundTile(
     val blendTexture: Int? = null,
     /** Which part of [blendTexture] to sample when its style is provisional (ADR 0057/0086). */
     val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
-)
+    /** Which texture rows the tile spans, before either colour window is applied. */
+    val uvV: FloatArray = ORDINARY_TILE_UV_V,
+    /** The selected edge strip of the resident LOD-zero texture, continuous across the world. */
+    val worldStrip: Int? = null,
+    /** ADR 0086's selected target-style edge strip, or `null` when unavailable. */
+    val blendWorldStrip: Int? = null,
+    /** The other edge strip, present only for a LOD-zero tile that fades both map edges. */
+    val oppositeWorldStrip: Int? = null,
+    /** ADR 0086's other target-style edge strip for that same LOD-zero tile. */
+    val blendOppositeWorldStrip: Int? = null,
+    /** `0` ordinary/fallback; cap values are exclusive and edge-row values are a two-bit mask. */
+    val capMode: Int = 0,
+    val capSpanTiles: Float = 1f,
+    val capWorldUStart: Float = 0f,
+    val capWorldUWidth: Float = 1f,
+    val capLodScale: Float = 1f,
+    val capTileSideLogicalPixels: Float = 1f,
+    /** Width of [worldStrip] in texels; the shader picks the mip level whose texel is the blur width. */
+    val worldStripSide: Float = 1f,
+    val blendWorldStripSide: Float = 1f,
+) {
+    init {
+        require(uvV.size == 2) { "a ground tile carries two texture v coordinates" }
+        require(
+            capMode == 0 || capMode == GROUND_CAP_MODE_NORTH || capMode == GROUND_CAP_MODE_SOUTH ||
+                capMode == GROUND_CAP_MODE_NORTH_EDGE || capMode == GROUND_CAP_MODE_SOUTH_EDGE ||
+                capMode == GROUND_CAP_MODE_BOTH_EDGES,
+        ) { "a ground cap mode is ordinary, one cap, one edge row, or both edge rows" }
+        require(capMode != GROUND_CAP_MODE_BOTH_EDGES || oppositeWorldStrip != null) {
+            "a tile fading both world edges carries both primary strips"
+        }
+        require(capSpanTiles.isFinite() && capSpanTiles >= 1f) { "a ground cap span is positive" }
+        require(capWorldUStart.isFinite() && capWorldUWidth.isFinite()) { "ground cap world u is finite" }
+        require(capWorldUWidth > 0f && capLodScale.isFinite() && capLodScale >= 1f) {
+            "ground cap lod scale is positive"
+        }
+        require(capTileSideLogicalPixels.isFinite() && capTileSideLogicalPixels > 0f) {
+            "a ground cap tile has a positive on-screen side"
+        }
+        require(worldStripSide.isFinite() && worldStripSide > 0f &&
+            blendWorldStripSide.isFinite() && blendWorldStripSide > 0f) {
+            "a ground world strip has a positive texel side"
+        }
+    }
+}
 
 /** The frame-wide values consumed by ADR 0086's mixed ground programs. */
 internal class GroundBlendFrame(
@@ -852,6 +1422,7 @@ internal fun drawGround(
                         groundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
                     )
                 }
+                bindGroundCapSamplers(binding = binding, locations = mixedProgram.cap)
                 bindGroundBlendMask(
                     binding = binding,
                     program = mixedProgram,
@@ -877,6 +1448,7 @@ internal fun drawGround(
                 if (pipeline.terrain.textureUniformLocation >= 0) {
                     binding.uniform1i(pipeline.terrain.textureUniformLocation, GROUND_PRIMARY_TEXTURE_UNIT)
                 }
+                bindGroundCapSamplers(binding = binding, locations = pipeline.terrain.cap)
                 if (pipeline.terrain.elevationScaleUniformLocation >= 0) {
                     binding.uniform1f(
                         pipeline.terrain.elevationScaleUniformLocation,
@@ -893,6 +1465,7 @@ internal fun drawGround(
                 if (pipeline.textureUniformLocation >= 0) {
                     binding.uniform1i(pipeline.textureUniformLocation, GROUND_PRIMARY_TEXTURE_UNIT)
                 }
+                bindGroundCapSamplers(binding = binding, locations = pipeline.cap)
             }
         }
 
@@ -905,6 +1478,16 @@ internal fun drawGround(
         }
         if (matrixLocation >= 0) {
             binding.uniformMatrix4fv(matrixLocation, 1, false, tile.modelViewProjection)
+        }
+        val uvVLocation = if (mixedProgram != null) {
+            mixedProgram.tileUvVUniformLocation
+        } else if (wantsDisplacement) {
+            pipeline.terrain.tileUvVUniformLocation
+        } else {
+            pipeline.tileUvVUniformLocation
+        }
+        if (uvVLocation >= 0) {
+            binding.uniform2f(uvVLocation, tile.uvV[0], tile.uvV[1])
         }
         val windowLocation = if (mixedProgram != null) {
             mixedProgram.colourWindowUniformLocation
@@ -947,6 +1530,13 @@ internal fun drawGround(
                 tile = tileElevation.dem,
             )
         }
+        val capLocations = mixedProgram?.cap ?: if (wantsDisplacement) pipeline.terrain.cap else pipeline.cap
+        bindGroundCapTile(
+            binding = binding,
+            locations = capLocations,
+            tile = tile,
+            mixed = mixedProgram != null,
+        )
         if (mixedProgram != null) {
             binding.activeTexture(
                 GL_TEXTURE0 + groundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
@@ -963,10 +1553,73 @@ internal fun drawGround(
 private const val GROUND_PRIMARY_TEXTURE_UNIT: Int = 0
 private const val GROUND_BLEND_TEXTURE_UNIT: Int = 1
 private const val GROUND_TERRAIN_BLEND_TEXTURE_UNIT: Int = 2
+private const val GROUND_WORLD_TEXTURE_UNIT: Int = 3
+private const val GROUND_BLEND_WORLD_TEXTURE_UNIT: Int = 4
+private const val GROUND_OPPOSITE_WORLD_TEXTURE_UNIT: Int = 5
+private const val GROUND_BLEND_OPPOSITE_WORLD_TEXTURE_UNIT: Int = 6
 
 /** Terrain already owns unit 1 for its DEM, so its ADR 0086 target texture uses unit 2. */
 private fun groundBlendTextureUnit(wantsDisplacement: Boolean): Int =
     if (wantsDisplacement) GROUND_TERRAIN_BLEND_TEXTURE_UNIT else GROUND_BLEND_TEXTURE_UNIT
+
+private fun bindGroundCapSamplers(binding: GlBinding, locations: GroundCapUniformLocations) {
+    if (locations.worldStrip >= 0) {
+        binding.uniform1i(locations.worldStrip, GROUND_WORLD_TEXTURE_UNIT)
+    }
+    if (locations.blendWorldStrip >= 0) {
+        binding.uniform1i(locations.blendWorldStrip, GROUND_BLEND_WORLD_TEXTURE_UNIT)
+    }
+    if (locations.oppositeWorldStrip >= 0) {
+        binding.uniform1i(locations.oppositeWorldStrip, GROUND_OPPOSITE_WORLD_TEXTURE_UNIT)
+    }
+    if (locations.blendOppositeWorldStrip >= 0) {
+        binding.uniform1i(
+            locations.blendOppositeWorldStrip,
+            GROUND_BLEND_OPPOSITE_WORLD_TEXTURE_UNIT,
+        )
+    }
+}
+
+private fun bindGroundCapTile(
+    binding: GlBinding,
+    locations: GroundCapUniformLocations,
+    tile: ResolvedGroundTile,
+    mixed: Boolean,
+) {
+    if (locations.mode >= 0) binding.uniform1i(locations.mode, tile.capMode)
+    if (locations.spanTiles >= 0) binding.uniform1f(locations.spanTiles, tile.capSpanTiles)
+    if (locations.worldU >= 0) {
+        binding.uniform2f(locations.worldU, tile.capWorldUStart, tile.capWorldUWidth)
+    }
+    if (locations.lodScale >= 0) binding.uniform1f(locations.lodScale, tile.capLodScale)
+    if (locations.tileSideLogicalPixels >= 0) {
+        binding.uniform1f(locations.tileSideLogicalPixels, tile.capTileSideLogicalPixels)
+    }
+    if (locations.worldStripSide >= 0) {
+        binding.uniform1f(locations.worldStripSide, tile.worldStripSide)
+    }
+    if (locations.blendWorldStripSide >= 0) {
+        binding.uniform1f(locations.blendWorldStripSide, tile.blendWorldStripSide)
+    }
+    if (locations.blendWorldAvailable >= 0) {
+        binding.uniform1i(locations.blendWorldAvailable, if (tile.blendWorldStrip == null) 0 else 1)
+    }
+
+    binding.activeTexture(GL_TEXTURE0 + GROUND_WORLD_TEXTURE_UNIT)
+    binding.bindTexture(GL_TEXTURE_2D, tile.worldStrip ?: tile.texture)
+    tile.oppositeWorldStrip?.let { opposite ->
+        binding.activeTexture(GL_TEXTURE0 + GROUND_OPPOSITE_WORLD_TEXTURE_UNIT)
+        binding.bindTexture(GL_TEXTURE_2D, opposite)
+    }
+    if (mixed) {
+        binding.activeTexture(GL_TEXTURE0 + GROUND_BLEND_WORLD_TEXTURE_UNIT)
+        binding.bindTexture(GL_TEXTURE_2D, tile.blendWorldStrip ?: requireNotNull(tile.blendTexture))
+        tile.blendOppositeWorldStrip?.let { opposite ->
+            binding.activeTexture(GL_TEXTURE0 + GROUND_BLEND_OPPOSITE_WORLD_TEXTURE_UNIT)
+            binding.bindTexture(GL_TEXTURE_2D, opposite)
+        }
+    }
+}
 
 internal fun bindGroundBlendMask(
     binding: GlBinding,

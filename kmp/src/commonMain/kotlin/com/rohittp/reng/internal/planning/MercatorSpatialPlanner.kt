@@ -25,6 +25,7 @@ internal fun planMercatorSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    extendGroundPastPoles: Boolean = false,
     shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ): SpatialOutcome<FrameSpatialPlan> {
     val cameraOutcome = resolveMercatorCamera(plan.camera, outputPixelSize)
@@ -55,6 +56,7 @@ internal fun planMercatorSpatial(
                 camera = camera,
                 selectedLod = lodObservation.selectedLod,
                 maximumBasemapTileInstances = maximumBasemapTileInstances,
+                extendGroundPastPoles = extendGroundPastPoles,
             )
         ) {
             is TileSelectionOutcome.OverBudget -> return basemapTileBudgetFailure(selection)

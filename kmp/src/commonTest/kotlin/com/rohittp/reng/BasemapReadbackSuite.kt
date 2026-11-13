@@ -7,10 +7,12 @@ import com.rohittp.reng.internal.gl.GL_COLOR_BUFFER_BIT
 import com.rohittp.reng.internal.gl.GL_CULL_FACE
 import com.rohittp.reng.internal.gl.GL_DEPTH_TEST
 import com.rohittp.reng.internal.gl.GL_DRAW_FRAMEBUFFER
+import com.rohittp.reng.internal.gl.GL_DRAW_FRAMEBUFFER_BINDING
 import com.rohittp.reng.internal.gl.GL_FLOAT
 import com.rohittp.reng.internal.gl.GL_FRAMEBUFFER_COMPLETE
 import com.rohittp.reng.internal.gl.GL_PACK_ALIGNMENT
 import com.rohittp.reng.internal.gl.GL_READ_FRAMEBUFFER
+import com.rohittp.reng.internal.gl.GL_READ_FRAMEBUFFER_BINDING
 import com.rohittp.reng.internal.gl.GL_RENDERER
 import com.rohittp.reng.internal.gl.GL_RGBA
 import com.rohittp.reng.internal.gl.GL_RGBA8
@@ -23,6 +25,7 @@ import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.GlProgramResult
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.ShaderDialect
+import com.rohittp.reng.internal.gl.buildGroundEdgeStrips
 import com.rohittp.reng.internal.gl.compileShaderProgram
 import com.rohittp.reng.internal.gl.littleEndianBytes
 import com.rohittp.reng.internal.identity.CanonicalBytes
@@ -164,6 +167,33 @@ internal fun runBasemapReadbackSuite(
                 groundCoverageTrustworthy = rasterisation.isTrustworthy,
             )
         }
+        failures.run("Mercator pole extension stretches both LOD-zero edge rows") {
+            assertMercatorPoleExtensionStretchesBothEdgeRows(
+                binding = binding,
+                probe = probe,
+            )
+        }
+        failures.run("Mercator pole extension smudges LOD-one columns into one far-field colour") {
+            assertMercatorPoleExtensionSmudgesAcrossColumns(
+                binding = binding,
+                probe = probe,
+            )
+        }
+        failures.run("Mercator pole extension prefilters one-texel edge stripes") {
+            assertMercatorPoleExtensionPrefiltersEdgeStripes(
+                binding = binding,
+                probe = probe,
+            )
+        }
+        failures.run("Mercator pole extension averages an edge band and fades the map into it") {
+            assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
+                binding = binding,
+                probe = probe,
+            )
+        }
+        failures.run("building pole edge strips preserves framebuffer bindings") {
+            assertGroundEdgeStripBuildPreservesFramebufferBindings(binding = binding)
+        }
     } finally {
         renderer.close()
         binding.deleteFramebuffers(1, intArrayOf(target))
@@ -204,7 +234,55 @@ private class CollectedFailures {
     }
 }
 
-private const val BASEMAP_READBACK_CASE_COUNT: Int = 7
+private const val BASEMAP_READBACK_CASE_COUNT: Int = 12
+
+private fun assertGroundEdgeStripBuildPreservesFramebufferBindings(binding: GlBinding) {
+    val names = IntArray(2)
+    binding.genTextures(1, names)
+    val sourceTexture = names[0]
+    binding.bindTexture(GL_TEXTURE_2D, sourceTexture)
+    binding.texImage2D(
+        target = GL_TEXTURE_2D,
+        level = 0,
+        internalFormat = GL_RGBA8,
+        width = 4,
+        height = 8,
+        border = 0,
+        format = GL_RGBA,
+        type = GL_UNSIGNED_BYTE,
+        pixels = ByteArray(4 * 8 * 4) { 0xff.toByte() },
+    )
+    binding.genFramebuffers(names.size, names)
+    val preservedDraw = names[0]
+    val preservedRead = names[1]
+    var strips: com.rohittp.reng.internal.gl.GroundEdgeStrips? = null
+    try {
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, preservedDraw)
+        binding.bindFramebuffer(GL_READ_FRAMEBUFFER, preservedRead)
+        strips = buildGroundEdgeStrips(
+            binding = binding,
+            sourceTexture = sourceTexture,
+            sourceWidthPx = 4,
+            sourceHeightPx = 8,
+        )
+        assertTrue(strips != null, "the binding fixture must build both edge strips")
+
+        val actualDraw = IntArray(1)
+        val actualRead = IntArray(1)
+        binding.getIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, actualDraw)
+        binding.getIntegerv(GL_READ_FRAMEBUFFER_BINDING, actualRead)
+        assertEquals(preservedDraw, actualDraw[0], "edge-strip build changed the draw framebuffer")
+        assertEquals(preservedRead, actualRead[0], "edge-strip build changed the read framebuffer")
+    } finally {
+        binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+        binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+        strips?.let { built ->
+            binding.deleteTextures(2, intArrayOf(built.northTexture, built.southTexture))
+        }
+        binding.deleteTextures(1, intArrayOf(sourceTexture))
+        binding.deleteFramebuffers(names.size, names)
+    }
+}
 
 /**
  * ADR 0086's one-pass regression: ADR 0065 deliberately lets adjacent LOD bands select tiles whose
@@ -590,6 +668,352 @@ private fun assertDrawBasemapFalseLeavesTheFrameUntouched(
 }
 
 /**
+ * One LOD-zero tile in a frame taller than the Mercator world: the top half of its 2x2 image is red
+ * and the bottom half blue. The opt-in frame must smear those exact edge rows into the otherwise
+ * absent regions, while the default frame must leave both samples untouched.
+ */
+private fun assertMercatorPoleExtensionStretchesBothEdgeRows(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+) {
+    val target = createReadbackTarget(
+        binding = binding,
+        width = POLE_READBACK_WIDTH,
+        height = POLE_READBACK_HEIGHT,
+    )
+    fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleReadbackSamples {
+        val renderer = createRenderer(
+            configuration = RendererConfiguration(
+                outputPixelSize = OutputPixelSize(
+                    width = POLE_READBACK_WIDTH,
+                    height = POLE_READBACK_HEIGHT,
+                ),
+                transport = ReadbackTransport(),
+                store = RecordingStyleStore(),
+                basemapStyle = ResourceLocator(value = STYLE_URL),
+                extendGroundPastPoles = extendGroundPastPoles,
+            ),
+            binding = binding,
+            probe = probe,
+        )
+        return try {
+            val renderTarget = renderer.mintRenderTarget(FramebufferName(value = target.toUInt()))
+            clearDrawAndReadPoleSamples(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = renderTarget,
+                targetFramebuffer = target,
+                plan = FramePlan(
+                    frameIndex = frameIndex,
+                    camera = Camera(
+                        latitude = 0.0,
+                        unwrappedLongitude = 0.0,
+                        zoom = 0.0,
+                        bearing = 0.0,
+                        pitch = 0.0,
+                    ),
+                    drawBasemap = true,
+                    drawLabels = false,
+                ),
+            )
+        } finally {
+            renderer.close()
+        }
+    }
+
+    try {
+        val off = samples(extendGroundPastPoles = false, frameIndex = 8_000L)
+        assertTrue(off.north.isCloseTo(ABSENT), "north must stay clear with pole extension off")
+        assertTrue(off.south.isCloseTo(ABSENT), "south must stay clear with pole extension off")
+
+        val on = samples(extendGroundPastPoles = true, frameIndex = 8_001L)
+        assertTrue(
+            on.north.isCloseTo(NORTH_WEST_TILE),
+            "north cap sampled ${on.north.describe()}, expected top-row ${NORTH_WEST_TILE.describe()}",
+        )
+        assertTrue(
+            on.south.isCloseTo(SOUTH_WEST_TILE),
+            "south cap sampled ${on.south.describe()}, expected bottom-row ${SOUTH_WEST_TILE.describe()}",
+        )
+    } finally {
+        binding.deleteFramebuffers(1, intArrayOf(target))
+    }
+}
+
+/**
+ * Two LOD-one north-edge tiles have different solid top rows while their LOD-zero parent contains
+ * the same red/green split. Close to the edge each cap must already be the root band's prefiltered
+ * colour at that distance, symmetrically nearer the world mean rather than either sharp tile row;
+ * several tile heights out, both columns must converge on the root band's red/green mean.
+ */
+private fun assertMercatorPoleExtensionSmudgesAcrossColumns(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+) {
+    val target = createReadbackTarget(
+        binding = binding,
+        width = POLE_SMUDGE_WIDTH,
+        height = POLE_SMUDGE_HEIGHT,
+    )
+    fun samples(
+        extendGroundPastPoles: Boolean,
+        frameIndex: Long,
+        failWorldTexture: Boolean = false,
+    ): PoleSmudgeSamples {
+        val fixtureTransport = ReadbackTransport()
+        val renderer = createRenderer(
+            configuration = RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = POLE_SMUDGE_WIDTH, height = POLE_SMUDGE_HEIGHT),
+                transport = if (failWorldTexture) {
+                    object : Transport {
+                        override suspend fun execute(request: TransportRequest): TransportResponse =
+                            if (request.locator.value == POLE_SMUDGE_ROOT_URL) {
+                                TransportResponse(
+                                    statusCode = 404,
+                                    body = ByteArray(0),
+                                    metadata = TransportResponseMetadata(contentType = "image/png"),
+                                )
+                            } else {
+                                fixtureTransport.execute(request)
+                            }
+                    }
+                } else {
+                    fixtureTransport
+                },
+                store = RecordingStyleStore(),
+                basemapStyle = ResourceLocator(value = POLE_SMUDGE_STYLE_URL),
+                extendGroundPastPoles = extendGroundPastPoles,
+            ),
+            binding = binding,
+            probe = probe,
+        )
+        return try {
+            val renderTarget = renderer.mintRenderTarget(FramebufferName(value = target.toUInt()))
+            clearDrawAndReadPoleSmudgeSamples(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = renderTarget,
+                targetFramebuffer = target,
+                plan = FramePlan(
+                    frameIndex = frameIndex,
+                    camera = Camera(
+                        latitude = POLE_SMUDGE_LATITUDE,
+                        unwrappedLongitude = 0.0,
+                        zoom = 1.0,
+                        bearing = 0.0,
+                        pitch = 0.0,
+                    ),
+                    drawBasemap = true,
+                    drawLabels = false,
+                ),
+            )
+        } finally {
+            renderer.close()
+        }
+    }
+
+    try {
+        val off = samples(extendGroundPastPoles = false, frameIndex = 8_002L)
+        listOf(off.nearWest, off.nearEast, off.farWest, off.farEast).forEach { sample ->
+            assertTrue(sample.isCloseTo(ABSENT), "pole smudge fixture must stay clear while off: ${sample.describe()}")
+        }
+
+        val on = samples(extendGroundPastPoles = true, frameIndex = 8_003L)
+        assertTrue(
+            !on.nearWest.isCloseTo(POLE_SMUDGE_WEST) &&
+                on.nearWest.distanceTo(POLE_SMUDGE_MEAN) < POLE_SMUDGE_WEST.distanceTo(POLE_SMUDGE_MEAN),
+            "near west must be the distance-width band colour rather than sharp red: " +
+                on.nearWest.describe(),
+        )
+        assertTrue(
+            !on.nearEast.isCloseTo(POLE_SMUDGE_EAST) &&
+                on.nearEast.distanceTo(POLE_SMUDGE_MEAN) < POLE_SMUDGE_EAST.distanceTo(POLE_SMUDGE_MEAN),
+            "near east must be the distance-width band colour rather than sharp green: " +
+                on.nearEast.describe(),
+        )
+        assertTrue(
+            on.nearWest.indices.all { channel ->
+                abs(on.nearWest[channel] + on.nearEast[channel] - 2 * POLE_SMUDGE_MEAN[channel]) <=
+                    CHANNEL_TOLERANCE
+            },
+            "near band colours must stay symmetric about the world mean: " +
+                "west=${on.nearWest.describe()} east=${on.nearEast.describe()}",
+        )
+        assertTrue(
+            on.farWest.isCloseTo(on.farEast),
+            "far cap columns differ: west=${on.farWest.describe()} east=${on.farEast.describe()}",
+        )
+        assertTrue(
+            on.farWest.isCloseTo(POLE_SMUDGE_MEAN),
+            "far cap sampled ${on.farWest.describe()}, expected red/green mean ${POLE_SMUDGE_MEAN.describe()}",
+        )
+        assertTrue(!on.farWest.isCloseTo(POLE_SMUDGE_WEST) && !on.farWest.isCloseTo(POLE_SMUDGE_EAST))
+
+        val missingWorld = samples(
+            extendGroundPastPoles = true,
+            frameIndex = 8_004L,
+            failWorldTexture = true,
+        )
+        assertTrue(
+            missingWorld.farWest.isCloseTo(POLE_SMUDGE_WEST),
+            "missing root must retain sharp west cap, got ${missingWorld.farWest.describe()}",
+        )
+        assertTrue(
+            missingWorld.farEast.isCloseTo(POLE_SMUDGE_EAST),
+            "missing root must retain sharp east cap, got ${missingWorld.farEast.describe()}",
+        )
+    } finally {
+        binding.deleteFramebuffers(1, intArrayOf(target))
+    }
+}
+
+/**
+ * A one-texel black/white edge alternation is above the sampling rate of the old fixed-tap blur.
+ * Far into the cap, a horizontal run must therefore be the edge mip pyramid's stable grey rather
+ * than a longitude-dependent choice of which source stripes the taps happened to hit.
+ */
+private fun assertMercatorPoleExtensionPrefiltersEdgeStripes(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+) {
+    val target = createReadbackTarget(
+        binding = binding,
+        width = POLE_SMUDGE_WIDTH,
+        height = POLE_SMUDGE_HEIGHT,
+    )
+    val renderer = createRenderer(
+        configuration = RendererConfiguration(
+            outputPixelSize = OutputPixelSize(width = POLE_SMUDGE_WIDTH, height = POLE_SMUDGE_HEIGHT),
+            transport = ReadbackTransport(),
+            store = RecordingStyleStore(),
+            basemapStyle = ResourceLocator(value = POLE_STRIPE_STYLE_URL),
+            extendGroundPastPoles = true,
+        ),
+        binding = binding,
+        probe = probe,
+    )
+    try {
+        val renderTarget = renderer.mintRenderTarget(FramebufferName(value = target.toUInt()))
+        val run = clearDrawAndReadPoleStripeRun(
+            binding = binding,
+            renderer = renderer,
+            renderTarget = renderTarget,
+            targetFramebuffer = target,
+            plan = FramePlan(
+                frameIndex = 8_005L,
+                camera = Camera(
+                    latitude = POLE_SMUDGE_LATITUDE,
+                    unwrappedLongitude = 0.0,
+                    zoom = 1.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+                drawBasemap = true,
+                drawLabels = false,
+            ),
+        )
+        for (channel in 0..2) {
+            val values = IntArray(POLE_STRIPE_SAMPLE_WIDTH) { index -> run[index * 4 + channel] }
+            val minimum = values.min()
+            val maximum = values.max()
+            assertTrue(
+                maximum - minimum <= POLE_STRIPE_MAX_SPREAD &&
+                    minimum >= POLE_STRIPE_MID_GREY - POLE_STRIPE_MID_GREY_TOLERANCE &&
+                    maximum <= POLE_STRIPE_MID_GREY + POLE_STRIPE_MID_GREY_TOLERANCE,
+                "far striped cap channel $channel ranged $minimum..$maximum, expected stable mid-grey",
+            )
+        }
+    } finally {
+        renderer.close()
+        binding.deleteFramebuffers(1, intArrayOf(target))
+    }
+}
+
+/**
+ * The root and LOD-one north-edge tiles have one white outer row followed by black. The cap's far
+ * colour must therefore be the eight-row band's one-eighth white average, not the white outer row.
+ * At the world edge the ordinary LOD-one tile must already have faded to that same colour, while a
+ * sample beyond the 160-logical-pixel fade remains the exact black texel it is with the option off.
+ */
+private fun assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
+    binding: GlBinding,
+    probe: RenderContextProbe,
+) {
+    val target = createReadbackTarget(
+        binding = binding,
+        width = POLE_SMUDGE_WIDTH,
+        height = POLE_SMUDGE_HEIGHT,
+    )
+    fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleSmudgeSamples {
+        val renderer = createRenderer(
+            configuration = RendererConfiguration(
+                outputPixelSize = OutputPixelSize(width = POLE_SMUDGE_WIDTH, height = POLE_SMUDGE_HEIGHT),
+                transport = ReadbackTransport(),
+                store = RecordingStyleStore(),
+                basemapStyle = ResourceLocator(value = POLE_BAND_STYLE_URL),
+                extendGroundPastPoles = extendGroundPastPoles,
+            ),
+            binding = binding,
+            probe = probe,
+        )
+        return try {
+            val renderTarget = renderer.mintRenderTarget(FramebufferName(value = target.toUInt()))
+            clearDrawAndReadPoleSmudgeSamples(
+                binding = binding,
+                renderer = renderer,
+                renderTarget = renderTarget,
+                targetFramebuffer = target,
+                plan = FramePlan(
+                    frameIndex = frameIndex,
+                    camera = Camera(
+                        latitude = POLE_SMUDGE_LATITUDE,
+                        unwrappedLongitude = 0.0,
+                        zoom = 1.0,
+                        bearing = 0.0,
+                        pitch = 0.0,
+                    ),
+                    drawBasemap = true,
+                    drawLabels = false,
+                ),
+            )
+        } finally {
+            renderer.close()
+        }
+    }
+
+    try {
+        val off = samples(extendGroundPastPoles = false, frameIndex = 8_006L)
+        assertTrue(off.farWest.isCloseTo(ABSENT), "far cap must stay clear with pole extension off")
+        assertTrue(off.edgeOutside.isCloseTo(ABSENT), "near cap must stay clear with pole extension off")
+
+        val on = samples(extendGroundPastPoles = true, frameIndex = 8_007L)
+        assertTrue(
+            on.farWest.isCloseTo(POLE_BAND_MEAN),
+            "far band cap sampled ${on.farWest.describe()}, expected ${POLE_BAND_MEAN.describe()}",
+        )
+        assertTrue(
+            on.farWest.distanceTo(POLE_BAND_OUTER_ROW) > CHANNEL_TOLERANCE,
+            "far band cap retained the white outer row: ${on.farWest.describe()}",
+        )
+        assertTrue(
+            on.edgeInside.distanceTo(on.edgeOutside) <= POLE_EDGE_MAX_STEP,
+            "world edge stepped from outside=${on.edgeOutside.describe()} to " +
+                "inside=${on.edgeInside.describe()}",
+        )
+        assertTrue(
+            on.interior.contentEquals(off.interior),
+            "map beyond the fade changed from ${off.interior.describe()} to ${on.interior.describe()}",
+        )
+        assertTrue(
+            on.interior.contentEquals(POLE_BAND_INTERIOR),
+            "map beyond the fade sampled ${on.interior.describe()}, expected exact black texel",
+        )
+    } finally {
+        binding.deleteFramebuffers(1, intArrayOf(target))
+    }
+}
+
+/**
  * ADR 0025's ordering contract, in pixels, and the only place it is enforced.
  *
  * Both stickers are map-anchored at the camera's own ground anchor with altitude 0, under a pitch-0
@@ -820,6 +1244,26 @@ private fun assertAMapAnchoredBillboardIsTheSameSizeAtEveryPitch(
 internal const val BASEMAP_READBACK_PIXELS: Int = 128
 
 private const val READBACK_PIXELS: Int = BASEMAP_READBACK_PIXELS
+private const val POLE_READBACK_WIDTH: Int = 128
+private const val POLE_READBACK_HEIGHT: Int = 1024
+private const val POLE_NORTH_SAMPLE_Y: Int = 128
+private const val POLE_SOUTH_SAMPLE_Y: Int = 896
+private const val POLE_SMUDGE_WIDTH: Int = 256
+private const val POLE_SMUDGE_HEIGHT: Int = 4096
+private const val POLE_SMUDGE_NEAR_Y: Int = POLE_SMUDGE_HEIGHT / 2 - 8
+private const val POLE_SMUDGE_FAR_Y: Int = 128
+private const val POLE_SMUDGE_WEST_X: Int = POLE_SMUDGE_WIDTH / 4
+private const val POLE_SMUDGE_EAST_X: Int = POLE_SMUDGE_WIDTH * 3 / 4
+private const val POLE_SMUDGE_LATITUDE: Double = 85.0511287798066
+private const val POLE_EDGE_OUTSIDE_Y: Int = POLE_SMUDGE_HEIGHT / 2 - 1
+private const val POLE_EDGE_INSIDE_Y: Int = POLE_SMUDGE_HEIGHT / 2
+private const val POLE_EDGE_INTERIOR_Y: Int = POLE_SMUDGE_HEIGHT / 2 + 200
+private const val POLE_EDGE_MAX_STEP: Int = 4
+private const val POLE_STRIPE_SAMPLE_WIDTH: Int = 64
+private const val POLE_STRIPE_SAMPLE_X: Int = (POLE_SMUDGE_WIDTH - POLE_STRIPE_SAMPLE_WIDTH) / 2
+private const val POLE_STRIPE_MAX_SPREAD: Int = 6
+private const val POLE_STRIPE_MID_GREY: Int = 128
+private const val POLE_STRIPE_MID_GREY_TOLERANCE: Int = 6
 
 /**
  * Per-channel tolerance. The fixture colours are separated by at least 32 in some channel, and the
@@ -965,6 +1409,156 @@ private fun clearAndDraw(
     binding.readPixels(0, 0, READBACK_PIXELS, READBACK_PIXELS, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
     binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
     return ReadbackFrame(pixels)
+}
+
+private class PoleReadbackSamples(val north: IntArray, val south: IntArray)
+
+private class PoleSmudgeSamples(
+    val nearWest: IntArray,
+    val nearEast: IntArray,
+    val farWest: IntArray,
+    val farEast: IntArray,
+    val edgeOutside: IntArray,
+    val edgeInside: IntArray,
+    val interior: IntArray,
+)
+
+private fun clearDrawAndReadPoleSamples(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+    plan: FramePlan,
+): PoleReadbackSamples {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
+    binding.disable(GL_SCISSOR_TEST)
+    binding.colorMask(true, true, true, true)
+    binding.viewport(0, 0, POLE_READBACK_WIDTH, POLE_READBACK_HEIGHT)
+    binding.clearColor(ABSENT[0] / 255f, ABSENT[1] / 255f, ABSENT[2] / 255f, ABSENT[3] / 255f)
+    binding.clear(GL_COLOR_BUFFER_BIT)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+
+    val frame = runBlocking { renderer.prepare(plan) }
+    try {
+        renderer.draw(frame, renderTarget)
+    } finally {
+        frame.close()
+    }
+
+    fun sample(topDownY: Int): IntArray {
+        val bytes = ByteArray(4)
+        binding.readPixels(
+            POLE_READBACK_WIDTH / 2,
+            POLE_READBACK_HEIGHT - 1 - topDownY,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            bytes,
+        )
+        return IntArray(4) { index -> bytes[index].toInt() and 0xff }
+    }
+
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)
+    binding.readBuffer(GL_COLOR_ATTACHMENT0)
+    binding.pixelStorei(GL_PACK_ALIGNMENT, 1)
+    val samples = PoleReadbackSamples(
+        north = sample(topDownY = POLE_NORTH_SAMPLE_Y),
+        south = sample(topDownY = POLE_SOUTH_SAMPLE_Y),
+    )
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+    return samples
+}
+
+private fun clearDrawAndReadPoleSmudgeSamples(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+    plan: FramePlan,
+): PoleSmudgeSamples {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
+    binding.disable(GL_SCISSOR_TEST)
+    binding.colorMask(true, true, true, true)
+    binding.viewport(0, 0, POLE_SMUDGE_WIDTH, POLE_SMUDGE_HEIGHT)
+    binding.clearColor(ABSENT[0] / 255f, ABSENT[1] / 255f, ABSENT[2] / 255f, ABSENT[3] / 255f)
+    binding.clear(GL_COLOR_BUFFER_BIT)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+
+    val frame = runBlocking { renderer.prepare(plan) }
+    try {
+        renderer.draw(frame, renderTarget)
+    } finally {
+        frame.close()
+    }
+
+    fun sample(x: Int, topDownY: Int): IntArray {
+        val bytes = ByteArray(4)
+        binding.readPixels(
+            x,
+            POLE_SMUDGE_HEIGHT - 1 - topDownY,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            bytes,
+        )
+        return IntArray(4) { index -> bytes[index].toInt() and 0xff }
+    }
+
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)
+    binding.readBuffer(GL_COLOR_ATTACHMENT0)
+    binding.pixelStorei(GL_PACK_ALIGNMENT, 1)
+    val samples = PoleSmudgeSamples(
+        nearWest = sample(x = POLE_SMUDGE_WEST_X, topDownY = POLE_SMUDGE_NEAR_Y),
+        nearEast = sample(x = POLE_SMUDGE_EAST_X, topDownY = POLE_SMUDGE_NEAR_Y),
+        farWest = sample(x = POLE_SMUDGE_WEST_X, topDownY = POLE_SMUDGE_FAR_Y),
+        farEast = sample(x = POLE_SMUDGE_EAST_X, topDownY = POLE_SMUDGE_FAR_Y),
+        edgeOutside = sample(x = POLE_SMUDGE_WIDTH / 2, topDownY = POLE_EDGE_OUTSIDE_Y),
+        edgeInside = sample(x = POLE_SMUDGE_WIDTH / 2, topDownY = POLE_EDGE_INSIDE_Y),
+        interior = sample(x = POLE_SMUDGE_WIDTH / 2, topDownY = POLE_EDGE_INTERIOR_Y),
+    )
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+    return samples
+}
+
+private fun clearDrawAndReadPoleStripeRun(
+    binding: GlBinding,
+    renderer: Renderer,
+    renderTarget: RenderTarget,
+    targetFramebuffer: Int,
+    plan: FramePlan,
+): IntArray {
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer)
+    binding.disable(GL_SCISSOR_TEST)
+    binding.colorMask(true, true, true, true)
+    binding.viewport(0, 0, POLE_SMUDGE_WIDTH, POLE_SMUDGE_HEIGHT)
+    binding.clearColor(ABSENT[0] / 255f, ABSENT[1] / 255f, ABSENT[2] / 255f, ABSENT[3] / 255f)
+    binding.clear(GL_COLOR_BUFFER_BIT)
+    binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+
+    val frame = runBlocking { renderer.prepare(plan) }
+    try {
+        renderer.draw(frame, renderTarget)
+    } finally {
+        frame.close()
+    }
+
+    val bytes = ByteArray(POLE_STRIPE_SAMPLE_WIDTH * 4)
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)
+    binding.readBuffer(GL_COLOR_ATTACHMENT0)
+    binding.pixelStorei(GL_PACK_ALIGNMENT, 1)
+    binding.readPixels(
+        POLE_STRIPE_SAMPLE_X,
+        POLE_SMUDGE_HEIGHT - 1 - POLE_SMUDGE_FAR_Y,
+        POLE_STRIPE_SAMPLE_WIDTH,
+        1,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        bytes,
+    )
+    binding.bindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+    return IntArray(bytes.size) { index -> bytes[index].toInt() and 0xff }
 }
 
 /**
@@ -1192,12 +1786,16 @@ private val PROBE_FRAGMENT_SOURCE: String =
 private val PROBE_KEY: ResourceKey =
     ResourceKey(ResourceKind.INTERNAL_PIPELINE, "0".repeat(64), null)
 
-private fun createReadbackTarget(binding: GlBinding): Int {
+private fun createReadbackTarget(
+    binding: GlBinding,
+    width: Int = READBACK_PIXELS,
+    height: Int = READBACK_PIXELS,
+): Int {
     val names = IntArray(1)
     binding.genTextures(1, names)
     val texture = names[0]
     binding.bindTexture(GL_TEXTURE_2D, texture)
-    binding.texStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, READBACK_PIXELS, READBACK_PIXELS)
+    binding.texStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height)
     binding.genFramebuffers(1, names)
     val framebuffer = names[0]
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer)
@@ -1270,6 +1868,12 @@ private val COPLANAR_GEOMETRY: IntArray = intArrayOf(0, 255, 128, 255)
  * serving a colour that happens to match.
  */
 private val HORIZON_FILLER_TILE: IntArray = intArrayOf(96, 32, 160, 255)
+private val POLE_SMUDGE_WEST: IntArray = intArrayOf(240, 40, 40, 255)
+private val POLE_SMUDGE_EAST: IntArray = intArrayOf(40, 200, 40, 255)
+private val POLE_SMUDGE_MEAN: IntArray = intArrayOf(140, 120, 40, 255)
+private val POLE_BAND_MEAN: IntArray = intArrayOf(32, 32, 32, 255)
+private val POLE_BAND_OUTER_ROW: IntArray = intArrayOf(255, 255, 255, 255)
+private val POLE_BAND_INTERIOR: IntArray = intArrayOf(0, 0, 0, 255)
 
 /**
  * The same palette as [FIXTURE_COLOURS], one character each, for [asciiMap]. No glyph means "no
@@ -1448,6 +2052,34 @@ private val READBACK_STYLE_JSON: String =
         """"layers":[{"id":"bg","type":"background","paint":{"background-color":"#000000"}},""" +
         """{"id":"r","type":"raster","source":"s"}]}"""
 
+private const val POLE_SMUDGE_STYLE_URL: String = "https://styles.example/pole-smudge.json"
+private const val POLE_SMUDGE_TILE_TEMPLATE: String = "https://tiles.example/pole-smudge/{z}/{x}/{y}.png"
+private const val POLE_SMUDGE_ROOT_URL: String = "https://tiles.example/pole-smudge/0/0/0.png"
+private val POLE_SMUDGE_STYLE_JSON: ByteArray =
+    (
+        """{"version":8,"name":"pole-smudge",""" +
+            """"sources":{"s":{"type":"raster","tiles":["$POLE_SMUDGE_TILE_TEMPLATE"],"tileSize":512}},""" +
+            """"layers":[{"id":"r","type":"raster","source":"s"}]}"""
+        ).encodeToByteArray()
+
+private const val POLE_STRIPE_STYLE_URL: String = "https://styles.example/pole-stripe.json"
+private const val POLE_STRIPE_TILE_TEMPLATE: String = "https://tiles.example/pole-stripe/{z}/{x}/{y}.png"
+private val POLE_STRIPE_STYLE_JSON: ByteArray =
+    (
+        """{"version":8,"name":"pole-stripe",""" +
+            """"sources":{"s":{"type":"raster","tiles":["$POLE_STRIPE_TILE_TEMPLATE"],"tileSize":512}},""" +
+            """"layers":[{"id":"r","type":"raster","source":"s"}]}"""
+        ).encodeToByteArray()
+
+private const val POLE_BAND_STYLE_URL: String = "https://styles.example/pole-band.json"
+private const val POLE_BAND_TILE_TEMPLATE: String = "https://tiles.example/pole-band/{z}/{x}/{y}.png"
+private val POLE_BAND_STYLE_JSON: ByteArray =
+    (
+        """{"version":8,"name":"pole-band",""" +
+            """"sources":{"s":{"type":"raster","tiles":["$POLE_BAND_TILE_TEMPLATE"],"tileSize":512}},""" +
+            """"layers":[{"id":"r","type":"raster","source":"s"}]}"""
+        ).encodeToByteArray()
+
 private const val BLEND_PRIMARY_STYLE_URL: String = "https://styles.example/blend-primary.json"
 private const val BLEND_TARGET_STYLE_URL: String = "https://styles.example/blend-target.json"
 private val BLEND_PRIMARY: IntArray = intArrayOf(32, 64, 96, 255)
@@ -1476,6 +2108,21 @@ internal class ReadbackTransport : Transport {
             url == STYLE_URL -> TransportResponse(
                 statusCode = 200,
                 body = READBACK_STYLE_JSON.encodeToByteArray(),
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            url == POLE_SMUDGE_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = POLE_SMUDGE_STYLE_JSON,
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            url == POLE_STRIPE_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = POLE_STRIPE_STYLE_JSON,
+                metadata = TransportResponseMetadata(contentType = "application/json"),
+            )
+            url == POLE_BAND_STYLE_URL -> TransportResponse(
+                statusCode = 200,
+                body = POLE_BAND_STYLE_JSON,
                 metadata = TransportResponseMetadata(contentType = "application/json"),
             )
             url == BLEND_PRIMARY_STYLE_URL -> TransportResponse(
@@ -1517,7 +2164,48 @@ private val HORIZON_FILLER_TILE_PNG: ByteArray = Base64.decode(
  *
  * The two sticker PNGs are 2x2 solid magenta and solid orange.
  */
+/** A 512-wide, two-row RGBA PNG whose rows alternate one black and one white texel. */
+private val POLE_STRIPE_TILE_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAACCAYAAAAuL2TYAAAAI0lEQVR42u3QMQ0AAAjAsPk3DUEH3dN/VXORJMlXGkGS5DcXwEP2iAYlhyUAAAAASUVORK5CYII=",
+)
+
+/** A 512-square RGBA PNG with one white north row followed by black rows. */
+private val POLE_BAND_TILE_PNG: ByteArray = Base64.decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAG1klEQVR42u3WMREAAAwCMfybpjXRqeEuBpg+NTMzs3fLrgDAO04AAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIATAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAADgBAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAAOAEABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAE4AAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIATAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAAHBl2/TYfQFggQgAAAABJRU5ErkJggg==",
+)
+
 private val READBACK_PNGS: Map<String, ByteArray> = mapOf(
+    // LOD-zero pole-cap fixture: two red north texels over two blue south texels.
+    "https://tiles.example/r/0/0/0.png" to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP4oKHxH4QZNDRO/AdhAEw0CK1KYF9sAAAAAElFTkSuQmCC",
+    ),
+    // LOD-zero north edge: the whole world's west half red and east half green.
+    POLE_SMUDGE_ROOT_URL to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABgAAAACCAYAAABCOhwFAAAAFklEQVR4nGP4oKHxnxSscYI0zEBrCwCyQ2gRT74CEgAAAABJRU5ErkJggg==",
+    ),
+    // LOD-one columns agree with their respective halves of the root edge row.
+    "https://tiles.example/pole-smudge/1/0/0.png" to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4oKHxH4QZYAwAUJQI/Re6KjEAAAAASUVORK5CYII=",
+    ),
+    "https://tiles.example/pole-smudge/1/0/1.png" to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4oKHxH4QZYAwAUJQI/Re6KjEAAAAASUVORK5CYII=",
+    ),
+    "https://tiles.example/pole-smudge/1/1/0.png" to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGPQOKHxH4QZYAwAR4QIXaDXc8EAAAAASUVORK5CYII=",
+    ),
+    "https://tiles.example/pole-smudge/1/1/1.png" to Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGPQOKHxH4QZYAwAR4QIXaDXc8EAAAAASUVORK5CYII=",
+    ),
+    "https://tiles.example/pole-stripe/0/0/0.png" to POLE_STRIPE_TILE_PNG,
+    "https://tiles.example/pole-stripe/1/0/0.png" to POLE_STRIPE_TILE_PNG,
+    "https://tiles.example/pole-stripe/1/0/1.png" to POLE_STRIPE_TILE_PNG,
+    "https://tiles.example/pole-stripe/1/1/0.png" to POLE_STRIPE_TILE_PNG,
+    "https://tiles.example/pole-stripe/1/1/1.png" to POLE_STRIPE_TILE_PNG,
+    "https://tiles.example/pole-band/0/0/0.png" to POLE_BAND_TILE_PNG,
+    "https://tiles.example/pole-band/1/0/0.png" to POLE_BAND_TILE_PNG,
+    "https://tiles.example/pole-band/1/0/1.png" to POLE_BAND_TILE_PNG,
+    "https://tiles.example/pole-band/1/1/0.png" to POLE_BAND_TILE_PNG,
+    "https://tiles.example/pole-band/1/1/1.png" to POLE_BAND_TILE_PNG,
     "https://tiles.example/r/4/1/10.png" to Base64.decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAGUlEQVR42mP4DwQMDAz/GRoaGv5/0ND4DwBczAm6XLG13AAAAABJRU5ErkJggg==",
     ),

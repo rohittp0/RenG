@@ -8,6 +8,7 @@ import com.rohittp.reng.internal.projection.footprintForAdmissibleRowRange
 import com.rohittp.reng.internal.projection.fullScanAdmissibleGroundRows
 import com.rohittp.reng.internal.projection.physicalPixelGroundRay
 import com.rohittp.reng.internal.projection.pixelRayCoordinates
+import com.rohittp.reng.internal.projection.yUnclippedFootprintForAdmissibleRowRange
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.log2
@@ -275,9 +276,10 @@ private fun mergeBandsTooShortToEarnTheirOwnSelection(
 /**
  * Every band's tiles, selected at that band's own level and unioned (ADR 0065).
  *
- * `selectBasemapTiles` is unmodified: a band is a footprint and a level, which is what it already
- * takes. Bands never share a level -- the offsets are monotone in row -- so concatenating cannot
- * duplicate an instance, and row order is the coarse-to-fine draw order ADR 0065 relies on.
+ * A band is a footprint and a level, which is what `selectBasemapTiles` takes. With pole extension
+ * enabled, each band supplies its y-unclipped footprint and therefore selects its own cap instances
+ * at its own level. Bands never share a level -- the offsets are monotone in row -- so concatenating
+ * cannot duplicate an instance, and row order is the coarse-to-fine draw order ADR 0065 relies on.
  *
  * The budget bounds the total, because a caller asking for 512 instances asked for 512 in the
  * frame; each band is still offered the whole budget so none fails on a share of it.
@@ -286,6 +288,7 @@ internal fun selectBandedBasemapTiles(
     camera: ResolvedMercatorCamera,
     selectedLod: Int,
     maximumBasemapTileInstances: Int,
+    extendGroundPastPoles: Boolean = false,
 ): TileSelectionOutcome {
     require(maximumBasemapTileInstances > 0) { "maximumBasemapTileInstances must be positive" }
 
@@ -296,12 +299,17 @@ internal fun selectBandedBasemapTiles(
     val canonicalResources = ArrayList<CanonicalBasemapTile>()
     var total = 0L
     for (band in bands) {
-        val footprint = footprintForAdmissibleRowRange(camera, band.firstRow, band.lastRow)
+        val footprint = if (extendGroundPastPoles) {
+            yUnclippedFootprintForAdmissibleRowRange(camera, band.firstRow, band.lastRow)
+        } else {
+            footprintForAdmissibleRowRange(camera, band.firstRow, band.lastRow)
+        }
         when (
             val selection = selectBasemapTiles(
                 footprint = footprint,
                 lod = band.lod,
                 maximumInstances = maximumBasemapTileInstances,
+                extendGroundPastPoles = extendGroundPastPoles,
             )
         ) {
             is TileSelectionOutcome.OverBudget -> return selection
@@ -319,7 +327,7 @@ internal fun selectBandedBasemapTiles(
             }
         }
     }
-    return TileSelectionOutcome.Success(instances, canonicalResources)
+    return TileSelectionOutcome.Success(instances, canonicalResources.distinct())
 }
 
 /**

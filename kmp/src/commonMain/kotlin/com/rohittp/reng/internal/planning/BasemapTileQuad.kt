@@ -3,20 +3,22 @@ package com.rohittp.reng.internal.planning
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 
 /**
- * One basemap tile's ground footprint, in camera-relative logical pixels: an axis-aligned square in
- * the map plane (`z = 0`), centred on [centreXLogicalPixels] / [centreYLogicalPixels], with side
- * [sideLogicalPixels]. `+x` is east and **`+y` is north**, matching
+ * One basemap instance's ground footprint, in camera-relative logical pixels: an axis-aligned
+ * rectangle in the map plane (`z = 0`), centred on [centreXLogicalPixels] /
+ * [centreYLogicalPixels], with width [sideLogicalPixels] and height [heightLogicalPixels]. `+x` is
+ * east and **`+y` is north**, matching
  * [resolveCameraRelativeMapPosition]'s own convention — Mercator `y` grows southward, so the sign is
  * flipped exactly once, here, and never again downstream.
  *
- * A square in both axes because a Mercator tile *is* square in Mercator space: one tile spans
- * `1 / 2^lod` in each axis, and both axes scale by the same
- * [ResolvedMercatorCamera.worldSizeLogicalPixels].
+ * An ordinary tile is square because it spans `1 / 2^lod` in each Mercator axis. A [GroundCap]
+ * keeps that width and extends [BasemapTileInstance.capSpanTiles] tile heights away from the world
+ * edge.
  */
 internal data class BasemapTileQuad(
     val centreXLogicalPixels: Double,
     val centreYLogicalPixels: Double,
     val sideLogicalPixels: Double,
+    val heightLogicalPixels: Double = sideLogicalPixels,
 )
 
 /**
@@ -49,10 +51,17 @@ internal fun resolveBasemapTileQuad(
     val side = camera.worldSizeLogicalPixels / tileCount
     val anchorTileX = camera.mercatorAnchor.x * tileCount
     val anchorTileY = camera.mercatorAnchor.y * tileCount
+    val height = side * instance.capSpanTiles
+    val centreY = when (instance.cap) {
+        GroundCap.NORTH -> (anchorTileY + instance.capSpanTiles * HALF_TILE) * side
+        GroundCap.SOUTH -> (anchorTileY - tileCount - instance.capSpanTiles * HALF_TILE) * side
+        null -> (anchorTileY - (instance.tileY.toDouble() + HALF_TILE)) * side
+    }
     return BasemapTileQuad(
         centreXLogicalPixels = (instance.unwrappedX.toDouble() + HALF_TILE - anchorTileX) * side,
-        centreYLogicalPixels = (anchorTileY - (instance.tileY.toDouble() + HALF_TILE)) * side,
+        centreYLogicalPixels = centreY,
         sideLogicalPixels = side,
+        heightLogicalPixels = height,
     )
 }
 

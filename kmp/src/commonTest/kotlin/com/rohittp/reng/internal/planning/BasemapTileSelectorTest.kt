@@ -7,6 +7,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
+import kotlin.test.assertTrue
 
 class BasemapTileSelectorTest {
     @Test
@@ -278,6 +279,104 @@ class BasemapTileSelectorTest {
     }
 
     @Test
+    fun poleExtensionOffLeavesAPastNorthEdgeFootprintOnTheOrdinarySelectionPath() {
+        val footprint = northCrossingDiamond()
+
+        val defaultSelection = selectSuccess(footprint = footprint, lod = 2)
+        val explicitlyOff = selectSuccess(
+            footprint = footprint,
+            lod = 2,
+            extendGroundPastPoles = false,
+        )
+
+        assertEquals(defaultSelection, explicitlyOff)
+        assertTrue(explicitlyOff.instances.none { it.cap != null })
+        assertEquals(0, explicitlyOff.canonicalResources.count { it == WORLD_BASEMAP_TILE })
+    }
+
+    @Test
+    fun northCapCoversEveryColumnTouchedByAFortyFiveDegreeRotatedPastEdgeRegion() {
+        val success = selectSuccess(
+            footprint = northCrossingDiamond(),
+            lod = 2,
+            extendGroundPastPoles = true,
+        )
+        val caps = success.instances.filter { it.cap == GroundCap.NORTH }
+
+        assertEquals(listOf(1L, 2L), caps.map(BasemapTileInstance::unwrappedX))
+        assertEquals(listOf(2.0, 2.0), caps.map(BasemapTileInstance::capSpanTiles))
+        assertTrue(caps.all { it.tileY == 0 })
+        assertTrue(
+            caps.all { cap ->
+                CanonicalBasemapTile(lod = cap.lod, tileY = 0, canonicalX = cap.canonicalX) in
+                    success.canonicalResources
+            },
+        )
+        assertEquals(1, success.canonicalResources.count { it == WORLD_BASEMAP_TILE })
+    }
+
+    @Test
+    fun poleExtensionSelectsNoCapsWhenTheFootprintStaysInsideTheWorld() {
+        val success = selectSuccess(
+            footprint = ClosedMercatorFootprint.Polygon(
+                vertices = listOf(
+                    MercatorGroundPoint(x = 0.2, y = 0.2),
+                    MercatorGroundPoint(x = 0.8, y = 0.2),
+                    MercatorGroundPoint(x = 0.8, y = 0.8),
+                    MercatorGroundPoint(x = 0.2, y = 0.8),
+                ),
+            ),
+            lod = 2,
+            extendGroundPastPoles = true,
+        )
+
+        assertTrue(success.instances.none { it.cap != null })
+        assertEquals(0, success.canonicalResources.count { it == WORLD_BASEMAP_TILE })
+    }
+
+    @Test
+    fun southCapUsesTheLastCanonicalTileRow() {
+        val success = selectSuccess(
+            footprint = ClosedMercatorFootprint.Polygon(
+                vertices = listOf(
+                    MercatorGroundPoint(x = 0.2, y = 0.8),
+                    MercatorGroundPoint(x = 0.8, y = 0.8),
+                    MercatorGroundPoint(x = 0.7, y = 1.4),
+                    MercatorGroundPoint(x = 0.3, y = 1.4),
+                ),
+            ),
+            lod = 2,
+            extendGroundPastPoles = true,
+        )
+        val caps = success.instances.filter { it.cap == GroundCap.SOUTH }
+
+        assertTrue(caps.isNotEmpty())
+        assertTrue(caps.all { it.tileY == 3 })
+        assertTrue(
+            caps.all { cap ->
+                CanonicalBasemapTile(lod = cap.lod, tileY = 3, canonicalX = cap.canonicalX) in
+                    success.canonicalResources
+            },
+        )
+        assertEquals(1, success.canonicalResources.count { it == WORLD_BASEMAP_TILE })
+    }
+
+    @Test
+    fun capInstancesCountTowardTheSameMaximumAsOrdinaryTiles() {
+        val outcome = selectBasemapTiles(
+            footprint = ClosedMercatorFootprint.Segment(
+                start = MercatorGroundPoint(x = 0.5, y = -0.5),
+                end = MercatorGroundPoint(x = 0.5, y = 0.5),
+            ),
+            lod = 0,
+            maximumInstances = 1,
+            extendGroundPastPoles = true,
+        )
+
+        assertEquals(TileSelectionOutcome.OverBudget(limit = 1, actual = 2L), outcome)
+    }
+
+    @Test
     fun budgetCountsEveryWorldCopyBeforeCanonicalDeduplication() {
         val outcome = selectBasemapTiles(
             footprint = ClosedMercatorFootprint.Segment(
@@ -499,12 +598,27 @@ class BasemapTileSelectorTest {
     private fun point(x: Double, y: Double): ClosedMercatorFootprint =
         ClosedMercatorFootprint.Point(MercatorGroundPoint(x, y))
 
+    private fun northCrossingDiamond(): ClosedMercatorFootprint = ClosedMercatorFootprint.Polygon(
+        vertices = listOf(
+            MercatorGroundPoint(x = 0.5, y = -0.4),
+            MercatorGroundPoint(x = 0.86, y = 0.2),
+            MercatorGroundPoint(x = 0.5, y = 0.8),
+            MercatorGroundPoint(x = 0.14, y = 0.2),
+        ),
+    )
+
     private fun selectSuccess(
         footprint: ClosedMercatorFootprint,
         lod: Int,
         maximumInstances: Int = 4096,
+        extendGroundPastPoles: Boolean = false,
     ): TileSelectionOutcome.Success = assertIs<TileSelectionOutcome.Success>(
-        selectBasemapTiles(footprint, lod, maximumInstances),
+        selectBasemapTiles(
+            footprint = footprint,
+            lod = lod,
+            maximumInstances = maximumInstances,
+            extendGroundPastPoles = extendGroundPastPoles,
+        ),
     )
 
     private fun instance(

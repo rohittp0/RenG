@@ -173,6 +173,25 @@ class MercatorGroundFootprintTest {
     }
 
     @Test
+    fun yUnclippedFootprintKeepsPastPoleYWhileRetainingTheXSupportClip() {
+        val camera = syntheticCamera(
+            outputPixelSize = OutputPixelSize(width = 3, height = 3),
+            mercatorAnchor = MercatorPosition(-16383.9375, -0.0625, 0.0),
+            worldSizeLogicalPixels = 8.0,
+        )
+
+        assertPolygon(
+            yUnclippedFootprintForAdmissibleRowRange(camera = camera, firstRow = 0, lastRow = 2),
+            listOf(
+                MercatorGroundPoint(x = -16384.0, y = -0.1875),
+                MercatorGroundPoint(x = -16383.8125, y = -0.1875),
+                MercatorGroundPoint(x = -16383.8125, y = 0.0625),
+                MercatorGroundPoint(x = -16384.0, y = 0.0625),
+            ),
+        )
+    }
+
+    @Test
     fun edgeAndCornerTangenciesRemainAClosedSegmentAndPoint() {
         val edgeTangent = clippedPhysicalPixelFootprint(
             syntheticCamera(

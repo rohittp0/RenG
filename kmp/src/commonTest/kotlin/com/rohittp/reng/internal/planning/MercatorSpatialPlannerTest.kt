@@ -137,6 +137,40 @@ class FrameSpatialPlannerTest {
     }
 
     @Test
+    fun bearingFortyFiveNorthViewSelectsAContiguousCapStripOnlyWhenEnabled() {
+        val camera = Camera(
+            latitude = MERCATOR_MAXIMUM_LATITUDE_DEGREES,
+            unwrappedLongitude = 0.0,
+            zoom = 2.0,
+            bearing = 45.0,
+            pitch = 0.0,
+        )
+        val off = planSuccess(
+            plan = framePlan(camera = camera),
+            outputPixelSize = OutputPixelSize(width = 512, height = 512),
+            maximumBasemapTileInstances = 64,
+            basemapStyleConfigured = true,
+            extendGroundPastPoles = false,
+        )
+        val on = planSuccess(
+            plan = framePlan(camera = camera),
+            outputPixelSize = OutputPixelSize(width = 512, height = 512),
+            maximumBasemapTileInstances = 64,
+            basemapStyleConfigured = true,
+            extendGroundPastPoles = true,
+        )
+
+        assertTrue(requireNotNull(off.tileSelection).instances.none { it.cap != null })
+        val caps = requireNotNull(on.tileSelection).instances.filter { it.cap == GroundCap.NORTH }
+        assertTrue(caps.size > 1, "the rotated past-edge region must span more than one column")
+        assertEquals(
+            (caps.first().unwrappedX..caps.last().unwrappedX).toList(),
+            caps.map(BasemapTileInstance::unwrappedX),
+        )
+        assertTrue(caps.all { it.tileY == 0 })
+    }
+
+    @Test
     fun activeBasemapPreservesEmptyPointSegmentAndPolygonFootprintPaths() {
         val empty = planSuccess(
             plan = framePlan(
@@ -918,6 +952,7 @@ class FrameSpatialPlannerTest {
         previousSelectedLod: Int? = null,
         maximumBasemapTileInstances: Int,
         basemapStyleConfigured: Boolean,
+        extendGroundPastPoles: Boolean = false,
     ): FrameSpatialPlan = assertIs<SpatialOutcome.Success<FrameSpatialPlan>>(
         planMercatorSpatial(
             plan = plan,
@@ -925,6 +960,7 @@ class FrameSpatialPlannerTest {
             previousSelectedLod = previousSelectedLod,
             maximumBasemapTileInstances = maximumBasemapTileInstances,
             basemapStyleConfigured = basemapStyleConfigured,
+            extendGroundPastPoles = extendGroundPastPoles,
         ),
     ).value
 

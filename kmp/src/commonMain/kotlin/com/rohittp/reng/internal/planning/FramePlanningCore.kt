@@ -37,6 +37,7 @@ internal data class FramePlanningRequest(
     val maximumBasemapTileInstances: Int,
     val previousSelectedLod: Int?,
     val additionalBasemapStyles: List<ResourceLocator> = emptyList(),
+    val extendGroundPastPoles: Boolean = false,
 ) {
     val basemapStyleCount: Int = if (basemapStyle == null) 0 else 1 + additionalBasemapStyles.size
 
@@ -205,6 +206,7 @@ internal fun planSpatial(
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    extendGroundPastPoles: Boolean = false,
     // A renderer passes the one it owns, so a consumer's shader text is scanned once rather than on every
     // frame. The memo is of a pure function of an immutable `String`, so it changes no answer and leaves
     // this function as pure as the KDoc above says; the default, a memo of this call alone, is what a
@@ -220,12 +222,13 @@ internal fun planSpatial(
         shaderProfileMemo,
     )
     ProjectionMode.MERCATOR -> planMercatorSpatial(
-        plan,
-        outputPixelSize,
-        previousSelectedLod,
-        maximumBasemapTileInstances,
-        basemapStyleConfigured,
-        shaderProfileMemo,
+        plan = plan,
+        outputPixelSize = outputPixelSize,
+        previousSelectedLod = previousSelectedLod,
+        maximumBasemapTileInstances = maximumBasemapTileInstances,
+        basemapStyleConfigured = basemapStyleConfigured,
+        extendGroundPastPoles = extendGroundPastPoles,
+        shaderProfileMemo = shaderProfileMemo,
     )
 }
 
@@ -256,12 +259,13 @@ internal class FramePlanningCore(
             )
         }
         val spatialOutcome = planSpatial(
-            plan,
-            request.outputPixelSize,
-            request.previousSelectedLod,
-            request.maximumBasemapTileInstances,
-            request.basemapStyleCount > 0,
-            shaderProfileMemo,
+            plan = plan,
+            outputPixelSize = request.outputPixelSize,
+            previousSelectedLod = request.previousSelectedLod,
+            maximumBasemapTileInstances = request.maximumBasemapTileInstances,
+            basemapStyleConfigured = request.basemapStyleCount > 0,
+            extendGroundPastPoles = request.extendGroundPastPoles,
+            shaderProfileMemo = shaderProfileMemo,
         )
         if (spatialOutcome is SpatialOutcome.Failure) {
             return FramePlanningOutcome.Failure(spatialOutcome.failure)

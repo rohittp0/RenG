@@ -135,6 +135,37 @@ internal fun footprintForAdmissibleRowRange(
     }
 }
 
+/**
+ * [footprintForAdmissibleRowRange] without Mercator's finite `y` support clip.
+ *
+ * The x support planes and non-finite guards remain identical. This is the footprint used only to
+ * select opt-in ground caps: their geometry deliberately occupies the otherwise unsupported
+ * half-planes beyond `y = 0` and `y = 1`.
+ */
+internal fun yUnclippedFootprintForAdmissibleRowRange(
+    camera: ResolvedMercatorCamera,
+    firstRow: Int,
+    lastRow: Int,
+): ClosedMercatorFootprint {
+    require(firstRow in 0..lastRow && lastRow < camera.outputPixelSize.height) {
+        "row range must be ordered and within the resolved output size"
+    }
+
+    val lastColumn = camera.outputPixelSize.width - 1
+    val pixelCentreRectangle = listOf(
+        groundHit(camera, pixelX = 0, pixelY = firstRow),
+        groundHit(camera, pixelX = lastColumn, pixelY = firstRow),
+        groundHit(camera, pixelX = lastColumn, pixelY = lastRow),
+        groundHit(camera, pixelX = 0, pixelY = lastRow),
+    )
+    return when (val footprint = classifyFootprint(pixelCentreRectangle)) {
+        ClosedMercatorFootprint.Empty -> ClosedMercatorFootprint.Empty
+        is ClosedMercatorFootprint.Point -> clipPointOnlyInX(footprint.point)
+        is ClosedMercatorFootprint.Segment -> clipSegmentOnlyInX(footprint.start, footprint.end)
+        is ClosedMercatorFootprint.Polygon -> clipPolygonOnlyInX(footprint.vertices)
+    }
+}
+
 private fun groundHit(
     camera: ResolvedMercatorCamera,
     pixelX: Int,
@@ -144,6 +175,13 @@ private fun groundHit(
 
 private fun clipPoint(point: MercatorGroundPoint): ClosedMercatorFootprint =
     if (isWithinMercatorPlanningSupport(point.x, point.y)) {
+        ClosedMercatorFootprint.Point(point)
+    } else {
+        ClosedMercatorFootprint.Empty
+    }
+
+private fun clipPointOnlyInX(point: MercatorGroundPoint): ClosedMercatorFootprint =
+    if (point.isFinite() && point.x in MINIMUM_SUPPORT_X..MAXIMUM_SUPPORT_X) {
         ClosedMercatorFootprint.Point(point)
     } else {
         ClosedMercatorFootprint.Empty
@@ -180,6 +218,32 @@ private fun clipSegment(
     return classifyFootprint(listOf(clippedStart, clippedEnd))
 }
 
+private fun clipSegmentOnlyInX(
+    start: MercatorGroundPoint,
+    end: MercatorGroundPoint,
+): ClosedMercatorFootprint {
+    if (!start.isFinite() || !end.isFinite()) return ClosedMercatorFootprint.Empty
+
+    val deltaX = end.x - start.x
+    val deltaY = end.y - start.y
+    if (deltaX == 0.0) {
+        return if (start.x in MINIMUM_SUPPORT_X..MAXIMUM_SUPPORT_X) {
+            classifyFootprint(listOf(start, end))
+        } else {
+            ClosedMercatorFootprint.Empty
+        }
+    }
+    val first = (MINIMUM_SUPPORT_X - start.x) / deltaX
+    val second = (MAXIMUM_SUPPORT_X - start.x) / deltaX
+    val minimumT = max(0.0, min(first, second))
+    val maximumT = min(1.0, max(first, second))
+    if (minimumT > maximumT) return ClosedMercatorFootprint.Empty
+
+    val clippedStart = pointAlong(start, deltaX, deltaY, minimumT).clampedToXSupport()
+    val clippedEnd = pointAlong(start, deltaX, deltaY, maximumT).clampedToXSupport()
+    return classifyFootprint(listOf(clippedStart, clippedEnd))
+}
+
 private fun clipPolygon(vertices: List<MercatorGroundPoint>): ClosedMercatorFootprint {
     if (vertices.any { !it.isFinite() }) return ClosedMercatorFootprint.Empty
 
@@ -188,6 +252,14 @@ private fun clipPolygon(vertices: List<MercatorGroundPoint>): ClosedMercatorFoot
     clipped = clipAgainstHorizontalPlane(clipped, MINIMUM_SUPPORT_Y, keepGreater = true)
     clipped = clipAgainstHorizontalPlane(clipped, MAXIMUM_SUPPORT_Y, keepGreater = false)
     return classifyFootprint(clipped.map(MercatorGroundPoint::clampedToSupport))
+}
+
+private fun clipPolygonOnlyInX(vertices: List<MercatorGroundPoint>): ClosedMercatorFootprint {
+    if (vertices.any { !it.isFinite() }) return ClosedMercatorFootprint.Empty
+
+    var clipped = clipAgainstVerticalPlane(vertices, MINIMUM_SUPPORT_X, keepGreater = true)
+    clipped = clipAgainstVerticalPlane(clipped, MAXIMUM_SUPPORT_X, keepGreater = false)
+    return classifyFootprint(clipped.map(MercatorGroundPoint::clampedToXSupport))
 }
 
 private fun clipAgainstVerticalPlane(
@@ -293,6 +365,11 @@ private fun MercatorGroundPoint.isFinite(): Boolean = x.isFinite() && y.isFinite
 private fun MercatorGroundPoint.clampedToSupport(): MercatorGroundPoint = MercatorGroundPoint(
     x = x.coerceIn(MINIMUM_SUPPORT_X, MAXIMUM_SUPPORT_X),
     y = y.coerceIn(MINIMUM_SUPPORT_Y, MAXIMUM_SUPPORT_Y),
+)
+
+private fun MercatorGroundPoint.clampedToXSupport(): MercatorGroundPoint = MercatorGroundPoint(
+    x = x.coerceIn(MINIMUM_SUPPORT_X, MAXIMUM_SUPPORT_X),
+    y = y,
 )
 
 private const val MINIMUM_SUPPORT_X: Double = -16384.0

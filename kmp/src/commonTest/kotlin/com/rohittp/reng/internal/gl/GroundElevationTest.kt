@@ -112,9 +112,9 @@ class GroundElevationTest {
             "the globe ground must compose the shared elevation source, not restate it",
         )
         assertEquals(
-            GROUND_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_FRAGMENT_SOURCE,
             TERRAIN_GROUND_SHADER_PAIR.fragmentSource,
-            "displacement is a vertex-stage change; the fragment stage stays the shared one",
+            "Mercator terrain keeps the same cap-aware fragment stage as flat Mercator ground",
         )
         assertEquals(
             GROUND_FRAGMENT_SOURCE,

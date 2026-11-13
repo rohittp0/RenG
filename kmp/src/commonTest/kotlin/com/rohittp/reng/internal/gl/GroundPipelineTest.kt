@@ -36,20 +36,61 @@ class GroundPipelineTest {
         assertTrue(GROUND_FRAGMENT_SOURCE.startsWith("#version 300 es\n"))
         assertTrue(scanShaderProfile(GROUND_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(MERCATOR_GROUND_FRAGMENT_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_MIXED_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_MIXED_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE) != null)
         assertTrue(scanShaderProfile(GROUND_SHADED_MIXED_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE) != null)
+        assertTrue(scanShaderProfile(MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE) != null)
         assertTrue(scanShaderProfile(TERRAIN_MIXED_GROUND_VERTEX_SOURCE) != null)
         assertTrue(scanShaderProfile(TERRAIN_SHADED_MIXED_GROUND_VERTEX_SOURCE) != null)
         assertTrue(
-            GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf(
-                "vec4 tile = mix(primary, target, rengGroundBlendAmount());",
-            ) < GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf("float incidence"),
-            "ADR 0086 mixes the two premultiplied colours before applying the ordinary terrain shade",
+            MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf(
+                "vec4 sharp = mix(primary, target, blendAmount);",
+            ) <
+                MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf("tile = mix(sharp, world, fade);") &&
+                MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf("tile = mix(sharp, world, fade);") <
+                MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE.indexOf("float incidence"),
+            "ADR 0086 mixes primary/target, then edge/far, before applying the ordinary terrain shade",
         )
     }
 
-    @Test fun mixedSourcesAddOnlyTheirBlendUvContractToThePinnedOrdinarySources() {
+    @Test fun ordinaryModeSkipsEveryCapBlurTapInAllFourFragmentPrograms() {
+        listOf(
+            MERCATOR_GROUND_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE,
+        ).forEach { source ->
+            val main = source.substring(startIndex = source.indexOf("void main()"))
+            val blurCall = main.indexOf("rengGroundWorldBlur(")
+            assertTrue(blurCall >= 0, "the cap path must call its world blur: $source")
+            val modeZeroReturn = main.indexOf("if (rengGroundCapMode == 0)")
+            val capOnlyBranch = main.indexOf("if (rengGroundCapMode != 0)")
+            val capOnlyElse = main.indexOf("    } else {", startIndex = modeZeroReturn)
+            assertTrue(
+                (modeZeroReturn in 0 until blurCall && main.indexOf("return;", modeZeroReturn) in 0 until blurCall) ||
+                    capOnlyBranch in 0 until blurCall || capOnlyElse in 0 until blurCall,
+                "mode zero must return before, or stay outside, every cap blur call: $source",
+            )
+        }
+    }
+
+    @Test fun capBlurNeverSamplesAOneRowMipBeforeTheWholeEightRowBandHasBeenAveraged() {
+        val expected = "float level = max(log2(float($CAP_BAND_ROWS)), " +
+            "log2(max(1.0, width * stripSide)));"
+        listOf(
+            MERCATOR_GROUND_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_MIXED_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE,
+            MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE,
+        ).forEach { source ->
+            assertTrue(source.contains(expected), "the cap blur must clamp to the band-average mip: $source")
+        }
+    }
+
+    @Test fun mixedSourcesAddOnlyTheirBlendUvContractToTheOrdinarySources() {
         assertEquals(
             expected = mixedVertexSource(
                 ordinary = GROUND_VERTEX_SOURCE,
@@ -99,8 +140,8 @@ class GroundPipelineTest {
             actual = TERRAIN_SHADED_MIXED_GLOBE_GROUND_VERTEX_SOURCE,
         )
         assertEquals(
-            expected = shadingLines(source = GROUND_SHADED_FRAGMENT_SOURCE),
-            actual = shadingLines(source = GROUND_SHADED_MIXED_FRAGMENT_SOURCE),
+            expected = shadingLines(source = MERCATOR_GROUND_SHADED_FRAGMENT_SOURCE),
+            actual = shadingLines(source = MERCATOR_GROUND_SHADED_MIXED_FRAGMENT_SOURCE),
             message = "mixing changes only how the shaded fragment obtains tile, not how it shades it",
         )
     }
@@ -212,20 +253,97 @@ class GroundPipelineTest {
             "u must run west-to-east and v north-to-south, row zero at the tile's north edge: " +
                 GROUND_VERTEX_SOURCE,
         )
-        // The grid coordinate is still the texture coordinate, now through a window (ADR 0057). The
-        // identity window -- scale 1, offset 0 -- is what every exact tile is given, so this is the
-        // same mapping it always was and the shader has no branch and no second variant; a tile drawn
-        // from an ancestor is the only one whose window is anything else.
+        // The ordinary (0, 1) uvV maps the grid v to itself; a cap collapses this before the
+        // provisional window, so both exact and ancestor-backed caps land on their own edge row.
         assertTrue(
             GROUND_VERTEX_SOURCE.contains(
-                "rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;",
+                "vec2 rengGroundTileUv = vec2(rengGroundGrid.x, mix(rengGroundUvV.x, " +
+                    "rengGroundUvV.y, rengGroundGrid.y));",
             ),
-            "the grid coordinate IS the texture coordinate, windowed: " + GROUND_VERTEX_SOURCE,
+            "uvV must be applied to the grid coordinate: " + GROUND_VERTEX_SOURCE,
+        )
+        assertTrue(
+            GROUND_VERTEX_SOURCE.indexOf("vec2 rengGroundTileUv") <
+                GROUND_VERTEX_SOURCE.indexOf("rengGroundUv = rengGroundTileUv"),
+            "the cap collapse must precede the colour window: " + GROUND_VERTEX_SOURCE,
         )
         assertTrue(
             GROUND_VERTEX_SOURCE.contains("uniform vec3 rengGroundColourWindow;"),
             "the window must be declared: " + GROUND_VERTEX_SOURCE,
         )
+    }
+
+    @Test fun everyTileIsGivenItsUvVIncludingTheOrdinaryIdentity() {
+        val binding = RecordingGlBinding().withDeclaredNames(
+            GROUND_TILE_UV_V_UNIFORM_NAME to TILE_UV_V_LOCATION,
+        )
+        val pipeline = createdPipeline(binding)
+        binding.log.clear()
+
+        drawGround(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(
+                resolvedTile(),
+                resolvedTile(uvV = NORTH_POLAR_CAP_UV_V),
+                resolvedTile(uvV = SOUTH_POLAR_CAP_UV_V),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                "uniform2f($TILE_UV_V_LOCATION,0.0,1.0)",
+                "uniform2f($TILE_UV_V_LOCATION,0.0,0.0)",
+                "uniform2f($TILE_UV_V_LOCATION,1.0,1.0)",
+            ),
+            binding.log.filter { it.startsWith("uniform2f($TILE_UV_V_LOCATION,") },
+        )
+    }
+
+    @Test fun everyTileBindsCapModeAndAValidWorldSamplerIncludingOrdinaryModeZero() {
+        val binding = newBinding()
+        val pipeline = createdPipeline(binding)
+        binding.log.clear()
+
+        drawGround(
+            binding = binding,
+            pipeline = pipeline,
+            tiles = listOf(
+                resolvedTile(texture = 11),
+                resolvedTile(
+                    texture = 12,
+                    worldStrip = 22,
+                    capMode = GROUND_CAP_MODE_NORTH,
+                    capSpanTiles = 4f,
+                    capWorldUStart = 0.5f,
+                    capWorldUWidth = 0.25f,
+                    capLodScale = 4f,
+                    worldStripSide = 512f,
+                ),
+                resolvedTile(
+                    texture = 13,
+                    worldStrip = 23,
+                    oppositeWorldStrip = 33,
+                    capMode = GROUND_CAP_MODE_BOTH_EDGES,
+                    worldStripSide = 512f,
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                "uniform1i($CAP_MODE_LOCATION,0)",
+                "uniform1i($CAP_MODE_LOCATION,$GROUND_CAP_MODE_NORTH)",
+                "uniform1i($CAP_MODE_LOCATION,$GROUND_CAP_MODE_BOTH_EDGES)",
+            ),
+            binding.log.filter { it.startsWith("uniform1i($CAP_MODE_LOCATION,") },
+        )
+        assertTrue(binding.log.contains("uniform1i($WORLD_STRIP_LOCATION,3)"))
+        assertTrue(binding.log.contains("uniform1i($OPPOSITE_WORLD_STRIP_LOCATION,5)"))
+        assertTrue(binding.log.contains("uniform1f($WORLD_STRIP_SIDE_LOCATION,512.0)"), binding.log.toString())
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},11)"), "ordinary fallback is valid")
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},22)"), "cap root is bound")
+        assertTrue(binding.log.contains("bindTexture(${hex(GL_TEXTURE_2D)},33)"), "opposite edge is bound")
     }
 
     /**
@@ -370,8 +488,12 @@ class GroundPipelineTest {
         assertFalse(binding.log.any { it == "enable(0x8037)" }, "polygon offset is never enabled")
         assertEquals(
             listOf(
+                "bindTexture(${hex(GL_TEXTURE_2D)},11)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},21)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},21)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},11)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},12)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},22)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},22)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},12)",
             ),
@@ -424,6 +546,8 @@ class GroundPipelineTest {
                 GL_TEXTURE0 to 90,
                 GL_TEXTURE0 + 1 to 91,
                 GL_TEXTURE0 + 2 to 92,
+                GL_TEXTURE0 + 3 to 93,
+                GL_TEXTURE0 + 4 to 94,
             ),
         )
         val binding = TextureUnitCapturingBinding(delegate = host)
@@ -460,6 +584,8 @@ class GroundPipelineTest {
 
         assertEquals(expected = 91, actual = host.texture2d(unit = GL_TEXTURE0 + 1))
         assertEquals(expected = 92, actual = host.texture2d(unit = GL_TEXTURE0 + 2))
+        assertEquals(expected = 93, actual = host.texture2d(unit = GL_TEXTURE0 + 3))
+        assertEquals(expected = 94, actual = host.texture2d(unit = GL_TEXTURE0 + 4))
         assertEquals(expected = GL_TEXTURE0, actual = host.activeUnit)
         assertEquals(expected = 0, actual = binding.touchedUnitCount)
     }
@@ -751,7 +877,10 @@ class GroundPipelineTest {
         assertEquals(
             listOf(
                 "bindTexture(${hex(GL_TEXTURE_2D)},11)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},11)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},12)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},12)",
+                "bindTexture(${hex(GL_TEXTURE_2D)},13)",
                 "bindTexture(${hex(GL_TEXTURE_2D)},13)",
             ),
             binds,
@@ -894,12 +1023,30 @@ class GroundPipelineTest {
         window: GroundTileWindow = GroundTileWindow.WHOLE,
         blendTexture: Int? = null,
         blendWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+        uvV: FloatArray = ORDINARY_TILE_UV_V,
+        worldStrip: Int? = null,
+        oppositeWorldStrip: Int? = null,
+        capMode: Int = 0,
+        capSpanTiles: Float = 1f,
+        capWorldUStart: Float = 0f,
+        capWorldUWidth: Float = 1f,
+        capLodScale: Float = 1f,
+        worldStripSide: Float = 1f,
     ): ResolvedGroundTile = ResolvedGroundTile(
         modelViewProjection = FloatArray(16),
         texture = texture,
         colourWindow = window,
         blendTexture = blendTexture,
         blendColourWindow = blendWindow,
+        uvV = uvV,
+        worldStrip = worldStrip,
+        oppositeWorldStrip = oppositeWorldStrip,
+        capMode = capMode,
+        capSpanTiles = capSpanTiles,
+        capWorldUStart = capWorldUStart,
+        capWorldUWidth = capWorldUWidth,
+        capLodScale = capLodScale,
+        worldStripSide = worldStripSide,
     )
 
     private fun mixedVertexSource(
@@ -938,6 +1085,18 @@ class GroundPipelineTest {
         GROUND_DEM_WINDOW_UNIFORM_NAME to DEM_WINDOW_LOCATION,
         GROUND_DEM_DECODE_UNIFORM_NAME to DEM_DECODE_LOCATION,
         GROUND_DEM_GRID_UNIFORM_NAME to DEM_GRID_LOCATION,
+        GROUND_TILE_UV_V_UNIFORM_NAME to TILE_UV_V_LOCATION,
+        GROUND_WORLD_STRIP_UNIFORM_NAME to WORLD_STRIP_LOCATION,
+        GROUND_BLEND_WORLD_STRIP_UNIFORM_NAME to BLEND_WORLD_STRIP_LOCATION,
+        GROUND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME to OPPOSITE_WORLD_STRIP_LOCATION,
+        GROUND_BLEND_OPPOSITE_WORLD_STRIP_UNIFORM_NAME to BLEND_OPPOSITE_WORLD_STRIP_LOCATION,
+        GROUND_CAP_MODE_UNIFORM_NAME to CAP_MODE_LOCATION,
+        GROUND_CAP_SPAN_TILES_UNIFORM_NAME to CAP_SPAN_LOCATION,
+        GROUND_CAP_WORLD_U_UNIFORM_NAME to CAP_WORLD_U_LOCATION,
+        GROUND_CAP_LOD_SCALE_UNIFORM_NAME to CAP_LOD_SCALE_LOCATION,
+        GROUND_WORLD_STRIP_SIDE_UNIFORM_NAME to WORLD_STRIP_SIDE_LOCATION,
+        GROUND_BLEND_WORLD_STRIP_SIDE_UNIFORM_NAME to BLEND_WORLD_STRIP_SIDE_LOCATION,
+        GROUND_BLEND_WORLD_AVAILABLE_UNIFORM_NAME to BLEND_WORLD_AVAILABLE_LOCATION,
     )
 
     private fun hex(value: Int): String = "0x${value.toString(16).uppercase()}"
@@ -954,10 +1113,22 @@ class GroundPipelineTest {
         const val DEM_WINDOW_LOCATION: Int = 14
         const val DEM_DECODE_LOCATION: Int = 15
         const val DEM_GRID_LOCATION: Int = 16
+        const val TILE_UV_V_LOCATION: Int = 17
+        const val WORLD_STRIP_LOCATION: Int = 18
+        const val BLEND_WORLD_STRIP_LOCATION: Int = 19
+        const val OPPOSITE_WORLD_STRIP_LOCATION: Int = 27
+        const val BLEND_OPPOSITE_WORLD_STRIP_LOCATION: Int = 28
+        const val CAP_MODE_LOCATION: Int = 20
+        const val CAP_SPAN_LOCATION: Int = 21
+        const val CAP_WORLD_U_LOCATION: Int = 22
+        const val CAP_LOD_SCALE_LOCATION: Int = 23
+        const val WORLD_STRIP_SIDE_LOCATION: Int = 24
+        const val BLEND_WORLD_STRIP_SIDE_LOCATION: Int = 25
+        const val BLEND_WORLD_AVAILABLE_LOCATION: Int = 26
         const val MERCATOR_PRIMARY_UV_LINE: String =
-            "    rengGroundUv = rengGroundGrid * rengGroundColourWindow.x + rengGroundColourWindow.yz;"
+            "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;"
         const val MERCATOR_BLEND_UV_LINE: String =
-            "    rengGroundBlendUv = rengGroundGrid * rengGroundBlendColourWindow.x + " +
+            "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
                 "rengGroundBlendColourWindow.yz;"
         const val GLOBE_PRIMARY_UV_LINE: String =
             "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;"

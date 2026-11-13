@@ -49,6 +49,7 @@ import com.rohittp.reng.internal.gl.GpuGenerationRetirement
 import com.rohittp.reng.internal.gl.GpuResourceIdentity
 import com.rohittp.reng.internal.gl.GpuSubresource
 import com.rohittp.reng.internal.gl.GpuTextureResidency
+import com.rohittp.reng.internal.gl.GroundEdgeStrips
 import com.rohittp.reng.internal.gl.GroundPipeline
 import com.rohittp.reng.internal.gl.IconBatch
 import com.rohittp.reng.internal.gl.IconPipeline
@@ -76,6 +77,7 @@ import com.rohittp.reng.internal.gl.TextureContent
 import com.rohittp.reng.internal.gl.TextureLease
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.UploadedPrimitive
+import com.rohittp.reng.internal.gl.buildGroundEdgeStrips
 import com.rohittp.reng.internal.gl.composeBackdropInverseViewProjection
 import com.rohittp.reng.internal.gl.consumerStickerShaderPair
 import com.rohittp.reng.internal.gl.createConsumerBackdropPipeline
@@ -156,6 +158,8 @@ import com.rohittp.reng.internal.planning.FramePlanningCore
 import com.rohittp.reng.internal.planning.FramePlanningOutcome
 import com.rohittp.reng.internal.planning.FramePlanningRequest
 import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.planning.TileSelectionOutcome
+import com.rohittp.reng.internal.planning.WORLD_BASEMAP_TILE
 import com.rohittp.reng.internal.planning.observeLabelTiles
 import com.rohittp.reng.internal.preparation.GroundTileProvisioner
 import com.rohittp.reng.internal.preparation.PreparationSessionCoordinator
@@ -586,6 +590,7 @@ internal class RenGRenderer(
                             maximumBasemapTileInstances = configuration.maximumBasemapTileInstances,
                             previousSelectedLod = planningLod,
                             additionalBasemapStyles = configuration.additionalBasemapStylesForCore(),
+                            extendGroundPastPoles = configuration.extendGroundPastPoles,
                         ),
                     )
                     val planned = when (planningOutcome) {
@@ -1005,6 +1010,10 @@ internal class RenGRenderer(
             } else {
                 emptyList()
             }
+            // ADR 0094's LOD-zero world tile, when the selection added it only as the cap smudge's
+            // source rather than as a tile it draws. Only then is it optional, and only then is it
+            // kept out of labels and terrain: a LOD-zero frame draws that same tile as ground.
+            val auxiliaryGroundTiles = auxiliaryGroundTilesOf(planned.spatialPlan.tileSelection)
             // **The label draw's own gate, and the same selection the ground reads.** Deriving a second
             // tile list here would be a defect rather than a duplication: `labelCandidateRequestKey`
             // deliberately does not canonicalise `x`, so a tile set that differs from this one by a
@@ -1016,7 +1025,8 @@ internal class RenGRenderer(
             // with the camera, and the label request key cannot afford to.
             val labelCanonicalTiles = if (plan.drawLabels) {
                 observeLabelTiles(
-                    required = planned.spatialPlan.tileSelection?.canonicalResources.orEmpty(),
+                    required = planned.spatialPlan.tileSelection?.canonicalResources.orEmpty() -
+                        auxiliaryGroundTiles,
                     previous = history.labelTiles,
                 )
             } else {
@@ -1040,6 +1050,7 @@ internal class RenGRenderer(
                 imageReferences = imageReferences,
                 modelGlbReferences = modelGlbReferences,
                 canonicalTiles = groundCanonicalTiles,
+                optionalGroundTiles = auxiliaryGroundTiles,
                 labelTiles = labelCanonicalTiles,
                 accessMode = accessMode,
                 priority = priority,
@@ -1738,6 +1749,7 @@ internal class RenGRenderer(
                     imageReferences = emptyList(),
                     modelGlbReferences = emptyList(),
                     canonicalTiles = emptyList(),
+                    optionalGroundTiles = emptySet(),
                     labelTiles = emptyList(),
                     accessMode = accessMode,
                     priority = priority,
@@ -1945,6 +1957,8 @@ internal class RenGRenderer(
         imageReferences: List<StaticResourceReference.External>,
         modelGlbReferences: List<StaticResourceReference.External>,
         canonicalTiles: List<CanonicalBasemapTile>,
+        /** Tiles in [canonicalTiles] whose failure must not fail the frame (ADR 0094's world source). */
+        optionalGroundTiles: Set<CanonicalBasemapTile>,
         labelTiles: List<CanonicalBasemapTile>,
         accessMode: ResourceAccessMode,
         /** The engine gate lane this frame's tiles are rendered in (ADR 0053). */
@@ -2081,13 +2095,14 @@ internal class RenGRenderer(
                     if (manifest != null && canonicalTiles.isNotEmpty()) {
                         basemapTiles =
                             groundTileProvisioner.renderBasemapTiles(
-                                manifest,
-                                style,
-                                canonicalTiles,
-                                accessMode,
-                                priority,
-                                rawReservationSink,
-                                residentAtSelection,
+                                manifest = manifest,
+                                style = style,
+                                canonicalTiles = canonicalTiles,
+                                optionalTiles = optionalGroundTiles,
+                                accessMode = accessMode,
+                                priority = priority,
+                                rawReservationSink = rawReservationSink,
+                                residentAtSelection = residentAtSelection,
                             )
                         basemapStyleDigest = style.digest
                         // Inside the invocation, on the routes `tileTimeRoutes` already preregistered
@@ -2095,7 +2110,7 @@ internal class RenGRenderer(
                         // subset of at any overzoom). Never throws for an acquisition failure: ADR
                         // 0041 makes terrain the one basemap resource that degrades to a picture RenG
                         // has already shipped rather than costing the frame.
-                        terrain = terrainAcquisition.acquire(style, manifest, canonicalTiles)
+                        terrain = terrainAcquisition.acquire(style, manifest, canonicalTiles - optionalGroundTiles)
                         terrainExaggeration = manifest.terrainExaggeration
                     }
                     if (manifest != null && labelTiles.isNotEmpty()) {
@@ -2129,6 +2144,7 @@ internal class RenGRenderer(
                                 manifest = blendManifest,
                                 style = blendStyle,
                                 canonicalTiles = canonicalTiles,
+                                optionalTiles = optionalGroundTiles,
                                 accessMode = accessMode,
                                 priority = priority,
                                 rawReservationSink = rawReservationSink,
@@ -2792,7 +2808,14 @@ internal class RenGRenderer(
             // `drawFrame` still opens a region of its own for every other caller, and finds this one
             // already open and joins it.
             withCapturedGlState(binding, profile) { captured ->
-                when (val resolved = resolveGroundTiles(frame, textureLeases, captured)) {
+                when (
+                    val resolved = resolveGroundTiles(
+                        frame = frame,
+                        groundLeases = textureLeases,
+                        groundPipeline = ground,
+                        binding = captured,
+                    )
+                ) {
                     is GroundTilesResult.Failed -> resolved.failure
                     is GroundTilesResult.Resolved -> {
                         // ADR 0057's "and say so", emitted before the draw rather than after it so that
@@ -3482,9 +3505,17 @@ internal class RenGRenderer(
      * value, and it is filtered under every pitched camera, which is exactly what premultiplication
      * exists to make correct.
      */
+    private class GroundWorldTexture(
+        val key: ResourceKey,
+        val texture: Int,
+        val widthPx: Int,
+        val heightPx: Int,
+    )
+
     private fun resolveGroundTiles(
         frame: RenGPreparedFrame,
         groundLeases: MutableList<TextureLease>,
+        groundPipeline: GroundPipeline,
         /** The captured binding (ADR 0054): uploads here overwrite texture units the host owns. */
         binding: GlBinding,
     ): GroundTilesResult {
@@ -3503,6 +3534,127 @@ internal class RenGRenderer(
         val texturesByKey = HashMap<ResourceKey, Int>(renderedByKey.size)
         val elevationByTile = resolveDemTextures(frame.terrain, groundLeases, binding)
         val tiles = ArrayList<SceneGroundTile>(groundInstances.size)
+        val hasCaps = groundInstances.any { groundInstance -> groundInstance.instance.cap != null }
+        fun resolveWorldTexture(styleDigest: String?): GroundWorldTexture? {
+            if (!hasCaps || styleDigest == null) return null
+            val key = groundTileProvisioner.renderedTextureKey(
+                styleDigest = styleDigest,
+                tile = WORLD_BASEMAP_TILE,
+            )
+            texturesByKey[key]?.let { texture ->
+                return GroundWorldTexture(
+                    key = key,
+                    texture = texture,
+                    widthPx = groundTileProvisioner.renderedTextureSidePixels,
+                    heightPx = groundTileProvisioner.renderedTextureSidePixels,
+                )
+            }
+            val reused = glObjectRegistry.leaseResident(key)
+            if (reused != null) {
+                groundLeases += reused.lease
+                texturesByKey[key] = reused.handle.name
+                return GroundWorldTexture(
+                    key = key,
+                    texture = reused.handle.name,
+                    widthPx = groundTileProvisioner.renderedTextureSidePixels,
+                    heightPx = groundTileProvisioner.renderedTextureSidePixels,
+                )
+            }
+            val rendered = renderedByKey[key] ?: return null
+            val uploaded = when (val pixels = rendered.pixels) {
+                is BasemapTilePixels.Encoded -> {
+                    val image = when (
+                        val decoded = decodePng(
+                            pixels.pngBytes,
+                            configuration.resourceLimits.maximumDecodedImageBytes,
+                            configuration.resourceLimits.maximumImageDecodeWorkingBytes,
+                        )
+                    ) {
+                        is PngDecodeResult.Success -> decoded.image
+                        else -> return null
+                    }
+                    UploadedGroundTile(
+                        name = uploadTexture(binding, image, TextureContent.IMAGE),
+                        widthPx = image.width,
+                        heightPx = image.height,
+                    )
+                }
+                is BasemapTilePixels.Raw -> UploadedGroundTile(
+                    name = uploadPremultipliedTexture(
+                        binding,
+                        pixels.rgba,
+                        pixels.widthPx,
+                        pixels.heightPx,
+                    ),
+                    widthPx = pixels.widthPx,
+                    heightPx = pixels.heightPx,
+                )
+            }
+            groundLeases += glObjectRegistry.registerTexture(
+                key = key,
+                handle = GlObjectHandle(type = GlObjectType.TEXTURE, name = uploaded.name),
+                byteSize = uploaded.widthPx.toLong() * uploaded.heightPx.toLong() * RGBA_BYTES_PER_PIXEL,
+            )
+            texturesByKey[key] = uploaded.name
+            return GroundWorldTexture(
+                key = key,
+                texture = uploaded.name,
+                widthPx = uploaded.widthPx,
+                heightPx = uploaded.heightPx,
+            )
+        }
+        fun resolveWorldStrips(world: GroundWorldTexture?): GroundEdgeStrips? {
+            if (world == null) return null
+            val cached = groundPipeline.worldStrips[world.key]
+            if (cached != null && cached.sourceTexture == world.texture) {
+                val liveTextures = glObjectRegistry.handlesOfType(world.key, GlObjectType.TEXTURE)
+                    .mapTo(hashSetOf()) { handle -> handle.name }
+                if (cached.northTexture in liveTextures && cached.southTexture in liveTextures) {
+                    return cached
+                }
+            }
+            groundPipeline.worldStrips.remove(world.key)
+            val built = buildGroundEdgeStrips(
+                binding = binding,
+                sourceTexture = world.texture,
+                sourceWidthPx = world.widthPx,
+                sourceHeightPx = world.heightPx,
+            ) ?: return null
+            // Under the world texture's own key, so it and its strips are freed together. They are
+            // appended after it, and `leaseResident` hands back the key's first texture, so a lookup
+            // of the world tile still finds the world texture rather than a strip.
+            glObjectRegistry.register(
+                key = world.key,
+                handles = listOf(
+                    GlObjectHandle(type = GlObjectType.TEXTURE, name = built.northTexture),
+                    GlObjectHandle(type = GlObjectType.TEXTURE, name = built.southTexture),
+                ),
+            )
+            groundPipeline.worldStrips[world.key] = built
+            return built
+        }
+        fun withWorldStrips(
+            tile: SceneGroundTile,
+            primary: GroundEdgeStrips?,
+            blend: GroundEdgeStrips? = null,
+        ): SceneGroundTile = if (
+            tile.instance.cap == null &&
+            tile.instance.tileY.toLong() != 0L &&
+            tile.instance.tileY.toLong() != (1L shl tile.instance.lod) - 1L
+        ) {
+            tile
+        } else {
+            SceneGroundTile(
+                instance = tile.instance,
+                texture = tile.texture,
+                colourWindow = tile.colourWindow,
+                blendTexture = tile.blendTexture,
+                blendColourWindow = tile.blendColourWindow,
+                worldStrips = primary,
+                blendWorldStrips = blend,
+                elevation = tile.elevation,
+            )
+        }
         fun resolveInstances(
             instances: List<PreparedGroundInstance>,
             styleDigest: String?,
@@ -3625,9 +3777,10 @@ internal class RenGRenderer(
         if (primaryResolution is GroundInstanceResolution.Failed) {
             return GroundTilesResult.Failed(failure = primaryResolution.failure)
         }
+        val primaryWorldStrips = resolveWorldStrips(resolveWorldTexture(frame.basemapStyleDigest))
         if (!hasBlend) {
             return GroundTilesResult.Resolved(
-                tiles = tiles,
+                tiles = tiles.map { tile -> withWorldStrips(tile = tile, primary = primaryWorldStrips) },
                 provisionalTileCount =
                     (primaryResolution as GroundInstanceResolution.Resolved).provisionalTileCount,
             )
@@ -3641,6 +3794,7 @@ internal class RenGRenderer(
         if (blendResolution is GroundInstanceResolution.Failed) {
             return GroundTilesResult.Failed(failure = blendResolution.failure)
         }
+        val blendWorldStrips = resolveWorldStrips(resolveWorldTexture(frame.blendBasemapStyleDigest))
         // ADR 0086/0065 invariant: both styles resolve the identical ordered instance list so one
         // mixed draw preserves the ordinary pass's finer-last overlap rule.
         require(tiles.size == blendTiles.size) {
@@ -3657,6 +3811,8 @@ internal class RenGRenderer(
                 colourWindow = primary.colourWindow,
                 blendTexture = target.texture,
                 blendColourWindow = target.colourWindow,
+                worldStrips = primaryWorldStrips,
+                blendWorldStrips = blendWorldStrips,
                 elevation = primary.elevation,
             )
         }
@@ -3857,4 +4013,19 @@ internal class RenGRenderer(
         }
         if (outcome is RendererLifecycleOutcome.Failed) throw outcome.failure.toException()
     }
+}
+
+/**
+ * ADR 0094's LOD-zero world tile when [selection] carries it only as the source of the cap smudge, or
+ * nothing. A selection with a LOD-zero instance draws that same tile as ground, so there it is an
+ * ordinary required tile like any other.
+ */
+internal fun auxiliaryGroundTilesOf(selection: TileSelectionOutcome.Success?): Set<CanonicalBasemapTile> {
+    if (selection == null || WORLD_BASEMAP_TILE !in selection.canonicalResources) return emptySet()
+    val drawn = selection.instances.any { instance ->
+        instance.lod == WORLD_BASEMAP_TILE.lod &&
+            instance.tileY == WORLD_BASEMAP_TILE.tileY &&
+            instance.canonicalX == WORLD_BASEMAP_TILE.canonicalX
+    }
+    return if (drawn) emptySet() else setOf(WORLD_BASEMAP_TILE)
 }

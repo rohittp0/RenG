@@ -43,6 +43,7 @@ public class RendererConfiguration(
     maximumReadAheadRasterisedTileBytes: Long = 0L,
     presentFailedTilesProvisionally: Boolean = false,
     additionalBasemapStyles: List<ResourceLocator> = emptyList(),
+    extendGroundPastPoles: Boolean = false,
 ) {
     public val outputPixelSize: OutputPixelSize
     public val transport: Transport
@@ -165,6 +166,17 @@ public class RendererConfiguration(
      * inside the engine stays disabled either way (ADR 0016).
      */
     public val presentFailedTilesProvisionally: Boolean
+
+    /**
+     * Whether Mercator ground extends past its north and south limits by stretching each edge
+     * tile's outermost texel row, **off by default**.
+     *
+     * With this on, a frame that reaches above Mercator `y = 0` or below `y = 1` keeps drawing the
+     * basemap to the frame edge instead of exposing the backdrop. The globe is unchanged: it always
+     * closes its spherical poles. Off preserves the finite Mercator ground drawn by existing
+     * renderers.
+     */
+    public val extendGroundPastPoles: Boolean
     private val additionalBasemapStyleSnapshot: List<ResourceLocator>
     private val basemapStyleSetSnapshot: List<ResourceLocator>
     public val additionalBasemapStyles: List<ResourceLocator>
@@ -215,6 +227,7 @@ public class RendererConfiguration(
         this.maximumConcurrentTileRasterisations = maximumConcurrentTileRasterisations
         this.maximumReadAheadRasterisedTileBytes = maximumReadAheadRasterisedTileBytes
         this.presentFailedTilesProvisionally = presentFailedTilesProvisionally
+        this.extendGroundPastPoles = extendGroundPastPoles
         this.additionalBasemapStyleSnapshot = ArrayList(additionalBasemapStyles)
         this.basemapStyleSetSnapshot = ArrayList(configuredBasemapStyles)
     }

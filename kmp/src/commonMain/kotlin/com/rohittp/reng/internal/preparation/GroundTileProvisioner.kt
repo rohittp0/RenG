@@ -139,6 +139,11 @@ internal class GroundTileProvisioner(
         priority: RenGRenderPriority,
         rawReservationSink: (RawTileBudget.Reservation) -> Unit,
         residentAtSelection: MutableSet<ResourceKey>,
+        /**
+         * Tiles in [canonicalTiles] that only improve the picture (ADR 0094's world source when the
+         * frame does not also draw it); one that cannot be prepared is left out instead of failing.
+         */
+        optionalTiles: Set<CanonicalBasemapTile> = emptySet(),
     ): List<RenderedBasemapTile> {
         // Routes for EVERY visible tile, never only the missing ones. `tileTimeRoutes` expands a
         // `raster-dem` source through `demNeighbourhoodOrSelf`, so terrain's routes come from this
@@ -273,7 +278,7 @@ internal class GroundTileProvisioner(
         // tiles this frame actually rasterises rather than every tile it draws, which is where that
         // budget belongs now that a resident tile is never asked for (ADR 0046).
         val tilesAskedFor = missing.size
-        val preparedFresh = prepareFreshTiles(style, missing)
+        val preparedFresh = prepareFreshTiles(style = style, missing = missing, optionalTiles = optionalTiles)
         if (missing.size != tilesAskedFor) {
             // ADR 0057's failed tiles left `missing`, and the reservation above was taken for them too.
             // ADR 0044 holds a frame's reservation to exactly the raw pixels it carries (the frame's own
@@ -325,6 +330,11 @@ internal class GroundTileProvisioner(
      * failure it fails with today keeps the consumer's error handling exactly as it is. A frame that
      * cannot draw its ground is not an improvement on one that fails.
      *
+     * [optionalTiles] are the one exception: ADR 0094's LOD-zero world texture, when the frame does not
+     * also draw it, only improves cap smudging, so its failure is presentable even when provisional
+     * ground is otherwise disabled.
+     * It is removed before the retry and does not increment the presented-after-failure metric.
+     *
      * **Once, deliberately.** The second request is [BasemapEngineHost.prepareTiles] itself, and whatever
      * it throws is the frame's failure. It costs no network for the tiles that succeeded the first
      * time: this invocation's firewall registry latched their responses and answers the engine's second
@@ -339,8 +349,12 @@ internal class GroundTileProvisioner(
     private suspend fun prepareFreshTiles(
         style: PreparedStyle,
         missing: MutableList<CanonicalBasemapTile>,
+        optionalTiles: Set<CanonicalBasemapTile>,
     ): PreparedBasemapTiles? {
-        if (!configuration.presentFailedTilesProvisionally) return basemapEngineHost.prepareTiles(style, missing)
+        val hasOptionalTile = missing.any { tile -> tile in optionalTiles }
+        if (!configuration.presentFailedTilesProvisionally && !hasOptionalTile) {
+            return basemapEngineHost.prepareTiles(style, missing)
+        }
         val outcome = basemapEngineHost.prepareTilesReportingUnavailableColour(style, missing)
         val unavailable = when (outcome) {
             is BasemapTilePreparation.Prepared -> return outcome.tiles
@@ -349,13 +363,19 @@ internal class GroundTileProvisioner(
         val presentable = presentableFailedTiles(
             failed = unavailable.tiles,
             requested = missing,
-            hasResidentAncestor = { tile -> residentAncestorOf(style.digest, tile) != null },
+            hasResidentAncestor = { tile ->
+                tile in optionalTiles ||
+                    (configuration.presentFailedTilesProvisionally && residentAncestorOf(style.digest, tile) != null)
+            },
         ) ?: throw unavailable.failure
         missing.removeAll(presentable)
         val retried = if (missing.isEmpty()) null else basemapEngineHost.prepareTiles(style, missing)
         // Counted only once the frame is going to prepare: a frame that failed on the second request
         // presents nothing, and a counter that said otherwise would be counting attempts, not frames.
-        metricRecorder.record(RenGMetricName.TILES_PRESENTED_AFTER_FAILURE, presentable.size.toLong())
+        metricRecorder.record(
+            RenGMetricName.TILES_PRESENTED_AFTER_FAILURE,
+            presentable.count { tile -> tile !in optionalTiles }.toLong(),
+        )
         return retried
     }
 
@@ -380,6 +400,14 @@ internal class GroundTileProvisioner(
         }
         return null
     }
+
+    /** The registry identity used for [tile] after this provisioner's style-specific render. */
+    internal fun renderedTextureKey(styleDigest: String, tile: CanonicalBasemapTile): ResourceKey =
+        basemapEngineHost.renderedTileKey(styleDigest, tile)
+
+    /** Actual side of every square texture produced by the configured basemap renderer. */
+    internal val renderedTextureSidePixels: Int
+        get() = basemapEngineHost.tileOutputSizePixels
 
     /**
      * Whether [tileCount] tiles of raw pixels still fit under

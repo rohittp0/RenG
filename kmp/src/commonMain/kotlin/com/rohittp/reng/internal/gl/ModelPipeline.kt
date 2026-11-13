@@ -648,6 +648,7 @@ internal fun drawModels(
     pipelines: Map<ModelShaderVariant, ModelPipeline>,
     models: List<ResolvedModel>,
     lightDirectionCameraSpace: FloatArray,
+    textureBindingObserver: ((unit: Int, texture: Int) -> Unit)? = null,
 ) {
     require(lightDirectionCameraSpace.size == 3) { "a light direction requires exactly three components" }
     val primitives = models.flatMap { it.primitives }
@@ -656,7 +657,7 @@ internal fun drawModels(
     val blended = primitives.filter { it.material.alphaMode == MODEL_ALPHA_MODE_BLEND || it.opacity < 1f }
     val opaque = primitives.filter { it.material.alphaMode != MODEL_ALPHA_MODE_BLEND && it.opacity >= 1f }
 
-    val state = ModelDrawState(binding, pipelines, lightDirectionCameraSpace)
+    val state = ModelDrawState(binding, pipelines, lightDirectionCameraSpace, textureBindingObserver)
     binding.enable(GL_DEPTH_TEST)
     binding.frontFace(GL_CCW)
     binding.disable(GL_CULL_FACE)
@@ -687,6 +688,7 @@ private class ModelDrawState(
     private val binding: GlBinding,
     private val pipelines: Map<ModelShaderVariant, ModelPipeline>,
     private val lightDirectionCameraSpace: FloatArray,
+    private val textureBindingObserver: ((unit: Int, texture: Int) -> Unit)?,
 ) {
     private var currentProgram: Int = 0
     private var currentFrontFace: Int = GL_CCW
@@ -735,7 +737,9 @@ private class ModelDrawState(
         }
         if (variant.hasBaseColourTexture) {
             binding.activeTexture(GL_TEXTURE0)
-            binding.bindTexture(GL_TEXTURE_2D, primitive.baseColourTexture ?: 0)
+            val texture = primitive.baseColourTexture ?: 0
+            binding.bindTexture(GL_TEXTURE_2D, texture)
+            textureBindingObserver?.invoke(0, texture)
             if (pipeline.baseColourTextureLocation >= 0) {
                 binding.uniform1i(pipeline.baseColourTextureLocation, 0)
             }

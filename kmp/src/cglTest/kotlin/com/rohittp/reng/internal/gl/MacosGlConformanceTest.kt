@@ -10,6 +10,8 @@ import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
 import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
 import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.LAYER_ORDER_READBACK_PIXELS
+import com.rohittp.reng.runLayerOrderReadbackSuite
 import com.rohittp.reng.BLOOM_READBACK_PIXELS
 import com.rohittp.reng.runBloomReadbackSuite
 import com.rohittp.reng.runBloomPerElementReadbackSuite
@@ -467,6 +469,24 @@ class MacosGlConformanceTest {
                 binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
                 binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
                 runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
+            } finally {
+                fixture.destroy()
+            }
+        }
+    }
+
+    @Test fun theLayerOrderReadbackSuitePassesOnBothAppleRasterisers() {
+        listOf(MacosGlRenderer.DEFAULT, MacosGlRenderer.SOFTWARE).forEach { glRenderer ->
+            val fixture = CglCoreProfileContext.createOrNull(glRenderer)
+            if (fixture == null) {
+                println("RenG layer order readback: skipped, $glRenderer is unavailable on this machine")
+                return@forEach
+            }
+            try {
+                val binding = bindOrFail()
+                binding.viewport(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+                binding.scissor(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+                runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.DESKTOP)
             } finally {
                 fixture.destroy()
             }

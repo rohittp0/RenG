@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.planning
 
+import com.rohittp.reng.FramePlan
 import com.rohittp.reng.internal.projection.FrameGroundFootprint
 import com.rohittp.reng.internal.projection.ResolvedFrameCamera
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
@@ -8,6 +9,8 @@ internal sealed interface DrawnThingReference {
     data class StickerAt(val index: Int) : DrawnThingReference
 
     data class ModelAt(val index: Int) : DrawnThingReference
+
+    data class GeometryAt(val index: Int) : DrawnThingReference
 }
 
 internal data class ResolvedDrawnThing(
@@ -62,8 +65,14 @@ internal class FrameSpatialPlan(
         require(mapEntrySnapshot.all { it.placement.drawRegime == DrawRegime.MAP_OCCLUDED }) {
             "mapEntries must contain only map-occluded placements"
         }
+        require(mapEntrySnapshot.none { it.reference is DrawnThingReference.GeometryAt }) {
+            "mapEntries may not contain a Geometry, which has no Placement"
+        }
         require(screenEntrySnapshot.all { it.placement.drawRegime == DrawRegime.SCREEN_COMPOSITED }) {
             "screenEntries must contain only screen-composited placements"
+        }
+        require(screenEntrySnapshot.none { it.reference is DrawnThingReference.GeometryAt }) {
+            "screenEntries may not contain a Geometry, which has no Placement"
         }
         for (index in 1 until screenEntrySnapshot.size) {
             require(
@@ -140,13 +149,44 @@ private val DrawnThingReference.typeOrder: Int
     get() = when (this) {
         is DrawnThingReference.StickerAt -> 0
         is DrawnThingReference.ModelAt -> 1
+        is DrawnThingReference.GeometryAt -> 2
     }
 
 private val DrawnThingReference.sourceIndex: Int
     get() = when (this) {
         is DrawnThingReference.StickerAt -> index
         is DrawnThingReference.ModelAt -> index
+        is DrawnThingReference.GeometryAt -> index
     }
+
+/** ADR 0096's one draw order for the map regime; geometries remain outside placement entries. */
+internal fun mergedMapOrder(
+    plan: FramePlan,
+    mapEntries: List<ResolvedDrawnThing>,
+): List<DrawnThingReference> {
+    val stickers = plan.stickers
+    val models = plan.models
+    val geometries = plan.geometries
+    val references = ArrayList<DrawnThingReference>(mapEntries.size + geometries.size)
+    references += mapEntries.map(ResolvedDrawnThing::reference)
+    references += geometries.indices.map { DrawnThingReference.GeometryAt(it) }
+    references.sortWith(
+        compareBy<DrawnThingReference> {
+            when (it) {
+                is DrawnThingReference.GeometryAt -> geometries[it.index].layer
+                is DrawnThingReference.ModelAt -> models[it.index].layer
+                is DrawnThingReference.StickerAt -> stickers[it.index].layer
+            }
+        }.thenBy {
+            when (it) {
+                is DrawnThingReference.GeometryAt -> 0
+                is DrawnThingReference.ModelAt -> 1
+                is DrawnThingReference.StickerAt -> 2
+            }
+        }.thenBy { it.sourceIndex },
+    )
+    return references
+}
 
 internal fun appendByDrawRegime(
     entry: ResolvedDrawnThing,

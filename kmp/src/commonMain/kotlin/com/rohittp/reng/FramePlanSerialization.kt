@@ -380,6 +380,7 @@ private class StickerSurrogate(
     @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
     @SerialName("shader") val shader: StickerShader? = null,
     @SerialName("transient") val transient: Boolean = false,
+    @SerialName("layer") val layer: Int = 0,
 )
 
 internal object StickerSerializer : KSerializer<Sticker> {
@@ -388,12 +389,28 @@ internal object StickerSerializer : KSerializer<Sticker> {
     override fun serialize(encoder: Encoder, value: Sticker) {
         encoder.encodeSerializableValue(
             delegate,
-            StickerSurrogate(value.placement, value.image, value.opacity, value.blend, value.shader, value.transient),
+            StickerSurrogate(
+                placement = value.placement,
+                image = value.image,
+                opacity = value.opacity,
+                blend = value.blend,
+                shader = value.shader,
+                transient = value.transient,
+                layer = value.layer,
+            ),
         )
     }
     override fun deserialize(decoder: Decoder): Sticker {
         val it = decoder.decodeSerializableValue(delegate)
-        return Sticker(it.placement, it.image, it.opacity, it.blend, it.shader, it.transient)
+        return Sticker(
+            placement = it.placement,
+            image = it.image,
+            opacity = it.opacity,
+            blend = it.blend,
+            shader = it.shader,
+            transient = it.transient,
+            layer = it.layer,
+        )
     }
 }
 
@@ -516,6 +533,7 @@ private class ModelSurrogate(
     @SerialName("texture") val texture: ResourceLocator? = null,
     @SerialName("animationTracks") val animationTracks: List<AnimationTrack> = emptyList(),
     @SerialName("opacity") val opacity: Float = 1f,
+    @SerialName("layer") val layer: Int = 0,
 )
 
 internal object ModelSerializer : KSerializer<Model> {
@@ -524,12 +542,26 @@ internal object ModelSerializer : KSerializer<Model> {
     override fun serialize(encoder: Encoder, value: Model) {
         encoder.encodeSerializableValue(
             delegate,
-            ModelSurrogate(value.placement, value.glb, value.texture, value.animationTracks, value.opacity),
+            ModelSurrogate(
+                placement = value.placement,
+                glb = value.glb,
+                texture = value.texture,
+                animationTracks = value.animationTracks,
+                opacity = value.opacity,
+                layer = value.layer,
+            ),
         )
     }
     override fun deserialize(decoder: Decoder): Model {
         val it = decoder.decodeSerializableValue(delegate)
-        return Model(it.placement, it.glb, it.texture, it.animationTracks, it.opacity)
+        return Model(
+            placement = it.placement,
+            glb = it.glb,
+            texture = it.texture,
+            animationTracks = it.animationTracks,
+            opacity = it.opacity,
+            layer = it.layer,
+        )
     }
 }
 
@@ -687,6 +719,7 @@ private class GeometrySurrogate(
     @SerialName("emissive") val emissive: Boolean = false,
     @SerialName("blend") val blend: BlendMode = BlendMode.OVER,
     @SerialName("bloomReach") val bloomReach: Float = 0f,
+    @SerialName("layer") val layer: Int = 0,
 )
 
 internal object GeometrySerializer : KSerializer<Geometry> {
@@ -696,17 +729,32 @@ internal object GeometrySerializer : KSerializer<Geometry> {
         encoder.encodeSerializableValue(
             delegate,
             GeometrySurrogate(
-                value.topLeft, value.bottomRight, value.shaderPair,
-                value.uniforms, value.textures, value.altitudeMode, value.emissive, value.blend,
-                value.bloomReach,
+                topLeft = value.topLeft,
+                bottomRight = value.bottomRight,
+                shaderPair = value.shaderPair,
+                uniforms = value.uniforms,
+                textures = value.textures,
+                altitudeMode = value.altitudeMode,
+                emissive = value.emissive,
+                blend = value.blend,
+                bloomReach = value.bloomReach,
+                layer = value.layer,
             ),
         )
     }
     override fun deserialize(decoder: Decoder): Geometry {
         val it = decoder.decodeSerializableValue(delegate)
         return Geometry(
-            it.topLeft, it.bottomRight, it.shaderPair, it.uniforms, it.textures, it.altitudeMode,
-            it.emissive, it.blend, it.bloomReach,
+            topLeft = it.topLeft,
+            bottomRight = it.bottomRight,
+            shaderPair = it.shaderPair,
+            uniforms = it.uniforms,
+            textures = it.textures,
+            altitudeMode = it.altitudeMode,
+            emissive = it.emissive,
+            blend = it.blend,
+            bloomReach = it.bloomReach,
+            layer = it.layer,
         )
     }
 }

@@ -160,6 +160,7 @@ import com.rohittp.reng.internal.planning.FramePlanningRequest
 import com.rohittp.reng.internal.planning.StaticResourceReference
 import com.rohittp.reng.internal.planning.TileSelectionOutcome
 import com.rohittp.reng.internal.planning.WORLD_BASEMAP_TILE
+import com.rohittp.reng.internal.planning.mergedMapOrder
 import com.rohittp.reng.internal.planning.observeLabelTiles
 import com.rohittp.reng.internal.preparation.GroundTileProvisioner
 import com.rohittp.reng.internal.preparation.PreparationSessionCoordinator
@@ -1352,7 +1353,7 @@ internal class RenGRenderer(
                 terrain = terrain,
                 groundSurface = groundSurface,
                 labels = labels,
-                mapOrder = planned.spatialPlan.mapEntries.map { it.reference },
+                mapOrder = mergedMapOrder(plan, planned.spatialPlan.mapEntries),
                 screenOrder = planned.spatialPlan.screenEntries.map { it.reference },
                 rawTileReservation = rawTileReservation,
                 blendRawTileReservation = blendRawTileReservation,
@@ -3084,6 +3085,7 @@ internal class RenGRenderer(
             icons = sceneIcons(frame, textureLeases, binding),
             mapOrder = frame.mapOrder,
             screenOrder = frame.screenOrder,
+            completeMapOrder = true,
         )
         val frameBloom = frame.bloom
         val resolvedBloomResources = if (

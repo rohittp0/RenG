@@ -28,6 +28,7 @@ import com.rohittp.reng.internal.model.ModelDrawItem
 import com.rohittp.reng.internal.model.ModelIndices
 import com.rohittp.reng.internal.model.ResolvedMaterial
 import com.rohittp.reng.internal.planning.BasemapTileInstance
+import com.rohittp.reng.internal.planning.DrawnThingReference.GeometryAt
 import com.rohittp.reng.internal.planning.DrawnThingReference.ModelAt
 import com.rohittp.reng.internal.planning.DrawnThingReference.StickerAt
 import com.rohittp.reng.internal.planning.resolveBasemapTileQuad
@@ -493,6 +494,47 @@ class SceneContentTest {
         )
     }
 
+    @Test
+    fun mergedMapOrderDrawsStickerGeometryStickerInThatOrder() {
+        val binding = RecordingGlBinding()
+        val geometryPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(
+                SceneSticker(mapPlacement(), texture = 101),
+                SceneSticker(mapPlacement(), texture = 202),
+            ),
+            geometries = listOf(
+                SceneGeometry(testGeometry(), geometryPipeline, consumerUniforms = emptyMap()),
+            ),
+            mapOrder = listOf(StickerAt(0), GeometryAt(0), StickerAt(1)),
+        )
+        binding.log.clear()
+
+        SceneContent(
+            topDownCamera(),
+            scene,
+            stickerPipeline,
+            newGroundPipeline(binding),
+        ).draw(binding)
+
+        var currentProgram = 0
+        val draws = ArrayList<String>()
+        for (call in binding.log) {
+            if (call.startsWith("useProgram(")) {
+                currentProgram = call.removePrefix("useProgram(").removeSuffix(")").toInt()
+            } else if (call.startsWith("drawArrays") || call.startsWith("drawElements")) {
+                when (currentProgram) {
+                    stickerPipeline.program -> draws += "sticker"
+                    geometryPipeline.program -> draws += "geometry"
+                }
+            }
+        }
+        assertEquals(listOf("sticker", "geometry", "sticker"), draws)
+    }
+
     /**
      * **ADR 0039's terrain arm, asserting two writes rather than widening the count above to two.**
      *
@@ -833,6 +875,53 @@ class SceneContentTest {
         assertEquals(1, binding.log.count { it.startsWith("drawElements") })
         assertFalse(binding.log.any { it.startsWith("bindFramebuffer") }, binding.log.toString())
         assertEquals(listOf("uniform1i(60,0)"), binding.log.filter { it.startsWith("uniform1i(60,") })
+    }
+
+    @Test
+    fun bloomFiresAfterTheLastEmissiveGeometryInMergedMapOrder() {
+        val binding = RecordingGlBinding().withDeclaredNames(UNIFORM_GEOMETRY_EMISSION_PASS to 60)
+        val firstPipeline = newGeometryPipeline(binding)
+        val lastPipeline = newGeometryPipeline(binding)
+        val stickerPipeline = newStickerPipeline(binding)
+        val resources = newBloomResources(binding, depthRenderbuffer = 77)
+        val scene = Scene(
+            outputPixelSize = OUTPUT_SIZE,
+            frameIndex = 0L,
+            stickers = listOf(SceneSticker(mapPlacement(), texture = 101)),
+            geometries = listOf(
+                SceneGeometry(
+                    testGeometry().copy(emissive = true),
+                    firstPipeline,
+                    consumerUniforms = emptyMap(),
+                ),
+                SceneGeometry(
+                    testGeometry().copy(emissive = true),
+                    lastPipeline,
+                    consumerUniforms = emptyMap(),
+                ),
+            ),
+            mapOrder = listOf(GeometryAt(0), StickerAt(0), GeometryAt(1)),
+        )
+        binding.log.clear()
+
+        SceneContent(
+            camera = topDownCamera(),
+            scene = scene,
+            stickerPipeline = stickerPipeline,
+            groundPipeline = newGroundPipeline(binding),
+            bloom = Bloom(),
+            bloomResources = resources,
+            surfaceFramebuffer = 55,
+            surfaceDepthRenderbuffer = 77,
+        ).draw(binding)
+
+        val firstGeometry = binding.log.indexOfFirst { it == "useProgram(${firstPipeline.program})" }
+        val sticker = binding.log.indexOfFirst { it == "bindTexture(${hex(GL_TEXTURE_2D)},101)" }
+        val lastGeometry = binding.log.indexOfFirst { it == "useProgram(${lastPipeline.program})" }
+        val bloomComposite = binding.log.indexOfFirst { it == "useProgram(${resources.composite.program})" }
+        assertTrue(firstGeometry < sticker, binding.log.toString())
+        assertTrue(sticker < lastGeometry, binding.log.toString())
+        assertTrue(lastGeometry < bloomComposite, binding.log.toString())
     }
 
     @Test

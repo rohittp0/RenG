@@ -60,6 +60,7 @@ class FramePlanSerializationTest {
                             ground = GroundRectangle(Vector3(48.5, -38.0, 12.0), Vector3(44.5, -36.5, -4.0)),
                         ),
                         transient = true,
+                        layer = 7,
                     ),
                 ),
                 models = listOf(
@@ -72,6 +73,7 @@ class FramePlanSerializationTest {
                             AnimationTrack(AnimationSelector.Index(7L), 2.25),
                         ),
                         opacity = 0.5f,
+                        layer = 8,
                     ),
                 ),
                 geometries = listOf(
@@ -94,6 +96,7 @@ class FramePlanSerializationTest {
                         emissive = true,
                         blend = BlendMode.MULTIPLY,
                         bloomReach = 0.5f,
+                        layer = 9,
                     ),
                 ),
                 bloom = Bloom(
@@ -132,6 +135,20 @@ class FramePlanSerializationTest {
         assertEquals(original, json.decodeFromString(FramePlan.serializer(), json.encodeToString(FramePlan.serializer(), original)))
     }
 
+    @Test
+    fun aDocumentWrittenBeforeLayerExistedDefaultsEveryLayerToZero() {
+        val olderDocument = json.encodeToString(FramePlan.serializer(), maximalPlan)
+            .replace(",\"layer\":7", "")
+            .replace(",\"layer\":8", "")
+            .replace(",\"layer\":9", "")
+        assertTrue("\"layer\"" !in olderDocument)
+
+        val decoded = json.decodeFromString(FramePlan.serializer(), olderDocument)
+        assertEquals(0, decoded.stickers.single().layer)
+        assertEquals(0, decoded.models.single().layer)
+        assertEquals(0, decoded.geometries.single().layer)
+    }
+
     /**
      * Every property of every type appears in the document, by name.
      *
@@ -156,7 +173,7 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image", "opacity", "blend", "shader", "transient",
+            "placement", "image", "opacity", "blend", "shader", "transient", "layer",
             // StickerShader + GroundRectangle (its corners share Geometry's key names)
             "ground",
             // Model

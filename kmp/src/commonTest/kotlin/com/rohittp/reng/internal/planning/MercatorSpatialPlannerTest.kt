@@ -348,6 +348,96 @@ class FrameSpatialPlannerTest {
         assertEquals(DrawRegime.SCREEN_COMPOSITED, spatialPlan.screenEntries[0].placement.drawRegime)
     }
 
+    @Test
+    fun mergedMapOrderUsesLayerThenTypeThenSourceIndex() {
+        val placement = mapPlacement()
+        val firstGeometry = geometry(
+            Vector3(1.0, -1.0, 0.0),
+            Vector3(-1.0, 1.0, 0.0),
+            "first-v",
+            "first-f",
+        )
+        val secondGeometry = geometry(
+            Vector3(2.0, -2.0, 0.0),
+            Vector3(-2.0, 2.0, 0.0),
+            "second-v",
+            "second-f",
+        )
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(sticker(placement, "first-sticker"), sticker(placement, "second-sticker")),
+            models = listOf(model(placement, "first-model"), model(placement, "second-model")),
+            geometries = listOf(firstGeometry, secondGeometry),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(
+                DrawnThingReference.GeometryAt(0),
+                DrawnThingReference.GeometryAt(1),
+                DrawnThingReference.ModelAt(0),
+                DrawnThingReference.ModelAt(1),
+                DrawnThingReference.StickerAt(0),
+                DrawnThingReference.StickerAt(1),
+            ),
+            mergedMapOrder(plan, spatialPlan.mapEntries),
+        )
+    }
+
+    @Test
+    fun lowerStickerLayerPrecedesHigherGeometryLayer() {
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(sticker(mapPlacement(), "sticker").copy(layer = 0)),
+            geometries = listOf(
+                geometry(
+                    Vector3(1.0, -1.0, 0.0),
+                    Vector3(-1.0, 1.0, 0.0),
+                    "geometry-v",
+                    "geometry-f",
+                ).copy(layer = 1),
+            ),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(DrawnThingReference.StickerAt(0), DrawnThingReference.GeometryAt(0)),
+            mergedMapOrder(plan, spatialPlan.mapEntries),
+        )
+    }
+
+    @Test
+    fun screenStickerLayerDoesNotAffectScreenOrder() {
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(
+                sticker(screenPlacement(2.0), "higher-z").copy(layer = -100),
+                sticker(screenPlacement(1.0), "lower-z").copy(layer = 100),
+            ),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(DrawnThingReference.StickerAt(1), DrawnThingReference.StickerAt(0)),
+            spatialPlan.screenEntries.map(ResolvedDrawnThing::reference),
+        )
+    }
+
     // ADR 0029 leaves only Stickers reachable in the screen-composited regime through the real
     // planning pipeline, so this no longer demonstrates a sticker-before-model tiebreak (that
     // property of screenCompositingOrder is still covered directly, via construction, by

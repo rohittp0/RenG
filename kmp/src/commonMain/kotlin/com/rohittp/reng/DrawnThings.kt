@@ -239,6 +239,15 @@ public data class Sticker(
      * for the append-only ABI.
      */
     public val transient: Boolean = false,
+    /**
+     * Orders map-anchored drawn things across types (ADR 0096); lower draws first; ties keep
+     * today's order — Geometry, then Model, then Sticker, each in its own list order. Ignored for a
+     * screen-anchored Sticker, whose order is `position.z`. A Model writes depth, so a
+     * later layer does not draw over a nearer model.
+     *
+     * Declared last for the append-only data-class ABI.
+     */
+    public val layer: Int = 0,
 ) {
     init {
         require(requireFiniteFloat(opacity, "opacity") in 0f..1f) {
@@ -404,6 +413,7 @@ public class Model(
     texture: ResourceLocator? = null,
     animationTracks: List<AnimationTrack> = emptyList(),
     opacity: Float = 1f,
+    layer: Int = 0,
 ) {
     public val placement: Placement
     public val glb: ResourceLocator
@@ -412,6 +422,13 @@ public class Model(
     public val animationTracks: List<AnimationTrack>
         get() = freshListCopy(animationTrackSnapshot)
     public val opacity: Float
+    /**
+     * Orders map-anchored drawn things across types (ADR 0096); lower draws first; ties keep
+     * today's order — Geometry, then Model, then Sticker, each in its own list order. Ignored for a
+     * screen-anchored Sticker, whose order is `position.z`. A Model writes depth, so a later layer
+     * does not draw over a nearer model.
+     */
+    public val layer: Int
 
     init {
         val validatedPlacement = placement
@@ -427,6 +444,7 @@ public class Model(
         this.texture = validatedTexture
         this.animationTrackSnapshot = snapshot
         this.opacity = canonicalFloat(opacity, "opacity")
+        this.layer = layer
     }
 
     override fun equals(other: Any?): Boolean =
@@ -435,7 +453,8 @@ public class Model(
             glb == other.glb &&
             texture == other.texture &&
             animationTrackSnapshot == other.animationTrackSnapshot &&
-            opacity == other.opacity
+            opacity == other.opacity &&
+            layer == other.layer
 
     override fun hashCode(): Int {
         var result = placement.hashCode()
@@ -443,6 +462,7 @@ public class Model(
         result = 31 * result + (texture?.hashCode() ?: 0)
         result = 31 * result + animationTrackSnapshot.hashCode()
         result = 31 * result + opacity.hashCode()
+        result = 31 * result + layer
         return result
     }
 }
@@ -683,6 +703,15 @@ public data class Geometry(
      * existing component.
      */
     public val bloomReach: Float = 0f,
+    /**
+     * Orders map-anchored drawn things across types (ADR 0096); lower draws first; ties keep
+     * today's order — Geometry, then Model, then Sticker, each in its own list order. Ignored for a
+     * screen-anchored Sticker, whose order is `position.z`. A Model writes depth, so a later layer
+     * does not draw over a nearer model.
+     *
+     * Declared last for the append-only data-class ABI.
+     */
+    public val layer: Int = 0,
 ) {
     init {
         require(requireFiniteFloat(bloomReach, "bloomReach") in 0f..1f) {
@@ -710,7 +739,7 @@ public data class Geometry(
     override fun toString(): String =
             "Geometry(topLeft=$topLeft, bottomRight=$bottomRight, shaderPair=<redacted>, " +
             "uniforms=<redacted>, textures=<redacted>, altitudeMode=$altitudeMode, emissive=$emissive, " +
-            "blend=$blend, bloomReach=$bloomReach)"
+            "blend=$blend, bloomReach=$bloomReach, layer=$layer)"
 }
 
 private fun isReservedGeometryShaderName(name: String): Boolean =

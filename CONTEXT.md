@@ -314,13 +314,12 @@ accepts any finite value, but planning rejects values that cannot remain finite 
 and GPU-bound Float conversion. Those failures report `mapPosition.altitude` or `geometry.altitude`; latitude
 and world-copy failures retain their corresponding latitude or unwrapped-longitude field. Map-anchored
 drawing is depth-tested throughout, in **three depth phases** and one draw order (ADRs 0025, 0027 and 0030).
-Flat map-plane content — the **Basemap Tile** ground first, then **Geometry**s in list order — tests depth
-and writes none, so it is occluded by anything that did write nearer depth and occludes nothing itself.
-**Model**s in list order then test **and write**, because a mesh that writes no depth cannot occlude itself:
-its own back faces show through its front ones. Map-anchored **Sticker**s in list order then test and write
-none again, drawing after the models because a map-anchored sticker is a marker and a marker paints over
-the scene it marks. The map regime's draw order is therefore ground, **Geometry**s, **Model**s,
-map-anchored **Sticker**s, with later entries on top of anything that wrote no nearer depth. Depth
+The **Basemap Tile** ground draws first. Caller-authored map content then draws by ascending **Layer**;
+within one layer the tie-break is **Geometry**, **Model**, **Sticker**, each in its own list order.
+Flat map-plane content — Geometry and map-anchored Sticker — tests depth and writes none, so it is
+occluded by anything that did write nearer depth and occludes nothing itself. Model tests **and writes**,
+because a mesh that writes no depth cannot occlude itself: its own back faces show through its front ones.
+Later entries paint on top of anything that wrote no nearer depth. Depth
 comparison is greater-or-equal, so a drawn thing at exactly the depth already drawn there is visible rather
 than discarded; altitude-0 content over the ground is the ordinary case of that, and needs no tie-break of
 its own now that nothing on the map plane writes depth to tie with. A **Model** is a real occluder, so a
@@ -334,6 +333,13 @@ map-occluded.
 _Avoid_: Layer, pass, stage
 
 ### Drawn things
+
+**Layer**:
+An integer ordering map-anchored **Sticker**, **Geometry** and **Model** entries across types. Lower layers
+draw first. Equal layers keep the compatibility order Geometry, Model, Sticker, each in source-list order.
+A screen-anchored Sticker ignores Layer and uses `position.z`; a Model remains a depth-writing occluder, so
+a later layer does not paint over a nearer Model (ADR 0096).
+_Avoid_: z-index, phase
 
 **Sticker**:
 A **Placement** paired with one image identified by a **Resource Locator** -- a PNG, an **ETC2 Container** or a

@@ -263,11 +263,10 @@ internal class SceneModel(
  *
  * **[labels] is the fourth scene list, and it is outside [mapOrder] and [screenOrder] on purpose
  * (ADR 0034).** Labels are engine-derived: no entry in any of the caller's three `FramePlan` lists
- * corresponds to one, so a label cannot be named by a [DrawnThingReference], whose two members both
- * mean "the *n*th entry of the caller's own list". [geometries] and [groundTiles] are already that
- * shape — a list drawn at a fixed phase, named by no reference — and this is the third of them. The
- * bijection below therefore keeps counting [stickers] and [models] and nothing else; labels are
- * outside it for exactly the reason they are outside the two order lists.
+ * corresponds to one, so a label cannot be named by a [DrawnThingReference], whose members mean
+ * "the *n*th entry of the caller's own list". Ground tiles are similarly engine-derived. The
+ * bijection below counts caller-authored [stickers], [models] and [geometries]; labels and ground
+ * tiles are outside it for exactly the reason they are outside the two order lists.
  *
  * A [LabelBatch] carries its own atlas texture, and [outputPixelSize] is the label pass's only
  * per-frame uniform, so [SceneContent] builds the [LabelWorld] from this list and this class's own
@@ -281,27 +280,22 @@ internal class SceneModel(
  * interleaved; see [drawLabelPhase].
  *
  * **[mapOrder] and [screenOrder] are the planner's answer, carried rather than re-derived.**
- * `MercatorSpatialPlanner` splits every drawn thing into its draw regime (from `Placement`'s
- * `positionMode`, `CONTEXT.md`) and sorts the screen stack by `screenCompositeZ`, then
- * sticker-before-model, then source index — once, at `FRAME_PLANNING`, where it is unit-tested.
- * [SceneContent] used to discard both answers and re-derive them from a second resolution of each
- * [Placement] plus a second sort inside `drawStickers`. Two copies of one documented rule is one
- * too many, and the copy in the GL layer was the untested one, so these two lists are now the only
- * authority: [stickers] and [models] say *what* there is to draw, and these say *where each one
- * goes and in what order*.
+ * The spatial planner splits placed things by `Placement.positionMode`. ADR 0096 then merges the
+ * map placements with every Geometry and sorts by `layer`, type rank (Geometry, Model, Sticker),
+ * then source index. The screen stack remains sorted by `screenCompositeZ`, then type and source
+ * index. These two lists are the only authority for where and in what order each caller-authored
+ * drawn thing goes.
  *
- * [mapOrder] is **not** a draw order on its own. It is the planner's `mapEntries` order, which is
- * stickers-then-models by declaration; ADR 0030 fixes the map regime's phase order as ground,
- * geometries, models, map-anchored stickers, and consuming this list verbatim would paint a car
- * over the pin standing in front of it. [SceneContent] takes each type's relative order from here
- * and applies ADR 0030's phase order over it. [screenOrder] *is* a draw order, complete — ADR 0024
- * makes the screen regime one ordered stack across every drawn-thing type.
+ * Both lists are complete draw orders. The renderer sets `completeMapOrder` for its planner-built
+ * order. For compatibility with older direct test callers, the default rule treats a supplied
+ * [mapOrder] containing no `GeometryAt` as the old membership list and expands it to every Geometry,
+ * then its Models, then its Stickers, preserving each type's list order. The explicit flag matters
+ * in a frame with no Geometry, where an ADR 0096 order can otherwise have no `GeometryAt` marker.
+ * After that one expansion the ordinary exact-once validation is unchanged.
  *
- * The two lists are required to be a **bijection** onto [stickers] and [models]: every reference in
- * range, no reference twice, and every sticker and every model named exactly once. A drawn thing is
- * in exactly one regime, so anything else is a caller that built the two halves inconsistently —
- * including a caller that simply forgot to pass an order at all, which would otherwise draw a
- * frame's stickers and models silently missing rather than reporting anything.
+ * The two lists are required to be a **bijection** onto [stickers], [models] and [geometries]: every
+ * reference in range, no reference twice, and every caller-authored drawn thing named exactly once.
+ * Anything else is a caller that built the two halves inconsistently.
  */
 internal class Scene(
     val outputPixelSize: OutputPixelSize,
@@ -320,8 +314,19 @@ internal class Scene(
     val icons: List<IconBatch> = emptyList(),
     mapOrder: List<DrawnThingReference> = emptyList(),
     screenOrder: List<DrawnThingReference> = emptyList(),
+    completeMapOrder: Boolean = false,
 ) {
-    val mapOrder: List<DrawnThingReference> = mapOrder.toList()
+    val mapOrder: List<DrawnThingReference> = mapOrder.let { supplied ->
+        if (!completeMapOrder && supplied.none { it is DrawnThingReference.GeometryAt }) {
+            ArrayList<DrawnThingReference>(geometries.size + supplied.size).apply {
+                geometries.indices.mapTo(this) { DrawnThingReference.GeometryAt(it) }
+                addAll(supplied.filterIsInstance<DrawnThingReference.ModelAt>())
+                addAll(supplied.filterIsInstance<DrawnThingReference.StickerAt>())
+            }
+        } else {
+            supplied.toList()
+        }
+    }
     val screenOrder: List<DrawnThingReference> = screenOrder.toList()
 
     init {
@@ -336,18 +341,20 @@ internal class Scene(
             val available = when (reference) {
                 is DrawnThingReference.StickerAt -> stickers.size
                 is DrawnThingReference.ModelAt -> models.size
+                is DrawnThingReference.GeometryAt -> geometries.size
             }
             val index = when (reference) {
                 is DrawnThingReference.StickerAt -> reference.index
                 is DrawnThingReference.ModelAt -> reference.index
+                is DrawnThingReference.GeometryAt -> reference.index
             }
             require(index in 0 until available) { "a draw order may only reference a drawn thing the scene carries" }
         }
-        // Stickers and models only, and ADR 0034 keeps it that way: `labels` is engine-derived, has
-        // no `FramePlan` entry to be the n-th of, and is named by neither order list. Adding it to
-        // this sum would make every label-bearing scene fail construction.
-        require(referenced.size == stickers.size + models.size) {
-            "every sticker and every model must appear in exactly one of mapOrder and screenOrder"
+        // Caller-authored drawn things only, and ADR 0034 keeps it that way: `labels` is
+        // engine-derived, has no `FramePlan` entry to be the n-th of, and is named by neither order
+        // list. Adding it to this sum would make every label-bearing scene fail construction.
+        require(referenced.size == stickers.size + models.size + geometries.size) {
+            "every sticker, model and geometry must appear in exactly one of mapOrder and screenOrder"
         }
     }
 }
@@ -356,28 +363,24 @@ internal class Scene(
  * The [GlFrameContent] Cycle D always left a seam for: its own KDoc says "Cycle D draws no frame
  * content of its own; Cycle E replaces this with the real scene draw." This is that replacement.
  *
- * **Ordering (ADRs 0024, 0025, 0027, 0030 and 0034).** The map regime draws first, depth-tested; the
- * screen regime then composites on top with depth testing off. Within the map regime the order is
- * fixed as: the **ground** first, then every [Geometry] (map-anchored by definition — `CONTEXT.md`
- * says "A Geometry carries no Placement") in `FramePlan.geometries` order, then every **model**, then
- * every map-anchored sticker. That is ADR 0025's order with ADR 0030's models inserted before the
- * stickers, because a map-anchored sticker is a marker and a marker paints over the scene it marks.
- * ADR 0034 adds the labels between the two regimes. ADR 0080 amends ADR 0074 by inserting optional
- * bloom work immediately after the last emissive Geometry in phase 2, without renumbering either
- * regime. Later Geometry, models and map-anchored stickers consequently cover that light in the
- * same order in which the consumer declared them:
+ * **Ordering (ADRs 0024, 0025, 0027, 0030, 0034 and 0096).** The map regime draws first,
+ * depth-tested; the screen regime then composites on top with depth testing off. Ground remains
+ * first. Caller-authored map content then follows [Scene.mapOrder], sorted by ascending `layer` with
+ * ADR 0025/0030's former phase order as the within-layer tie-break: Geometry, Model, Sticker, each
+ * in source-list order. Consecutive references of one type form a run and establish that type's
+ * existing state. ADR 0034 keeps labels between the two regimes. ADR 0080 bloom runs immediately
+ * after the last emissive Geometry in the merged order:
  *
  * ```
  * map regime (depth tested throughout, ADR 0027)
  *   1 ground (test, AND write when displaced, ADR 0039)
- *   2 geometries in FramePlan order
+ *   2 mapOrder by (layer, Geometry < Model < Sticker, source index)
  *       ... last emissive Geometry
  *       [emissive redraw tests depth; BLOOM chain/composite is screen-space, ADR 0080]
- *       ... later Geometry
- *   3 models (test AND write, ADR 0030)                   4 map-anchored stickers
+ *       ... later map content
  *   5 LABELS   depth test OFF   <-- ADR 0034, and OUTSIDE both regimes
  * screen regime (no depth)
- *   6 consumer screen-anchored stickers, by z (ADR 0024)
+ *   6 consumer screen-anchored stickers, by z (ADR 0024; layer ignored)
  * ```
  *
  * **Labels are not a member of the map regime, and saying so is what keeps ADR 0034 from
@@ -386,18 +389,17 @@ internal class Scene(
  * [beginLabelPass] *disables* the test, which would read as a third exception if the label pass were
  * inside the map regime. It is not: it is a fourth scene list drawn between the regimes, described by
  * a phase number rather than by a regime name, so both of those ADRs continue to describe every pass
- * that *is* in the map regime without amendment. Bloom is interstitial work inside phase 2 rather
- * than a drawn-thing type: it samples only the emissive Geometry redraw, so later Geometry, models,
- * map-anchored stickers, labels and the screen stack cover it. A non-emissive Geometry between two
+ * that *is* in the map regime without amendment. Bloom is interstitial work inside the merged map
+ * walk rather than a drawn-thing type: it samples only the emissive Geometry redraw, so later map
+ * content, labels and the screen stack cover it. A non-emissive Geometry between two
  * emitters is necessarily below the last-emitter boundary and still receives bloom; removing that
  * known sandwich limit would require a later-content occlusion mask (ADR 0080). Thus a consumer's
  * screen-anchored sticker covers a label, and a label covers every map-regime item. What still binds
  * the label pass is
  * `SceneContentTest.exactlyOnePhaseWritesDepthItIsTheModelPassAndTheMaskIsOffAgainOnTheWayOut`:
  * exactly one phase in a whole scene enables depth writes and it is the model pass. The label pass
- * enables none, and the test off is genuinely *needed* here rather than merely restated — phase 4
- * leaves `GL_DEPTH_TEST` enabled behind it, unlike the depth mask, which the model pass already
- * turned off on its way out.
+ * enables none, and the test off is genuinely *needed* here rather than merely restated — every map
+ * run leaves `GL_DEPTH_TEST` enabled behind it.
  *
  * **The phase order is a relative order, not a claim that any earlier phase produced pixels.** The
  * label pass is orthogonal to the basemap (`FramePlan.drawLabels` against `FramePlan.drawBasemap`),
@@ -405,13 +407,8 @@ internal class Scene(
  * nothing-to-draw guard below rather than being reachable only past a ground tile.
  *
  * **Which regime each drawn thing is in, and its order within its own type, is
- * [Scene.mapOrder]/[Scene.screenOrder] — never re-derived here.** `MercatorSpatialPlanner` computes
- * both at `FRAME_PLANNING`; this class used to compute them a second time, from a second resolution
- * of every [Placement] plus a second sort inside `drawStickers`, and the second copy was the untested
- * one. [draw] now splits [Scene.mapOrder] by type — preserving each type's own relative order — and
- * applies ADR 0030's phase order over that, because [Scene.mapOrder] is stickers-then-models by
- * declaration and is a regime membership answer rather than a draw order. [drawScreenStack] walks
- * [Scene.screenOrder] straight through, because that one *is* a complete draw order.
+ * [Scene.mapOrder]/[Scene.screenOrder] — never re-derived here.** [draw] walks the merged map order
+ * in consecutive same-type runs. [drawScreenStack] walks [Scene.screenOrder] straight through.
  *
  * Each [Placement] is still re-resolved here for its **matrices**, which is a different claim and
  * still a sound one — see [requireResolvedAtDrawTime]. What no longer happens is reading
@@ -436,8 +433,8 @@ internal class Scene(
  *   coplanar `Geometry` tearing itself apart frame to frame as the epsilon between two different
  *   matrix products changed sign, and a billboard bisected along its anchor row by a ground plane
  *   whose depth varies down the screen. Flat map-plane content acting as an occluder was the single
- *   cause of both. Among the passes that write nothing, later declared wins, full stop, not merely
- *   on an exact tie.
+ *   cause of both. Among runs that write nothing, later in the merged map order wins, full stop,
+ *   not merely on an exact tie.
  * - **Models test *and* write** (ADR 0030, which supersedes ADR 0027 for this pass alone). A mesh
  *   that writes no depth cannot occlude itself: every triangle passes the test against whatever is
  *   behind it and paints in submission order, so back faces show through front ones. Back-face
@@ -448,8 +445,9 @@ internal class Scene(
  * - **Map-anchored stickers test and write none** (ADR 0027 again, unchanged).
  *
  * The map regime still *tests* depth throughout, so content that genuinely wrote nearer depth — a
- * model since ADR 0030, and a displaced ground since ADR 0039 — occludes what is drawn after it. The
- * ground goes first because it is the backdrop everything else paints onto. ADR 0030 records the
+ * model since ADR 0030, and a displaced ground since ADR 0039 — occludes what is drawn after it.
+ * Consequently a later layer does not paint over a nearer Model. The ground goes first because it
+ * is the backdrop everything else paints onto. ADR 0030 records the
  * cost it accepts: a billboard sharing space with a model can still be cut along its own anchor row,
  * exactly as ADR 0027 describes against the ground, because a model is a real occluder again.
  *
@@ -589,140 +587,135 @@ internal class SceneContent(
             drawGroundPhase(binding)
         }
 
-        if (scene.geometries.isNotEmpty()) {
-            // ADR 0027: the map regime tests depth and writes none. `drawGeometry` runs a
-            // consumer's own shader pair, so unlike `drawGround` and `drawStickers` it establishes
-            // no pipeline state of its own -- the depth state for the geometry pass is set here,
-            // beside the `GL_DEPTH_TEST` enable that has always lived here.
-            //
-            // This `depthMask(false)` stopped being one of three identical redundant calls when
-            // ADR 0039 landed: the pass immediately before it now leaves the mask **on** in every
-            // displaced frame, so deleting this line puts a consumer's shader pair into the depth
-            // buffer.
-            binding.enable(GL_DEPTH_TEST)
-            binding.depthMask(false)
-            // ADR 0038: the geometry pass must not inherit the ground's cull enable. The ground
-            // enables culling on a globe and draws immediately before this, and the winding of the
-            // triangles a consumer's shader pair emits is the consumer's own: a shader that negates
-            // a coordinate or reorders its corners inverts the front face, and culling would then
-            // delete a legal `Geometry` whose only sin is a sign, silently and only in one
-            // projection mode. That is the class of silent breakage ADR 0008 exists to prevent, so
-            // the disable belongs here beside the depth state, for the same reason the depth state
-            // does: `drawGeometry` cannot make these calls for itself.
-            binding.disable(GL_CULL_FACE)
-            // ADR 0073: Geometry writes premultiplied colour and the pass owns its blend state.
-            binding.enable(GL_BLEND)
-            binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
-            val geometryViewProjection = when (camera) {
+        val geometryViewProjection = if (scene.geometries.isEmpty()) {
+            null
+        } else {
+            when (camera) {
                 is ResolvedMercatorCamera -> composeGeometryViewProjection(camera)
                 is ResolvedGlobeCamera -> composeGeometryViewProjection(camera)
             }
-            val lastEmissiveGeometryIndex = if (bloom == null) {
-                -1
-            } else {
-                scene.geometries.indexOfLast { it.geometry.emissive }
-            }
-            var currentBlend: BlendMode? = null
-            // ADR 0080 (2026-10-21 and 2026-10-22 amendments) and ADR 0085: the texture this frame's
-            // normal draws left on each consumer unit, and each emitter's consumer state at its normal
-            // draw. Kept only on a frame with a bloom phase, whose redraws replay the emitters' state
-            // and which restores the rest afterwards. What each program holds is its pipeline's shadow.
-            val consumerHistory = if (lastEmissiveGeometryIndex >= 0) {
-                ConsumerValueHistory(binding as? TextureUnitCapturingBinding)
-            } else {
-                null
-            }
-            for ((geometryIndex, sceneGeometry) in scene.geometries.withIndex()) {
-                if (sceneGeometry.geometry.blend != currentBlend) {
-                    applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
-                    currentBlend = sceneGeometry.geometry.blend
-                }
-                // Subdivided and CPU-projected, in both projection modes, so that the matrix above
-                // stays linear and a consumer's shader pair survives a globe unchanged (ADR 0008's
-                // 2026-08-29 erratum). Under Mercator the camera implies a single cell, so this
-                // resolves the same four corners `resolveGeometry` always did and the frame is the
-                // one `0.3.0` drew.
-                val drape = groundDrapeFor(sceneGeometry.geometry)
-                val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
-                val grid = when (camera) {
-                    is ResolvedMercatorCamera ->
-                        geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-
-                    is ResolvedGlobeCamera ->
-                        geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
-                }.requireResolvedAtDrawTime()
-                drawGeometry(
-                    binding = binding,
-                    pipeline = sceneGeometry.pipeline,
-                    grid = grid,
-                    modelViewProjection = geometryViewProjection,
-                    resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
-                    resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
-                    boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
-                    frameIndex = scene.frameIndex,
-                    consumerUniforms = sceneGeometry.consumerUniforms,
-                    consumerTextures = sceneGeometry.consumerTextures,
-                    emissionPass = 0,
-                )
-                if (consumerHistory != null) {
-                    if (grid.triangleIndices.isNotEmpty()) consumerHistory.record(sceneGeometry)
-                    if (sceneGeometry.geometry.emissive) consumerHistory.snapshotEmitter(sceneGeometry, grid)
-                }
-                if (geometryIndex == lastEmissiveGeometryIndex) {
-                    // ADR 0080: compositing here makes the rest of the existing phase order an
-                    // occluder in painter's order. The phase re-establishes this loop's known state
-                    // except the blend function, which it leaves as the chain left it; clearing
-                    // currentBlend is what makes the next geometry, whatever its blend, bind its own.
-                    drawBloomPhase(binding, checkNotNull(consumerHistory))
-                    currentBlend = null
-                }
-            }
-            applyPremultipliedBlendMode(binding, BlendMode.OVER)
         }
-
-        // ADR 0030's phase order over the planner's per-type order. `Scene.mapOrder` is
-        // stickers-then-models by declaration and is deliberately NOT consumed as a draw order:
-        // drawing it verbatim would paint a car over the pin standing in front of it. What is taken
-        // from it is which stickers and models are map-anchored at all, and the relative order of
-        // each type among its own kind.
-        val mapModels = ArrayList<SceneModel>()
-        val mapStickers = ArrayList<SceneSticker>()
-        for (reference in scene.mapOrder) {
-            when (reference) {
-                is DrawnThingReference.StickerAt -> mapStickers += scene.stickers[reference.index]
-                is DrawnThingReference.ModelAt -> mapModels += scene.models[reference.index]
+        val lastEmissiveReferenceIndex = if (bloom == null) {
+            -1
+        } else {
+            scene.mapOrder.indexOfLast { reference ->
+                reference is DrawnThingReference.GeometryAt &&
+                    scene.geometries[reference.index].geometry.emissive
             }
         }
-
-        if (mapModels.isNotEmpty()) {
-            // ADR 0030: models are the one map-regime pass that tests AND writes depth, because a
-            // mesh has to occlude itself. `drawModels` owns the whole phase -- the depth enable, the
-            // mask on for its opaque primitives, and the mask off again on the way out -- so nothing
-            // here sets depth state of its own. That exit mask matters: it is what keeps ADR 0027's
-            // billboard fix working for the map-anchored stickers drawn immediately after.
-            drawModels(
-                binding = binding,
-                pipelines = modelPipelines,
-                models = mapModels.mapNotNull { model ->
-                    drawTimePlacement(model.placement)?.let { resolveModel(model, camera, it) }
-                },
-                lightDirectionCameraSpace = sceneLightDirectionCameraSpace(camera),
-            )
+        // ADR 0080 (2026-10-21 and 2026-10-22 amendments), ADR 0085 and ADR 0096: the texture this
+        // frame's normal draws left on each consumer unit, and each emitter's consumer state at its
+        // normal draw. One history spans the merged map walk because intervening stickers and models
+        // can bind those units too.
+        val consumerHistory = if (lastEmissiveReferenceIndex >= 0) {
+            ConsumerValueHistory(binding as? TextureUnitCapturingBinding)
+        } else {
+            null
         }
 
-        if (mapStickers.isNotEmpty()) {
-            // ADR 0038 records a pre-existing gap here and this cycle deliberately does not close it:
-            // `drawStickers` sets no cull state, so it inherits whatever the model pass's last
-            // non-`doubleSided` primitive left -- and now, on a globe with no models in the frame, the
-            // ground's own enable. Nothing moves either way, because `STICKER_QUAD` is `GROUND_QUAD`'s
-            // winding exactly, so a sticker is front-facing under `drawFrame`'s `GL_CCW`. That is the
-            // same luck ADR 0038 removed from the ground rather than a second argument for keeping it,
-            // and closing it belongs with whichever cycle owns the sticker pass.
-            drawStickers(
-                binding,
-                stickerPipeline,
-                StickerWorld(mapStickers.mapNotNull { mapAnchoredSticker(it) }),
-            )
+        var mapOrderIndex = 0
+        while (mapOrderIndex < scene.mapOrder.size) {
+            when (scene.mapOrder[mapOrderIndex]) {
+                is DrawnThingReference.GeometryAt -> {
+                    // ADR 0027: the map regime tests depth and writes none. `drawGeometry` runs a
+                    // consumer's own shader pair, so unlike `drawGround` and `drawStickers` it
+                    // establishes no pipeline state of its own. Each Geometry run therefore owns
+                    // the same state the former single Geometry phase did.
+                    binding.enable(GL_DEPTH_TEST)
+                    binding.depthMask(false)
+                    // ADR 0038: a Geometry run must not inherit culling from ground or a Model run;
+                    // the winding emitted by a consumer's shader pair is the consumer's own.
+                    binding.disable(GL_CULL_FACE)
+                    // ADR 0073: Geometry writes premultiplied colour and each run owns blend state.
+                    binding.enable(GL_BLEND)
+                    binding.blendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+                    var currentBlend: BlendMode? = null
+                    while (mapOrderIndex < scene.mapOrder.size) {
+                        val reference = scene.mapOrder[mapOrderIndex] as? DrawnThingReference.GeometryAt ?: break
+                        val sceneGeometry = scene.geometries[reference.index]
+                        if (sceneGeometry.geometry.blend != currentBlend) {
+                            applyPremultipliedBlendMode(binding, sceneGeometry.geometry.blend)
+                            currentBlend = sceneGeometry.geometry.blend
+                        }
+                        // Subdivided and CPU-projected in both projection modes, so the matrix stays
+                        // linear and a consumer shader pair survives a globe unchanged (ADR 0008).
+                        val drape = groundDrapeFor(sceneGeometry.geometry)
+                        val cellsPerSide = geometryCellsPerSideFor(sceneGeometry.geometry, drape)
+                        val grid = when (camera) {
+                            is ResolvedMercatorCamera ->
+                                geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+
+                            is ResolvedGlobeCamera ->
+                                geometryGrid(sceneGeometry.geometry, camera, cellsPerSide, drape)
+                        }.requireResolvedAtDrawTime()
+                        drawGeometry(
+                            binding = binding,
+                            pipeline = sceneGeometry.pipeline,
+                            grid = grid,
+                            modelViewProjection = checkNotNull(geometryViewProjection),
+                            resolutionWidthPixels = scene.outputPixelSize.width.toFloat(),
+                            resolutionHeightPixels = scene.outputPixelSize.height.toFloat(),
+                            boundsWestSouthEastNorthDegrees = sceneGeometry.geometry.boundsWestSouthEastNorth(),
+                            frameIndex = scene.frameIndex,
+                            consumerUniforms = sceneGeometry.consumerUniforms,
+                            consumerTextures = sceneGeometry.consumerTextures,
+                            emissionPass = 0,
+                        )
+                        if (consumerHistory != null) {
+                            if (grid.triangleIndices.isNotEmpty()) consumerHistory.record(sceneGeometry)
+                            if (sceneGeometry.geometry.emissive) {
+                                consumerHistory.snapshotEmitter(sceneGeometry, grid)
+                            }
+                        }
+                        if (mapOrderIndex == lastEmissiveReferenceIndex) {
+                            // ADR 0080: bloom composites immediately after the last emitter in the
+                            // merged order. It re-establishes this run's known state except the blend
+                            // function, so the next Geometry must bind its own blend again.
+                            drawBloomPhase(binding, checkNotNull(consumerHistory))
+                            currentBlend = null
+                        }
+                        mapOrderIndex += 1
+                    }
+                    applyPremultipliedBlendMode(binding, BlendMode.OVER)
+                }
+
+                is DrawnThingReference.ModelAt -> {
+                    val run = ArrayList<SceneModel>()
+                    while (mapOrderIndex < scene.mapOrder.size) {
+                        val reference = scene.mapOrder[mapOrderIndex] as? DrawnThingReference.ModelAt ?: break
+                        run += scene.models[reference.index]
+                        mapOrderIndex += 1
+                    }
+                    val resolvedModels = run.mapNotNull { model ->
+                        drawTimePlacement(model.placement)?.let { resolveModel(model, camera, it) }
+                    }
+                    // ADR 0030: Model runs are the map-regime runs that test AND write depth because
+                    // a mesh has to occlude itself. `drawModels` owns the whole run's depth state.
+                    drawModels(
+                        binding = binding,
+                        pipelines = modelPipelines,
+                        models = resolvedModels,
+                        lightDirectionCameraSpace = sceneLightDirectionCameraSpace(camera),
+                        textureBindingObserver = consumerHistory?.let { history ->
+                            { unit: Int, texture: Int -> history.recordTextureBinding(unit, texture) }
+                        },
+                    )
+                }
+
+                is DrawnThingReference.StickerAt -> {
+                    val run = ArrayList<SceneSticker>()
+                    while (mapOrderIndex < scene.mapOrder.size) {
+                        val reference = scene.mapOrder[mapOrderIndex] as? DrawnThingReference.StickerAt ?: break
+                        run += scene.stickers[reference.index]
+                        mapOrderIndex += 1
+                    }
+                    // ADR 0038 records the pre-existing cull-state gap: `drawStickers` owns no cull
+                    // state. The quad has the ground quad's winding, so it remains front-facing.
+                    val resolvedStickers = run.mapNotNull { mapAnchoredSticker(it) }
+                    drawStickers(binding, stickerPipeline, StickerWorld(resolvedStickers))
+                    consumerHistory?.recordStickerRun(resolvedStickers)
+                }
+            }
         }
 
         drawLabelPhase(binding)
@@ -888,7 +881,7 @@ internal class SceneContent(
      * ADR 0034's phase 5: every label the placement pass left standing, drawn after the whole map
      * regime and before the screen regime's first bind, with the depth test off.
      *
-     * **This sits here, between [drawStickers] and [drawScreenStack], and the position is the whole
+     * **This sits here, between the merged map walk and [drawScreenStack], and the position is the whole
      * contract.** A label carries its meaning by being *readable* — a half-covered pin is still a pin
      * and a half-covered label is nothing — so it wins over every map-regime pass. It loses to the
      * screen regime, because that is where a consumer puts a HUD, an attribution badge or a cursor,
@@ -903,12 +896,11 @@ internal class SceneContent(
      * plan rather than of the label content. A fourth list drawn as its own phase has exactly one
      * batch by construction.
      *
-     * The depth state belongs to [beginLabelPass] rather than to this method, which follows phases 3
-     * and 4 — [drawModels] and [drawStickers] each own their own — rather than phases 1 and 2, whose
-     * depth state is set at this level because [drawGeometry] runs a consumer's shader pair and
-     * establishes none of its own. The label pass runs a program RenG wrote, so it owns its state:
-     * the `disable(GL_DEPTH_TEST)` that phase 4 genuinely leaves it needing (`drawStickers` enables
-     * the test for itself), and no depth write at all, so nothing about ADR 0027's billboard fix or
+     * The depth state belongs to [beginLabelPass] rather than to this method. Model and Sticker runs
+     * own their depth state; Geometry-run depth state is set at this level because [drawGeometry]
+     * runs a consumer's shader pair and establishes none of its own. The label pass runs a program
+     * RenG wrote, so it owns its state: the `disable(GL_DEPTH_TEST)` every map-run type leaves it
+     * needing, and no depth write at all, so nothing about ADR 0027's billboard fix or
      * ADR 0030's exit mask moves. [drawScreenStack] then disables the test again for itself,
      * idempotently, exactly as it did before this phase existed.
      */
@@ -940,7 +932,7 @@ internal class SceneContent(
      * near symbol's plate. Collision exists precisely to keep that pair off the screen together.
      *
      * The pass owns its own GL state ([beginIconPass]) exactly as [drawLabels] does, so this runs
-     * straight after phase 4's stickers with the depth test still on and turns it off itself.
+     * straight after the merged map walk with the depth test still on and turns it off itself.
      */
     private fun drawIconPass(binding: GlBinding) {
         if (scene.icons.isEmpty()) return
@@ -990,6 +982,9 @@ internal class SceneContent(
                 }
                 is DrawnThingReference.ModelAt -> throw IllegalArgumentException(
                     "ADR 0029 refuses a SCREEN-positioned Model before drawing; one reached the screen stack",
+                )
+                is DrawnThingReference.GeometryAt -> throw IllegalArgumentException(
+                    "a Geometry has no Placement and can never reach the screen stack",
                 )
             }
         }
@@ -1850,7 +1845,8 @@ internal class BloomEmitter(
  * program holds is its pipeline's [ConsumerValueShadow], which outlives the frame. What each unit holds
  * is read from [capturing], the capture region's binding, which sees every bind -- a consumer's,
  * another RenG pass's, and the host's original -- so a unit is put back exactly whoever bound it.
- * Outside a capture region only the consumer binds [record] sees are known.
+ * Outside a capture region [record], [recordStickerRun] and [recordTextureBinding] keep the units
+ * touched by Geometry, Sticker and Model runs exact.
  */
 internal class ConsumerValueHistory(private val capturing: TextureUnitCapturingBinding?) {
     /** Outside a capture region: the consumer texture on each unit, [UNTOUCHED_UNIT] where none. */
@@ -1866,6 +1862,29 @@ internal class ConsumerValueHistory(private val capturing: TextureUnitCapturingB
         if (textures.isEmpty()) return
         val names = sceneGeometry.pipeline.textureNameOrder.of(textures.keys)
         for (unit in names.indices) textureByUnit[unit] = textures.getValue(names[unit])
+    }
+
+    /** Records the exact units a completed Sticker run left bound. */
+    fun recordStickerRun(stickers: List<ResolvedSticker>) {
+        if (capturing != null) return
+        for (sticker in stickers) {
+            recordTextureBinding(0, sticker.texture)
+            val shader = sticker.shader ?: continue
+            val names = shader.pipeline.textureNameOrder.of(shader.textures.keys)
+            for (index in names.indices) {
+                recordTextureBinding(
+                    STICKER_FIRST_CONSUMER_TEXTURE_UNIT + index,
+                    shader.textures.getValue(names[index]),
+                )
+            }
+        }
+    }
+
+    /** Records one bind performed by a non-Geometry run, in consumer-unit numbering. */
+    fun recordTextureBinding(unit: Int, texture: Int) {
+        if (capturing != null) return
+        require(unit in textureByUnit.indices) { "a recorded texture unit must be a consumer unit" }
+        textureByUnit[unit] = texture
     }
 
     /** Snapshots what [sceneGeometry], an emitter, just drew with, and the [grid] it drew. */

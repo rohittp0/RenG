@@ -19,6 +19,7 @@ import com.rohittp.reng.RawResourceKey
 import com.rohittp.reng.RenGMetricName
 import com.rohittp.reng.Renderer
 import com.rohittp.reng.RendererConfiguration
+import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
 import com.rohittp.reng.Store
@@ -32,29 +33,6 @@ import com.rohittp.reng.Vector3
 import com.rohittp.reng.createRenderer
 import com.rohittp.reng.installBasemapTileRenderer
 import com.rohittp.reng.makeWebGl2ContextCurrent
-import com.rohittp.rentile.BasemapRasterizer
-import com.rohittp.rentile.CredentialProvider
-import com.rohittp.rentile.ExecutionPolicy
-import com.rohittp.rentile.MapSessionProvider
-import com.rohittp.rentile.PreparedStyle
-import com.rohittp.rentile.RasterAcquisitionDensity
-import com.rohittp.rentile.RawResourceKey as TileRawResourceKey
-import com.rohittp.rentile.RawResourceMetadata as TileRawResourceMetadata
-import com.rohittp.rentile.RawResourceStore as TileRawResourceStore
-import com.rohittp.rentile.RenderOptions
-import com.rohittp.rentile.RenderPriority
-import com.rohittp.rentile.Rentile
-import com.rohittp.rentile.RentileClock
-import com.rohittp.rentile.RentileConfiguration
-import com.rohittp.rentile.ResourceAccessMode
-import com.rohittp.rentile.ResourceTransport as TileResourceTransport
-import com.rohittp.rentile.StoredRawResource as TileStoredRawResource
-import com.rohittp.rentile.StyleInput
-import com.rohittp.rentile.TileId
-import com.rohittp.rentile.TileSubstitutionPolicy
-import com.rohittp.rentile.TransportRequest as TileTransportRequest
-import com.rohittp.rentile.TransportResponse as TileTransportResponse
-import com.rohittp.rentile.TransportResponseMetadata as TileTransportResponseMetadata
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.await
 import kotlinx.coroutines.launch
@@ -75,10 +53,6 @@ private val BASEMAP_STYLE_URL: String get() = basemapStyleUrl().toString()
 private const val LOOP_MILLIS = 24_000.0
 
 fun main() {
-    if (isTileWorkerScope()) {
-        startTileWorker()
-        return
-    }
     if (isWorkerScope()) {
         waitForWorkerSetup { setup ->
             MainScope().launch {
@@ -143,6 +117,12 @@ private class Demo(
             basemapStyle = ResourceLocator(value = BASEMAP_STYLE_URL),
             diagnosticSink = DiagnosticSink(::recordDiagnostic),
             maximumReadAheadRasterisedTileBytes = if (readAheadOn()) 256L * 1024 * 1024 else 0L,
+            // `?budget=N` (RenG ADR 0057): rasterise at most N new tiles a frame and draw the rest from a
+            // resident ancestor until a later frame reaches them. A preview setting; an export leaves it
+            // unlimited so every frame is exact.
+            resourceLimits = tileBudget().let { budget ->
+                if (budget > 0) ResourceLimits(maximumTilesRasterisedPerFrame = budget) else ResourceLimits()
+            },
         ),
     )
     private val renderTarget = renderer.mintRenderTarget(
@@ -473,9 +453,7 @@ private suspend fun createRengStore(): Store {
 
 private const val INDEXED_DB_NAME = "reng-demo-store"
 private const val RENG_OBJECT_STORE = "reng"
-private const val RENTILE_OBJECT_STORE = "rentile"
 private const val DATA_RECORD = "data"
-private const val METADATA_RECORD = "meta"
 private var indexedDbPromise: Promise<IndexedDbDatabase>? = null
 private val loggedStoreFailures = HashSet<String>()
 
@@ -596,8 +574,6 @@ private fun installTileWorkerPoolIfRequested() {
     if (workerCount == 0) return
     val pool = createTileWorkerPool(
         workerCount = workerCount,
-        skipSkia = skipSkia(),
-        compareCount = if (skipSkia()) compareTileCount().coerceAtLeast(0) else 0,
         persistentStore = persistentStoreRequested(),
     )
     tileWorkerPool = pool
@@ -605,255 +581,6 @@ private fun installTileWorkerPoolIfRequested() {
         requestTileFromPool(pool, styleLocator.toJsString(), zoom, column, row, outputSizePx)
             .await()
             .copyToByteArray()
-    }
-}
-
-private fun startTileWorker() {
-    val scope = MainScope()
-    scope.launch {
-        val renderer = TileWorkerRenderer(
-            skipSkia = tileWorkerSkipsSkia(),
-            store = createTileWorkerStore(),
-        )
-        installTileWorkerMessageHandler { request ->
-            scope.launch {
-                try {
-                    val rgba = renderer.render(
-                        styleLocator = request.style.toString(),
-                        tile = TileId(request.zoom, request.column, request.row),
-                        outputSizePx = request.outputSizePx,
-                        compare = request.compare,
-                    )
-                    postTileWorkerSuccess(request.id, rgba)
-                } catch (failure: Throwable) {
-                    val type = failure::class.simpleName ?: "Throwable"
-                    postTileWorkerFailure(request.id, "$type: ${failure.message ?: "no message"}".toJsString())
-                }
-            }
-        }
-    }
-}
-
-private class TileWorkerRenderer(
-    private val skipSkia: Boolean,
-    store: TileRawResourceStore,
-) {
-    private val engine: BasemapRasterizer = Rentile.create(
-        RentileConfiguration(
-            transport = TileWorkerTransport(),
-            rawResourceStore = store,
-            sessionProvider = MapSessionProvider.None,
-            credentialProvider = CredentialProvider.None,
-            clock = RentileClock.System,
-            executionPolicy = ExecutionPolicy(maxConcurrentMetatileWorkers = 1),
-        ),
-    )
-    private val styles = HashMap<String, PreparedStyle>()
-    private val reportedBrowserFallbacks = HashSet<String>()
-
-    suspend fun render(
-        styleLocator: String,
-        tile: TileId,
-        outputSizePx: Int,
-        compare: Boolean,
-    ): ByteArray {
-        if (skipSkia) {
-            val browser = renderBrowserRaster(
-                styleLocator.toJsString(),
-                tile.z,
-                tile.x,
-                tile.y,
-                outputSizePx,
-            ).await()
-            val browserBytes = browser.rgba?.copyToByteArray()
-            if (browser.supported && browserBytes != null) {
-                if (compare) comparePixels(tile, browserBytes, renderWithRentile(styleLocator, tile, outputSizePx))
-                return browserBytes
-            }
-            if (reportedBrowserFallbacks.add(styleLocator)) {
-                postTileWorkerNotice(
-                    ("Skia skip unavailable for $styleLocator; using Rentile: " +
-                        (browser.reason?.toString() ?: "style is not a single default raster layer")).toJsString(),
-                )
-            }
-        }
-        return renderWithRentile(styleLocator, tile, outputSizePx)
-    }
-
-    private suspend fun renderWithRentile(styleLocator: String, tile: TileId, outputSizePx: Int): ByteArray {
-        val style = styles[styleLocator] ?: engine.prepare(StyleInput.Remote(styleLocator)).also {
-            styles[styleLocator] = it
-        }
-        val batch = engine.prepareBatch(
-            style = style,
-            tiles = listOf(tile),
-            options = RenderOptions(
-                outputSizePx = outputSizePx,
-                rasterAcquisitionDensity = RasterAcquisitionDensity.OUTPUT_ZOOM,
-            ),
-            resourceAccess = ResourceAccessMode.NORMAL,
-            substitutionPolicy = TileSubstitutionPolicy.Disabled,
-        )
-        return try {
-            engine.renderRaw(batch, tiles = listOf(tile), priority = RenderPriority.NORMAL)
-                .tiles
-                .single()
-                .rgbaBytes
-        } finally {
-            batch.close()
-        }
-    }
-
-    private fun comparePixels(tile: TileId, browser: ByteArray, skia: ByteArray) {
-        require(browser.size == skia.size) {
-            "comparison sizes differ: browser=${browser.size}, Skia=${skia.size}"
-        }
-        var absoluteTotal = 0L
-        var maximum = 0
-        var pixelsOverEight = 0
-        for (pixelStart in browser.indices step 4) {
-            var pixelOverEight = false
-            for (channel in 0..3) {
-                val difference = kotlin.math.abs(
-                    (browser[pixelStart + channel].toInt() and 0xff) -
-                        (skia[pixelStart + channel].toInt() and 0xff),
-                )
-                absoluteTotal += difference
-                maximum = maxOf(maximum, difference)
-                if (difference > 8) pixelOverEight = true
-            }
-            if (pixelOverEight) pixelsOverEight++
-        }
-        val mean = absoluteTotal.toDouble() / browser.size
-        val share = pixelsOverEight.toDouble() / (browser.size / 4)
-        consoleLog(
-            ("RASTER COMPARE ${tile.z}/${tile.x}/${tile.y}: " +
-                "meanAbs=${mean.roundTo1()}, maxAbs=$maximum, " +
-                "pixelsOver8=${(share * 100.0).roundTo1()}%").toJsString(),
-        )
-    }
-}
-
-private class TileWorkerStore : TileRawResourceStore {
-    private val resources = HashMap<TileRawResourceKey, TileStoredRawResource>()
-
-    override suspend fun read(key: TileRawResourceKey): TileStoredRawResource? = resources[key]
-
-    override suspend fun write(key: TileRawResourceKey, resource: TileStoredRawResource) {
-        resources[key] = resource
-    }
-
-    override suspend fun remove(key: TileRawResourceKey) {
-        resources.remove(key)
-    }
-}
-
-private class IndexedDbTileWorkerStore(private val database: IndexedDbDatabase) : TileRawResourceStore {
-    override suspend fun read(key: TileRawResourceKey): TileStoredRawResource? = try {
-        val record = indexedDbRead(
-            database = database,
-            objectStore = RENTILE_OBJECT_STORE.toJsString(),
-            key = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-        ).await() ?: return null
-        TileStoredRawResource(
-            bytes = record.body.copyToByteArray(),
-            contentDigest = record.contentDigest.toString(),
-            metadata = record.toTileMetadata(),
-        )
-    } catch (failure: Throwable) {
-        logStoreFailureOnce("Rentile read", failure)
-        null
-    }
-
-    override suspend fun write(key: TileRawResourceKey, resource: TileStoredRawResource) {
-        try {
-            val metadata = resource.metadata
-            val bytes = resource.bytes
-            val promise = withScopedMemoryAllocator { allocator ->
-                val pointer = allocator.allocate(bytes.size)
-                for (index in bytes.indices) (pointer + index).storeByte(bytes[index])
-                indexedDbWriteRentile(
-                    database = database,
-                    dataKey = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-                    metadataKey = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-                    address = pointer.address.toInt(),
-                    length = bytes.size,
-                    contentDigest = resource.contentDigest.toJsString(),
-                    contentType = metadata.contentType?.toJsString(),
-                    etag = metadata.etag?.toJsString(),
-                    lastModified = metadata.lastModified?.toJsString(),
-                    freshUntilEpochMillis = metadata.freshUntilEpochMillis?.toDouble() ?: -1.0,
-                    storedAtEpochMillis = metadata.storedAtEpochMillis.toDouble(),
-                )
-            }
-            promise.await()
-        } catch (failure: Throwable) {
-            logStoreFailureOnce("Rentile write", failure)
-        }
-    }
-
-    override suspend fun remove(key: TileRawResourceKey) {
-        try {
-            indexedDbRemoveRentile(
-                database = database,
-                dataKey = indexedDbKey(DATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-                metadataKey = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-            ).await()
-        } catch (failure: Throwable) {
-            logStoreFailureOnce("Rentile remove", failure)
-        }
-    }
-
-    override suspend fun metadata(key: TileRawResourceKey): TileRawResourceMetadata? = try {
-        indexedDbReadMetadata(
-            database = database,
-            key = indexedDbKey(METADATA_RECORD, key.stableId, key.resourceClass.toString()).toJsString(),
-        ).await()?.toTileMetadata()
-    } catch (failure: Throwable) {
-        logStoreFailureOnce("Rentile metadata read", failure)
-        null
-    }
-}
-
-private fun IndexedDbMetadataRecord.toTileMetadata(): TileRawResourceMetadata = TileRawResourceMetadata(
-    contentType = contentType?.toString(),
-    etag = etag?.toString(),
-    lastModified = lastModified?.toString(),
-    freshUntilEpochMillis = freshUntilEpochMillis.optionalEpochMillis(),
-    storedAtEpochMillis = storedAtEpochMillis.toLong(),
-)
-
-private suspend fun createTileWorkerStore(): TileRawResourceStore {
-    if (!persistentStoreRequested()) return TileWorkerStore()
-    return try {
-        IndexedDbTileWorkerStore(openIndexedDbOnce())
-    } catch (failure: Throwable) {
-        logStoreFailureOnce("open", failure)
-        TileWorkerStore()
-    }
-}
-
-private class TileWorkerTransport : TileResourceTransport {
-    override suspend fun execute(request: TileTransportRequest): TileTransportResponse {
-        val payload = fetchResource(
-            url = request.url.toJsString(),
-            method = "GET".toJsString(),
-            headers = requestHeaders(null, null, null),
-        ).await()
-        require(payload.body.length.toLong() <= request.maxResponseBytes) {
-            "response exceeded the ${request.maxResponseBytes}-byte limit"
-        }
-        return TileTransportResponse(
-            statusCode = payload.statusCode,
-            body = payload.body.copyToByteArray(),
-            metadata = TileTransportResponseMetadata(
-                contentType = payload.contentType?.toString(),
-                etag = payload.etag?.toString(),
-                lastModified = payload.lastModified?.toString(),
-                expiresAtEpochMillis = payload.freshUntilEpochMillis.takeIf { it >= 0.0 }?.toLong(),
-                wireByteCount = payload.body.length.toLong(),
-            ),
-        )
     }
 }
 
@@ -980,29 +707,11 @@ private external interface JsUint8Array : JsAny {
 
 private external interface TileWorkerPool : JsAny
 
-private external interface TileWorkerRequest : JsAny {
-    val id: Int
-    val style: JsString
-    val zoom: Int
-    val column: Int
-    val row: Int
-    val outputSizePx: Int
-    val compare: Boolean
-}
-
-private external interface BrowserRasterResult : JsAny {
-    val supported: Boolean
-    val reason: JsString?
-    val rgba: JsUint8Array?
-}
-
 @JsFun(
-    """(workerCount, skipSkia, compareCount, persistentStore) => {
+    """(workerCount, persistentStore) => {
         const queue = [];
         const workers = [];
-        const notices = new Set();
         let nextId = 1;
-        let comparisonsLeft = compareCount;
 
         const rejectIfPoolFailed = () => {
             if (!workers.every(state => state.broken)) return;
@@ -1020,29 +729,19 @@ private external interface BrowserRasterResult : JsAny {
                     zoom: job.zoom,
                     column: job.column,
                     row: job.row,
-                    outputSizePx: job.outputSizePx,
-                    compare: job.compare
+                    outputSizePx: job.outputSizePx
                 });
             }
         };
 
         for (let index = 0; index < workerCount; index++) {
-            const url = new URL('worker-bootstrap.js', globalThis.location.href);
+            const url = new URL('tile-worker-bootstrap.js', globalThis.location.href);
             url.search = '';
-            url.searchParams.set('role', 'tile');
-            if (skipSkia) url.searchParams.set('skia', 'skip');
             if (persistentStore) url.searchParams.set('store', 'idb');
             const worker = new Worker(url);
             const state = { worker, current: null, broken: false };
             worker.onmessage = event => {
                 const message = event.data || {};
-                if (message.kind === 'tileNotice') {
-                    if (!notices.has(message.message)) {
-                        notices.add(message.message);
-                        console.warn(message.message);
-                    }
-                    return;
-                }
                 const job = state.current;
                 if (!job || message.id !== job.id) return;
                 state.current = null;
@@ -1068,10 +767,8 @@ private external interface BrowserRasterResult : JsAny {
         return {
             render(style, zoom, column, row, outputSizePx) {
                 return new Promise((resolve, reject) => {
-                    const compare = comparisonsLeft > 0;
-                    if (compare) comparisonsLeft--;
                     queue.push({
-                        id: nextId++, style, zoom, column, row, outputSizePx, compare, resolve, reject
+                        id: nextId++, style, zoom, column, row, outputSizePx, resolve, reject
                     });
                     pump();
                 });
@@ -1081,8 +778,6 @@ private external interface BrowserRasterResult : JsAny {
 )
 private external fun createTileWorkerPool(
     workerCount: Int,
-    skipSkia: Boolean,
-    compareCount: Int,
     persistentStore: Boolean,
 ): TileWorkerPool
 
@@ -1095,230 +790,6 @@ private external fun requestTileFromPool(
     row: Int,
     outputSizePx: Int,
 ): Promise<JsUint8Array>
-
-@JsFun(
-    """callback => {
-        if (self.__rengTileHold) self.removeEventListener('message', self.__rengTileHold);
-        const accept = message => { if (message?.kind === 'tileRequest') callback(message); };
-        self.onmessage = event => accept(event.data);
-        for (const message of self.__rengTileMessages || []) accept(message);
-        self.__rengTileMessages = [];
-    }""",
-)
-private external fun installTileWorkerMessageHandler(callback: (TileWorkerRequest) -> Unit)
-
-private fun postTileWorkerSuccess(id: Int, rgba: ByteArray) {
-    withScopedMemoryAllocator { allocator ->
-        val pointer = allocator.allocate(rgba.size)
-        for (index in rgba.indices) (pointer + index).storeByte(rgba[index])
-        postTileWorkerSuccessFromMemory(id, pointer.address.toInt(), rgba.size)
-    }
-}
-
-@JsFun(
-    """(id, address, length) => {
-        const rgba = new Uint8Array(length);
-        rgba.set(new Uint8Array(wasmExports.memory.buffer, address >>> 0, length));
-        self.postMessage({ kind: 'tileResult', id, rgba: rgba.buffer }, [rgba.buffer]);
-    }""",
-)
-private external fun postTileWorkerSuccessFromMemory(id: Int, address: Int, length: Int)
-
-@JsFun("(id, message) => self.postMessage({ kind: 'tileError', id, message: String(message) })")
-private external fun postTileWorkerFailure(id: Int, message: JsString)
-
-@JsFun("message => self.postMessage({ kind: 'tileNotice', message: String(message) })")
-private external fun postTileWorkerNotice(message: JsString)
-
-@JsFun(
-    """(styleLocator, zoom, column, row, outputSizePx) => {
-        const plans = globalThis.__rengBrowserRasterPlans ||= new Map();
-        const canvases = globalThis.__rengBrowserRasterCanvases ||= new Map();
-        const ineligible = reason => ({ eligible: false, reason });
-        const loadJson = async url => {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error('HTTP ' + response.status + ' for ' + url);
-            return response.json();
-        };
-        const defaultPaintValues = {
-            'raster-opacity': 1,
-            'raster-hue-rotate': 0,
-            'raster-brightness-min': 0,
-            'raster-brightness-max': 1,
-            'raster-saturation': 0,
-            'raster-contrast': 0,
-            'raster-resampling': 'linear',
-            'raster-fade-duration': 300
-        };
-        const defaultPaint = paint => paint == null || (
-            typeof paint === 'object' &&
-            !Array.isArray(paint) &&
-            Object.entries(paint).every(([name, value]) =>
-                Object.hasOwn(defaultPaintValues, name) && defaultPaintValues[name] === value
-            )
-        );
-        const defaultLayout = layout => layout == null || (
-            typeof layout === 'object' &&
-            !Array.isArray(layout) &&
-            Object.entries(layout).every(([name, value]) => name === 'visibility' && value === 'visible')
-        );
-
-        const inspect = async () => {
-            try {
-                const styleUrl = new URL(styleLocator, self.location.href).href;
-                const style = await loadJson(styleUrl);
-                const layers = Array.isArray(style.layers) ? style.layers : [];
-                const sources = style.sources && typeof style.sources === 'object' ? style.sources : {};
-                if (layers.length !== 1 || Object.keys(sources).length !== 1) {
-                    return ineligible('style must contain exactly one layer and one source');
-                }
-                const layer = layers[0];
-                const source = sources[layer.source];
-                if (layer.type !== 'raster' || !source || source.type !== 'raster') {
-                    return ineligible('the only layer and source must both be raster');
-                }
-                if (!defaultPaint(layer.paint) || !defaultLayout(layer.layout)) {
-                    return ineligible('the raster layer has non-default paint or layout');
-                }
-                if (source.bounds != null) return ineligible('bounded raster sources are not mirrored');
-
-                let definition = source;
-                let tileBase = styleUrl;
-                if (source.url != null) {
-                    const tileJsonUrl = new URL(String(source.url), styleUrl).href;
-                    const tileJson = await loadJson(tileJsonUrl);
-                    definition = { ...tileJson, ...source };
-                    tileBase = tileJsonUrl;
-                }
-                if (!Array.isArray(definition.tiles) || definition.tiles.length !== 1) {
-                    return ineligible('exactly one tile URL template is required');
-                }
-                const templateText = String(definition.tiles[0]);
-                const tokens = templateText.match(/\{[^}]+\}/g) || [];
-                if (tokens.some(token => !['{z}', '{x}', '{y}', '{-y}', '{quadkey}'].includes(token))) {
-                    return ineligible('tile URL template uses an unsupported token');
-                }
-                // URL percent-encodes braces. Protect the already-validated placeholders while
-                // resolving a relative template, then put them back for substitution per request.
-                const template = new URL(
-                    templateText.replaceAll('{', '__reng_open__').replaceAll('}', '__reng_close__'),
-                    tileBase
-                ).href.replaceAll('__reng_open__', '{').replaceAll('__reng_close__', '}');
-                const scheme = definition.scheme == null ? 'xyz' : String(definition.scheme);
-                if (scheme !== 'xyz' && scheme !== 'tms') return ineligible('unsupported tile scheme ' + scheme);
-                const minimumZoom = Number.isFinite(Number(definition.minzoom)) ? Number(definition.minzoom) : 0;
-                const maximumZoom = Number.isFinite(Number(definition.maxzoom)) ? Number(definition.maxzoom) : 22;
-                const tileSize = Number.isFinite(Number(definition.tileSize)) ? Number(definition.tileSize) : 512;
-                if (minimumZoom < 0 || maximumZoom < minimumZoom || tileSize <= 0) {
-                    return ineligible('invalid raster source zoom or tile size');
-                }
-                return {
-                    eligible: true,
-                    template,
-                    scheme,
-                    minimumZoom,
-                    maximumZoom,
-                    tileSize,
-                    layerMinimumZoom: Number.isFinite(Number(layer.minzoom)) ? Number(layer.minzoom) : 0,
-                    layerMaximumZoom: Number.isFinite(Number(layer.maxzoom)) ? Number(layer.maxzoom) : 24
-                };
-            } catch (error) {
-                return ineligible('style inspection failed: ' + (error?.message || error));
-            }
-        };
-
-        let planPromise = plans.get(styleLocator);
-        if (!planPromise) {
-            planPromise = inspect();
-            plans.set(styleLocator, planPromise);
-        }
-        return planPromise.then(async plan => {
-            if (!plan.eligible) return { supported: false, reason: plan.reason, rgba: null };
-            const transparent = () => ({
-                supported: true,
-                reason: null,
-                rgba: new Uint8Array(outputSizePx * outputSizePx * 4)
-            });
-            if (zoom < plan.layerMinimumZoom || zoom >= plan.layerMaximumZoom || zoom < plan.minimumZoom) {
-                return transparent();
-            }
-
-            const outputDimension = 2 ** zoom;
-            if (row < 0 || row >= outputDimension) return transparent();
-            const canonicalColumn = ((column % outputDimension) + outputDimension) % outputDimension;
-            const sourceZoom = Math.min(zoom, Math.floor(plan.maximumZoom));
-            const childScale = 2 ** (zoom - sourceZoom);
-            const sourceColumn = Math.floor(canonicalColumn / childScale);
-            const sourceRow = Math.floor(row / childScale);
-            const childColumn = canonicalColumn - sourceColumn * childScale;
-            const childRow = row - sourceRow * childScale;
-            const sourceDimension = 2 ** sourceZoom;
-            const urlRow = plan.scheme === 'tms' ? sourceDimension - sourceRow - 1 : sourceRow;
-            let quadkey = '';
-            for (let bit = sourceZoom; bit > 0; bit--) {
-                const mask = 2 ** (bit - 1);
-                let digit = 0;
-                if ((sourceColumn & mask) !== 0) digit++;
-                if ((sourceRow & mask) !== 0) digit += 2;
-                quadkey += digit;
-            }
-            const tileUrl = plan.template
-                .replaceAll('{z}', String(sourceZoom))
-                .replaceAll('{x}', String(sourceColumn))
-                .replaceAll('{y}', String(urlRow))
-                .replaceAll('{-y}', String(sourceDimension - sourceRow - 1))
-                .replaceAll('{quadkey}', quadkey);
-            const response = await fetch(tileUrl);
-            if (!response.ok) throw new Error('raster tile HTTP ' + response.status);
-            const bitmap = await createImageBitmap(await response.blob(), {
-                premultiplyAlpha: 'none',
-                colorSpaceConversion: 'default'
-            });
-            try {
-                let entry = canvases.get(outputSizePx);
-                if (!entry) {
-                    const canvas = new OffscreenCanvas(outputSizePx, outputSizePx);
-                    const context = canvas.getContext('2d', { alpha: true, willReadFrequently: true });
-                    if (!context) throw new Error('OffscreenCanvas 2D context is unavailable');
-                    entry = { canvas, context };
-                    canvases.set(outputSizePx, entry);
-                }
-                const context = entry.context;
-                context.clearRect(0, 0, outputSizePx, outputSizePx);
-                context.imageSmoothingEnabled = true;
-                context.imageSmoothingQuality = 'low';
-                const sourceLeft = bitmap.width * childColumn / childScale;
-                const sourceTop = bitmap.height * childRow / childScale;
-                const sourceWidth = bitmap.width / childScale;
-                const sourceHeight = bitmap.height / childScale;
-                context.drawImage(
-                    bitmap,
-                    sourceLeft, sourceTop, sourceWidth, sourceHeight,
-                    0, 0, outputSizePx, outputSizePx
-                );
-                const data = context.getImageData(0, 0, outputSizePx, outputSizePx).data;
-                for (let index = 0; index < data.length; index += 4) {
-                    const alpha = data[index + 3];
-                    if (alpha !== 255) {
-                        data[index] = Math.round(data[index] * alpha / 255);
-                        data[index + 1] = Math.round(data[index + 1] * alpha / 255);
-                        data[index + 2] = Math.round(data[index + 2] * alpha / 255);
-                    }
-                }
-                return { supported: true, reason: null, rgba: new Uint8Array(data.buffer) };
-            } finally {
-                bitmap.close();
-            }
-        });
-    }""",
-)
-private external fun renderBrowserRaster(
-    styleLocator: JsString,
-    zoom: Int,
-    column: Int,
-    row: Int,
-    outputSizePx: Int,
-): Promise<BrowserRasterResult>
 
 @JsFun(
     """() => {
@@ -1485,9 +956,6 @@ private external fun prepareWorker(setup: WorkerSetup): BrowserSetup
 @JsFun("() => typeof window === 'undefined'")
 private external fun isWorkerScope(): Boolean
 
-@JsFun("() => typeof window === 'undefined' && new URL(self.location.href).searchParams.get('role') === 'tile'")
-private external fun isTileWorkerScope(): Boolean
-
 @JsFun("callback => self.__rengSetup.then(callback)")
 private external fun waitForWorkerSetup(callback: (WorkerSetup) -> Unit)
 
@@ -1591,77 +1059,6 @@ private external fun indexedDbWrite(
 ): Promise<JsAny>
 
 @JsFun(
-    """(database, dataKey, metadataKey, address, length, contentDigest, contentType, etag, lastModified,
-        freshUntilEpochMillis, storedAtEpochMillis) => {
-        const bytes = new Uint8Array(length);
-        bytes.set(new Uint8Array(wasmExports.memory.buffer, address >>> 0, length));
-        const metadata = {
-            contentDigest: String(contentDigest),
-            contentType: contentType == null ? null : String(contentType),
-            etag: etag == null ? null : String(etag),
-            lastModified: lastModified == null ? null : String(lastModified),
-            freshUntilEpochMillis,
-            storedAtEpochMillis
-        };
-        return new Promise((resolve, reject) => {
-            const transaction = database.transaction('rentile', 'readwrite');
-            const store = transaction.objectStore('rentile');
-            store.put({ ...metadata, bytes: bytes.buffer }, String(dataKey));
-            store.put(metadata, String(metadataKey));
-            transaction.oncomplete = () => resolve({});
-            transaction.onerror = () => reject(transaction.error || new Error('IndexedDB Rentile write failed'));
-            transaction.onabort = () => reject(transaction.error || new Error('IndexedDB Rentile write aborted'));
-        });
-    }""",
-)
-private external fun indexedDbWriteRentile(
-    database: IndexedDbDatabase,
-    dataKey: JsString,
-    metadataKey: JsString,
-    address: Int,
-    length: Int,
-    contentDigest: JsString,
-    contentType: JsString?,
-    etag: JsString?,
-    lastModified: JsString?,
-    freshUntilEpochMillis: Double,
-    storedAtEpochMillis: Double,
-): Promise<JsAny>
-
-@JsFun(
-    """(database, key) => new Promise((resolve, reject) => {
-        const transaction = database.transaction('rentile', 'readonly');
-        const request = transaction.objectStore('rentile').get(String(key));
-        let result = null;
-        request.onsuccess = () => { result = request.result == null ? null : request.result; };
-        transaction.oncomplete = () => resolve(result);
-        transaction.onerror = () => reject(transaction.error || request.error || new Error('IndexedDB metadata read failed'));
-        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB metadata read aborted'));
-    })""",
-)
-private external fun indexedDbReadMetadata(
-    database: IndexedDbDatabase,
-    key: JsString,
-): Promise<IndexedDbMetadataRecord?>
-
-@JsFun(
-    """(database, dataKey, metadataKey) => new Promise((resolve, reject) => {
-        const transaction = database.transaction('rentile', 'readwrite');
-        const store = transaction.objectStore('rentile');
-        store.delete(String(dataKey));
-        store.delete(String(metadataKey));
-        transaction.oncomplete = () => resolve({});
-        transaction.onerror = () => reject(transaction.error || new Error('IndexedDB Rentile remove failed'));
-        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB Rentile remove aborted'));
-    })""",
-)
-private external fun indexedDbRemoveRentile(
-    database: IndexedDbDatabase,
-    dataKey: JsString,
-    metadataKey: JsString,
-): Promise<JsAny>
-
-@JsFun(
     """(ifNoneMatch, ifModifiedSince, accept) => {
         const headers = new Headers();
         if (ifNoneMatch != null) headers.set('If-None-Match', ifNoneMatch);
@@ -1731,6 +1128,9 @@ private external fun benchFrameCount(): Int
 @JsFun("() => new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('labels') !== 'on'")
 private external fun labelsOff(): Boolean
 
+@JsFun("() => Number(new URLSearchParams(globalThis.__rengQuery ?? self.location.search).get('budget') || 0)")
+private external fun tileBudget(): Int
+
 @JsFun("() => Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('trace') || 0)")
 private external fun traceSeconds(): Int
 
@@ -1739,15 +1139,6 @@ private external fun readAheadOn(): Boolean
 
 @JsFun("() => Math.floor(Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('tileworkers') || 0))")
 private external fun tileWorkerCount(): Int
-
-@JsFun("() => new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('skia') === 'skip'")
-private external fun skipSkia(): Boolean
-
-@JsFun("() => Math.floor(Number(new URLSearchParams(typeof window === 'undefined' ? globalThis.__rengQuery : window.location.search).get('compare') || 0))")
-private external fun compareTileCount(): Int
-
-@JsFun("() => new URL(self.location.href).searchParams.get('skia') === 'skip'")
-private external fun tileWorkerSkipsSkia(): Boolean
 
 @JsFun("() => { globalThis.__rengRenderLongTasks = []; try { new PerformanceObserver((list) => { for (const e of list.getEntries()) globalThis.__rengRenderLongTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }")
 private external fun startLongTaskObserver()

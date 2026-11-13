@@ -1,6 +1,10 @@
+@file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+
 import org.gradle.api.credentials.AwsCredentials
 import org.gradle.api.publish.PublishingExtension
 import org.gradle.api.publish.maven.tasks.PublishToMavenRepository
+import org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenEnvSpec
+import org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenPlugin
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform) apply false
@@ -21,6 +25,14 @@ allprojects {
 }
 
 subprojects {
+    // KGP's Binaryen environment spec uses command verbatim when downloads are disabled.
+    plugins.withType<BinaryenPlugin>().configureEach {
+        extensions.configure<BinaryenEnvSpec> {
+            download = false
+            command = "/opt/homebrew/bin/wasm-opt"
+        }
+    }
+
     plugins.withId("maven-publish") {
         extensions.configure<PublishingExtension> {
             repositories {

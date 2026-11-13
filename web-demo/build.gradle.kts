@@ -2,6 +2,7 @@ import org.gradle.api.file.ArchiveOperations
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.tasks.Copy
 import org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsEnvSpec
 import org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin
 import javax.inject.Inject
@@ -66,7 +67,6 @@ kotlin {
     sourceSets {
         wasmJsMain.dependencies {
             implementation(project(":kmp"))
-            implementation("com.rohittp.rentile:kmp:0.19.0-wasm2")
             implementation(libs.kotlinx.coroutines.core)
         }
         getByName("wasmJsMain").resources.srcDir(unpackSkikoWasmRuntime)
@@ -77,3 +77,25 @@ kotlin {
 extensions.configure<WasmNodeJsEnvSpec> {
     download = false
 }
+
+fun includeTileWorkerDistribution(mode: String, demoTaskName: String, workerTaskName: String) {
+    val copyTask = tasks.register<Copy>("include${mode}TileWorkerDistribution") {
+        from(project(":web-tile-worker").layout.buildDirectory.dir("dist/wasmJs/${mode.lowercase()}Executable"))
+        into(layout.buildDirectory.dir("dist/wasmJs/${mode.lowercase()}Executable"))
+    }
+    tasks.named(demoTaskName) {
+        dependsOn(":web-tile-worker:$workerTaskName")
+        finalizedBy(copyTask)
+    }
+}
+
+includeTileWorkerDistribution(
+    mode = "Development",
+    demoTaskName = "wasmJsBrowserDevelopmentExecutableDistribution",
+    workerTaskName = "wasmJsBrowserDevelopmentExecutableDistribution",
+)
+includeTileWorkerDistribution(
+    mode = "Production",
+    demoTaskName = "wasmJsBrowserDistribution",
+    workerTaskName = "wasmJsBrowserDistribution",
+)

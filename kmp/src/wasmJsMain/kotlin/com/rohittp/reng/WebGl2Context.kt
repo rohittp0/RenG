@@ -7,15 +7,126 @@ import kotlin.js.unsafeCast
 
 internal var currentWebGl2Context: WebGl2Context? = null
 
+/**
+ * A kind of WebGL object whose integer names are shared by RenG and its consumer on a context.
+ * RenG uses consumer-owned contexts and never creates a WebGL context itself (ADR 0001).
+ */
+public enum class WebGlObjectKind {
+    FRAMEBUFFER,
+    RENDERBUFFER,
+    TEXTURE,
+    SAMPLER,
+    BUFFER,
+    VERTEX_ARRAY,
+    SHADER,
+    PROGRAM,
+}
+
 /** Selects the consumer-owned WebGL2 context used by subsequent RenG calls on the browser main thread. */
 public fun makeWebGl2ContextCurrent(context: JsAny) {
     currentWebGl2Context = context.unsafeCast<WebGl2Context>()
+}
+
+/**
+ * Returns the integer name shared by RenG and its consumer for [obj] on [context], registering it
+ * if necessary. Names belong to the consumer-owned context; RenG never creates a context (ADR 0001).
+ */
+public fun webGlObjectName(context: JsAny, kind: WebGlObjectKind, obj: JsAny): Int =
+    webGlObjectNames(context, kind).nameFor(obj)
+
+/**
+ * Returns the WebGL object behind [name] in the names shared by RenG and its consumer on [context],
+ * or null for zero or an unknown/deleted name. RenG never creates a context (ADR 0001).
+ */
+public fun webGlObjectForName(context: JsAny, kind: WebGlObjectKind, name: Int): JsAny? =
+    webGlObjectNames(context, kind)[name]
+
+/**
+ * Forgets [name] from the names shared by RenG and its consumer on [context]. Call this after the
+ * consumer deletes the object itself. RenG never creates a context (ADR 0001).
+ */
+public fun forgetWebGlObjectName(context: JsAny, kind: WebGlObjectKind, name: Int) {
+    webGlObjectNames(context, kind).forget(name)
 }
 
 /** Clears the consumer-owned WebGL2 context currently selected for RenG. */
 public fun clearCurrentWebGl2Context() {
     currentWebGl2Context = null
 }
+
+internal fun webGlObjectNames(context: JsAny, kind: WebGlObjectKind): WebGlObjectNames =
+    WebGlObjectNames(objectNamesState(contextObjectNameRegistries, context, kind.ordinal))
+
+internal fun webGlUniformLocationNames(context: JsAny, program: Int): WebGlObjectNames =
+    WebGlObjectNames(objectNamesState(contextObjectNameRegistries, context, uniformLocationKey(program)))
+
+internal fun forgetWebGlUniformLocationNames(context: JsAny, program: Int) {
+    forgetObjectNamesState(contextObjectNameRegistries, context, uniformLocationKey(program))
+}
+
+internal class WebGlObjectNames(private val state: JsObjectNamesState) {
+    operator fun get(name: Int): JsAny? = if (name == 0) null else objectNameValue(state, name)
+
+    fun require(name: Int): JsAny = get(name) ?: error("unknown WebGL object name $name")
+
+    fun add(value: JsAny?): Int {
+        val actual = value ?: error("WebGL object allocation failed")
+        return addObjectName(state, actual)
+    }
+
+    fun nameFor(value: JsAny?): Int {
+        if (value == null) return 0
+        return objectNameFor(state, value).takeIf { it != 0 } ?: add(value)
+    }
+
+    fun delete(name: Int, action: (JsAny?) -> Unit) {
+        if (name == 0) return
+        val value = get(name) ?: return
+        action(value)
+        forget(name)
+    }
+
+    fun forget(name: Int) {
+        if (name != 0) forgetObjectName(state, name)
+    }
+}
+
+private fun uniformLocationKey(program: Int): Int = -program - 1
+
+private external interface JsContextObjectNameRegistries : JsAny
+
+internal external interface JsObjectNamesState : JsAny
+
+@JsFun("() => new WeakMap()")
+private external fun newContextObjectNameRegistries(): JsContextObjectNameRegistries
+
+private val contextObjectNameRegistries = newContextObjectNameRegistries()
+
+@JsFun("(registries, context, key) => { let registry = registries.get(context); if (!registry) { registry = Object.create(null); registries.set(context, registry); } let state = registry[key]; if (!state) { state = { values: [null], namesByObject: new Map() }; registry[key] = state; } return state; }")
+private external fun objectNamesState(
+    registries: JsContextObjectNameRegistries,
+    context: JsAny,
+    key: Int,
+): JsObjectNamesState
+
+@JsFun("(registries, context, key) => { const registry = registries.get(context); if (registry) delete registry[key]; }")
+private external fun forgetObjectNamesState(
+    registries: JsContextObjectNameRegistries,
+    context: JsAny,
+    key: Int,
+)
+
+@JsFun("(state, name) => state.values[name] ?? null")
+private external fun objectNameValue(state: JsObjectNamesState, name: Int): JsAny?
+
+@JsFun("(state, value) => { state.values.push(value); const name = state.values.length - 1; state.namesByObject.set(value, name); return name; }")
+private external fun addObjectName(state: JsObjectNamesState, value: JsAny): Int
+
+@JsFun("(state, value) => state.namesByObject.get(value) || 0")
+private external fun objectNameFor(state: JsObjectNamesState, value: JsAny): Int
+
+@JsFun("(state, name) => { const value = state.values[name]; if (value == null) return; state.namesByObject.delete(value); state.values[name] = null; }")
+private external fun forgetObjectName(state: JsObjectNamesState, name: Int)
 
 /**
  * Installs a process-local raw basemap tile renderer. RenG supplies Rentile's pre-acquisition

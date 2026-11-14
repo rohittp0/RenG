@@ -3,21 +3,27 @@
 package com.rohittp.reng.internal.gl
 
 import com.rohittp.reng.WebGl2Context
+import com.rohittp.reng.WebGlObjectKind
+import com.rohittp.reng.WebGlObjectNames
 import com.rohittp.reng.currentWebGl2Context
+import com.rohittp.reng.forgetWebGlUniformLocationNames
+import com.rohittp.reng.webGlObjectNames
+import com.rohittp.reng.webGlUniformLocationNames
 import kotlin.js.JsAny
 import kotlin.js.toJsString
 import kotlin.wasm.unsafe.withScopedMemoryAllocator
 
 internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
-    private val framebuffers = ObjectNames()
-    private val renderbuffers = ObjectNames()
-    private val textures = ObjectNames()
-    private val samplers = ObjectNames()
-    private val buffers = ObjectNames()
-    private val vertexArrays = ObjectNames()
-    private val shaders = ObjectNames()
-    private val programs = ObjectNames()
-    private val uniformLocations = mutableMapOf<Int, ObjectNames>()
+    private val framebuffers = webGlObjectNames(gl, WebGlObjectKind.FRAMEBUFFER)
+    private val renderbuffers = webGlObjectNames(gl, WebGlObjectKind.RENDERBUFFER)
+    private val textures = webGlObjectNames(gl, WebGlObjectKind.TEXTURE)
+    private val samplers = webGlObjectNames(gl, WebGlObjectKind.SAMPLER)
+    private val buffers = webGlObjectNames(gl, WebGlObjectKind.BUFFER)
+    private val vertexArrays = webGlObjectNames(gl, WebGlObjectKind.VERTEX_ARRAY)
+    private val shaders = webGlObjectNames(gl, WebGlObjectKind.SHADER)
+    private val programs = webGlObjectNames(gl, WebGlObjectKind.PROGRAM)
+    // A view per program, cached: uniform calls are per draw, and finding the context's table is two JS calls.
+    private val uniformLocations = mutableMapOf<Int, WebGlObjectNames>()
     private var currentProgram: Int = 0
 
     private val extensionNames: List<String>
@@ -200,6 +206,7 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     override fun createProgram(): Int = programs.add(gl.createProgram())
     override fun deleteProgram(program: Int) {
         uniformLocations.remove(program)
+        forgetWebGlUniformLocationNames(gl, program)
         programs.delete(program, gl::deleteProgram)
     }
     override fun attachShader(program: Int, shader: Int) = gl.attachShader(programs.require(program), shaders.require(shader))
@@ -218,10 +225,10 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
         gl.getAttribLocation(programs.require(program), name.toJsString())
     override fun getUniformLocation(program: Int, name: String): Int {
         val location = gl.getUniformLocation(programs.require(program), name.toJsString()) ?: return -1
-        return uniformLocations.getOrPut(program) { ObjectNames() }.nameFor(location)
+        return uniformLocationNames(program).nameFor(location)
     }
     private fun uniform(location: Int): JsAny? =
-        if (location < 0) null else uniformLocations[currentProgram]?.get(location)
+        if (location < 0) null else uniformLocationNames(currentProgram)[location]
     override fun uniform1i(location: Int, value: Int) = gl.uniform1i(uniform(location), value)
     override fun uniform1f(location: Int, value: Float) = gl.uniform1f(uniform(location), value)
     override fun uniform2f(location: Int, x: Float, y: Float) = gl.uniform2f(uniform(location), x, y)
@@ -262,7 +269,10 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
     override fun drawElements(mode: Int, count: Int, type: Int, offset: Int) = gl.drawElements(mode, count, type, offset)
     override fun finish() = gl.finish()
 
-    private fun objectNamesForQuery(pname: Int): ObjectNames? = when (pname) {
+    private fun uniformLocationNames(program: Int): WebGlObjectNames =
+        uniformLocations.getOrPut(program) { webGlUniformLocationNames(gl, program) }
+
+    private fun objectNamesForQuery(pname: Int): WebGlObjectNames? = when (pname) {
         GL_DRAW_FRAMEBUFFER_BINDING, GL_READ_FRAMEBUFFER_BINDING -> framebuffers
         GL_RENDERBUFFER_BINDING -> renderbuffers
         GL_TEXTURE_BINDING_2D -> textures
@@ -294,43 +304,13 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
         }
     }
 
-    private fun generate(count: Int, out: IntArray, names: ObjectNames, create: () -> JsAny?) {
+    private fun generate(count: Int, out: IntArray, names: WebGlObjectNames, create: () -> JsAny?) {
         require(out.size >= count) { "object generation needs room for $count names" }
         repeat(count) { index -> out[index] = names.add(create()) }
     }
 
-    private fun delete(count: Int, values: IntArray, names: ObjectNames, action: (JsAny?) -> Unit) {
+    private fun delete(count: Int, values: IntArray, names: WebGlObjectNames, action: (JsAny?) -> Unit) {
         repeat(count) { index -> names.delete(values[index], action) }
-    }
-
-    private class ObjectNames {
-        private val values = mutableListOf<JsAny?>(null)
-        private val namesByObject = newObjectNameMap()
-
-        operator fun get(name: Int): JsAny? = if (name == 0) null else values.getOrNull(name)
-
-        fun require(name: Int): JsAny = get(name) ?: error("unknown WebGL object name $name")
-
-        fun add(value: JsAny?): Int {
-            val actual = value ?: error("WebGL object allocation failed")
-            values += actual
-            val name = values.lastIndex
-            objectNameMapSet(namesByObject, actual, name)
-            return name
-        }
-
-        fun nameFor(value: JsAny?): Int {
-            if (value == null) return 0
-            return objectNameMapGet(namesByObject, value).takeIf { it != 0 } ?: add(value)
-        }
-
-        fun delete(name: Int, action: (JsAny?) -> Unit) {
-            if (name == 0) return
-            val value = get(name) ?: return
-            action(value)
-            objectNameMapDelete(namesByObject, value)
-            values[name] = null
-        }
     }
 
     private companion object {
@@ -341,20 +321,6 @@ internal class WebGlBinding(private val gl: WebGl2Context) : GlBinding {
 
 internal actual fun openPlatformGlBinding(): GlBindingResult =
     currentWebGl2Context?.let { GlBindingResult.Bound(WebGlBinding(it)) } ?: unsupportedRenderContext()
-
-private external interface JsObjectNameMap : JsAny
-
-@JsFun("() => new Map()")
-private external fun newObjectNameMap(): JsObjectNameMap
-
-@JsFun("(map, value) => map.get(value) || 0")
-private external fun objectNameMapGet(map: JsObjectNameMap, value: JsAny): Int
-
-@JsFun("(map, value, name) => map.set(value, name)")
-private external fun objectNameMapSet(map: JsObjectNameMap, value: JsAny, name: Int)
-
-@JsFun("(map, value) => map.delete(value)")
-private external fun objectNameMapDelete(map: JsObjectNameMap, value: JsAny)
 
 @JsFun("value => value == null ? null : String(value)")
 private external fun jsStringValue(value: JsAny?): JsString?

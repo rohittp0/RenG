@@ -318,7 +318,7 @@ class IosGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
             binding.scissor(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
-            runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }
@@ -368,7 +368,7 @@ class IosGlConformanceTest {
             val binding = bindOrFail()
             binding.viewport(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
             binding.scissor(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
-            runExternalFrameReadbackSuite(binding, fixture.probe)
+            runBlocking { runExternalFrameReadbackSuite(binding, fixture.probe) }
         } finally {
             fixture.destroy()
         }

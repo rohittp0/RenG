@@ -214,7 +214,7 @@ internal suspend fun runBasemapReadbackSuite(
 private class CollectedFailures {
     private val messages: MutableList<String> = mutableListOf()
 
-    inline fun run(name: String, case: () -> Unit) {
+    suspend fun run(name: String, case: suspend () -> Unit) {
         try {
             case()
         } catch (error: AssertionError) {
@@ -671,7 +671,7 @@ private suspend fun assertDrawBasemapFalseLeavesTheFrameUntouched(
  * and the bottom half blue. The opt-in frame must smear those exact edge rows into the otherwise
  * absent regions, while the default frame must leave both samples untouched.
  */
-private fun assertMercatorPoleExtensionStretchesBothEdgeRows(
+private suspend fun assertMercatorPoleExtensionStretchesBothEdgeRows(
     binding: GlBinding,
     probe: RenderContextProbe,
 ) {
@@ -680,7 +680,7 @@ private fun assertMercatorPoleExtensionStretchesBothEdgeRows(
         width = POLE_READBACK_WIDTH,
         height = POLE_READBACK_HEIGHT,
     )
-    fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleReadbackSamples {
+    suspend fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleReadbackSamples {
         val renderer = createRenderer(
             configuration = RendererConfiguration(
                 outputPixelSize = OutputPixelSize(
@@ -745,7 +745,7 @@ private fun assertMercatorPoleExtensionStretchesBothEdgeRows(
  * colour at that distance, symmetrically nearer the world mean rather than either sharp tile row;
  * several tile heights out, both columns must converge on the root band's red/green mean.
  */
-private fun assertMercatorPoleExtensionSmudgesAcrossColumns(
+private suspend fun assertMercatorPoleExtensionSmudgesAcrossColumns(
     binding: GlBinding,
     probe: RenderContextProbe,
 ) {
@@ -754,7 +754,7 @@ private fun assertMercatorPoleExtensionSmudgesAcrossColumns(
         width = POLE_SMUDGE_WIDTH,
         height = POLE_SMUDGE_HEIGHT,
     )
-    fun samples(
+    suspend fun samples(
         extendGroundPastPoles: Boolean,
         frameIndex: Long,
         failWorldTexture: Boolean = false,
@@ -871,7 +871,7 @@ private fun assertMercatorPoleExtensionSmudgesAcrossColumns(
  * Far into the cap, a horizontal run must therefore be the edge mip pyramid's stable grey rather
  * than a longitude-dependent choice of which source stripes the taps happened to hit.
  */
-private fun assertMercatorPoleExtensionPrefiltersEdgeStripes(
+private suspend fun assertMercatorPoleExtensionPrefiltersEdgeStripes(
     binding: GlBinding,
     probe: RenderContextProbe,
 ) {
@@ -934,7 +934,7 @@ private fun assertMercatorPoleExtensionPrefiltersEdgeStripes(
  * At the world edge the ordinary LOD-one tile must already have faded to that same colour, while a
  * sample beyond the 160-logical-pixel fade remains the exact black texel it is with the option off.
  */
-private fun assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
+private suspend fun assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
     binding: GlBinding,
     probe: RenderContextProbe,
 ) {
@@ -943,7 +943,7 @@ private fun assertMercatorPoleExtensionAveragesBandAndFadesMapEdge(
         width = POLE_SMUDGE_WIDTH,
         height = POLE_SMUDGE_HEIGHT,
     )
-    fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleSmudgeSamples {
+    suspend fun samples(extendGroundPastPoles: Boolean, frameIndex: Long): PoleSmudgeSamples {
         val renderer = createRenderer(
             configuration = RendererConfiguration(
                 outputPixelSize = OutputPixelSize(width = POLE_SMUDGE_WIDTH, height = POLE_SMUDGE_HEIGHT),
@@ -1422,7 +1422,7 @@ private class PoleSmudgeSamples(
     val interior: IntArray,
 )
 
-private fun clearDrawAndReadPoleSamples(
+private suspend fun clearDrawAndReadPoleSamples(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1437,7 +1437,7 @@ private fun clearDrawAndReadPoleSamples(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {
@@ -1469,7 +1469,7 @@ private fun clearDrawAndReadPoleSamples(
     return samples
 }
 
-private fun clearDrawAndReadPoleSmudgeSamples(
+private suspend fun clearDrawAndReadPoleSmudgeSamples(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1484,7 +1484,7 @@ private fun clearDrawAndReadPoleSmudgeSamples(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {
@@ -1521,7 +1521,7 @@ private fun clearDrawAndReadPoleSmudgeSamples(
     return samples
 }
 
-private fun clearDrawAndReadPoleStripeRun(
+private suspend fun clearDrawAndReadPoleStripeRun(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -1536,7 +1536,7 @@ private fun clearDrawAndReadPoleStripeRun(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    val frame = runBlocking { renderer.prepare(plan) }
+    val frame = renderer.prepare(plan)
     try {
         renderer.draw(frame, renderTarget)
     } finally {

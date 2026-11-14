@@ -5,6 +5,7 @@ import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
 import com.rohittp.reng.BLOOM_READBACK_PIXELS
 import com.rohittp.reng.DEPTH_READBACK_PIXELS
 import com.rohittp.reng.DISPLACEMENT_READBACK_PIXELS
+import com.rohittp.reng.EXTERNAL_FRAME_READBACK_PIXELS
 import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
@@ -12,6 +13,7 @@ import com.rohittp.reng.GLOBE_GROUND_READBACK_PIXELS
 import com.rohittp.reng.GROUND_ANCHOR_READBACK_PIXELS
 import com.rohittp.reng.GROUND_CULL_READBACK_PIXELS
 import com.rohittp.reng.LATITUDE_PROBE_PIXELS
+import com.rohittp.reng.LAYER_ORDER_READBACK_PIXELS
 import com.rohittp.reng.MODEL_READBACK_PIXELS
 import com.rohittp.reng.SHADING_READBACK_PIXELS
 import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
@@ -22,6 +24,7 @@ import com.rohittp.reng.makeWebGl2ContextCurrent
 import com.rohittp.reng.runBasemapReadbackSuite
 import com.rohittp.reng.runBloomPerElementReadbackSuite
 import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runExternalFrameReadbackSuite
 import com.rohittp.reng.runGeometryBlendReadbackSuite
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
 import com.rohittp.reng.runGlobeFrameReadbackSuite
@@ -32,6 +35,7 @@ import com.rohittp.reng.runGroundDepthReadback
 import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
 import com.rohittp.reng.runLatitudePrecisionProbeSuite
+import com.rohittp.reng.runLayerOrderReadbackSuite
 import com.rohittp.reng.runModelReadbackSuite
 import com.rohittp.reng.runStickerOpacityReadbackSuite
 import com.rohittp.reng.runStickerShaderReadbackSuite
@@ -70,6 +74,18 @@ class WebGl2ConformanceTest {
     fun theBasemapReadbackSuitePassesOnARealWebGl2Context() = runOn(BASEMAP_READBACK_PIXELS) { binding, probe ->
         runBasemapReadbackSuite(binding, probe, ShaderDialect.GLES)
     }
+
+    @Test
+    fun theExternalFrameReadbackSuitePassesOnARealWebGl2Context() =
+        runOn(EXTERNAL_FRAME_READBACK_PIXELS) { binding, probe ->
+            runExternalFrameReadbackSuite(binding, probe)
+        }
+
+    @Test
+    fun theLayerOrderReadbackSuitePassesOnARealWebGl2Context() =
+        runOn(LAYER_ORDER_READBACK_PIXELS) { binding, probe ->
+            runLayerOrderReadbackSuite(binding, probe, ShaderDialect.GLES)
+        }
 
     @Test
     fun theGroundCullReadbackSuitePassesOnARealWebGl2Context() = runOn(GROUND_CULL_READBACK_PIXELS) { binding, _ ->

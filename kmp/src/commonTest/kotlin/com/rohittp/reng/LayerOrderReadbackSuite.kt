@@ -17,11 +17,9 @@ import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.ShaderDialect
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
-import kotlinx.coroutines.runBlocking
-
 internal const val LAYER_ORDER_READBACK_PIXELS: Int = 32
 
-internal fun runLayerOrderReadbackSuite(
+internal suspend fun runLayerOrderReadbackSuite(
     binding: GlBinding,
     probe: RenderContextProbe,
     dialect: ShaderDialect,
@@ -117,7 +115,7 @@ private fun layerOrderFramePlan(frameIndex: Long, stickerLayer: Int, geometryLay
         ),
     )
 
-private fun clearDrawAndReadLayerOrder(
+private suspend fun clearDrawAndReadLayerOrder(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -133,7 +131,7 @@ private fun clearDrawAndReadLayerOrder(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    runBlocking { renderer.prepare(plan) }.use { renderer.draw(it, renderTarget) }
+    renderer.prepare(plan).use { renderer.draw(it, renderTarget) }
 
     val pixel = ByteArray(4)
     binding.bindFramebuffer(GL_READ_FRAMEBUFFER, targetFramebuffer)

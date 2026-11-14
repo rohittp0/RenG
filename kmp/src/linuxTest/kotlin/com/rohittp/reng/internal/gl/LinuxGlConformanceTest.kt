@@ -245,7 +245,7 @@ class LinuxGlConformanceTest {
             }
             binding.viewport(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
             binding.scissor(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
-            runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+            runBlocking { runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES) }
         } finally {
             fixture.destroy()
         }

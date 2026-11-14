@@ -23,7 +23,6 @@ import com.rohittp.reng.internal.gl.GL_UNSIGNED_BYTE
 import com.rohittp.reng.internal.gl.GlBinding
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.image.rawRgbaContainer
-import kotlinx.coroutines.runBlocking
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -31,7 +30,7 @@ import kotlin.test.assertFalse
 internal const val EXTERNAL_FRAME_READBACK_PIXELS: Int = 32
 
 /** Real-GL coverage for ADR 0095's 2D external texture and every fallback arm. */
-internal fun runExternalFrameReadbackSuite(binding: GlBinding, probe: RenderContextProbe) {
+internal suspend fun runExternalFrameReadbackSuite(binding: GlBinding, probe: RenderContextProbe) {
     val target = createExternalFrameTarget(binding)
     val renderer = createRenderer(
         RendererConfiguration(
@@ -85,7 +84,7 @@ internal fun runExternalFrameReadbackSuite(binding: GlBinding, probe: RenderCont
     }
 }
 
-private fun drawExternalFrameAndRead(
+private suspend fun drawExternalFrameAndRead(
     binding: GlBinding,
     renderer: Renderer,
     renderTarget: RenderTarget,
@@ -103,7 +102,7 @@ private fun drawExternalFrameAndRead(
     binding.clear(GL_COLOR_BUFFER_BIT)
     binding.bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
-    runBlocking { renderer.prepare(externalFramePlan(sourceId, frame)) }.use {
+    renderer.prepare(externalFramePlan(sourceId, frame)).use {
         renderer.draw(it, renderTarget)
     }
 

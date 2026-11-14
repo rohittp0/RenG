@@ -35,7 +35,7 @@ internal const val REVERSE_Z_FAR_DEPTH: Float = 0.0f
  * The entire body runs inside [withCapturedGlState]. A shared context is captured before either pass
  * and restored afterward unconditionally — including when [content] leaves state dirty or a driver
  * error is detected at the end. An opted-in exclusive context establishes RenG's required state but
- * has no consumer state to capture or restore (ADR 0092).
+ * has no consumer state to capture or restore (ADR 0097).
  *
  * **Depth comparison (ADR 0025) and depth writes (ADR 0027).** The test is [GL_GEQUAL], not
  * `GL_GREATER`. Under strict `GL_GREATER` a fragment at exactly the depth already in the buffer is

@@ -69,7 +69,7 @@ internal fun offscreenSurfaceDescriptorFor(size: OutputPixelSize): OffscreenSurf
  *
  * Creation deliberately leaves its objects bound; the caller wraps it in [withCapturedGlState],
  * which is the single place restoration happens for a shared context. An exclusive context keeps
- * the bindings because it has no consumer state to restore (ADR 0092).
+ * the bindings because it has no consumer state to restore (ADR 0097).
  *
  * A surface larger than the context allows fails before any allocation is issued, so a rejected
  * request never leaves objects to delete. An incomplete or otherwise-failed framebuffer deletes

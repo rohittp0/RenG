@@ -267,7 +267,7 @@ private fun GlBinding.setEnabled(cap: Int, enabled: Boolean) {
 
 /**
  * Runs [block] with [binding]'s corrected save-and-restore set captured beforehand and restored
- * afterward unconditionally, including when [block] throws. ADR 0092's explicitly exclusive binding
+ * afterward unconditionally, including when [block] throws. ADR 0097's explicitly exclusive binding
  * skips both operations and establishes only RenG's required unpack state.
  *
  * Restoring in a `finally` is what turns ADR 0006 from a happy-path promise into a guarantee: a

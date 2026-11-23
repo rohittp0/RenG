@@ -104,7 +104,7 @@ internal data class GltfMaterial(
 )
 
 /** [uri] is parsed only so `VALIDATE_GLB_FEATURES` can reject an external or `data:` reference;
- * RenG's only supported image form is [bufferView] plus an `image/png` [mimeType]. */
+ * RenG's only supported image form is [bufferView] plus an `image/png` or `image/jpeg` [mimeType]. */
 internal data class GltfImage(val bufferView: Int?, val mimeType: String?, val uri: String?)
 
 internal data class GltfTexture(val source: Int?, val sampler: Int?)

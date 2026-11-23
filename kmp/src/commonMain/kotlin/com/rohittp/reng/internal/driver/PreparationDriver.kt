@@ -1,11 +1,16 @@
 package com.rohittp.reng.internal.driver
 
+import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.Store
 import com.rohittp.reng.Transport
+import com.rohittp.reng.internal.cache.Lease
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.firewall.BasemapEngineHost
+import com.rohittp.reng.internal.planning.StaticResourceReference
+import com.rohittp.reng.internal.resource.ordinaryResourceClassGates
 import com.rohittp.reng.internal.resource.AdvancePendingClassGates
 import com.rohittp.reng.internal.resource.AdvancePendingStyleCommit
 import com.rohittp.reng.internal.resource.BasemapStyleCompilationCompleted
@@ -19,7 +24,6 @@ import com.rohittp.reng.internal.resource.CancellationSelection
 import com.rohittp.reng.internal.resource.CompileBasemapStyle
 import com.rohittp.reng.internal.resource.InstallBasemapStyleVisibility
 import com.rohittp.reng.internal.resource.InstallVisibility
-import com.rohittp.reng.internal.resource.PendingClassGates
 import com.rohittp.reng.internal.resource.ReadStore
 import com.rohittp.reng.internal.resource.ResourceActionId
 import com.rohittp.reng.internal.resource.ResourceClassValidationCompleted
@@ -30,7 +34,6 @@ import com.rohittp.reng.internal.resource.ResourceOperationOutcome
 import com.rohittp.reng.internal.resource.ResourceOperationState
 import com.rohittp.reng.internal.resource.ResourceOperationStateMachine
 import com.rohittp.reng.internal.resource.ResourceOperationTransition
-import com.rohittp.reng.internal.resource.ResourceRouteStatus
 import com.rohittp.reng.internal.resource.StartRoute
 import com.rohittp.reng.internal.resource.StoreReadCompleted
 import com.rohittp.reng.internal.resource.StoreWriteCompleted
@@ -42,13 +45,10 @@ import com.rohittp.reng.internal.resource.ValidateResourceClass
 import com.rohittp.reng.internal.resource.VisibilityInstallCompleted
 import com.rohittp.reng.internal.resource.WriteBasemapStyle
 import com.rohittp.reng.internal.resource.WriteStore
-import com.rohittp.reng.internal.resource.ordinaryResourceClassGates
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -103,13 +103,9 @@ import kotlin.coroutines.coroutineContext
  * does at its own seam. [ResourceOperationStateMachine]'s own arbitration decides what an observed adapter
  * cancellation means for the whole operation; this driver only supplies the observation.
  *
- * [cancel] is this driver's own cross-coroutine cancellation entry point, distinct from either of the
- * above: it lets a caller that does not hold the specific [Job] running [run] — a future
- * [com.rohittp.reng.Renderer.cancelPreparations] implementation, called from whatever coroutine the
- * consumer happens to be on — stop an in-flight preparation anyway. It tracks at most one active [run]
- * invocation, which is all ADR 0014's serialized frame preparation ever leaves in flight on one driver at
- * a time; it is not a general-purpose multi-run scheduler. Calling it while no [run] is active is a no-op,
- * the same idempotent spirit as this codebase's `close()`/`free()` operations.
+ * Cross-coroutine cancellation belongs to the renderer's outer preparation-session coordinator. This
+ * driver deliberately has no independently published active job: structured cancellation of [run]'s
+ * caller reaches every action child in this scope.
  */
 internal class PreparationDriver(
     private val transport: Transport,
@@ -120,12 +116,104 @@ internal class PreparationDriver(
     private val resourceLimits: ResourceLimits,
     private val maximumConcurrentOperations: Int,
     private val clock: () -> Long,
+    /**
+     * Also runs every step through the pure [ResourceOperationStateMachine.transition] path and fails if
+     * its actions, outcome or state ever differ from the session's. For tests: it restores the per-event
+     * copy the session exists to remove. See [ResourceOperationStateMachine.Session].
+     */
+    private val shadowCheck: Boolean = false,
 ) {
-    private val activeRunJob = MutableStateFlow<Job?>(null)
 
-    suspend fun run(definition: ResourceOperationDefinition): ResourceOperationOutcome = coroutineScope {
-        activeRunJob.value = coroutineContext[Job]
-        try {
+    /**
+     * The steady-state shortcut: leases every reference in [references] that the operation would only
+     * re-confirm, and returns the ones it must still drive.
+     *
+     * **What qualifies.** A reference whose resource is resident, fresh at this clock sample (or any
+     * resident one under `CACHE_ONLY`), and whose every class gate is remembered as passed for exactly the
+     * resident bytes (ADR 0060). For such a reference the operation's whole route -- sample the clock,
+     * observe the resident generation, select it, re-run gates that answer at once from memory, install
+     * visibility by leasing it -- decides nothing new; it costs about six scheduler steps and four
+     * coroutine round-trips. Here it is one atomic [ResidentCache.observeAndTakeLease].
+     *
+     * **Why.** Most references in a steady frame are resident and unchanged since the previous frame, so
+     * driving each through the scheduler costs a frame far more than the one lease it ends in.
+     *
+     * **What it keeps.** The lease goes to [leaseSink] and then [leaseObserver], exactly as
+     * [ResourceActionExecutor] records an install, so admission and rollback are unchanged. Decided per
+     * resource key: a key is bypassed whole, with one lease, or left whole to the operation, and a key named
+     * on more than one route is always left to it. Never under `RELOAD`, which never selects resident content;
+     * never for a basemap style, which carries discovery and its commit barrier (ADR 0016).
+     *
+     * **Registration first.** [registration] is the operation every reference in [references] belongs to,
+     * style included. Its own registration ([ResourceOperationStateMachine.preRegister]) runs before
+     * anything is leased, and if it would fail -- an identity collision, two routes claiming one private
+     * Rentile key -- nothing is bypassed, so the operation reports that failure exactly as it always did
+     * and no admission refusal can stand in front of it. Styles discover no child routes any more (their
+     * validation announces a route manifest to the engine instead), so registration sees every claim
+     * there is. Freshness is sampled once per route, as the operation samples it.
+     *
+     * Not shadow-checked: a bypassed reference never reaches the session. It is covered by
+     * PreparationDriverTest's shortcut cases instead.
+     */
+    fun leaseSteadyStateResident(
+        references: List<StaticResourceReference.External>,
+        accessMode: ResourceAccessMode,
+        leaseSink: MutableList<Lease>,
+        leaseObserver: (Lease) -> Unit,
+        registration: ResourceOperationDefinition,
+    ): List<StaticResourceReference.External> {
+        if (accessMode == ResourceAccessMode.RELOAD || references.isEmpty()) return references
+        if (ResourceOperationStateMachine.preRegister(registration).outcome != null) return references
+        // Decided per resource key, so a key is never split between the shortcut and the operation: the
+        // caller keeps or drops whole keys from the operation, and a frame must end up holding one lease,
+        // on one generation, per key. A key named by references on more than one route is left entirely
+        // to the operation -- registration already refuses one, since its routes claim one private Rentile
+        // key, so this only keeps that true by construction. Same route key the definition builder derives, so a key with one
+        // route is exactly the references route joining would have shared one lookup between.
+        fun routeOf(reference: StaticResourceReference.External) =
+            Triple(reference.locator, reference.resourceClass, reference.maximumResponseBytes)
+        val routesByKey = LinkedHashMap<ResourceKey, MutableSet<Triple<*, *, *>>>()
+        val firstByKey = LinkedHashMap<ResourceKey, StaticResourceReference.External>()
+        for (reference in references) {
+            routesByKey.getOrPut(reference.resourceKey) { HashSet() } += routeOf(reference)
+            firstByKey.getOrPut(reference.resourceKey) { reference }
+        }
+        val bypassedKeys = HashSet<ResourceKey>()
+        for ((key, reference) in firstByKey) {
+            if (routesByKey.getValue(key).size != 1) continue
+            if (reference.resourceClass == ResourceClass.BASEMAP_STYLE) continue
+            val gates = ordinaryResourceClassGates(reference.resourceClass) ?: continue
+            val lease = cache.observeAndTakeLease(reference.resourceKey) ?: continue
+            val stored = lease.generation.stored
+            val fresh = accessMode == ResourceAccessMode.CACHE_ONLY ||
+                stored.metadata.freshUntilEpochMillis?.let { it > clock() } == true
+            if (fresh && gates.all { classGateRunner.hasPassed(it, stored.contentDigest) }) {
+                // Recorded before observed, as the executor does, so an observer that refuses admission
+                // leaves the lease where the caller's rollback releases it.
+                leaseSink += lease
+                leaseObserver(lease)
+                bypassedKeys += key
+            } else {
+                cache.releaseLease(lease)
+            }
+        }
+        if (bypassedKeys.isEmpty()) return references
+        return references.filter { it.resourceKey !in bypassedKeys }
+    }
+
+    /**
+     * [leaseSink], when supplied, collects every resident-cache lease this run takes, so the owner that
+     * asked for the operation can release them once it is done with the content -- which is what
+     * [com.rohittp.reng.PreparedFrame.close] does with the ones its own preparation took. Omitting it
+     * leaves the leases outstanding for the cache's lifetime.
+     * [leaseObserver], when supplied, runs immediately after that lease has been recorded for cleanup;
+     * throwing from it aborts the operation while leaving the lease reachable by the caller's rollback.
+     */
+    suspend fun run(
+        definition: ResourceOperationDefinition,
+        leaseSink: MutableList<Lease>? = null,
+        leaseObserver: ((Lease) -> Unit)? = null,
+    ): ResourceOperationOutcome = coroutineScope {
             val executor = ResourceActionExecutor(
                 transport = transport,
                 store = store,
@@ -134,23 +222,48 @@ internal class PreparationDriver(
                 basemapEngineHost = basemapEngineHost,
                 resourceLimits = resourceLimits,
                 clock = clock,
+                leaseSink = leaseSink,
+                leaseObserver = leaseObserver,
             )
             val semaphore = Semaphore(maximumConcurrentOperations)
             val events = Channel<ResourceOperationEvent>(Channel.UNLIMITED)
 
-            var state: ResourceOperationState.Running? = null
+            var session: ResourceOperationStateMachine.Session? = null
+            var shadow: ResourceOperationState.Running? = null
             var outcome: ResourceOperationOutcome? = null
             var pendingActionCount = 0
 
-            fun apply(transition: ResourceOperationTransition) {
-                transition.state?.let { state = it }
-                transition.outcome?.let { outcome = it }
-                transition.actions.forEach { action ->
+            // The pure path's result for the same step, compared with what the session produced. Only
+            // when [shadowCheck] is on; the session itself never needs [shadow]. Actions, outcome and the
+            // whole state are compared at every step, and building the session's snapshot runs Running's
+            // invariant validation on it. The session's own indexes (pending cursors, eligible routes) are
+            // cross-checked inside it against the scans they replace, since both paths share them.
+            fun checkShadow(step: ResourceOperationStateMachine.Session.Step, pure: ResourceOperationTransition) {
+                check(pure.actions == step.actions) {
+                    "session actions diverged from the pure transition: ${step.actions} vs ${pure.actions}"
+                }
+                check(pure.outcome == step.outcome) { "session outcome diverged from the pure transition" }
+                val snapshot = requireNotNull(session).snapshot()
+                pure.state?.let { expected ->
+                    check(ResourceOperationStateMachine.sameState(expected, snapshot)) {
+                        "session state diverged from the pure transition"
+                    }
+                    shadow = expected
+                }
+            }
+
+            fun apply(step: ResourceOperationStateMachine.Session.Step) {
+                step.outcome?.let { outcome = it }
+                step.actions.forEach { action ->
                     if (action is StartRoute) {
-                        // StartRoute performs no adapter call and feeds back no event through
-                        // `transition`: it is folded into the same loop as every other action by calling
-                        // beginLookup directly and recursively applying whatever it yields.
-                        apply(ResourceOperationStateMachine.beginLookup(requireNotNull(state), action.ordinal))
+                        // StartRoute performs no adapter call and feeds back no event: it is folded into the
+                        // same loop as every other action by beginning its lookup directly and recursively
+                        // applying whatever that yields, before the rest of this batch.
+                        val begun = requireNotNull(session).beginLookup(action.ordinal)
+                        if (shadowCheck) {
+                            checkShadow(begun, ResourceOperationStateMachine.beginLookup(requireNotNull(shadow), action.ordinal))
+                        }
+                        apply(begun)
                     } else {
                         pendingActionCount += 1
                         launch {
@@ -162,17 +275,17 @@ internal class PreparationDriver(
                 }
             }
 
+            fun applyEvent(event: ResourceOperationEvent) {
+                val step = requireNotNull(session).apply(event)
+                if (shadowCheck) checkShadow(step, ResourceOperationStateMachine.transition(requireNotNull(shadow), event))
+                apply(step)
+            }
+
             fun advancePendingClassGates(): Boolean {
                 var advanced = false
                 while (true) {
-                    val running = state ?: return advanced
-                    val record = running.routeRecords.firstOrNull { record ->
-                        val cursor = record.cursor
-                        cursor is PendingClassGates &&
-                            ordinaryResourceClassGates(cursor.content.route.resourceClass) != null
-                    } ?: return advanced
-                    val ordinal = (record.cursor as PendingClassGates).ordinal
-                    apply(ResourceOperationStateMachine.transition(running, AdvancePendingClassGates(ordinal)))
+                    val ordinal = session?.nextPendingClassGateOrdinal() ?: return advanced
+                    applyEvent(AdvancePendingClassGates(ordinal))
                     advanced = true
                 }
             }
@@ -185,19 +298,8 @@ internal class PreparationDriver(
             fun advancePendingStyleCommits(): Boolean {
                 var advanced = false
                 while (true) {
-                    val running = state ?: return advanced
-                    val staged = running.styleCommitStates.map { it.ordinal }.toSet()
-                    val active = running.activeRouteOrdinals.toSet()
-                    val record = running.routeRecords.firstOrNull { record ->
-                        val cursor = record.cursor
-                        cursor is PendingClassGates &&
-                            cursor.content.route.resourceClass == ResourceClass.BASEMAP_STYLE &&
-                            record.status == ResourceRouteStatus.RUNNING &&
-                            cursor.ordinal in active &&
-                            cursor.ordinal !in staged
-                    } ?: return advanced
-                    val ordinal = (record.cursor as PendingClassGates).ordinal
-                    apply(ResourceOperationStateMachine.transition(running, AdvancePendingStyleCommit(ordinal)))
+                    val ordinal = session?.nextPendingStyleCommitOrdinal() ?: return advanced
+                    applyEvent(AdvancePendingStyleCommit(ordinal))
                     advanced = true
                 }
             }
@@ -210,7 +312,17 @@ internal class PreparationDriver(
                 }
             }
 
-            apply(ResourceOperationStateMachine.start(definition))
+            val (started, firstStep) = ResourceOperationStateMachine.startSession(definition, crossCheckIndexes = shadowCheck)
+            session = started
+            if (shadowCheck) {
+                val pure = ResourceOperationStateMachine.start(definition)
+                if (started != null) {
+                    checkShadow(firstStep, pure)
+                } else {
+                    check(pure.outcome == firstStep.outcome) { "session start outcome diverged from the pure start" }
+                }
+            }
+            apply(firstStep)
             advancePendingCursors()
 
             while (outcome == null) {
@@ -219,24 +331,11 @@ internal class PreparationDriver(
                 }
                 val event = events.receive()
                 pendingActionCount -= 1
-                apply(ResourceOperationStateMachine.transition(requireNotNull(state), event))
+                applyEvent(event)
                 advancePendingCursors()
             }
 
-            requireNotNull(outcome)
-        } finally {
-            activeRunJob.value = null
-        }
-    }
-
-    /**
-     * Cancels whichever [run] invocation is currently active on this driver and suspends until it has
-     * actually finished unwinding, mirroring [com.rohittp.reng.Renderer.cancelPreparations]'s own suspend
-     * signature so a caller that awaits this knows preparation has genuinely stopped rather than merely
-     * requested to. See the class KDoc for why one job reference is enough.
-     */
-    suspend fun cancel() {
-        activeRunJob.value?.cancelAndJoin()
+        requireNotNull(outcome)
     }
 }
 
@@ -249,7 +348,7 @@ internal class PreparationDriver(
  * job on `close()` and surfacing that to in-flight work, say) and [adapterCancellationEventFor] reports it
  * as a [com.rohittp.reng.internal.resource.CancellationCause.ADAPTER] observation; `false` means this
  * child's own `Job` genuinely has been cancelled — a caller cancelling [PreparationDriver.run], or
- * [PreparationDriver.cancel] — in which case rethrowing unwrapped is what lets
+ * its outer preparation session — in which case rethrowing unwrapped is what lets
  * [kotlinx.coroutines.coroutineScope]'s ordinary structured-concurrency cancellation proceed, exactly as
  * [ResourceActionExecutor.suppliedCall] already does at its own seam. Left unhandled entirely — the shape
  * before this function existed — an adapter's own unsolicited [CancellationException] would complete its

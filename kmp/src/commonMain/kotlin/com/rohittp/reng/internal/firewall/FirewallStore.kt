@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.firewall
 
 import com.rohittp.rentile.RawResourceKey as EngineRawResourceKey
+import com.rohittp.rentile.RawResourceMetadata as EngineRawResourceMetadata
 import com.rohittp.rentile.RawResourceStore as EngineRawResourceStore
 import com.rohittp.rentile.StoredRawResource as EngineStoredRawResource
 
@@ -13,6 +14,9 @@ import com.rohittp.rentile.StoredRawResource as EngineStoredRawResource
  */
 internal class FirewallStore(private val registry: OperationRegistry) : EngineRawResourceStore {
     override suspend fun read(key: EngineRawResourceKey): EngineStoredRawResource? = registry.readStore(key)
+
+    override suspend fun metadata(key: EngineRawResourceKey): EngineRawResourceMetadata? =
+        registry.probeStore(key)?.metadata
 
     override suspend fun write(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
         registry.writeStore(key, resource)

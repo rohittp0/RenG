@@ -177,6 +177,7 @@ jobs:
           :kmp:checkKotlinAbi
           :kmp:testAndroidHostTest
           :kmp:macosArm64Test
+          :kmp:jvmTest
           :kmp:compileKotlinIosArm64
           :kmp:compileKotlinIosSimulatorArm64
           :kmp:compileKotlinLinuxX64

@@ -2,7 +2,11 @@ package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.internal.projection.ClosedMercatorFootprint
 import com.rohittp.reng.internal.projection.MercatorGroundPoint
+import kotlin.math.ceil
 import kotlin.math.floor
+
+/** Which Mercator edge an otherwise ordinary edge-row resource is stretched beyond. */
+internal enum class GroundCap { NORTH, SOUTH }
 
 internal data class BasemapTileInstance(
     val lod: Int,
@@ -10,7 +14,20 @@ internal data class BasemapTileInstance(
     val unwrappedX: Long,
     val instanceCopy: Int,
     val canonicalX: Int,
-)
+    /** `null` for an ordinary tile; otherwise the half-plane this edge-row instance covers. */
+    val cap: GroundCap? = null,
+    /** Rectangle height in tile units, rounded up to cover the selected footprint. */
+    val capSpanTiles: Double = 1.0,
+) {
+    init {
+        require(capSpanTiles.isFinite() && capSpanTiles >= 1.0 && capSpanTiles == ceil(capSpanTiles)) {
+            "a basemap cap span is a positive whole number of tile heights"
+        }
+        require(cap != null || capSpanTiles == 1.0) {
+            "an ordinary basemap tile spans exactly one tile height"
+        }
+    }
+}
 
 internal data class CanonicalBasemapTile(
     val lod: Int,
@@ -47,6 +64,7 @@ internal fun selectBasemapTiles(
     footprint: ClosedMercatorFootprint,
     lod: Int,
     maximumInstances: Int,
+    extendGroundPastPoles: Boolean = false,
 ): TileSelectionOutcome {
     require(lod in MINIMUM_LOD..MAXIMUM_LOD) { "lod must be within the Mercator LOD range" }
     require(maximumInstances > 0) { "maximumInstances must be positive" }
@@ -56,27 +74,43 @@ internal fun selectBasemapTiles(
     val scaledFootprint = footprint.scaledBy(tileCount.toDouble())
     if (scaledFootprint.vertices.isEmpty()) return emptyTileSelection()
     check(scaledFootprint.vertices.all { it.x.isFinite() && it.y.isFinite() })
-    val candidateRows = candidateRows(scaledFootprint, tileCount) ?: return emptyTileSelection()
+    val candidateRows = candidateRows(scaledFootprint, tileCount)
     val admissibleMinimumX = MINIMUM_WORLD_COPY.toLong() * tileCount
     val admissibleMaximumX = MAXIMUM_SUPPORT_COPY.toLong() * tileCount - 1L
+    val capRanges = if (extendGroundPastPoles) {
+        intersectingCapRanges(
+            footprint = scaledFootprint,
+            tileCount = tileCount,
+            admissibleMinimumX = admissibleMinimumX,
+            admissibleMaximumX = admissibleMaximumX,
+        )
+    } else {
+        emptyList()
+    }
 
-    val actual = countIntersectingInstances(
-        footprint = scaledFootprint,
-        rows = candidateRows,
-        admissibleMinimumX = admissibleMinimumX,
-        admissibleMaximumX = admissibleMaximumX,
-    )
+    var actual = candidateRows?.let { rows ->
+        countIntersectingInstances(
+            footprint = scaledFootprint,
+            rows = rows,
+            admissibleMinimumX = admissibleMinimumX,
+            admissibleMaximumX = admissibleMaximumX,
+        )
+    } ?: 0L
+    capRanges.forEach { range ->
+        actual = checkedAdd(actual, checkedInclusiveCount(range.firstX, range.lastX))
+    }
     if (actual > maximumInstances.toLong()) {
         return TileSelectionOutcome.OverBudget(limit = maximumInstances, actual = actual)
     }
 
     val instances = ArrayList<BasemapTileInstance>(actual.toInt())
-    forEachIntersectingRowRange(
-        footprint = scaledFootprint,
-        rows = candidateRows,
-        admissibleMinimumX = admissibleMinimumX,
-        admissibleMaximumX = admissibleMaximumX,
-    ) { tileY, firstX, lastX ->
+    fun appendRange(
+        tileY: Long,
+        firstX: Long,
+        lastX: Long,
+        cap: GroundCap? = null,
+        capSpanTiles: Double = 1.0,
+    ) {
         var unwrappedX = firstX
         while (true) {
             val copy = mathematicalFloorDivision(unwrappedX, tileCount)
@@ -89,21 +123,56 @@ internal fun selectBasemapTiles(
                 unwrappedX = unwrappedX,
                 instanceCopy = copy.toInt(),
                 canonicalX = canonicalX.toInt(),
+                cap = cap,
+                capSpanTiles = capSpanTiles,
             )
             if (unwrappedX == lastX) break
             unwrappedX += 1L
         }
     }
-    instances.sortWith(compareBy<BasemapTileInstance> { it.tileY }.thenBy { it.unwrappedX })
+    if (candidateRows != null) {
+        forEachIntersectingRowRange(
+            footprint = scaledFootprint,
+            rows = candidateRows,
+            admissibleMinimumX = admissibleMinimumX,
+            admissibleMaximumX = admissibleMaximumX,
+        ) { tileY, firstX, lastX ->
+            appendRange(tileY = tileY, firstX = firstX, lastX = lastX)
+        }
+    }
+    capRanges.forEach { range ->
+        appendRange(
+            tileY = if (range.cap == GroundCap.NORTH) 0L else tileCount - 1L,
+            firstX = range.firstX,
+            lastX = range.lastX,
+            cap = range.cap,
+            capSpanTiles = range.spanTiles,
+        )
+    }
+    instances.sortWith(
+        compareBy<BasemapTileInstance> { it.tileY }
+            .thenBy { it.unwrappedX }
+            .thenBy { instance ->
+                when (instance.cap) {
+                    GroundCap.NORTH -> 0
+                    null -> 1
+                    GroundCap.SOUTH -> 2
+                }
+            },
+    )
 
-    val canonicalResources = instances
-        .map { instance ->
-            CanonicalBasemapTile(
-                lod = instance.lod,
-                tileY = instance.tileY,
-                canonicalX = instance.canonicalX,
+    val canonicalResources = buildList {
+        instances.forEach { instance ->
+            add(
+                CanonicalBasemapTile(
+                    lod = instance.lod,
+                    tileY = instance.tileY,
+                    canonicalX = instance.canonicalX,
+                ),
             )
         }
+        if (instances.any { instance -> instance.cap != null }) add(WORLD_BASEMAP_TILE)
+    }
         .distinct()
         .sortedWith(
             compareBy<CanonicalBasemapTile> { it.lod }
@@ -111,6 +180,45 @@ internal fun selectBasemapTiles(
                 .thenBy { it.canonicalX },
         )
     return TileSelectionOutcome.Success(instances, canonicalResources)
+}
+
+private fun intersectingCapRanges(
+    footprint: ScaledFootprint,
+    tileCount: Long,
+    admissibleMinimumX: Long,
+    admissibleMaximumX: Long,
+): List<CapRange> {
+    val minimumY = footprint.vertices.minOf(TilePoint::y)
+    val maximumY = footprint.vertices.maxOf(TilePoint::y)
+    val projection = XIntervalAccumulator()
+    return buildList {
+        if (minimumY < 0.0) {
+            footprint.projectXWithinHorizontalStrip(minimumY, 0.0, projection)
+            intersectingXRange(projection, admissibleMinimumX, admissibleMaximumX)?.let { range ->
+                add(
+                    CapRange(
+                        cap = GroundCap.NORTH,
+                        firstX = range.first,
+                        lastX = range.last,
+                        spanTiles = ceil(-minimumY).coerceAtLeast(1.0),
+                    ),
+                )
+            }
+        }
+        if (maximumY > tileCount.toDouble()) {
+            footprint.projectXWithinHorizontalStrip(tileCount.toDouble(), maximumY, projection)
+            intersectingXRange(projection, admissibleMinimumX, admissibleMaximumX)?.let { range ->
+                add(
+                    CapRange(
+                        cap = GroundCap.SOUTH,
+                        firstX = range.first,
+                        lastX = range.last,
+                        spanTiles = ceil(maximumY - tileCount.toDouble()).coerceAtLeast(1.0),
+                    ),
+                )
+            }
+        }
+    }
 }
 
 private fun emptyTileSelection(): TileSelectionOutcome.Success =
@@ -174,20 +282,29 @@ private inline fun forEachIntersectingRowRange(
         val minimumY = tileY.toDouble() - CELL_EPSILON
         val maximumY = tileY.toDouble() + 1.0 + CELL_EPSILON
         footprint.projectXWithinHorizontalStrip(minimumY, maximumY, projection)
-        if (!projection.isEmpty) {
-            var firstX = conservativeFirstCandidate(projection.minimum, admissibleMinimumX)
-            var lastX = conservativeLastCandidate(projection.maximum, admissibleMaximumX)
-            while (firstX <= lastX && !expandedCellXIntersects(firstX, projection.minimum, projection.maximum)) {
-                firstX += 1L
-            }
-            while (lastX >= firstX && !expandedCellXIntersects(lastX, projection.minimum, projection.maximum)) {
-                lastX -= 1L
-            }
-            if (firstX <= lastX) action(tileY, firstX, lastX)
+        intersectingXRange(projection, admissibleMinimumX, admissibleMaximumX)?.let { range ->
+            action(tileY, range.first, range.last)
         }
         if (tileY == rows.lastY) break
         tileY += 1L
     }
+}
+
+private fun intersectingXRange(
+    projection: XIntervalAccumulator,
+    admissibleMinimumX: Long,
+    admissibleMaximumX: Long,
+): LongRange? {
+    if (projection.isEmpty) return null
+    var firstX = conservativeFirstCandidate(projection.minimum, admissibleMinimumX)
+    var lastX = conservativeLastCandidate(projection.maximum, admissibleMaximumX)
+    while (firstX <= lastX && !expandedCellXIntersects(firstX, projection.minimum, projection.maximum)) {
+        firstX += 1L
+    }
+    while (lastX >= firstX && !expandedCellXIntersects(lastX, projection.minimum, projection.maximum)) {
+        lastX -= 1L
+    }
+    return if (firstX <= lastX) firstX..lastX else null
 }
 
 private fun ScaledFootprint.projectXWithinHorizontalStrip(
@@ -313,9 +430,20 @@ private data class CandidateRows(
     val lastY: Long,
 )
 
+private data class CapRange(
+    val cap: GroundCap,
+    val firstX: Long,
+    val lastX: Long,
+    val spanTiles: Double,
+)
+
 private const val MINIMUM_LOD: Int = 0
 private const val MAXIMUM_LOD: Int = 22
 private const val MINIMUM_WORLD_COPY: Int = -16384
 private const val MAXIMUM_SUPPORT_COPY: Int = 16385
 private const val CELL_EPSILON: Double = 1e-10
 private const val CANDIDATE_NEIGHBOUR_PADDING: Long = 2L
+
+/** Auxiliary continuous source for cap smudging; it is provisioned but never creates a draw instance. */
+internal val WORLD_BASEMAP_TILE: CanonicalBasemapTile =
+    CanonicalBasemapTile(lod = 0, tileY = 0, canonicalX = 0)

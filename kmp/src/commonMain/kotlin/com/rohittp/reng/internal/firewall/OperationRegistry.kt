@@ -19,8 +19,9 @@ import com.rohittp.reng.internal.failure.toException
 import com.rohittp.reng.internal.failureContextDiagnostic
 import com.rohittp.reng.internal.freshCopy
 import com.rohittp.reng.internal.identity.CanonicalBytes
-import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.AcceleratedSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
+import com.rohittp.reng.internal.identity.RouteMemo
 import com.rohittp.reng.internal.identity.Sha256Function
 import com.rohittp.reng.internal.image.PngDecodeResult
 import com.rohittp.reng.internal.image.PngScan
@@ -44,7 +45,11 @@ import com.rohittp.rentile.TransportResponse as EngineTransportResponse
 import com.rohittp.rentile.TransportResponseMetadata as EngineTransportResponseMetadata
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -91,10 +96,16 @@ import kotlinx.coroutines.sync.withLock
  *
  * Everything else this class holds is immutable or stateless: `transport` and `store` are the
  * consumer's own objects, and `resourceKeyDeriver`, `privateKeyResolver` and `sha256` are pure
- * functions over their arguments with no fields that change.
+ * functions over their arguments with no fields that change. `redactedLocatorDigests`, and the memo a
+ * resolver may hold, remember pure functions of a route behind their own locks: they change how often a
+ * value is computed, never which value. Those locks are the one exception to the paragraph below --
+ * [preregister] takes them while holding [routeIndexMutex] -- and it cannot form a cycle, because a
+ * `RouteMemo` lock is held only around its own map's get and put, never around a derivation or any
+ * other lock.
  *
- * **The lock graph is a set of leaves, and stays one.** No lock in this file is ever acquired while
- * another is held, so no cycle can exist and the order of acquisition never matters. Three facts keep
+ * **The lock graph is acyclic, and stays so.** Its one edge is [routeIndexMutex] -> a `RouteMemo` lock,
+ * taken by [preregister]; a `RouteMemo` lock is terminal, taking nothing while held. Every other lock in
+ * this file is a leaf, never acquired while another is held, so no cycle can exist. Three facts keep
  * that true: `SuspendJoin.run` releases its own mutex *before* running the block, so every lock taken
  * inside a block is taken with nothing held; every critical section here is pure bookkeeping, with
  * `complete`/`await` and every consumer call outside it; and the route indices are read with no lock
@@ -105,7 +116,14 @@ internal class OperationRegistry(
     private val transport: Transport,
     private val store: Store,
     private val privateKeyResolver: RentilePrivateKeyResolver,
-    private val sha256: Sha256Function = PureKotlinSha256,
+    private val sha256: Sha256Function = AcceleratedSha256,
+    /**
+     * Where [preregister] remembers each route's redacted-url digest across registries (see
+     * [BasemapEngineHost]'s field of the same name); null derives it every time. A pure function of the
+     * url behind its own leaf lock, so it adds no state an answer path could observe; that lock is taken
+     * under [routeIndexMutex] but never takes another, so it cannot close a cycle.
+     */
+    private val redactedLocatorDigests: RouteMemo<String>? = null,
 ) {
     private val resourceKeyDeriver = ResourceKeyDeriver(sha256)
 
@@ -326,6 +344,17 @@ internal class OperationRegistry(
      * partial application it replaces: a half-applied batch would let an engine call this registry has
      * already decided to refuse be answered for whichever routes happened to land first.
      *
+     * **A repeat costs a lookup, not a copy.** Every frame of a batch, and every style commit within
+     * one, declares mostly routes this registry already holds, and copying all five indices to publish
+     * an identical snapshot was a measurable share of a `prepare`. So the batch is first narrowed, under
+     * the lock, to the routes not already registered *identically*; when none remain nothing is copied
+     * or published. That narrowing cannot hide a collision: a route counts as registered only when
+     * [RouteIndex.byPrivateKey] maps its own private key to an *equal* route, and a route is only ever
+     * put there by a batch that also wrote every other index it reaches, all-or-nothing, with nothing
+     * ever removed -- so every index that route would write already maps to that same route, and
+     * writing it again would change nothing. A *different* route is never equal, so it stays in the
+     * batch and meets every collision check exactly as before.
+     *
      * `suspend` because the write must serialize against other writers, and [routeIndexMutex] is the
      * only lock in this file's discipline that can do that. Every caller is already suspending.
      */
@@ -333,14 +362,23 @@ internal class OperationRegistry(
         if (routes.isEmpty()) return
         routeIndexMutex.withLock {
             val current = routeIndex
+            // Each route's private key, resolved once: the narrowing needs it and so does the
+            // byPrivateKey index below. A renderer's resolver remembers it (RouteMemo), so a repeat is a
+            // map lookup rather than a SHA-256.
+            val unregistered = ArrayList<Pair<ResourceRouteKey, RentilePrivateKey>>(0)
+            for (route in routes) {
+                val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
+                if (current.byPrivateKey[privateKey] != route) unregistered += route to privateKey
+            }
+            if (unregistered.isEmpty()) return@withLock
+
             val byPrivateKey = current.byPrivateKey.toMutableMap()
             val transportRoutes = current.transportRoutes.toMutableMap()
             val storeRoutes = current.storeRoutes.toMutableMap()
             val byEngineDigest = current.byEngineDigest.toMutableMap()
             val spriteMemberRoutes = current.spriteMemberRoutes.toMutableMap()
 
-            for (route in routes) {
-                val privateKey = privateKeyResolver.resolve(route.locator, route.resourceClass)
+            for ((route, privateKey) in unregistered) {
                 requireNoCollision(byPrivateKey[privateKey], route)
                 byPrivateKey[privateKey] = route
 
@@ -356,7 +394,7 @@ internal class OperationRegistry(
                 // classes the engine never touches (sticker, GLB, model texture) -- a pure-Kotlin
                 // SHA-256 per route adds up across a 512-instance tile plan.
                 val expectedStableId = if (storeClass != null || transportClass != null) {
-                    redactedLocatorHex(route.locator.value)
+                    redactedLocatorHexOf(route)
                 } else {
                     null
                 }
@@ -401,6 +439,42 @@ internal class OperationRegistry(
     fun renGResourceKeyForEngineDigest(resourceClass: ResourceClass, engineDigest: String): ResourceKey? {
         val route = routeIndex.byEngineDigest[EngineDigestKey(engineDigest, resourceClass)] ?: return null
         return renGResourceKeyFor(route)
+    }
+
+    // ---- Lookups for routing between two operations (ADR 0075) -----------------------------------
+    //
+    // [BasemapEngineHost] may hold a foreground registry and a read-ahead registry at once, and must
+    // pick between them before calling either. These three questions are that choice, and each is
+    // deliberately non-throwing: the answer path that then runs is the one that refuses an unknown
+    // route, so the refusal, its glyph-lookup observation and its sanitized failure stay in exactly
+    // one place. Each reads the volatile route snapshot with no lock, so none can ever nest.
+
+    /** Whether this registry preregistered a route for the exact `(url, engine class)` Transport carries. */
+    fun knowsTransport(url: String, engineClass: EngineResourceClass): Boolean =
+        routeIndex.transportRoutes.containsKey(TransportIndexKey(url, engineClass))
+
+    /** Whether this registry preregistered a route for the exact `(stableId, engine class)` a Store key carries. */
+    fun knowsStore(stableId: String, engineClass: EngineResourceClass): Boolean =
+        routeIndex.storeRoutes.containsKey(StoreIndexKey(stableId, engineClass))
+
+    /** The route this registry preregistered for the exact `(url, engine class)` Transport carries, if any. */
+    fun transportRouteOf(url: String, engineClass: EngineResourceClass): ResourceRouteKey? =
+        routeIndex.transportRoutes[TransportIndexKey(url, engineClass)]
+
+    /** The route this registry preregistered for the exact `(stableId, engine class)` a Store key carries, if any. */
+    fun storeRouteOf(stableId: String, engineClass: EngineResourceClass): ResourceRouteKey? =
+        routeIndex.storeRoutes[StoreIndexKey(stableId, engineClass)]
+
+    /**
+     * Whether this registry latched a Transport response for the route [stableId] and [engineClass] name,
+     * and that response's digest is exactly [digest].
+     *
+     * This is what decides which registry judges a Store write: the one whose own Transport call produced
+     * these bytes. A registry that merely knows the route cannot judge it, because it never latched them.
+     */
+    suspend fun hasLatchedDigest(stableId: String, engineClass: EngineResourceClass, digest: String): Boolean {
+        val route = routeIndex.storeRoutes[StoreIndexKey(stableId, engineClass)] ?: return false
+        return latchedTransportDigestFor(route) == digest
     }
 
     private fun requireNoCollision(existing: ResourceRouteKey?, route: ResourceRouteKey) {
@@ -489,7 +563,11 @@ internal class OperationRegistry(
                     // a consumer's Store has one: Rentile's acquirer parses a valid hit and never
                     // transports. Observing only the transport would leave a cached style deriving no
                     // tile route at all.
-                    observeTileJsonDocument(route, validated.bytes)
+                    //
+                    // The snapshot, not `bytes`: `observeTileJsonDocument` copies before it retains, and
+                    // returns at once for every class but TileJSON -- so `bytes` cost a full copy of every
+                    // tile and DEM read from the Store, discarded unread (ADR 0062 erratum).
+                    observeTileJsonDocument(route, validated.byteSnapshot)
                     validated.toEngineStoredRawResource()
                 }
             } catch (cancellation: CancellationException) {
@@ -501,6 +579,20 @@ internal class OperationRegistry(
                 throw storeReadFailure(route).toException()
             }
         }
+    }
+
+    /**
+     * Rentile's "is it already stored?" warm probe. Shares [readStore]'s join -- the consumer's Store
+     * has only `read`, so the probe costs one read -- but a miss is forgotten at once. A probe asks
+     * before the warm fetches and writes; latching its null would answer the engine's own acquire
+     * moments later with a stale miss (ADR 0016 erratum). A hit stays latched: it is true, and the
+     * acquire that follows replays it instead of reading and hashing the payload a second time.
+     */
+    suspend fun probeStore(key: EngineRawResourceKey): EngineStoredRawResource? {
+        val route = routeIndex.storeRoutes[StoreIndexKey(key.stableId, key.resourceClass)]
+        val stored = readStore(key)
+        if (stored == null && route != null) storeReadJoin.invalidate(route)
+        return stored
     }
 
     suspend fun writeStore(key: EngineRawResourceKey, resource: EngineStoredRawResource) {
@@ -584,6 +676,11 @@ internal class OperationRegistry(
             } catch (@Suppress("TooGenericExceptionCaught") adapterFailure: Throwable) {
                 throw storeWriteFailure(route).toException()
             }
+            // The consumer Store now holds this route, so a read latched earlier -- in practice a miss,
+            // such as Rentile's warm probe -- describes a store that no longer exists. Without this the
+            // engine's next acquire replays the stale null, reports RAW_CACHE_MISS and transports again
+            // (ADR 0016 erratum). Outside the catch above: invalidation cannot fail the write.
+            storeReadJoin.invalidate(route)
         }
     }
 
@@ -747,7 +844,11 @@ internal class OperationRegistry(
     private fun passesClassSpecificReadValidation(resourceClass: ResourceClass, stored: StoredRawResource): Boolean =
         when (resourceClass) {
             ResourceClass.BASEMAP_SPRITE_IMAGE ->
-                decodePng(stored.bytes, SPRITE_IMAGE_DECODE_CEILING_BYTES) is PngDecodeResult.Success
+                decodePng(
+                    stored.bytes,
+                    SPRITE_IMAGE_DECODE_CEILING_BYTES,
+                    SPRITE_IMAGE_WORKING_CEILING_BYTES,
+                ) is PngDecodeResult.Success
             ResourceClass.BASEMAP_SPRITE_JSON ->
                 parseJson(stored.bytes, 0, stored.bytes.size, SPRITE_JSON_MAXIMUM_DEPTH) is JsonParse.Parsed
             // Deliberate, and the reason is specific rather than "nothing else needs checking". Rentile's
@@ -790,9 +891,16 @@ internal class OperationRegistry(
 
     private fun redactedLocatorHex(url: String): String = sha256Hex(redactAuthenticationQuery(url))
 
+    private fun redactedLocatorHexOf(route: ResourceRouteKey): String =
+        redactedLocatorDigests?.valueOf(route.resourceClass, route.locator) {
+            redactedLocatorHex(route.locator.value)
+        } ?: redactedLocatorHex(route.locator.value)
+
     private fun sha256Hex(value: String): String = sha256Hex(value.encodeToByteArray())
 
-    private fun sha256Hex(bytes: ByteArray): String = sha256.digest(CanonicalBytes(bytes)).lowercaseHex
+    // Adopted, not copied: both callers pass an array nothing writes again -- a fresh `encodeToByteArray`,
+    // or a TransportResponse's private snapshot -- and the digest only reads it.
+    private fun sha256Hex(bytes: ByteArray): String = sha256.digest(CanonicalBytes.adopting(bytes)).lowercaseHex
 
     private fun TransportResponse.toEngineResponse(): EngineTransportResponse = EngineTransportResponse(
         statusCode = statusCode,
@@ -933,26 +1041,92 @@ private fun engineTransportClassFor(resourceClass: ResourceClass): EngineResourc
  * operation-scoped registry, "the engine's second attempt is not a consumer retry" (ADR 0016) holds
  * for the lifetime of the registry, not just for the duration of the first call.
  */
-private class SuspendJoin<K : Any, V> {
-    private val mutex = Mutex()
+internal class SuspendJoin<K : Any, V>(
+    // A parameter only so a test can hold the lock from outside and queue a waiter behind it.
+    private val mutex: Mutex = Mutex(),
+) {
     private val inFlight = mutableMapOf<K, CompletableDeferred<V>>()
 
+    /**
+     * Runs [block] for [key] once, replaying its outcome to every other caller — except a
+     * cancellation, which is replayed to nobody (ADR 0050).
+     *
+     * A latch records what is true of the resource: a success, a transport failure, an integrity
+     * refusal will all be just as true for the next caller. A cancellation says only that one
+     * coroutine stopped waiting, so it is forgotten rather than latched, and a healthy caller that
+     * inherits one re-enters and does the work itself.
+     */
     suspend fun run(key: K, block: suspend () -> V): V {
-        var owner = false
-        val deferred = mutex.withLock {
-            inFlight.getOrPut(key) {
-                owner = true
-                CompletableDeferred()
+        while (true) {
+            var owner = false
+            val deferred = mutex.withLock {
+                inFlight.getOrPut(key) {
+                    owner = true
+                    CompletableDeferred()
+                }
+            }
+            if (owner) {
+                return try {
+                    val result = block()
+                    deferred.complete(result)
+                    result
+                } catch (cancellation: CancellationException) {
+                    // Forget BEFORE completing: a sibling woken by the completion must not be able to
+                    // find this entry still standing and park on the deferred that just cancelled it.
+                    forget(key, deferred)
+                    deferred.completeExceptionally(cancellation)
+                    throw cancellation
+                } catch (@Suppress("TooGenericExceptionCaught") failure: Throwable) {
+                    deferred.completeExceptionally(failure)
+                    throw failure
+                }
+            }
+            try {
+                return deferred.await()
+            } catch (cancellation: CancellationException) {
+                // The owner's cancellation arrived here, and it is only ours if we are cancelled too.
+                // ensureActive() rethrows when we are; when we are not, the loop takes another pass,
+                // where the forgotten key makes this caller the owner or joins whoever now is.
+                //
+                // Explicit rather than load-bearing: the loop's next `withLock` is itself a
+                // cancellation point and a cancelled caller would leave through it regardless. This
+                // loop's correctness should not rest on a lock happening to be cancellable.
+                currentCoroutineContext().ensureActive()
             }
         }
-        if (!owner) return deferred.await()
-        return try {
-            val result = block()
-            deferred.complete(result)
-            result
-        } catch (t: Throwable) {
-            deferred.completeExceptionally(t)
-            throw t
+    }
+
+    /**
+     * Forgets [key]'s entry, completed or in flight, so the next caller runs [block] afresh.
+     *
+     * Callers already holding the old deferred still receive its outcome; only callers arriving
+     * afterwards are redirected. An in-flight owner that completes later therefore cannot latch a
+     * stale outcome, because its entry is no longer in the map.
+     */
+    suspend fun invalidate(key: K) {
+        mutex.withLock { inFlight.remove(key) }
+    }
+
+    /**
+     * Drops [key], but only while [deferred] is still the entry under it.
+     *
+     * The identity check is unreachable as this class stands, and says so rather than implying a race
+     * it does not have: the only caller runs this to completion *before* completing its deferred. It
+     * guards the ordering instead -- moving [forget] after `completeExceptionally` looks like a
+     * harmless simplification and would make the race real, and this turns that into a retry rather
+     * than a deferred nothing ever completes (ADR 0050).
+     *
+     * The only caller runs this inside a catch for its own cancellation, where a plain `withLock`
+     * would throw instead of taking the lock, so the lock is taken under [NonCancellable]. It must
+     * suspend rather than spin on `tryLock`: kotlinx `Mutex.unlock` hands the lock straight to a
+     * queued suspended waiter, and on a single-threaded dispatcher a spinning caller would starve that
+     * waiter -- which holds the lock but cannot run to release it -- forever.
+     */
+    private suspend fun forget(key: K, deferred: CompletableDeferred<V>) {
+        withContext(NonCancellable) {
+            mutex.withLock {
+                if (inFlight[key] === deferred) inFlight.remove(key)
+            }
         }
     }
 }
@@ -1258,6 +1432,7 @@ private val UNSUPPORTED_SPRITE_ENTRY_FIELDS: Set<String> = setOf("stretchX", "st
 /** Generous enough for any sticker/sprite-sized image; only used to decide whether a sprite image
  *  record decodes at all before answering the engine's read, never to size an actual buffer. */
 private const val SPRITE_IMAGE_DECODE_CEILING_BYTES: Long = 64L * 1024L * 1024L
+private const val SPRITE_IMAGE_WORKING_CEILING_BYTES: Long = 128L * 1024L * 1024L
 
 /** Sprite JSON documents are small, flat atlas manifests; this is a generous nesting ceiling used
  *  only to prove the document parses at all before answering the engine's read. */

@@ -17,8 +17,30 @@ internal class InflateException(message: String) : Exception(message)
  * a fresh output window.
  */
 internal expect class InflateStream() {
-    fun inflate(input: ByteArray, output: ByteArray, outputOffset: Int): InflateStep
+    fun inflate(
+        input: ByteArray,
+        inputOffset: Int,
+        inputLength: Int,
+        output: ByteArray,
+        outputOffset: Int,
+        outputLength: Int,
+    ): InflateStep
     fun close()
 }
 
+/** Compatibility convenience for callers that genuinely own whole input/output tails. */
+internal fun InflateStream.inflate(input: ByteArray, output: ByteArray, outputOffset: Int): InflateStep =
+    inflate(input, 0, input.size, output, outputOffset, output.size - outputOffset)
+
 internal expect fun crc32(seed: UInt, bytes: ByteArray, offset: Int, length: Int): UInt
+
+/**
+ * RFC 1950's Adler-32 over successive [update] ranges, from the platform's own zlib: the check the stored-
+ * block fast path in `decodePng` verifies itself, and the same one the platform inflater verifies on every
+ * other stream. zlib's is vectorised, where a Kotlin byte loop would dominate decoding a large stored
+ * texture (ADR 0020). [value] is the unsigned 32-bit check, held in a Long.
+ */
+internal expect class Adler32Stream() {
+    fun update(bytes: ByteArray, offset: Int, length: Int)
+    val value: Long
+}

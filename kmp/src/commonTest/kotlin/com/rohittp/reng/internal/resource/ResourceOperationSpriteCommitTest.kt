@@ -827,7 +827,7 @@ class ResourceOperationSpriteCommitTest {
         driver.driveToPendingCandidate(2L, ContentProvenance.TRANSPORT_200)
         driver.event(AdvancePendingClassGates(2L))
         val ordinaryGate = assertIs<ValidateResourceClass>(driver.actions.single())
-        assertEquals(ResourceClassGate.DECODE_PNG, ordinaryGate.gate)
+        assertEquals(ResourceClassGate.DECODE_STICKER_IMAGE, ordinaryGate.gate)
         driver.event(ResourceClassValidationCompleted(ordinaryGate.actionId, SuppliedValidationOutcome.Valid))
         val ordinaryWrite = assertIs<WriteStore>(driver.actions.single())
         driver.event(StoreWriteCompleted(ordinaryWrite.actionId, SuppliedCallOutcome.Success(Unit)))

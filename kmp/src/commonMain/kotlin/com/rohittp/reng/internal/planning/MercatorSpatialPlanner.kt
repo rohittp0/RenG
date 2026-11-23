@@ -1,12 +1,13 @@
 package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.Backdrop
 import com.rohittp.reng.FramePlan
 import com.rohittp.reng.OutputPixelSize
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.Placement
 import com.rohittp.reng.RenGErrorCode
-import com.rohittp.reng.geometriesForCore
+import com.rohittp.reng.backdropForCore
 import com.rohittp.reng.internal.DiagnosticField
 import com.rohittp.reng.internal.failure.FailureDescriptor
 import com.rohittp.reng.internal.failureContextDiagnostic
@@ -14,17 +15,24 @@ import com.rohittp.reng.internal.projection.ClosedMercatorFootprint
 import com.rohittp.reng.internal.projection.ResolvedMercatorCamera
 import com.rohittp.reng.internal.projection.clippedPhysicalPixelFootprint
 import com.rohittp.reng.internal.projection.resolveMercatorCamera
+import com.rohittp.reng.internal.shader.ShaderProfileMemo
 import com.rohittp.reng.internal.shader.ShaderProfilePlan
-import com.rohittp.reng.internal.shader.scanShaderProfile
-import com.rohittp.reng.modelsForCore
-import com.rohittp.reng.stickersForCore
+import com.rohittp.reng.internal.shader.containsExtensionDirective
 
+/**
+ * [extendGroundPastPoles] is the renderer's configured default; the frame's own
+ * [FramePlan.extendGroundPastPoles] wins over it when set. Resolving it here, the one place every
+ * Mercator tile selection passes through, keeps prepare, read-ahead and the draw (which only ever
+ * sees the cap instances selected here) in agreement.
+ */
 internal fun planMercatorSpatial(
     plan: FramePlan,
     outputPixelSize: OutputPixelSize,
     previousSelectedLod: Int?,
     maximumBasemapTileInstances: Int,
     basemapStyleConfigured: Boolean,
+    extendGroundPastPoles: Boolean = false,
+    shaderProfileMemo: ShaderProfileMemo = ShaderProfileMemo(),
 ): SpatialOutcome<FrameSpatialPlan> {
     val cameraOutcome = resolveMercatorCamera(plan.camera, outputPixelSize)
     if (cameraOutcome is SpatialOutcome.Failure) return cameraOutcome
@@ -47,10 +55,14 @@ internal fun planMercatorSpatial(
     if ((plan.drawBasemap || plan.drawLabels) && basemapStyleConfigured) {
         footprint = clippedPhysicalPixelFootprint(camera)
         when (
-            val selection = selectBasemapTiles(
-                footprint = footprint,
-                lod = lodObservation.selectedLod,
-                maximumInstances = maximumBasemapTileInstances,
+            // ADR 0065: one LOD per band rather than one for the frame. `footprint` above stays
+            // the whole frame's -- it is what `FrameSpatialPlan` carries and what the label handover
+            // reasons about -- while the tiles come from the banded decomposition of the same rays.
+            val selection = selectBandedBasemapTiles(
+                camera = camera,
+                selectedLod = lodObservation.selectedLod,
+                maximumBasemapTileInstances = maximumBasemapTileInstances,
+                extendGroundPastPoles = plan.extendGroundPastPoles ?: extendGroundPastPoles,
             )
         ) {
             is TileSelectionOutcome.OverBudget -> return basemapTileBudgetFailure(selection)
@@ -86,11 +98,27 @@ internal fun planMercatorSpatial(
     for (geometry in plan.geometriesForCore()) {
         val geometryOutcome = resolveGeometry(geometry, camera)
         if (geometryOutcome is SpatialOutcome.Failure) return geometryOutcome
-        val vertexProfile = scanShaderProfile(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
-        val fragmentProfile = scanShaderProfile(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+        val vertexProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        val fragmentProfile =
+            shaderProfileMemo.profileOf(geometry.shaderPair.fragmentSource) ?: return shaderProfileFailure()
         geometries += (geometryOutcome as SpatialOutcome.Success).value
         shaderProfiles += vertexProfile to fragmentProfile
     }
+
+    // ADR 0071. Scanned here but not carried: `shaderProfiles` is paired with `geometries` by size
+    // and the backdrop has no geometry. What the scan buys is the failure arriving as the
+    // consumer's INVALID_VALUE at FRAME_PLANNING rather than as a GL fault at draw;
+    // `createConsumerBackdropPipeline` re-scans for itself, as `createGeometryPipeline` does.
+    (plan.backdropForCore() as? Backdrop.Shader)?.let { backdrop ->
+        shaderProfileMemo.profileOf(backdrop.shaderPair.vertexSource) ?: return shaderProfileFailure()
+        shaderProfileMemo.profileOf(backdrop.shaderPair.fragmentSource) ?: return shaderProfileFailure()
+    }
+
+    // ADR 0087. A sticker program's source is scanned here for the backdrop's reason. Its ground
+    // rectangle is deliberately not resolved: one the camera cannot carry degrades that sticker to
+    // no ground at draw rather than failing the frame.
+    checkStickerShaderSources(plan, shaderProfileMemo)?.let { return it }
 
     return SpatialOutcome.Success(
         FrameSpatialPlan(
@@ -140,6 +168,30 @@ internal fun screenPositionedModelFailure(): SpatialOutcome.Failure = SpatialOut
         ),
     ),
 )
+
+/**
+ * ADR 0087: every sticker program's source must be a Shader Profile and carry no `#extension`, or the
+ * frame fails as the consumer's INVALID_VALUE at FRAME_PLANNING naming `sticker.shader.fragmentSource`.
+ * Shared by both planners, so a frame refused under one projection is refused under the other.
+ */
+internal fun checkStickerShaderSources(plan: FramePlan, shaderProfileMemo: ShaderProfileMemo): SpatialOutcome.Failure? {
+    for (sticker in plan.stickersForCore()) {
+        val source = sticker.shader?.fragmentSource ?: continue
+        if (shaderProfileMemo.profileOf(source) == null || containsExtensionDirective(source)) {
+            return SpatialOutcome.Failure(
+                FailureDescriptor(
+                    code = RenGErrorCode.INVALID_VALUE,
+                    stage = PipelineStage.FRAME_PLANNING,
+                    diagnostic = failureContextDiagnostic(
+                        stage = PipelineStage.FRAME_PLANNING,
+                        fieldName = DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
+                    ),
+                ),
+            )
+        }
+    }
+    return null
+}
 
 internal fun shaderProfileFailure(): SpatialOutcome.Failure = SpatialOutcome.Failure(
     FailureDescriptor(

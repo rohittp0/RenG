@@ -36,6 +36,31 @@ internal enum class InternalPipelineRole(internal val wireValue: Int) {
 
     /** The globe ground's displacing program, on [TERRAIN_GROUND]'s reasoning exactly. */
     TERRAIN_GLOBE_GROUND(9),
+
+    /** ADR 0068. Appended, so no existing role's wire value moves. */
+    BACKDROP(10),
+
+    /** ADR 0074. Appended, so no existing role's wire value moves. */
+    BLOOM_DOWNSAMPLE(11),
+    BLOOM_UPSAMPLE(12),
+    BLOOM_COMPOSITE(13),
+
+    /**
+     * ADR 0071's consumer backdrop. Its own role, not [BACKDROP]'s: a consumer pair byte-identical to
+     * RenG's own pattern shader would otherwise derive the same key, share its program, and have the
+     * consumer pipeline cache's eviction delete RenG's live one. Appended, so nothing moves.
+     */
+    CONSUMER_BACKDROP(14),
+
+    /** ADR 0086's one-pass mixed ground programs. Appended so no existing identity moves. */
+    GROUND_MIXED(15),
+
+    /**
+     * ADR 0087's consumer sticker programs, keyed by RenG's sticker vertex stage and the consumer's
+     * fragment source. Its own role for [CONSUMER_BACKDROP]'s reason: no consumer source can then name
+     * RenG's own sticker program. Appended so no existing identity moves.
+     */
+    CONSUMER_STICKER(16),
 }
 
 /**

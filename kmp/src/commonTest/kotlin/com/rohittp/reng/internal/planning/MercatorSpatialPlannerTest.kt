@@ -25,6 +25,7 @@ import com.rohittp.reng.internal.shader.scanShaderProfile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -134,6 +135,68 @@ class FrameSpatialPlannerTest {
 
         assertNull(neither.tileSelection, "a frame that asks for neither must stay as cheap as it was")
         assertNull(neither.footprint)
+    }
+
+    @Test
+    fun bearingFortyFiveNorthViewSelectsAContiguousCapStripOnlyWhenEnabled() {
+        val camera = Camera(
+            latitude = MERCATOR_MAXIMUM_LATITUDE_DEGREES,
+            unwrappedLongitude = 0.0,
+            zoom = 2.0,
+            bearing = 45.0,
+            pitch = 0.0,
+        )
+        val off = planSuccess(
+            plan = framePlan(camera = camera),
+            outputPixelSize = OutputPixelSize(width = 512, height = 512),
+            maximumBasemapTileInstances = 64,
+            basemapStyleConfigured = true,
+            extendGroundPastPoles = false,
+        )
+        val on = planSuccess(
+            plan = framePlan(camera = camera),
+            outputPixelSize = OutputPixelSize(width = 512, height = 512),
+            maximumBasemapTileInstances = 64,
+            basemapStyleConfigured = true,
+            extendGroundPastPoles = true,
+        )
+
+        assertTrue(requireNotNull(off.tileSelection).instances.none { it.cap != null })
+        val caps = requireNotNull(on.tileSelection).instances.filter { it.cap == GroundCap.NORTH }
+        assertTrue(caps.size > 1, "the rotated past-edge region must span more than one column")
+        assertEquals(
+            (caps.first().unwrappedX..caps.last().unwrappedX).toList(),
+            caps.map(BasemapTileInstance::unwrappedX),
+        )
+        assertTrue(caps.all { it.tileY == 0 })
+    }
+
+    @Test
+    fun aFramesOwnPoleChoiceWinsOverTheConfiguredOneInBothDirections() {
+        val camera = Camera(
+            latitude = MERCATOR_MAXIMUM_LATITUDE_DEGREES,
+            unwrappedLongitude = 0.0,
+            zoom = 2.0,
+            bearing = 45.0,
+            pitch = 0.0,
+        )
+        fun hasCaps(frameOverride: Boolean?, configured: Boolean): Boolean =
+            requireNotNull(
+                planSuccess(
+                    plan = FramePlan(frameIndex = 1L, camera = camera, extendGroundPastPoles = frameOverride),
+                    outputPixelSize = OutputPixelSize(width = 512, height = 512),
+                    maximumBasemapTileInstances = 64,
+                    basemapStyleConfigured = true,
+                    extendGroundPastPoles = configured,
+                ).tileSelection,
+            ).instances.any { it.cap != null }
+
+        // `null` follows the configuration, so this fixture really does select caps when enabled.
+        assertTrue(hasCaps(frameOverride = null, configured = true))
+        assertFalse(hasCaps(frameOverride = null, configured = false))
+        // An explicit value wins whichever way the configuration points.
+        assertFalse(hasCaps(frameOverride = false, configured = true))
+        assertTrue(hasCaps(frameOverride = true, configured = false))
     }
 
     @Test
@@ -283,6 +346,96 @@ class FrameSpatialPlannerTest {
         )
         assertEquals(DrawRegime.MAP_OCCLUDED, spatialPlan.mapEntries[0].placement.drawRegime)
         assertEquals(DrawRegime.SCREEN_COMPOSITED, spatialPlan.screenEntries[0].placement.drawRegime)
+    }
+
+    @Test
+    fun mergedMapOrderUsesLayerThenTypeThenSourceIndex() {
+        val placement = mapPlacement()
+        val firstGeometry = geometry(
+            Vector3(1.0, -1.0, 0.0),
+            Vector3(-1.0, 1.0, 0.0),
+            "first-v",
+            "first-f",
+        )
+        val secondGeometry = geometry(
+            Vector3(2.0, -2.0, 0.0),
+            Vector3(-2.0, 2.0, 0.0),
+            "second-v",
+            "second-f",
+        )
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(sticker(placement, "first-sticker"), sticker(placement, "second-sticker")),
+            models = listOf(model(placement, "first-model"), model(placement, "second-model")),
+            geometries = listOf(firstGeometry, secondGeometry),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(
+                DrawnThingReference.GeometryAt(0),
+                DrawnThingReference.GeometryAt(1),
+                DrawnThingReference.ModelAt(0),
+                DrawnThingReference.ModelAt(1),
+                DrawnThingReference.StickerAt(0),
+                DrawnThingReference.StickerAt(1),
+            ),
+            mergedMapOrder(plan, spatialPlan.mapEntries),
+        )
+    }
+
+    @Test
+    fun lowerStickerLayerPrecedesHigherGeometryLayer() {
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(sticker(mapPlacement(), "sticker").copy(layer = 0)),
+            geometries = listOf(
+                geometry(
+                    Vector3(1.0, -1.0, 0.0),
+                    Vector3(-1.0, 1.0, 0.0),
+                    "geometry-v",
+                    "geometry-f",
+                ).copy(layer = 1),
+            ),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(DrawnThingReference.StickerAt(0), DrawnThingReference.GeometryAt(0)),
+            mergedMapOrder(plan, spatialPlan.mapEntries),
+        )
+    }
+
+    @Test
+    fun screenStickerLayerDoesNotAffectScreenOrder() {
+        val plan = framePlan(
+            drawBasemap = false,
+            drawLabels = false,
+            stickers = listOf(
+                sticker(screenPlacement(2.0), "higher-z").copy(layer = -100),
+                sticker(screenPlacement(1.0), "lower-z").copy(layer = 100),
+            ),
+        )
+        val spatialPlan = planSuccess(
+            plan = plan,
+            maximumBasemapTileInstances = 1,
+            basemapStyleConfigured = false,
+        )
+
+        assertEquals(
+            listOf(DrawnThingReference.StickerAt(1), DrawnThingReference.StickerAt(0)),
+            spatialPlan.screenEntries.map(ResolvedDrawnThing::reference),
+        )
     }
 
     // ADR 0029 leaves only Stickers reachable in the screen-composited regime through the real
@@ -918,6 +1071,7 @@ class FrameSpatialPlannerTest {
         previousSelectedLod: Int? = null,
         maximumBasemapTileInstances: Int,
         basemapStyleConfigured: Boolean,
+        extendGroundPastPoles: Boolean = false,
     ): FrameSpatialPlan = assertIs<SpatialOutcome.Success<FrameSpatialPlan>>(
         planMercatorSpatial(
             plan = plan,
@@ -925,6 +1079,7 @@ class FrameSpatialPlannerTest {
             previousSelectedLod = previousSelectedLod,
             maximumBasemapTileInstances = maximumBasemapTileInstances,
             basemapStyleConfigured = basemapStyleConfigured,
+            extendGroundPastPoles = extendGroundPastPoles,
         ),
     ).value
 

@@ -37,6 +37,10 @@ EXPECTED_TARGETS = frozenset({
     "android", "iosArm64", "iosSimulatorArm64",
     "macosArm64", "linuxX64", "linuxArm64",
 })
+# ADR 0091 adds a seventh target, `jvm`, over LWJGL desktop GL. Like every superseded build form, the
+# six-target set stays accepted, but `kmp` and `consumer-smoke` must declare the *same* accepted set,
+# so the resolution proof can never cover fewer targets than the library publishes.
+_ACCEPTED_TARGET_SETS = (EXPECTED_TARGETS, EXPECTED_TARGETS | {"jvm"})
 
 
 _REQUIRED_DOCS = (
@@ -134,6 +138,7 @@ _LIBRARY_CREATED_DATA_CLASSES = (
     ("ResourceUsage", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceReportEntry", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
     ("ResourceFreeResult", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
+    ("ResourceResidency", "kmp/src/commonMain/kotlin/com/rohittp/reng/ResourceReports.kt"),
 )
 # Each value is a tuple of equally-exact accepted `plugins { }` token sequences, in the same shape
 # and for the same reason as _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS: a superseded form stays
@@ -222,7 +227,7 @@ _EXPECTED_REPOSITORY_BLOCK_SOURCES = {
                     google()
                     mavenCentral()
                     maven {
-                        url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+                        url = uri("https://redirector.kotlinlang.org/maven/compose-dev")
                         content {
                             includeGroup("org.jetbrains.skiko")
                         }
@@ -286,24 +291,40 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
     # whole-file digests: comments and whitespace are free, and any token is not. Each of these
     # two files pins four equally-exact accepted forms -- the pre-Cycle-C original, ADR 0019's
     # coroutines form, ADR 0032's device-test form, and ADR 0042's serialization form, which is the
-    # one currently on disk.
-    # Every form carries the rentile 0.7.0 bump (see base_versions below, which must move in
-    # lockstep with these fingerprints), and the two older forms cannot be recomputed from disk;
-    # they are the fixtures in tools/tests/test_check_repository_policy.py.
+    # one currently on disk for the catalog. `kmp/build.gradle.kts` pins a fifth, the opt-in
+    # benchmark form, which is the one on disk for it.
+    # Every form carries the rentile 0.19.0 bump (see base_versions below, which must move in
+    # lockstep with these fingerprints), and the three older forms cannot be recomputed from disk;
+    # they are the catalog fixtures in tools/tests/test_check_repository_policy.py, so all four move
+    # together whenever a version in the catalog does. Recompute them by fingerprinting
+    # VERSION_CATALOG and its three amended forms from that module, not by editing one hash.
     "gradle/libs.versions.toml": frozenset({
-        "0f665393f96f3c78621ac757322a742f7737187e81410330434f901e003ea1e6",
-        "cdfb80be9c5b2ea5c98ecbe8537a15ec4a0d7fe17a9c3291173fce0c66d20132",
-        "14c2e746e14aeccda729881a3005f8708d5c56ade5741081ccca622081b69f57",
-        "e0fa49ba3e177fd8294990e4ae613cb4ad5d75e83b277aef6c7a12a96707a83a",
+        "2c4def06fe1e2446e7ecacef8722838ad6f6c8d9dc8c7167bde349d3f6466eb6",
+        "f317045e6164ed71f98f2e8ac92709d2bbae271f87cef852a552c2e56eae7f95",
+        "a00e90336bb6e9cf5327f1ee2330b45b47bf6550ad9b9af287ce3f06ad61b51a",
+        "7f69f1b9f0c6e0570a5091b642c5b1b35a25578ae34c340a6c62eaa2d6609509",
+        # ADR 0091's form, on disk: the serialization form plus LWJGL's version and two coordinates.
+        "04713b5d8635b2eb71ccd70349138a5bce913588f1c83f4f03427142ac48aa47",
     }),
     "kmp/build.gradle.kts": frozenset({
         "cb2e7408aea431f014fbb1235b0a1793a39289a4dbf52c331e2f2fda23f236df",
         "386c6936c783eb1004ac0efe0a7954b0e93674d739f407e298e94a7a0763ccc7",
         "3d81ad92a07df321c226e3b796d02b7be85ca332b00f63e04c800d23fc399dfc",
         "22c1bbba0dd403502accadb914d7bc7e8a6ce7e5cc625f4a3d09a4f75b0e02d0",
+        # The opt-in benchmark form, on disk: ADR 0042's serialization form plus the
+        # `tasks.withType<AbstractTestTask>` filter that skips `*BenchmarkTest` classes unless
+        # `-Preng.benchmarks=true`. Its fixture is _KMP_BUILD_WITH_BENCHMARKS in tools/tests.
+        "8585bc4f3749083f15ed580971390c23a1b9fad6fc9cf2a919c02abb4b1e14fb",
+        # ADR 0091's form, on disk: the benchmark form plus the `jvm` target, the shared
+        # `jvmAndAndroidMain` and `cglTest` source sets and the JVM R2 publication. Its two LWJGL
+        # dependency blocks are blanked by `_mask_adr_0091_blocks` before fingerprinting, and are
+        # pinned token for token there instead.
+        "166fecfee5dec0aa54707d27f12154db3cf7ecc40f637d35672dc06a1b829dbc",
     }),
     "settings.gradle.kts": frozenset({
-        "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
+        # Skiko comes from JetBrains' live address for the Compose dev repository; the old
+        # maven.pkg.jetbrains.space host, which the previous fingerprint pinned, no longer resolves.
+        "e066f79cb05590eb994f94e817cef55b2e43b003d4d39b55fd05a986c55284fa",
     }),
 }
 _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES = frozenset({
@@ -369,8 +390,53 @@ _ARTIFACT_SIGNING_PATHS = (
 )
 
 
+# ADR 0091 admits LWJGL to `:kmp` in exactly two blocks, and nowhere else: `jvmMain`'s two
+# `implementation` coordinates, and the top-level block that puts LWJGL's Apple Silicon natives on
+# `jvmTest`'s runtime classpath only, with the Skia natives Rentile's JVM variant rasterises with (a version catalog cannot carry a classifier, so that block
+# needs `variantOf`, which the KMP source-set DSL lacks). Each block is pinned token for token: when
+# one appears exactly as written here, `_read` blanks it before any other rule sees the file, so
+# every other rule still applies to everything else, and a block that differs by a single token is
+# not blanked and fails the ordinary dependency rules.
+_ADR_0091_KMP_BLOCKS = (
+    """jvmMain.dependencies {
+    implementation(libs.lwjgl.core)
+    implementation(libs.lwjgl.opengl)
+}""",
+    """dependencies {
+    "jvmTestRuntimeOnly"(variantOf(libs.lwjgl.core) { classifier("natives-macos-arm64") })
+    "jvmTestRuntimeOnly"(variantOf(libs.lwjgl.opengl) { classifier("natives-macos-arm64") })
+    "jvmTestRuntimeOnly"("org.jetbrains.skiko:skiko-awt-runtime-macos-arm64:0.150.2")
+}""",
+)
+
+
+def _mask_adr_0091_blocks(text: str) -> str:
+    tokens = _kotlin_tokens(text)
+    values = [token.value for token in tokens]
+    for block in _ADR_0091_KMP_BLOCKS:
+        expected = [token.value for token in _kotlin_tokens(block)]
+        matches = [
+            index for index in range(len(values) - len(expected) + 1)
+            if values[index:index + len(expected)] == expected
+            and (index == 0 or values[index - 1] != ".")
+        ]
+        if len(matches) != 1:
+            continue
+        first = tokens[matches[0]]
+        last = tokens[matches[0] + len(expected) - 1]
+        start, end = first.start, last.start + len(last.value)
+        blank = "".join("\n" if character == "\n" else " " for character in text[start:end])
+        text = text[:start] + blank + text[end:]
+        tokens = _kotlin_tokens(text)
+        values = [token.value for token in tokens]
+    return text
+
+
 def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    if path.name == "build.gradle.kts" and path.parent.name == "kmp":
+        return _mask_adr_0091_blocks(text)
+    return text
 
 
 def _line(text: str, offset: int) -> int:
@@ -1644,13 +1710,14 @@ def check_version_inputs(root: Path) -> list[Violation]:
 
 
 def _target_call(tokens: Sequence[_Token], index: int) -> bool:
-    if tokens[index].value == "android":
+    if tokens[index].value in {"android", "jvm"}:
         return index + 1 < len(tokens) and tokens[index + 1].value in {"(", "{"}
     return index + 1 < len(tokens) and tokens[index + 1].value == "("
 
 
 def check_targets(root: Path) -> list[Violation]:
     violations = []
+    declared_sets = []
     for relative in ("kmp/build.gradle.kts", "consumer-smoke/build.gradle.kts"):
         path = root / relative
         if not path.is_file():
@@ -1663,14 +1730,23 @@ def check_targets(root: Path) -> list[Violation]:
             if token.value in _KMP_TARGET_FACTORIES and _target_call(tokens, index)
         ]
         names = [token.value for token in calls]
-        counts = {target: names.count(target) for target in EXPECTED_TARGETS}
-        extras = [token for token in calls if token.value not in EXPECTED_TARGETS]
-        if any(count != 1 for count in counts.values()) or extras:
-            first = min(calls, key=lambda token: token.start, default=_Token("", "", 0))
+        declared = frozenset(names)
+        exact = len(names) == len(declared) and declared in _ACCEPTED_TARGET_SETS
+        first = min(calls, key=lambda token: token.start, default=_Token("", "", 0))
+        if not exact:
             violations.append(_violation(
                 "TARGET_SET", path, _line(text, first.start),
-                "must declare exactly android, iosArm64, iosSimulatorArm64, macosArm64, linuxX64, and linuxArm64",
+                "must declare exactly android, iosArm64, iosSimulatorArm64, macosArm64, linuxX64, and "
+                "linuxArm64, plus jvm under ADR 0091",
             ))
+        else:
+            declared_sets.append((path, text, first, declared))
+    if len(declared_sets) == 2 and declared_sets[0][3] != declared_sets[1][3]:
+        path, text, first, _ = declared_sets[1]
+        violations.append(_violation(
+            "TARGET_SET", path, _line(text, first.start),
+            "must declare the same targets as kmp/build.gradle.kts",
+        ))
     return violations
 
 
@@ -1967,7 +2043,7 @@ def check_dependencies(root: Path) -> list[Violation]:
             "agp": "9.3.1",
             "kotlin": "2.3.21",
             "mavenPublish": "0.36.0",
-            "rentile": "0.7.0",
+            "rentile": "0.19.0",
         }
         base_libraries = {
             "rentile-kmp": {
@@ -2014,19 +2090,29 @@ def check_dependencies(root: Path) -> list[Violation]:
         }
         coroutines_versions = base_versions | {"kotlinxCoroutines": "1.11.0"}
         device_test_versions = coroutines_versions | {"androidxTestRunner": "1.7.0"}
+        serialization_versions = device_test_versions | {"kotlinxSerialization": "1.9.0"}
         exact = exact and versions in (
             base_versions,
             coroutines_versions,
             device_test_versions,
-            device_test_versions | {"kotlinxSerialization": "1.9.0"},
+            serialization_versions,
+            # ADR 0091's LWJGL, the fifth accepted shape: the serialization one plus its version.
+            serialization_versions | {"lwjgl": "3.4.2"},
         )
         coroutines_libraries = base_libraries | permitted_catalog_libraries
         device_test_libraries = coroutines_libraries | permitted_device_test_catalog_libraries
+        # ADR 0091's two LWJGL coordinates, admitted only on top of the serialization shape.
+        permitted_lwjgl_catalog_libraries = {
+            "lwjgl-core": {"module": "org.lwjgl:lwjgl", "version": {"ref": "lwjgl"}},
+            "lwjgl-opengl": {"module": "org.lwjgl:lwjgl-opengl", "version": {"ref": "lwjgl"}},
+        }
+        serialization_libraries = device_test_libraries | permitted_serialization_catalog_libraries
         exact = exact and libraries in (
             base_libraries,
             coroutines_libraries,
             device_test_libraries,
-            device_test_libraries | permitted_serialization_catalog_libraries,
+            serialization_libraries,
+            serialization_libraries | permitted_lwjgl_catalog_libraries,
         )
         # `[plugins]` was a single accepted shape until ADR 0042; it now accepts two, the original
         # and the original plus the serialization plugin. The original stays accepted forever
@@ -2283,12 +2369,42 @@ def check_abi(root: Path) -> list[Violation]:
                     code, api_file, _line(text, match.start()), message,
                 ))
 
-    if api_directory.is_dir():
-        for path in sorted(api_directory.glob("jvm*"), key=lambda item: item.as_posix()):
+    # ADR 0091: a `jvm` target publishes a JVM ABI, so it must have exactly one reviewed dump,
+    # `kmp/api/jvm/kmp.api`, held to the same leak rules as the KLIB dump plus one for LWJGL, whose types
+    # must stay behind the binding. Without the target, any JVM dump is still refused.
+    build = root / "kmp/build.gradle.kts"
+    build_tokens = _kotlin_tokens(_read(build)) if build.is_file() else []
+    declares_jvm = any(
+        token.value == "jvm" and _target_call(build_tokens, index)
+        for index, token in enumerate(build_tokens)
+    )
+    jvm_dump = api_directory / "jvm" / "kmp.api"
+    jvm_entries = (
+        sorted(api_directory.glob("jvm*"), key=lambda item: item.as_posix())
+        if api_directory.is_dir() else []
+    )
+    for path in jvm_entries:
+        allowed = declares_jvm and path == api_directory / "jvm" and sorted(
+            item.name for item in path.iterdir()
+        ) == ["kmp.api"]
+        if not allowed:
             violations.append(_violation(
                 "JVM_ABI", path, 1,
-                "Cycle B must not publish a JVM ABI dump",
+                "a JVM ABI dump must be exactly kmp/api/jvm/kmp.api, and only with the ADR 0091 jvm target",
             ))
+    if declares_jvm and not jvm_dump.is_file():
+        violations.append(_violation(
+            "JVM_ABI", jvm_dump, 1, "the ADR 0091 jvm target requires kmp/api/jvm/kmp.api",
+        ))
+    if declares_jvm and jvm_dump.is_file():
+        text = _read(jvm_dump)
+        for pattern, code, message in (
+            (r"com/rohittp/rentile|com\.rohittp\.rentile", "ABI_RENTILE_LEAK", "the JVM ABI must not expose Rentile types"),
+            (r"org/lwjgl|org\.lwjgl", "ABI_PLATFORM_LEAK", "the JVM ABI must not expose LWJGL types"),
+        ):
+            match = re.search(pattern, text)
+            if match is not None:
+                violations.append(_violation(code, jvm_dump, _line(text, match.start()), message))
     return violations
 
 

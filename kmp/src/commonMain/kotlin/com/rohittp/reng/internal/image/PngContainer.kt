@@ -138,6 +138,30 @@ private fun readUInt32BE(bytes: ByteArray, offset: Int): Long =
         ((bytes[offset + 2].toLong() and 0xFF) shl 8) or
         (bytes[offset + 3].toLong() and 0xFF)
 
+/** A PNG's IHDR width and height. */
+internal data class PngDimensions(val width: Int, val height: Int)
+
+/**
+ * The IHDR width and height of [bytes], read in place: the signature and the first chunk's length and type
+ * are checked, and nothing else. Null when the bytes do not open with a signature and a 13-byte IHDR, or the
+ * dimensions are not positive.
+ *
+ * For bytes whose container [scanPng] has already admitted, such as a resident generation that passed its
+ * class's `DECODE_PNG` gate, and only those. [scanPng] CRC-checks every chunk, the image data included, so
+ * asking it for the size on every frame cost a full pass over every geometry texture's PNG per frame (ADR 0088).
+ */
+internal fun pngHeaderDimensions(bytes: ByteArray): PngDimensions? {
+    val ihdrOffset = PNG_SIGNATURE.size
+    val payloadOffset = ihdrOffset + 8
+    if (bytes.size < payloadOffset + IHDR_PAYLOAD_LENGTH) return null
+    if (PNG_SIGNATURE.indices.any { bytes[it] != PNG_SIGNATURE[it] }) return null
+    if (readUInt32BE(bytes, ihdrOffset) != IHDR_PAYLOAD_LENGTH.toLong()) return null
+    if (typeCode(bytes, ihdrOffset + 4) != TYPE_IHDR) return null
+    val width = typeCode(bytes, payloadOffset)
+    val height = typeCode(bytes, payloadOffset + 4)
+    return if (width > 0 && height > 0) PngDimensions(width = width, height = height) else null
+}
+
 /**
  * Walks a candidate PNG's container: the eight-byte signature, then every chunk's four-byte length,
  * four-byte type, payload, and four-byte CRC. Every chunk's CRC is validated, including ancillary ones.

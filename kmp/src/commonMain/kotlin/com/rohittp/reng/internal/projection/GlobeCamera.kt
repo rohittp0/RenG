@@ -115,6 +115,13 @@ internal data class ResolvedGlobeCamera(
      * that direction is the safe one.
      */
     val limbPlane: GlobeLimbPlane? = globeLimbPlane(eyeGlobeFixed, radiusLogicalPixels)
+
+    /** `projectionMatrix * viewMatrix`, once per camera; see [ResolvedFrameCamera.viewProjection]. */
+    override val viewProjection: DoubleMatrix4 = projectionMatrix * viewMatrix
+
+    /** [globeFixedViewProjection]'s product, once per camera rather than once per ground patch and
+     * footprint: `(projectionMatrix * viewMatrix) * globeFixedToCameraRelative`, the grouping it always had. */
+    val globeFixedViewProjection: DoubleMatrix4 = viewProjection * globeFixedToCameraRelative
 }
 
 /**
@@ -288,9 +295,10 @@ internal fun globeCameraRelativePosition(
  * geometry that already holds globe-fixed vertices needs no CPU frame conversion per vertex, and
  * the transform stays linear -- which is what keeps ADR 0008's consumer shader contract intact,
  * since the nonlinearity was spent in [projectGlobe] before any vertex was handed over.
+ *
+ * The product is [ResolvedGlobeCamera.globeFixedViewProjection], computed once per camera.
  */
-internal fun globeFixedViewProjection(camera: ResolvedGlobeCamera): DoubleMatrix4 =
-    camera.projectionMatrix * camera.viewMatrix * camera.globeFixedToCameraRelative
+internal fun globeFixedViewProjection(camera: ResolvedGlobeCamera): DoubleMatrix4 = camera.globeFixedViewProjection
 
 /**
  * The globe's counterpart to [physicalPixelGroundRay]: what the centre of physical pixel

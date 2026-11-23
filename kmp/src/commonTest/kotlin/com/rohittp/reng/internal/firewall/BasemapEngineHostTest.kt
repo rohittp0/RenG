@@ -26,6 +26,8 @@ import com.rohittp.reng.internal.basemap.BasemapTileJsonOutcome
 import com.rohittp.reng.internal.cache.ResidentCache
 import com.rohittp.reng.internal.identity.CanonicalBytes
 import com.rohittp.reng.internal.identity.PureKotlinSha256
+import com.rohittp.reng.internal.identity.Sha256Function
+import com.rohittp.reng.internal.identity.Sha256Digest
 import com.rohittp.reng.internal.GpuByteAccount
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
 import com.rohittp.reng.internal.planning.BasemapTileInstance
@@ -850,7 +852,7 @@ class BasemapEngineHostTest {
         // `RenGRawResourceKey(stableId = key.stableId, ...)`). Two keys for one logical resource would be
         // two reads and two writes where RenG's contract permits one exchange, so the partition below is a
         // contract, not an implementation detail: the engine keys exactly the eight classes it fetches
-        // itself, and RenG keys exactly the four it fetches itself.
+        // itself, and RenG keys exactly the five it fetches itself.
         //
         // What this pins is the table. What makes the spaces genuinely disjoint *today* is that no
         // production path hands an engine-keyed class to the driver at all: `FramePlanningCore`'s static
@@ -866,6 +868,7 @@ class BasemapEngineHostTest {
             setOf(
                 ResourceClass.BASEMAP_STYLE,
                 ResourceClass.STICKER_IMAGE,
+                ResourceClass.BACKDROP_IMAGE,
                 ResourceClass.MODEL_GLB,
                 ResourceClass.MODEL_TEXTURE,
             ),
@@ -1085,6 +1088,102 @@ class BasemapEngineHostTest {
             host.close()
         }
     }
+
+    // ---- a shared invocation, which a batch's frames join (ADR 0051) ------------------------------
+
+    @Test
+    fun aSharedInvocationIsJoinedByTheFramesInsideItRatherThanReplaced() = runTest {
+        val transport = CountingHostTransport(throwable = RuntimeException("adapter down"))
+        val host = basemapEngineHost(transport = transport)
+        try {
+            host.withSharedOperation(ResourceAccessMode.NORMAL) {
+                val style = host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                    host.preparedStyle(hostStyleKey, hostStyleRecord(), HOST_STYLE_BASE_URI)
+                }
+                repeat(2) {
+                    host.withOperation(ResourceAccessMode.NORMAL, listOf(hostRasterRoute)) {
+                        assertFailsWith<RenGException> { host.prepareTiles(style, listOf(HOST_RASTER_TILE)) }
+                    }
+                }
+            }
+            // The mirror image of givesEachPreparationInvocationItsOwnOperationRegistry, which asserts
+            // 2 for the same two invocations run as roots. Inside a shared root they join one registry,
+            // so the second finds the first's latch and the consumer is never asked again.
+            assertEquals(1, transport.executeCalls, "frames inside one shared invocation share its latches")
+        } finally {
+            host.close()
+        }
+    }
+
+    @Test
+    fun aPlainInvocationNestedInsideAnotherStillFails() = runTest {
+        val host = basemapEngineHost()
+        try {
+            assertFailsWith<IllegalStateException> {
+                host.withOperation(ResourceAccessMode.NORMAL) {
+                    // Only a *shared* root may be joined. Concurrency is not nesting, and this check is
+                    // the one that catches two preparations sharing a host -- ADR 0051 moves it to "one
+                    // root at a time" rather than removing it.
+                    host.withOperation(ResourceAccessMode.NORMAL) { }
+                }
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    @Test
+    fun aSharedInvocationIsNeverJoinedUnderADifferentAccessMode() = runTest {
+        val host = basemapEngineHost()
+        try {
+            assertFailsWith<IllegalStateException> {
+                host.withSharedOperation(ResourceAccessMode.NORMAL) {
+                    // One registry is never shared across modes: its routes carry the mode they were
+                    // preregistered under, so a joiner asking under another would answer from routes
+                    // that never agreed to it.
+                    host.withOperation(ResourceAccessMode.RELOAD) { }
+                }
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    @Test
+    fun aJoinedBlockStillCarriesTheJobRentilesRasterizerReads() {
+        val host = basemapEngineHost()
+        var observedJob: Job? = null
+        var failure: Throwable? = null
+        var finished = false
+        try {
+            // Same construction, and the same requirement, as
+            // givesTheInvocationItsOwnJobEvenWhenTheCallerContextHasNone: every Rentile rasterizer
+            // entry point reads `currentCoroutineContext().job`, so a joined frame with no Job would
+            // fail every prepareTiles with an opaque BASEMAP_RENDER_FAILED.
+            //
+            // The Job here comes from the *root's* scope, not from the joined block's own -- removing
+            // the inner `coroutineScope` leaves this passing, which is why that inner scope is
+            // justified by child-bounding rather than by this property.
+            val invocation: suspend () -> Unit = {
+                host.withSharedOperation(ResourceAccessMode.NORMAL) {
+                    host.withOperation(ResourceAccessMode.NORMAL) {
+                        observedJob = currentCoroutineContext()[Job]
+                    }
+                }
+            }
+            invocation.startCoroutine(
+                Continuation(EmptyCoroutineContext) { result ->
+                    failure = result.exceptionOrNull()
+                    finished = true
+                },
+            )
+            assertTrue(finished, "an invocation over an empty block completes without ever dispatching")
+            assertNull(failure, "a caller without a Job is a legal caller")
+            assertNotNull(observedJob, "a joined block must supply the Job Rentile's rasterizer reads")
+        } finally {
+            host.close()
+        }
+    }
 }
 
 // ---- fixtures ------------------------------------------------------------------------------------
@@ -1293,16 +1392,154 @@ internal fun hostStyleRecord(json: String = HOST_STYLE_JSON): StoredRawResource 
 internal fun hostEngineSanitizedIdOf(url: String): String =
     PureKotlinSha256.digest(CanonicalBytes(redactAuthenticationQuery(url).encodeToByteArray())).lowercaseHex
 
+class RenderedTileKeyRemembranceTest {
+    /**
+     * ADR 0069's claim, and it is counted rather than timed: the derivation builds a fresh
+     * `ResourceKeyDeriver`, a canonical binary, a SHA-256 and a hex string, and it used to run twice
+     * per visible tile on every frame forever. Asking fifty times must hash exactly as much as asking
+     * once.
+     */
+    @Test
+    fun aRenderedTileKeyIsDerivedOnceHoweverManyTimesItIsAsked() {
+        val sha256 = CountingSha256()
+        val host = basemapEngineHost(sha256 = sha256)
+        val tile = CanonicalBasemapTile(lod = 14, tileY = 5, canonicalX = 9)
+
+        val first = host.renderedTileKey(STYLE_DIGEST, tile)
+        val afterFirst = sha256.digests
+        assertTrue(afterFirst > 0, "the first ask must actually derive something")
+
+        repeat(50) { assertEquals(first, host.renderedTileKey(STYLE_DIGEST, tile)) }
+
+        assertEquals(afterFirst, sha256.digests)
+    }
+
+    /**
+     * The instance overload projects the world copy away before it asks, so the several unwrapped
+     * copies of one canonical tile share one entry as well as one rendered resource -- the property
+     * the local map in `groundInstances` used to provide and this replaces.
+     */
+    @Test
+    fun everyUnwrappedCopyOfOneTileSharesTheSameRemembrance() {
+        val sha256 = CountingSha256()
+        val host = basemapEngineHost(sha256 = sha256)
+        val tile = CanonicalBasemapTile(lod = 14, tileY = 5, canonicalX = 9)
+
+        val canonical = host.renderedTileKey(STYLE_DIGEST, tile)
+        val afterFirst = sha256.digests
+
+        for (copy in -2..2) {
+            val instance = BasemapTileInstance(
+                lod = 14,
+                tileY = 5,
+                unwrappedX = 9L + copy * (1L shl 14),
+                instanceCopy = copy,
+                canonicalX = 9,
+            )
+            assertEquals(canonical, host.renderedTileKey(STYLE_DIGEST, instance))
+        }
+
+        assertEquals(afterFirst, sha256.digests)
+    }
+
+    /** The style digest is half the identity, so two styles never share an answer. */
+    @Test
+    fun aDifferentStyleDerivesItsOwnKey() {
+        val sha256 = CountingSha256()
+        val host = basemapEngineHost(sha256 = sha256)
+        val tile = CanonicalBasemapTile(lod = 3, tileY = 1, canonicalX = 2)
+
+        val first = host.renderedTileKey(STYLE_DIGEST, tile)
+        val afterFirst = sha256.digests
+        val second = host.renderedTileKey(OTHER_STYLE_DIGEST, tile)
+
+        assertNotEquals(first, second)
+        assertTrue(sha256.digests > afterFirst)
+    }
+
+    /** A cache that returned one tile's key for another would be worse than no cache at all. */
+    @Test
+    fun distinctTilesNeverShareARememberedKey() {
+        val host = basemapEngineHost()
+        val keys = mutableSetOf<ResourceKey>()
+        for (lod in 1..4) {
+            for (y in 0..3) {
+                for (x in 0..3) {
+                    keys += host.renderedTileKey(
+                        STYLE_DIGEST,
+                        CanonicalBasemapTile(lod = lod, tileY = y, canonicalX = x),
+                    )
+                }
+            }
+        }
+        assertEquals(4 * 4 * 4, keys.size)
+    }
+
+    /**
+     * The bound is exactly `maximumBasemapTileInstances`' own ceiling, so one frame can never evict a
+     * key it is still using -- which is the whole argument for the number. Past it a key nothing asked
+     * for since it was last passed over goes first (second chance), and forgetting costs one
+     * re-derivation, which is what every frame used to pay for every tile.
+     */
+    @Test
+    fun theRemembranceIsBoundedAndForgetsAnUnusedKeyBeforeARecentlyUsedOne() {
+        val sha256 = CountingSha256()
+        val host = basemapEngineHost(sha256 = sha256)
+        fun tileAt(index: Int) = CanonicalBasemapTile(lod = 22, tileY = index, canonicalX = 0)
+
+        val oldest = tileAt(0)
+        host.renderedTileKey(STYLE_DIGEST, oldest)
+        for (index in 1 until MAXIMUM_REMEMBERED_TILE_KEYS) host.renderedTileKey(STYLE_DIGEST, tileAt(index))
+
+        // Still exactly full, so the first entry is still remembered -- and asking for it marks it used.
+        val beforeOverflow = sha256.digests
+        host.renderedTileKey(STYLE_DIGEST, oldest)
+        assertEquals(beforeOverflow, sha256.digests)
+
+        // One past the bound: the marked first entry gets a second chance, the unmarked second goes, and
+        // the newcomer stays.
+        val newcomer = tileAt(MAXIMUM_REMEMBERED_TILE_KEYS)
+        host.renderedTileKey(STYLE_DIGEST, newcomer)
+        val afterOverflow = sha256.digests
+        host.renderedTileKey(STYLE_DIGEST, oldest)
+        assertEquals(afterOverflow, sha256.digests, "the just-used first entry must survive the overflow")
+        host.renderedTileKey(STYLE_DIGEST, tileAt(1))
+        assertTrue(sha256.digests > afterOverflow, "the oldest unused entry must have been forgotten")
+
+        val afterRederiving = sha256.digests
+        host.renderedTileKey(STYLE_DIGEST, newcomer)
+        assertEquals(afterRederiving, sha256.digests, "the newcomer must still be remembered")
+    }
+
+    private companion object {
+        const val STYLE_DIGEST: String = "0123456789abcdef"
+        const val OTHER_STYLE_DIGEST: String = "fedcba9876543210"
+    }
+}
+
 internal fun basemapEngineHost(
     transport: Transport = CountingHostTransport(),
     store: Store = CountingHostStore(),
     cache: ResidentCache = ResidentCache(),
+    sha256: Sha256Function = PureKotlinSha256,
 ): BasemapEngineHost = BasemapEngineHost(
     transport = transport,
     store = store,
     cache = cache,
     tileOutputSizePixels = 512,
+    sha256 = sha256,
 )
+
+/** Counts what [BasemapEngineHost] hashes, so a derivation that did not happen is observable. */
+internal class CountingSha256 : Sha256Function {
+    var digests: Int = 0
+        private set
+
+    override fun digest(bytes: CanonicalBytes): Sha256Digest {
+        digests += 1
+        return PureKotlinSha256.digest(bytes)
+    }
+}
 
 /** Counts every [Transport.execute] call and records the last request. Single-threaded by design: every
  *  test here drives it from one `runTest` scheduler. */

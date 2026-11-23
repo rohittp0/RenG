@@ -5,6 +5,8 @@ import com.rohittp.reng.internal.gl.GL_UNSIGNED_INT
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_SHORT
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.gltfSamplerState
+import com.rohittp.reng.internal.glb.GLTF_JPEG_MEDIA_TYPE
+import com.rohittp.reng.internal.glb.GLTF_PNG_MEDIA_TYPE
 import com.rohittp.reng.internal.glb.GlbScan
 import com.rohittp.reng.internal.glb.GltfDocument
 import com.rohittp.reng.internal.glb.GltfFeatureResult
@@ -15,8 +17,11 @@ import com.rohittp.reng.internal.glb.parseGltf
 import com.rohittp.reng.internal.glb.scanGlb
 import com.rohittp.reng.internal.glb.validateGltfFeatures
 import com.rohittp.reng.internal.image.DecodedImage
+import com.rohittp.reng.internal.image.JpegDecodeResult
 import com.rohittp.reng.internal.image.PngDecodeResult
-import com.rohittp.reng.internal.image.decodePng
+import com.rohittp.reng.internal.image.decodeJpeg
+import com.rohittp.reng.internal.image.prescanPng
+import com.rohittp.reng.internal.image.projectedJpegRgbaBytes
 import com.rohittp.reng.internal.math.DoubleMatrix4
 
 /** The attribute semantics RenG binds. Every other semantic `validateGltfFeatures` admits --
@@ -227,7 +232,11 @@ internal sealed interface ModelDecodeResult {
  * [ModelDecodeResult.Malformed] too, and are exactly the gap [GltfDocument]'s own documentation
  * warns about: `parseGltf` receives the BIN chunk's *length* and never its bytes.
  */
-internal fun decodeModel(bytes: ByteArray, limits: ResourceLimits): ModelDecodeResult {
+internal fun decodeModel(
+    bytes: ByteArray,
+    limits: ResourceLimits,
+    reserveDecodedCpuBytes: (Long) -> Unit = {},
+): ModelDecodeResult {
     val admitted = scanGlb(bytes, limits.maximumModelJsonChunkBytes) as? GlbScan.Admitted
         ?: return ModelDecodeResult.Malformed
     val binRange = admitted.binChunk ?: IntRange.EMPTY
@@ -238,7 +247,13 @@ internal fun decodeModel(bytes: ByteArray, limits: ResourceLimits): ModelDecodeR
         is GltfFeatureResult.Unsupported -> return ModelDecodeResult.Unsupported
     }
 
-    val decoder = ModelDecoder(document, BinChunk(bytes, binRange), limits.maximumDecodedImageBytes)
+    val decoder = ModelDecoder(
+        document,
+        BinChunk(bytes, binRange),
+        limits.maximumDecodedImageBytes,
+        limits.maximumImageDecodeWorkingBytes,
+        reserveDecodedCpuBytes,
+    )
     return try {
         ModelDecodeResult.Success(decoder.decode())
     } catch (signal: ModelDecodeSignal) {
@@ -258,6 +273,8 @@ private class ModelDecoder(
     private val document: GltfDocument,
     private val bin: BinChunk,
     private val budgetBytes: Long,
+    private val imageWorkingBudgetBytes: Long,
+    private val reserveDecodedCpuBytes: (Long) -> Unit,
 ) {
     private var decodedBytes: Long = 0L
 
@@ -266,7 +283,9 @@ private class ModelDecoder(
         // budget is refused without first building the arrays that would not fit. The projection is
         // exact rather than an upper bound -- it applies the same widening rules the decode below
         // does -- so it can never refuse a model the accumulated figure would have admitted.
-        if (projectedGeometryBytes() > budgetBytes) fail(ModelDecodeResult.TooLarge)
+        val geometryBytes = projectedGeometryBytes()
+        if (geometryBytes > budgetBytes) fail(ModelDecodeResult.TooLarge)
+        reserveDecodedCpuBytes(geometryBytes)
 
         val primitives = document.meshes.flatMap { mesh -> mesh.primitives.map { decodePrimitive(it) } }
         val images = decodeImages()
@@ -423,25 +442,69 @@ private class ModelDecoder(
      * Every embedded image, decoded to canonical RGBA8 and kept index-parallel with
      * `document.images`, which is what lets [ResolvedMaterial.baseColourImageIndex] be a glTF image
      * index rather than a remapped one. An image no material references is still decoded, and still
-     * fails the decode if its bytes are not a PNG: `validateGltfFeatures` has already vouched for
-     * every image's media type and embedding, so a payload that does not decode is a corrupt file
-     * rather than the unvalidated debris an unreferenced *skin* is.
+     * fails the decode if its bytes are not the format its `mimeType` declares:
+     * `validateGltfFeatures` has already vouched for every image's media type and embedding, so a
+     * payload that does not decode is a corrupt file rather than the unvalidated debris an
+     * unreferenced *skin* is.
      *
-     * A PNG's three failures map straight through to this file's three, so a JPEG mislabelled
-     * `image/png` and a raster larger than the budget stay distinguishable at the caller.
+     * PNG and JPEG (ADR 0089) decode to the same canonical form -- a JPEG opaque, with alpha 255 --
+     * and upload through the same path, so colour space, premultiplication and `alphaMode` treat
+     * them alike. Each decoder's three failures map straight through to this file's three, so a
+     * file mislabelled with the other format's media type and a raster larger than the budget stay
+     * distinguishable at the caller.
      */
     private fun decodeImages(): List<DecodedImage> = document.images.map { image ->
         val view = document.bufferViews[image.bufferView ?: fail(ModelDecodeResult.Malformed)]
         val payload = bin.copyOfRange(view.byteOffset, view.byteLength) ?: fail(ModelDecodeResult.Malformed)
-        val decoded = when (val result = decodePng(payload, budgetBytes)) {
+        val decoded = when (image.mimeType) {
+            GLTF_PNG_MEDIA_TYPE -> decodePngImage(payload)
+            GLTF_JPEG_MEDIA_TYPE -> decodeJpegImage(payload)
+            else -> fail(ModelDecodeResult.Unsupported)
+        }
+        decodedBytes += decoded.byteCount.toLong()
+        if (decodedBytes > budgetBytes) fail(ModelDecodeResult.TooLarge)
+        decoded
+    }
+
+    /** Projected bytes are admitted and reserved before the raster is allocated, as for geometry. */
+    private fun reserveProjectedImage(projectedBytes: Long?) {
+        projectedBytes ?: return
+        if (projectedBytes > budgetBytes - decodedBytes) fail(ModelDecodeResult.TooLarge)
+        reserveDecodedCpuBytes(projectedBytes)
+    }
+
+    private fun decodePngImage(payload: ByteArray): DecodedImage {
+        val png = prescanPng(payload)
+        reserveProjectedImage(png.projectedRgbaBytes)
+        return when (val result = png.decode(budgetBytes, imageWorkingBudgetBytes)) {
             is PngDecodeResult.Success -> result.image
             is PngDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)
             is PngDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
             PngDecodeResult.TooLarge -> fail(ModelDecodeResult.TooLarge)
         }
-        decodedBytes += decoded.byteCount.toLong()
-        if (decodedBytes > budgetBytes) fail(ModelDecodeResult.TooLarge)
-        decoded
+    }
+
+    /**
+     * A JPEG is decoded only after its raster is reserved. The projection walks the decoder's own
+     * marker parser, so a `null` means the decoder would fail at or before its frame header too: that
+     * failure is reproduced with a zero raster budget -- which allocates nothing -- only to report it
+     * as the right one of [ModelDecodeResult.Unsupported] and [ModelDecodeResult.Malformed].
+     */
+    private fun decodeJpegImage(payload: ByteArray): DecodedImage {
+        val projected = projectedJpegRgbaBytes(payload)
+        if (projected == null) {
+            when (decodeJpeg(payload, maximumDecodedBytes = 0L, maximumWorkingBytes = 0L)) {
+                is JpegDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
+                else -> fail(ModelDecodeResult.Malformed)
+            }
+        }
+        reserveProjectedImage(projected)
+        return when (val result = decodeJpeg(payload, budgetBytes, imageWorkingBudgetBytes)) {
+            is JpegDecodeResult.Success -> result.image
+            is JpegDecodeResult.Malformed -> fail(ModelDecodeResult.Malformed)
+            is JpegDecodeResult.Unsupported -> fail(ModelDecodeResult.Unsupported)
+            JpegDecodeResult.TooLarge -> fail(ModelDecodeResult.TooLarge)
+        }
     }
 
     /**
@@ -460,13 +523,16 @@ private class ModelDecoder(
         val referenced = document.nodes.mapNotNull { it.skin }.toSet()
         return document.skins.mapIndexed { index, skin ->
             val accessorIndex = skin.inverseBindMatrices.takeIf { index in referenced }
+            val projectedBytes = skin.joints.size * MATRIX_BYTES
+            if (projectedBytes > budgetBytes - decodedBytes) fail(ModelDecodeResult.TooLarge)
+            reserveDecodedCpuBytes(projectedBytes)
             val matrices = accessorIndex
                 ?.let { bin.readMatrices(document, it) ?: fail(ModelDecodeResult.Malformed) }
                 ?: List(skin.joints.size) { DoubleMatrix4.identity }
             // The specification requires one matrix per joint. A short accessor would leave a joint
             // with no bind pose, which the vertex shader would read as an out-of-range lookup.
             if (matrices.size != skin.joints.size) fail(ModelDecodeResult.Malformed)
-            decodedBytes += matrices.size * MATRIX_BYTES
+            decodedBytes += projectedBytes
             DecodedSkin(jointNodes = skin.joints, inverseBindMatrices = matrices, skeletonRoot = skin.skeleton)
         }
     }

@@ -109,6 +109,15 @@ class PngDecoderTest {
     }
 
     @Test
+    fun decidesThePeakWorkingCeilingBeforeAllocating() {
+        // 4x4 RGBA output is 64 bytes. The bounded upload workspace for this tiny image is another
+        // 64 bytes (larger than the two 13-byte RGB row buffers), for a projected peak of 128.
+        assertEquals(64L, projectedPngRgbaBytes(filterNoneFixture))
+        assertIs<PngDecodeResult.TooLarge>(decodePng(filterNoneFixture, 1L shl 20, 127L))
+        assertIs<PngDecodeResult.Success>(decodePng(filterNoneFixture, 1L shl 20, 128L))
+    }
+
+    @Test
     fun appliesNoColourTransformForAnyAncillaryColourChunk() {
         val plain = assertIs<PngDecodeResult.Success>(decodePng(rgb8Reference, 1L shl 20))
         // Pin the reference decode against an independently-computed expectation first, so the loop
@@ -239,6 +248,35 @@ class PngDecoderTest {
     fun reassemblesAZlibStreamSplitAcrossThreeNonChunkAlignedIdatRanges() {
         val result = assertIs<PngDecodeResult.Success>(decodePng(multiIdatSplitImage, 1L shl 20))
         assertContentEquals(expectedMultiIdatSplitPixels, result.image.rgbaSnapshot())
+    }
+
+    // Every fixture above is a compressed stream, so the stored-block fast path must decline each one
+    // and the decoder's answer must be exactly the general path's -- including every rejection.
+    @Test
+    fun compressedFixturesDecodeTheSameWithOrWithoutTheStoredFastPath() {
+        val fixtures = filterFixtures + listOf(
+            "grey8TwoPixels" to grey8TwoPixels,
+            "paletteWithTrns" to paletteWithTrns,
+            "filterByteFive" to filterByteFive,
+            "deflateShorterThanRaster" to deflateShorterThanRaster,
+            "deflateLongerThanRaster" to deflateLongerThanRaster,
+            "paletteIndexOutOfRange" to paletteIndexOutOfRange,
+            "greyTwoPixelsWithTrnsKey" to greyTwoPixelsWithTrnsKey,
+            "rgbTwoPixelsWithTrnsKey" to rgbTwoPixelsWithTrnsKey,
+            "paletteWithShortTrns" to paletteWithShortTrns,
+            "multiIdatSplitImage" to multiIdatSplitImage,
+            "rgb8Reference" to rgb8Reference,
+        )
+        for ((name, bytes) in fixtures) {
+            assertEquals(false, storedFastPathDecodes(bytes), name)
+            val fast = decodePng(bytes, 1L shl 20)
+            val general = decodePng(bytes, 1L shl 20, storedFastPath = false)
+            if (fast is PngDecodeResult.Success && general is PngDecodeResult.Success) {
+                assertContentEquals(general.image.rgbaSnapshot(), fast.image.rgbaSnapshot(), name)
+            } else {
+                assertEquals(general, fast, name)
+            }
+        }
     }
 
     private val expectedFilterPixels: ByteArray = byteArrayOf(

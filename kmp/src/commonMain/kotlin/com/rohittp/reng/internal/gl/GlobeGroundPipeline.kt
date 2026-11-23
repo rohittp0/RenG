@@ -1,5 +1,6 @@
 package com.rohittp.reng.internal.gl
 
+import com.rohittp.reng.BlendMask
 import com.rohittp.reng.PipelineStage
 import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.ShaderPair
@@ -66,6 +67,7 @@ internal const val GLOBE_GROUND_VERTEX_SOURCE: String =
         "uniform vec4 rengGlobeGroundTileEdges;\n" +
         "uniform vec2 rengGlobeGroundTileUvV;\n" +
         "out vec2 rengGroundUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
         "void main() {\n" +
         "    float longitude = mix(rengGlobeGroundTileEdges.x, rengGlobeGroundTileEdges.y, " +
         "rengGlobeGroundGrid.x);\n" +
@@ -78,8 +80,41 @@ internal const val GLOBE_GROUND_VERTEX_SOURCE: String =
         "    float cosineLatitude = 2.0 * tangentHalfAngle / denominator;\n" +
         "    vec3 direction = vec3(cosineLatitude * cos(longitude), cosineLatitude * sin(longitude), " +
         "sineLatitude);\n" +
-        "    rengGroundUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
+        "    vec2 rengGroundTileUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
         "rengGlobeGroundTileUvV.y, rengGlobeGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    gl_Position = rengGlobeGroundUnitSphereToClip * vec4(direction, 1.0);\n" +
+        "}\n"
+
+/** ADR 0086's globe mixed vertex stage; the pinned ordinary source above is unchanged. */
+internal const val GLOBE_GROUND_MIXED_VERTEX_SOURCE: String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "layout(location = 0) in vec2 rengGlobeGroundGrid;\n" +
+        "uniform mat4 rengGlobeGroundUnitSphereToClip;\n" +
+        "uniform vec4 rengGlobeGroundTileEdges;\n" +
+        "uniform vec2 rengGlobeGroundTileUvV;\n" +
+        "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundBlendUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
+        "uniform vec3 rengGroundBlendColourWindow;\n" +
+        "void main() {\n" +
+        "    float longitude = mix(rengGlobeGroundTileEdges.x, rengGlobeGroundTileEdges.y, " +
+        "rengGlobeGroundGrid.x);\n" +
+        "    float isometricLatitude = mix(rengGlobeGroundTileEdges.z, rengGlobeGroundTileEdges.w, " +
+        "rengGlobeGroundGrid.y);\n" +
+        "    float tangentHalfAngle = exp(isometricLatitude);\n" +
+        "    float tangentSquared = tangentHalfAngle * tangentHalfAngle;\n" +
+        "    float denominator = tangentSquared + 1.0;\n" +
+        "    float sineLatitude = (tangentSquared - 1.0) / denominator;\n" +
+        "    float cosineLatitude = 2.0 * tangentHalfAngle / denominator;\n" +
+        "    vec3 direction = vec3(cosineLatitude * cos(longitude), cosineLatitude * sin(longitude), " +
+        "sineLatitude);\n" +
+        "    vec2 rengGroundTileUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
+        "rengGlobeGroundTileUvV.y, rengGlobeGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
+        "rengGroundBlendColourWindow.yz;\n" +
         "    gl_Position = rengGlobeGroundUnitSphereToClip * vec4(direction, 1.0);\n" +
         "}\n"
 
@@ -152,6 +187,7 @@ private fun terrainGlobeGroundVertexSource(shading: Boolean): String =
         GROUND_ELEVATION_SOURCE +
         (if (shading) GROUND_NORMAL_SOURCE else "") +
         "out vec2 rengGroundUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
         (if (shading) "out vec3 rengGroundNormalEnu;\n" else "") +
         "void main() {\n" +
         "    float longitude = mix(rengGlobeGroundTileEdges.x, rengGlobeGroundTileEdges.y, " +
@@ -167,8 +203,9 @@ private fun terrainGlobeGroundVertexSource(shading: Boolean): String =
         "sineLatitude);\n" +
         "    float radial = 1.0 + rengGroundElevationMetres(rengGlobeGroundGrid) * " +
         "rengGlobeGroundRadialPerMetre;\n" +
-        "    rengGroundUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
+        "    vec2 rengGroundTileUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
         "rengGlobeGroundTileUvV.y, rengGlobeGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
         (
             if (shading) {
                 "    rengGroundNormalEnu = rengGroundEnuNormal(rengGlobeGroundGrid, cosineLatitude);\n"
@@ -198,12 +235,68 @@ internal val TERRAIN_GLOBE_GROUND_VERTEX_SOURCE: String = terrainGlobeGroundVert
 internal val TERRAIN_SHADED_GLOBE_GROUND_VERTEX_SOURCE: String =
     terrainGlobeGroundVertexSource(shading = true)
 
+/** ADR 0086's displacing globe mixed stage; the pinned ordinary variants remain unchanged. */
+private fun terrainMixedGlobeGroundVertexSource(shading: Boolean): String =
+    "#version 300 es\n" +
+        "precision highp float;\n" +
+        "layout(location = 0) in vec2 rengGlobeGroundGrid;\n" +
+        "uniform mat4 rengGlobeGroundUnitSphereToClip;\n" +
+        "uniform vec4 rengGlobeGroundTileEdges;\n" +
+        "uniform vec2 rengGlobeGroundTileUvV;\n" +
+        "uniform float rengGlobeGroundRadialPerMetre;\n" +
+        GROUND_ELEVATION_SOURCE +
+        (if (shading) GROUND_NORMAL_SOURCE else "") +
+        "out vec2 rengGroundUv;\n" +
+        "out vec2 rengGroundBlendUv;\n" +
+        "uniform vec3 rengGroundColourWindow;\n" +
+        "uniform vec3 rengGroundBlendColourWindow;\n" +
+        (if (shading) "out vec3 rengGroundNormalEnu;\n" else "") +
+        "void main() {\n" +
+        "    float longitude = mix(rengGlobeGroundTileEdges.x, rengGlobeGroundTileEdges.y, " +
+        "rengGlobeGroundGrid.x);\n" +
+        "    float isometricLatitude = mix(rengGlobeGroundTileEdges.z, rengGlobeGroundTileEdges.w, " +
+        "rengGlobeGroundGrid.y);\n" +
+        "    float tangentHalfAngle = exp(isometricLatitude);\n" +
+        "    float tangentSquared = tangentHalfAngle * tangentHalfAngle;\n" +
+        "    float denominator = tangentSquared + 1.0;\n" +
+        "    float sineLatitude = (tangentSquared - 1.0) / denominator;\n" +
+        "    float cosineLatitude = 2.0 * tangentHalfAngle / denominator;\n" +
+        "    vec3 direction = vec3(cosineLatitude * cos(longitude), cosineLatitude * sin(longitude), " +
+        "sineLatitude);\n" +
+        "    float radial = 1.0 + rengGroundElevationMetres(rengGlobeGroundGrid) * " +
+        "rengGlobeGroundRadialPerMetre;\n" +
+        "    vec2 rengGroundTileUv = vec2(rengGlobeGroundGrid.x, mix(rengGlobeGroundTileUvV.x, " +
+        "rengGlobeGroundTileUvV.y, rengGlobeGroundGrid.y));\n" +
+        "    rengGroundUv = rengGroundTileUv * rengGroundColourWindow.x + rengGroundColourWindow.yz;\n" +
+        "    rengGroundBlendUv = rengGroundTileUv * rengGroundBlendColourWindow.x + " +
+        "rengGroundBlendColourWindow.yz;\n" +
+        (
+            if (shading) {
+                "    rengGroundNormalEnu = rengGroundEnuNormal(rengGlobeGroundGrid, cosineLatitude);\n"
+            } else {
+                ""
+            }
+            ) +
+        "    gl_Position = rengGlobeGroundUnitSphereToClip * vec4(direction * radial, 1.0);\n" +
+        "}\n"
+
+internal val TERRAIN_MIXED_GLOBE_GROUND_VERTEX_SOURCE: String =
+    terrainMixedGlobeGroundVertexSource(shading = false)
+
+internal val TERRAIN_SHADED_MIXED_GLOBE_GROUND_VERTEX_SOURCE: String =
+    terrainMixedGlobeGroundVertexSource(shading = true)
+
 internal val TERRAIN_GLOBE_GROUND_SHADER_PAIR: ShaderPair =
     ShaderPair(vertexSource = TERRAIN_GLOBE_GROUND_VERTEX_SOURCE, fragmentSource = GROUND_FRAGMENT_SOURCE)
 
 internal val TERRAIN_SHADED_GLOBE_GROUND_SHADER_PAIR: ShaderPair = ShaderPair(
     vertexSource = TERRAIN_SHADED_GLOBE_GROUND_VERTEX_SOURCE,
     fragmentSource = GROUND_SHADED_FRAGMENT_SOURCE,
+)
+
+private val GLOBE_GROUND_MIXED_SHADER_PAIR: ShaderPair = ShaderPair(
+    vertexSource = GLOBE_GROUND_MIXED_VERTEX_SOURCE,
+    fragmentSource = GROUND_MIXED_FRAGMENT_SOURCE,
 )
 
 /**
@@ -214,11 +307,35 @@ internal class TerrainGlobeGroundProgram(
     val key: ResourceKey,
     val program: Int,
     val unitSphereToClipUniformLocation: Int,
+    /**
+     * Which part of the bound texture a tile samples (ADR 0057): scale, then u and v offsets.
+     *
+     * The identity window is what an exact tile gets, so this is written for every tile and the
+     * shader carries no branch and no second variant.
+     */
+    val colourWindowUniformLocation: Int,
     val tileEdgesUniformLocation: Int,
     val tileUvVUniformLocation: Int,
     val textureUniformLocation: Int,
     val radialPerMetreUniformLocation: Int,
     val elevation: GroundElevationUniformLocations,
+)
+
+internal class GlobeGroundMixedProgram(
+    val key: ResourceKey,
+    val program: Int,
+    val unitSphereToClipUniformLocation: Int,
+    val colourWindowUniformLocation: Int,
+    val tileEdgesUniformLocation: Int,
+    val tileUvVUniformLocation: Int,
+    val textureUniformLocation: Int,
+    val blendColourWindowUniformLocation: Int,
+    val blendTextureUniformLocation: Int,
+    val blendKindUniformLocation: Int,
+    val blendParamsUniformLocation: Int,
+    val blendFrameSizeUniformLocation: Int,
+    val radialPerMetreUniformLocation: Int = -1,
+    val elevation: GroundElevationUniformLocations? = null,
 )
 
 /**
@@ -243,11 +360,21 @@ internal class GlobeGroundPipeline(
     val key: ResourceKey,
     val program: Int,
     val unitSphereToClipUniformLocation: Int,
+    /**
+     * Which part of the bound texture a tile samples (ADR 0057): scale, then u and v offsets.
+     *
+     * The identity window is what an exact tile gets, so this is written for every tile and the
+     * shader carries no branch and no second variant.
+     */
+    val colourWindowUniformLocation: Int,
     val tileEdgesUniformLocation: Int,
     val tileUvVUniformLocation: Int,
     val textureUniformLocation: Int,
     /** The displacing program this pipeline draws a tile with a DEM through. */
     val terrain: TerrainGlobeGroundProgram,
+    val terrainShading: Boolean,
+    var mixed: GlobeGroundMixedProgram? = null,
+    var terrainMixed: GlobeGroundMixedProgram? = null,
     /**
      * Every grid this pipeline has been asked for, keyed by [GlobeGroundGrid.cellsPerSide].
      *
@@ -329,6 +456,10 @@ internal fun createGlobeGroundPipeline(
                 GLOBE_GROUND_TILE_UV_V_UNIFORM_NAME,
             ),
             textureUniformLocation = binding.getUniformLocation(program, GROUND_TEXTURE_UNIFORM_NAME),
+            colourWindowUniformLocation = binding.getUniformLocation(
+                program,
+                GROUND_COLOUR_WINDOW_UNIFORM_NAME,
+            ),
             terrain = TerrainGlobeGroundProgram(
                 key = terrainKey,
                 program = terrainProgram,
@@ -348,12 +479,17 @@ internal fun createGlobeGroundPipeline(
                     terrainProgram,
                     GROUND_TEXTURE_UNIFORM_NAME,
                 ),
+                colourWindowUniformLocation = binding.getUniformLocation(
+                    terrainProgram,
+                    GROUND_COLOUR_WINDOW_UNIFORM_NAME,
+                ),
                 radialPerMetreUniformLocation = binding.getUniformLocation(
                     terrainProgram,
                     GLOBE_GROUND_RADIAL_PER_METRE_UNIFORM_NAME,
                 ),
                 elevation = resolveGroundElevationUniforms(binding, terrainProgram),
             ),
+            terrainShading = terrainShading,
         ),
     )
 }
@@ -377,7 +513,117 @@ internal fun deleteGlobeGroundPipeline(
     pipeline.grids.clear()
     cache.remove(pipeline.key)?.let { binding.deleteProgram(it) }
     cache.remove(pipeline.terrain.key)?.let { binding.deleteProgram(it) }
+    pipeline.mixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
+    pipeline.terrainMixed?.let { mixed -> cache.remove(mixed.key)?.let { binding.deleteProgram(it) } }
 }
+
+/** Compiles ADR 0086's two globe mixed variants on the first blended globe frame. */
+internal fun ensureGlobeGroundMixedPrograms(
+    binding: GlBinding,
+    dialect: ShaderDialect,
+    cache: GlProgramCache,
+    pipeline: GlobeGroundPipeline,
+    deriver: ResourceKeyDeriver = ResourceKeyDeriver(),
+): FailureDescriptor? {
+    if (pipeline.mixed != null && pipeline.terrainMixed != null) return null
+    val mixedKey = deriver.internalPipeline(
+        role = InternalPipelineRole.GROUND_MIXED,
+        shaderPair = GLOBE_GROUND_MIXED_SHADER_PAIR,
+    ).key
+    val vertexPlan = scanShaderProfile(GLOBE_GROUND_MIXED_VERTEX_SOURCE)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
+    val mixedFragmentPlan = scanShaderProfile(GROUND_MIXED_FRAGMENT_SOURCE)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, mixedKey)
+    if (pipeline.mixed == null) {
+        val program = when (
+            val result = cache.getOrCompile(
+                binding = binding,
+                dialect = dialect,
+                key = mixedKey,
+                vertexPlan = vertexPlan,
+                fragmentPlan = mixedFragmentPlan,
+            )
+        ) {
+            is GlProgramResult.Linked -> result.program
+            is GlProgramResult.Failed -> return result.failure
+        }
+        pipeline.mixed = globeGroundMixedProgram(binding = binding, key = mixedKey, program = program)
+    }
+
+    val terrainMixedPair = ShaderPair(
+        vertexSource = if (pipeline.terrainShading) {
+            TERRAIN_SHADED_MIXED_GLOBE_GROUND_VERTEX_SOURCE
+        } else {
+            TERRAIN_MIXED_GLOBE_GROUND_VERTEX_SOURCE
+        },
+        fragmentSource = if (pipeline.terrainShading) {
+            GROUND_SHADED_MIXED_FRAGMENT_SOURCE
+        } else {
+            GROUND_MIXED_FRAGMENT_SOURCE
+        },
+    )
+    val terrainMixedKey = deriver.internalPipeline(
+        role = InternalPipelineRole.GROUND_MIXED,
+        shaderPair = terrainMixedPair,
+    ).key
+    val terrainVertexPlan = scanShaderProfile(terrainMixedPair.vertexSource)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainMixedKey)
+    val terrainFragmentPlan = scanShaderProfile(terrainMixedPair.fragmentSource)
+        ?: return glOperationFailure(PipelineStage.GPU_RESOURCE, terrainMixedKey)
+    if (pipeline.terrainMixed == null) {
+        val program = when (
+            val result = cache.getOrCompile(
+                binding = binding,
+                dialect = dialect,
+                key = terrainMixedKey,
+                vertexPlan = terrainVertexPlan,
+                fragmentPlan = terrainFragmentPlan,
+            )
+        ) {
+            is GlProgramResult.Linked -> result.program
+            is GlProgramResult.Failed -> return result.failure
+        }
+        pipeline.terrainMixed = globeGroundMixedProgram(
+            binding = binding,
+            key = terrainMixedKey,
+            program = program,
+            terrain = true,
+        )
+    }
+    return null
+}
+
+private fun globeGroundMixedProgram(
+    binding: GlBinding,
+    key: ResourceKey,
+    program: Int,
+    terrain: Boolean = false,
+): GlobeGroundMixedProgram = GlobeGroundMixedProgram(
+    key = key,
+    program = program,
+    unitSphereToClipUniformLocation = binding.getUniformLocation(
+        program,
+        GLOBE_GROUND_UNIT_SPHERE_TO_CLIP_UNIFORM_NAME,
+    ),
+    colourWindowUniformLocation = binding.getUniformLocation(program, GROUND_COLOUR_WINDOW_UNIFORM_NAME),
+    tileEdgesUniformLocation = binding.getUniformLocation(program, GLOBE_GROUND_TILE_EDGES_UNIFORM_NAME),
+    tileUvVUniformLocation = binding.getUniformLocation(program, GLOBE_GROUND_TILE_UV_V_UNIFORM_NAME),
+    textureUniformLocation = binding.getUniformLocation(program, GROUND_TEXTURE_UNIFORM_NAME),
+    blendColourWindowUniformLocation = binding.getUniformLocation(
+        program,
+        GROUND_BLEND_COLOUR_WINDOW_UNIFORM_NAME,
+    ),
+    blendTextureUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_TEXTURE_UNIFORM_NAME),
+    blendKindUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_KIND_UNIFORM_NAME),
+    blendParamsUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_PARAMS_UNIFORM_NAME),
+    blendFrameSizeUniformLocation = binding.getUniformLocation(program, GROUND_BLEND_FRAME_SIZE_UNIFORM_NAME),
+    radialPerMetreUniformLocation = if (terrain) {
+        binding.getUniformLocation(program, GLOBE_GROUND_RADIAL_PER_METRE_UNIFORM_NAME)
+    } else {
+        -1
+    },
+    elevation = if (terrain) resolveGroundElevationUniforms(binding, program) else null,
+)
 
 /**
  * The grid for [cellsPerSide], built once and reused forever after.
@@ -554,6 +800,18 @@ internal class ResolvedGlobeGroundTile(
     val edges: FloatArray,
     val texture: Int,
     /**
+     * Which part of [texture] this tile samples; the whole of it unless the tile is provisional
+     * (ADR 0057).
+     *
+     * Applied to the uv the shader has already built, **after** [uvV]'s polar-cap collapse, so a cap
+     * wedge lands on this window's own edge rather than the whole texture's.
+     */
+    val colourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /** ADR 0086's paired target-style texture, present on every tile of a blended frame. */
+    val blendTexture: Int? = null,
+    /** Which part of [blendTexture] to sample when its style is provisional (ADR 0057/0086). */
+    val blendColourWindow: GroundTileWindow = GroundTileWindow.WHOLE,
+    /**
      * This tile's DEM and the window it reads, or `null` when the frame has no terrain or Rentile
      * returned no DEM for this tile (ADR 0041: that tile draws flat rather than failing the frame).
      *
@@ -601,13 +859,11 @@ internal val SOUTH_POLAR_CAP_UV_V: FloatArray = floatArrayOf(1.0f, 1.0f)
  */
 internal fun composeGlobeGroundUnitSphereToClip(camera: ResolvedGlobeCamera): FloatArray {
     val radius = camera.radiusLogicalPixels
-    val radialScale = DoubleMatrix4.fromRows(
-        listOf(
-            listOf(radius, 0.0, 0.0, 0.0),
-            listOf(0.0, radius, 0.0, 0.0),
-            listOf(0.0, 0.0, radius, 0.0),
-            listOf(0.0, 0.0, 0.0, 1.0),
-        ),
+    val radialScale = DoubleMatrix4.rowMajor(
+        radius, 0.0, 0.0, 0.0,
+        0.0, radius, 0.0, 0.0,
+        0.0, 0.0, radius, 0.0,
+        0.0, 0.0, 0.0, 1.0,
     )
     return (globeFixedViewProjection(camera) * radialScale).toColumnMajorFloatArray()
 }
@@ -721,9 +977,13 @@ internal fun drawGlobeGround(
     unitSphereToClip: FloatArray,
     cellsPerTileSide: Int,
     elevation: GlobeGroundElevationFrame? = null,
+    blend: GroundBlendFrame? = null,
 ) {
     require(unitSphereToClip.size == 16) { "a model-view-projection matrix carries sixteen values" }
     if (tiles.isEmpty()) return
+    require(tiles.all { tile -> (tile.blendTexture != null) == (blend != null) }) {
+        "every tile in an ADR 0086 blended globe ground carries exactly one paired target texture"
+    }
 
     val grid = globeGroundGrid(binding, pipeline, cellsPerTileSide)
     binding.bindVertexArray(grid.vertexArray)
@@ -746,12 +1006,55 @@ internal fun drawGlobeGround(
     tiles.forEachIndexed { index, tile ->
         val tileElevation = tileElevations[index]
         val wantsDisplacement = tileElevation != null
+        val mixedProgram = if (blend == null) {
+            null
+        } else {
+            requireNotNull(if (wantsDisplacement) pipeline.terrainMixed else pipeline.mixed) {
+                "mixed programs must be compiled before an ADR 0086 blended globe ground draw"
+            }
+        }
         if (displacing != wantsDisplacement) {
             displacing = wantsDisplacement
-            val matrixLocation = if (wantsDisplacement) {
+            val matrixLocation = if (mixedProgram != null) {
+                val blendFrame = requireNotNull(blend)
+                binding.useProgram(mixedProgram.program)
+                if (mixedProgram.textureUniformLocation >= 0) {
+                    binding.uniform1i(mixedProgram.textureUniformLocation, GLOBE_GROUND_PRIMARY_TEXTURE_UNIT)
+                }
+                if (mixedProgram.blendTextureUniformLocation >= 0) {
+                    binding.uniform1i(
+                        mixedProgram.blendTextureUniformLocation,
+                        globeGroundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
+                    )
+                }
+                bindGlobeGroundBlendMask(
+                    binding = binding,
+                    program = mixedProgram,
+                    mask = blendFrame.mask,
+                    frameWidth = blendFrame.frameWidth,
+                    frameHeight = blendFrame.frameHeight,
+                )
+                if (wantsDisplacement) {
+                    if (mixedProgram.radialPerMetreUniformLocation >= 0) {
+                        binding.uniform1f(
+                            mixedProgram.radialPerMetreUniformLocation,
+                            requireNotNull(elevation).radialMultiplePerMetre,
+                        )
+                    }
+                    bindGroundElevationFrame(
+                        binding = binding,
+                        locations = requireNotNull(mixedProgram.elevation),
+                        dem = requireNotNull(elevation).dem,
+                    )
+                }
+                mixedProgram.unitSphereToClipUniformLocation
+            } else if (wantsDisplacement) {
                 binding.useProgram(pipeline.terrain.program)
                 if (pipeline.terrain.textureUniformLocation >= 0) {
-                    binding.uniform1i(pipeline.terrain.textureUniformLocation, 0)
+                    binding.uniform1i(
+                        pipeline.terrain.textureUniformLocation,
+                        GLOBE_GROUND_PRIMARY_TEXTURE_UNIT,
+                    )
                 }
                 if (pipeline.terrain.radialPerMetreUniformLocation >= 0) {
                     binding.uniform1f(
@@ -768,7 +1071,7 @@ internal fun drawGlobeGround(
             } else {
                 binding.useProgram(pipeline.program)
                 if (pipeline.textureUniformLocation >= 0) {
-                    binding.uniform1i(pipeline.textureUniformLocation, 0)
+                    binding.uniform1i(pipeline.textureUniformLocation, GLOBE_GROUND_PRIMARY_TEXTURE_UNIT)
                 }
                 pipeline.unitSphereToClipUniformLocation
             }
@@ -777,7 +1080,9 @@ internal fun drawGlobeGround(
             }
         }
 
-        val edgesLocation = if (wantsDisplacement) {
+        val edgesLocation = if (mixedProgram != null) {
+            mixedProgram.tileEdgesUniformLocation
+        } else if (wantsDisplacement) {
             pipeline.terrain.tileEdgesUniformLocation
         } else {
             pipeline.tileEdgesUniformLocation
@@ -785,7 +1090,9 @@ internal fun drawGlobeGround(
         if (edgesLocation >= 0) {
             binding.uniform4f(edgesLocation, tile.edges[0], tile.edges[1], tile.edges[2], tile.edges[3])
         }
-        val uvVLocation = if (wantsDisplacement) {
+        val uvVLocation = if (mixedProgram != null) {
+            mixedProgram.tileUvVUniformLocation
+        } else if (wantsDisplacement) {
             pipeline.terrain.tileUvVUniformLocation
         } else {
             pipeline.tileUvVUniformLocation
@@ -793,12 +1100,102 @@ internal fun drawGlobeGround(
         if (uvVLocation >= 0) {
             binding.uniform2f(uvVLocation, tile.uvV[0], tile.uvV[1])
         }
-        if (tileElevation != null) {
-            bindGroundElevationTile(binding, pipeline.terrain.elevation, tileElevation)
+        val windowLocation = if (mixedProgram != null) {
+            mixedProgram.colourWindowUniformLocation
+        } else if (wantsDisplacement) {
+            pipeline.terrain.colourWindowUniformLocation
+        } else {
+            pipeline.colourWindowUniformLocation
         }
+        if (windowLocation >= 0) {
+            // Applied to the uv this shader has already built, which is what makes the polar caps
+            // safe without a second thought: the cap constants collapse v onto 0 and 1, and 0 and 1
+            // map through this window onto the window's OWN edges rather than the whole texture's
+            // (ADR 0057). Written for every tile, identity included.
+            binding.uniform3f(
+                windowLocation,
+                tile.colourWindow.scale,
+                tile.colourWindow.offsetU,
+                tile.colourWindow.offsetV,
+            )
+        }
+        if (mixedProgram != null && mixedProgram.blendColourWindowUniformLocation >= 0) {
+            binding.uniform3f(
+                mixedProgram.blendColourWindowUniformLocation,
+                tile.blendColourWindow.scale,
+                tile.blendColourWindow.offsetU,
+                tile.blendColourWindow.offsetV,
+            )
+        }
+        if (tileElevation != null) {
+            bindGroundElevationTile(
+                binding = binding,
+                locations = mixedProgram?.elevation ?: pipeline.terrain.elevation,
+                tile = tileElevation,
+            )
+        }
+        if (mixedProgram != null) {
+            binding.activeTexture(
+                GL_TEXTURE0 + globeGroundBlendTextureUnit(wantsDisplacement = wantsDisplacement),
+            )
+            binding.bindTexture(GL_TEXTURE_2D, requireNotNull(tile.blendTexture))
+        }
+        // Bind the target first so selecting unit zero also establishes the final active unit.
         binding.activeTexture(GL_TEXTURE0)
         binding.bindTexture(GL_TEXTURE_2D, tile.texture)
         binding.drawElements(GL_TRIANGLES, grid.indexCount, GL_UNSIGNED_SHORT, 0)
+    }
+}
+
+private const val GLOBE_GROUND_PRIMARY_TEXTURE_UNIT: Int = 0
+private const val GLOBE_GROUND_BLEND_TEXTURE_UNIT: Int = 1
+private const val GLOBE_GROUND_TERRAIN_BLEND_TEXTURE_UNIT: Int = 2
+
+/** Terrain already owns unit 1 for its DEM, so its ADR 0086 target texture uses unit 2. */
+private fun globeGroundBlendTextureUnit(wantsDisplacement: Boolean): Int =
+    if (wantsDisplacement) GLOBE_GROUND_TERRAIN_BLEND_TEXTURE_UNIT else GLOBE_GROUND_BLEND_TEXTURE_UNIT
+
+private fun bindGlobeGroundBlendMask(
+    binding: GlBinding,
+    program: GlobeGroundMixedProgram,
+    mask: BlendMask,
+    frameWidth: Float,
+    frameHeight: Float,
+) {
+    if (program.blendFrameSizeUniformLocation >= 0) {
+        binding.uniform2f(program.blendFrameSizeUniformLocation, frameWidth, frameHeight)
+    }
+    when (mask) {
+        is BlendMask.Uniform -> {
+            if (program.blendKindUniformLocation >= 0) binding.uniform1i(program.blendKindUniformLocation, 0)
+            if (program.blendParamsUniformLocation >= 0) {
+                binding.uniform4f(program.blendParamsUniformLocation, mask.amount, 0f, 0f, 0f)
+            }
+        }
+        is BlendMask.Radial -> {
+            if (program.blendKindUniformLocation >= 0) binding.uniform1i(program.blendKindUniformLocation, 1)
+            if (program.blendParamsUniformLocation >= 0) {
+                binding.uniform4f(
+                    program.blendParamsUniformLocation,
+                    mask.centreX,
+                    mask.centreY,
+                    mask.radius,
+                    mask.feather,
+                )
+            }
+        }
+        is BlendMask.Linear -> {
+            if (program.blendKindUniformLocation >= 0) binding.uniform1i(program.blendKindUniformLocation, 2)
+            if (program.blendParamsUniformLocation >= 0) {
+                binding.uniform4f(
+                    program.blendParamsUniformLocation,
+                    mask.angleRadians,
+                    mask.position,
+                    mask.feather,
+                    0f,
+                )
+            }
+        }
     }
 }
 

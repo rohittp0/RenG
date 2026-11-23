@@ -1,6 +1,7 @@
 package com.rohittp.reng.internal.planning
 
 import com.rohittp.reng.AnchoringMode
+import com.rohittp.reng.Backdrop
 import com.rohittp.reng.Camera
 import com.rohittp.reng.DiagnosticCode
 import com.rohittp.reng.DiagnosticSeverity
@@ -17,17 +18,13 @@ import com.rohittp.reng.ResourceKind
 import com.rohittp.reng.ResourceLimits
 import com.rohittp.reng.ResourceLocator
 import com.rohittp.reng.ShaderPair
+import com.rohittp.reng.ShaderValue
+import com.rohittp.reng.GroundRectangle
 import com.rohittp.reng.Sticker
+import com.rohittp.reng.StickerShader
 import com.rohittp.reng.Vector3
-import com.rohittp.reng.internal.diff.FrameStructuralDiff
-import com.rohittp.reng.internal.diff.FrameStructuralDiffer
-import com.rohittp.reng.internal.identity.CanonicalIdentityRegistry
-import com.rohittp.reng.internal.identity.EncodedFramePlan
-import com.rohittp.reng.internal.identity.FramePlanCanonicalEncoder
-import com.rohittp.reng.internal.identity.FramePlanSegment
 import com.rohittp.reng.internal.identity.PureKotlinSha256
 import com.rohittp.reng.internal.identity.ResourceKeyDeriver
-import com.rohittp.reng.internal.identity.Sha256Digest
 import com.rohittp.reng.internal.maximumBytesFor
 import com.rohittp.reng.internal.projection.ResolvedGlobeCamera
 import com.rohittp.reng.internal.resource.RentilePrivateKey
@@ -40,6 +37,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class FramePlanningCoreTest {
@@ -189,6 +187,112 @@ class FramePlanningCoreTest {
 
         assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "shaderPair")
         assertEquals(emptyList(), resolver.calls)
+    }
+
+    /**
+     * ADR 0087: a sticker program that is not a Shader Profile, or that carries an `#extension` the
+     * preamble would land in front of, fails at the planning barrier in both projections, naming the
+     * sticker's own field.
+     */
+    @Test
+    fun aStickerProgramThatIsNotAShaderProfileOrCarriesAnExtensionFailsAtThePlanningBarrier() {
+        val refused = listOf(
+            "missing directive",
+            "#version 300 es\n#extension GL_EXT_shader_framebuffer_fetch : require\nvoid main() {}\n",
+            "#version 300 es\n  #  extension GL_OES_standard_derivatives : enable\nvoid main() {}\n",
+        )
+        for (projectionMode in ProjectionMode.entries) {
+            for (source in refused) {
+                val resolver = RecordingPrivateKeyResolver()
+                val outcome = planningCore(resolver).plan(
+                    request(
+                        plan = framePlan(
+                            projectionMode = projectionMode,
+                            stickers = listOf(
+                                Sticker(screenPlacement(), ResourceLocator("s"), shader = StickerShader(source)),
+                            ),
+                        ),
+                        basemapStyle = ResourceLocator("style-document"),
+                    ),
+                )
+                assertFailure(outcome, RenGErrorCode.INVALID_VALUE, "sticker.shader.fragmentSource")
+                assertEquals(emptyList(), resolver.calls)
+            }
+        }
+    }
+
+    /**
+     * ADR 0087: a ground rectangle a Mercator camera cannot carry does not fail the frame in either
+     * projection; the sticker draws without ground and the draw reports it.
+     */
+    @Test
+    fun aStickerGroundRectangleBeyondMercatorsLatitudePlansInBothProjections() {
+        for (projectionMode in ProjectionMode.entries) {
+            planSuccess(
+                planningCore(RecordingPrivateKeyResolver()),
+                request(
+                    plan = framePlan(
+                        projectionMode = projectionMode,
+                        drawBasemap = false,
+                        drawLabels = false,
+                        stickers = listOf(
+                            Sticker(
+                                screenPlacement(),
+                                ResourceLocator("s"),
+                                shader = StickerShader(
+                                    validShader("sticker"),
+                                    ground = GroundRectangle(Vector3(89.0, 0.0, 0.0), Vector3(80.0, 1.0, 0.0)),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * ADR 0087: a sticker program's textures traverse under MODEL_TEXTURE in name order, right after
+     * that sticker's image -- and every sticker image still traverses once, in order, so pairing the
+     * images back to stickers by position after filtering to STICKER_IMAGE still holds.
+     */
+    @Test
+    fun stickerProgramTexturesAreTraversedSortedByNameRightAfterTheirSticker() {
+        val limits = ResourceLimits(maximumModelTextureBytes = 8_192L)
+        val planned = planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(
+                plan = framePlan(
+                    drawBasemap = false,
+                    drawLabels = false,
+                    stickers = listOf(
+                        Sticker(
+                            screenPlacement(),
+                            ResourceLocator("sticker-one"),
+                            shader = StickerShader(
+                                validShader("sticker"),
+                                textures = mapOf(
+                                    "uZeta" to ResourceLocator("zeta-texture"),
+                                    "uAlpha" to ResourceLocator("alpha-texture"),
+                                ),
+                            ),
+                        ),
+                        sticker("sticker-two"),
+                    ),
+                ),
+                resourceLimits = limits,
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                expectedExternal("sticker-one", ResourceClass.STICKER_IMAGE, limits),
+                expectedExternal("alpha-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("zeta-texture", ResourceClass.MODEL_TEXTURE, limits),
+                expectedExternal("sticker-two", ResourceClass.STICKER_IMAGE, limits),
+            ),
+            planned.staticResourceTraversal,
+        )
     }
 
     @Test
@@ -436,30 +540,6 @@ class FramePlanningCoreTest {
     }
 
     @Test
-    fun plannedFrameCarriesEncodedSegmentsAndTheStructuralDiffAgainstItsPredecessor() {
-        val resolver = RecordingPrivateKeyResolver()
-        val planningCore = planningCore(resolver)
-        val referenceEncoder = FramePlanCanonicalEncoder(PureKotlinSha256)
-        val predecessor = framePlan(frameIndex = 1L, camera = Camera(10.0, 20.0, 4.0, 0.0, 0.0))
-        val successor = framePlan(frameIndex = 1L, camera = Camera(11.0, 20.0, 4.0, 0.0, 0.0))
-
-        val withoutBaseline = planSuccess(planningCore, request(plan = predecessor))
-        val withBaseline = planSuccess(
-            planningCore,
-            request(plan = successor, previousPlan = referenceEncoder.encode(predecessor)),
-        )
-
-        assertEquals(referenceEncoder.encode(predecessor), withoutBaseline.encodedPlan)
-        assertEquals(referenceEncoder.encode(successor), withBaseline.encodedPlan)
-        assertEquals(FrameStructuralDiff(FramePlanSegment.entries.toList()), withoutBaseline.structuralDiff)
-        assertEquals(FrameStructuralDiff(listOf(FramePlanSegment.CAMERA)), withBaseline.structuralDiff)
-        assertEquals(
-            FrameStructuralDiffer.diff(referenceEncoder.encode(predecessor), referenceEncoder.encode(successor)),
-            withBaseline.structuralDiff,
-        )
-    }
-
-    @Test
     fun staticDirectTraversalKeepsStyleStickerModelGeometryOrderWithInputDuplicates() {
         val limits = ResourceLimits(
             maximumBasemapStyleBytes = 1_024L,
@@ -620,37 +700,7 @@ class FramePlanningCoreTest {
     }
 
     @Test
-    fun frameCanonicalCollisionFailsWithFrameIdentityOnlyAndKeepsTheFirstEntry() {
-        val resolver = RecordingPrivateKeyResolver()
-        val planningCore = planningCore(resolver, encoder = constantDigestEncoder())
-        val established = framePlan(frameIndex = 1L, stickers = listOf(sticker("established-sticker")))
-        val colliding = framePlan(frameIndex = 2L, stickers = listOf(sticker("colliding-sticker")))
-
-        val establishedOutcome = planSuccess(planningCore, request(plan = established))
-        val collisionOutcome = planningCore.plan(request(plan = colliding))
-        val callsAfterCollision = resolver.calls
-        val replannedEstablished = planningCore.plan(request(plan = established))
-
-        assertEquals(
-            listOf(expectedExternal("established-sticker", ResourceClass.STICKER_IMAGE)),
-            establishedOutcome.staticResourceTraversal,
-        )
-        val failure = assertFailure(collisionOutcome, RenGErrorCode.IDENTITY_COLLISION, "frameIdentity")
-        val diagnostic = assertNotNull(failure.failure.diagnostic)
-        assertNull(diagnostic.resourceClass)
-        assertNull(diagnostic.resourceKey)
-        assertNull(diagnostic.statusCode)
-        assertNull(diagnostic.limit)
-        assertNull(diagnostic.actual)
-        assertEquals(
-            listOf(ResourceLocator("established-sticker") to ResourceClass.STICKER_IMAGE),
-            callsAfterCollision,
-        )
-        assertIs<FramePlanningOutcome.Success>(replannedEstablished)
-    }
-
-    @Test
-    fun noFailingPlanRegistersItsFrameIdentityOrResolvesAnyPrivateKey() {
+    fun noFailingPlanResolvesAnyPrivateKey() {
         val failingRequests = listOf(
             // The globe's own tile-budget failure. This entry used to be a bare GLOBE plan, which
             // failed for being a globe at all; since task 10 it has to fail for a reason a globe
@@ -688,7 +738,7 @@ class FramePlanningCoreTest {
 
         for (failingRequest in failingRequests) {
             val resolver = RecordingPrivateKeyResolver()
-            val planningCore = planningCore(resolver, encoder = constantDigestEncoder())
+            val planningCore = planningCore(resolver)
 
             assertIs<FramePlanningOutcome.Failure>(planningCore.plan(failingRequest))
             assertEquals(emptyList(), resolver.calls)
@@ -706,6 +756,117 @@ class FramePlanningCoreTest {
         }
     }
 
+    /**
+     * A uniform or texture name that is not Unicode scalar values -- an isolated surrogate -- is refused
+     * as the Frame Identity encoding refused it before ADR 0090 removed that encoding: the same
+     * `IllegalArgumentException` with the same message, after spatial planning and before any resource
+     * is traversed, on every drawn thing that carries such a map.
+     */
+    @Test
+    fun aShaderNameThatIsNotUnicodeScalarsIsRefusedAfterSpatialPlanningAndBeforeTheTraversal() {
+        val loneHigh = "uName\uD800"
+        val loneLow = "\uDC00uName"
+        val value = mapOf(loneHigh to ShaderValue.Scalar(1f))
+        val texture = mapOf(loneLow to ResourceLocator("named-texture"))
+        fun badGeometry(
+            uniforms: Map<String, ShaderValue> = emptyMap(),
+            textures: Map<String, ResourceLocator> = emptyMap(),
+        ): Geometry = Geometry(
+            topLeft = Vector3(20.0, 0.0, 0.0),
+            bottomRight = Vector3(10.0, 1.0, 0.0),
+            shaderPair = shaderPair("names"),
+            uniforms = uniforms,
+            textures = textures,
+        )
+        fun badSticker(
+            uniforms: Map<String, ShaderValue> = emptyMap(),
+            textures: Map<String, ResourceLocator> = emptyMap(),
+        ): Sticker = Sticker(
+            screenPlacement(),
+            ResourceLocator("named-sticker"),
+            shader = StickerShader(validShader("sticker"), uniforms = uniforms, textures = textures),
+        )
+        fun backdropPlan(backdrop: Backdrop): FramePlan = FramePlan(
+            frameIndex = 1L,
+            camera = Camera(0.0, 0.0, 0.0, 0.0, 0.0),
+            stickers = listOf(sticker("named-sticker")),
+            backdrop = backdrop,
+        )
+        val refused = listOf(
+            framePlan(stickers = listOf(sticker("named-sticker")), geometries = listOf(badGeometry(uniforms = value))),
+            framePlan(stickers = listOf(sticker("named-sticker")), geometries = listOf(badGeometry(textures = texture))),
+            framePlan(stickers = listOf(badSticker(uniforms = value))),
+            framePlan(stickers = listOf(badSticker(textures = texture))),
+            backdropPlan(Backdrop.Shader(shaderPair("backdrop"), uniforms = value)),
+            backdropPlan(Backdrop.Shader(shaderPair("backdrop"), textures = texture)),
+        )
+
+        for (plan in refused) {
+            val resolver = RecordingPrivateKeyResolver()
+            val failure = assertFailsWith<IllegalArgumentException> {
+                planningCore(resolver).plan(request(plan = plan))
+            }
+            assertEquals("canonical UTF-8 value must contain Unicode scalar values", failure.message)
+            assertEquals(emptyList(), resolver.calls)
+        }
+
+        // Spatial planning runs first, so a plan that fails there reports that failure, not the name.
+        val spatialFailureResolver = RecordingPrivateKeyResolver()
+        assertFailure(
+            planningCore(spatialFailureResolver).plan(
+                request(
+                    plan = framePlan(
+                        frameIndex = 13L,
+                        geometries = listOf(badGeometry(uniforms = value)),
+                    ),
+                    outputPixelSize = OutputPixelSize(1024, 1024),
+                    basemapStyle = ResourceLocator("style-document"),
+                    maximumBasemapTileInstances = 1,
+                ),
+            ),
+            RenGErrorCode.RESOURCE_LIMIT_EXCEEDED,
+            "basemapTileInstances",
+        )
+        assertEquals(emptyList(), spatialFailureResolver.calls)
+
+        // A surrogate pair is one scalar value and plans like any other name.
+        val pair = "uName\uD83D\uDE00"
+        planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(
+                plan = framePlan(
+                    stickers = listOf(badSticker(uniforms = mapOf(pair to ShaderValue.Scalar(1f)))),
+                    geometries = listOf(badGeometry(textures = mapOf(pair to ResourceLocator("paired-texture")))),
+                ),
+            ),
+        )
+    }
+
+    /**
+     * The view is the construction snapshot itself -- the same instance however often it is read, and
+     * still independent of the caller's list -- while the copying getter keeps returning a fresh list.
+     */
+    @Test
+    fun theTraversalViewIsTheSnapshotAndTheGetterStillCopies() {
+        val planned = planSuccess(
+            planningCore(RecordingPrivateKeyResolver()),
+            request(plan = framePlan(stickers = listOf(sticker("view-sticker")))),
+        )
+        val first = expectedExternal("view-sticker", ResourceClass.STICKER_IMAGE)
+        val traversalInput = mutableListOf<StaticResourceReference>(first)
+        val core = PlannedFrameCore(
+            spatialPlan = planned.spatialPlan,
+            staticResourceTraversal = traversalInput,
+        )
+        traversalInput.clear()
+
+        assertSame(core.staticResourceTraversalView, core.staticResourceTraversalView)
+        assertEquals(listOf(first), core.staticResourceTraversalView)
+        assertNotSame(core.staticResourceTraversalView, core.staticResourceTraversal)
+        assertNotSame(core.staticResourceTraversal, core.staticResourceTraversal)
+        assertEquals(core.staticResourceTraversal, core.staticResourceTraversalView)
+    }
+
     @Test
     fun plannedFrameCoreSnapshotsItsTraversalAndUsesStructuralEquality() {
         val resolver = RecordingPrivateKeyResolver()
@@ -717,8 +878,6 @@ class FramePlanningCoreTest {
         val second = expectedExternal("other-sticker", ResourceClass.STICKER_IMAGE)
         val traversalInput = mutableListOf<StaticResourceReference>(first)
         val core = PlannedFrameCore(
-            encodedPlan = planned.encodedPlan,
-            structuralDiff = planned.structuralDiff,
             spatialPlan = planned.spatialPlan,
             staticResourceTraversal = traversalInput,
         )
@@ -730,14 +889,10 @@ class FramePlanningCoreTest {
         assertNotSame(firstRead, core.staticResourceTraversal)
 
         val structurallyEqual = PlannedFrameCore(
-            encodedPlan = planned.encodedPlan,
-            structuralDiff = planned.structuralDiff,
             spatialPlan = planned.spatialPlan,
             staticResourceTraversal = listOf(expectedExternal("snapshot-sticker", ResourceClass.STICKER_IMAGE)),
         )
         val different = PlannedFrameCore(
-            encodedPlan = planned.encodedPlan,
-            structuralDiff = planned.structuralDiff,
             spatialPlan = planned.spatialPlan,
             staticResourceTraversal = listOf(second),
         )
@@ -747,10 +902,6 @@ class FramePlanningCoreTest {
         assertNotEquals(different, core)
         assertEquals(listOf(first), planned.staticResourceTraversal)
 
-        val otherFrameIndex = planSuccess(
-            planningCore(resolver),
-            request(plan = framePlan(frameIndex = 41L, stickers = listOf(sticker("snapshot-sticker")))),
-        )
         val otherCamera = planSuccess(
             planningCore(resolver),
             request(
@@ -761,32 +912,12 @@ class FramePlanningCoreTest {
                 ),
             ),
         )
-        val differentEncodedPlan = PlannedFrameCore(
-            encodedPlan = otherFrameIndex.encodedPlan,
-            structuralDiff = planned.structuralDiff,
-            spatialPlan = planned.spatialPlan,
-            staticResourceTraversal = listOf(first),
-        )
-        val differentStructuralDiff = PlannedFrameCore(
-            encodedPlan = planned.encodedPlan,
-            structuralDiff = FrameStructuralDiff(listOf(FramePlanSegment.CAMERA)),
-            spatialPlan = planned.spatialPlan,
-            staticResourceTraversal = listOf(first),
-        )
         val differentSpatialPlan = PlannedFrameCore(
-            encodedPlan = planned.encodedPlan,
-            structuralDiff = planned.structuralDiff,
             spatialPlan = otherCamera.spatialPlan,
             staticResourceTraversal = listOf(first),
         )
 
-        assertNotEquals(planned.encodedPlan, otherFrameIndex.encodedPlan)
-        assertNotEquals(planned.structuralDiff, differentStructuralDiff.structuralDiff)
         assertNotEquals(planned.spatialPlan, otherCamera.spatialPlan)
-        assertNotEquals(differentEncodedPlan, core)
-        assertNotEquals(differentEncodedPlan.hashCode(), core.hashCode())
-        assertNotEquals(differentStructuralDiff, core)
-        assertNotEquals(differentStructuralDiff.hashCode(), core.hashCode())
         assertNotEquals(differentSpatialPlan, core)
         assertNotEquals(differentSpatialPlan.hashCode(), core.hashCode())
         assertNotEquals(different.hashCode(), core.hashCode())
@@ -827,40 +958,30 @@ class FramePlanningCoreTest {
 
         assertFailsWith<IllegalArgumentException> {
             PlannedFrameCore(
-                encodedPlan = withGeometry.encodedPlan,
-                structuralDiff = withGeometry.structuralDiff,
                 spatialPlan = withGeometry.spatialPlan,
                 staticResourceTraversal = listOf(stickerReference),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             PlannedFrameCore(
-                encodedPlan = stickerOnly.encodedPlan,
-                structuralDiff = stickerOnly.structuralDiff,
                 spatialPlan = stickerOnly.spatialPlan,
                 staticResourceTraversal = listOf(stickerReference, guardProgram),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             PlannedFrameCore(
-                encodedPlan = withGeometry.encodedPlan,
-                structuralDiff = withGeometry.structuralDiff,
                 spatialPlan = withGeometry.spatialPlan,
                 staticResourceTraversal = listOf(stickerReference, otherProgram),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             PlannedFrameCore(
-                encodedPlan = stickerOnly.encodedPlan,
-                structuralDiff = stickerOnly.structuralDiff,
                 spatialPlan = stickerOnly.spatialPlan,
                 staticResourceTraversal = listOf(styleReference, stickerReference),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             PlannedFrameCore(
-                encodedPlan = activeBasemap.encodedPlan,
-                structuralDiff = activeBasemap.structuralDiff,
                 spatialPlan = activeBasemap.spatialPlan,
                 staticResourceTraversal = listOf(styleReference, styleReference, stickerReference),
             )
@@ -876,6 +997,7 @@ class FramePlanningCoreTest {
         val staticDirect = setOf(
             ResourceClass.BASEMAP_STYLE,
             ResourceClass.STICKER_IMAGE,
+            ResourceClass.BACKDROP_IMAGE,
             ResourceClass.MODEL_GLB,
             ResourceClass.MODEL_TEXTURE,
         )
@@ -972,17 +1094,10 @@ class FramePlanningCoreTest {
 
     private fun planningCore(
         resolver: RentilePrivateKeyResolver,
-        registry: CanonicalIdentityRegistry = CanonicalIdentityRegistry(),
-        encoder: FramePlanCanonicalEncoder = FramePlanCanonicalEncoder(PureKotlinSha256),
     ): FramePlanningCore = FramePlanningCore(
-        frameEncoder = encoder,
-        frameIdentityRegistry = registry,
         resourceKeyDeriver = ResourceKeyDeriver(PureKotlinSha256),
         rentilePrivateKeyResolver = resolver,
     )
-
-    private fun constantDigestEncoder(): FramePlanCanonicalEncoder =
-        FramePlanCanonicalEncoder { Sha256Digest(ByteArray(SHA256_DIGEST_BYTES) { CONSTANT_DIGEST_BYTE }) }
 
     private fun request(
         plan: FramePlan,
@@ -990,7 +1105,6 @@ class FramePlanningCoreTest {
         basemapStyle: ResourceLocator? = null,
         resourceLimits: ResourceLimits = ResourceLimits(),
         maximumBasemapTileInstances: Int = 512,
-        previousPlan: EncodedFramePlan? = null,
         previousSelectedLod: Int? = null,
     ): FramePlanningRequest = FramePlanningRequest(
         plan = plan,
@@ -998,7 +1112,6 @@ class FramePlanningCoreTest {
         basemapStyle = basemapStyle,
         resourceLimits = resourceLimits,
         maximumBasemapTileInstances = maximumBasemapTileInstances,
-        previousPlan = previousPlan,
         previousSelectedLod = previousSelectedLod,
     )
 
@@ -1131,9 +1244,6 @@ class FramePlanningCoreTest {
     }
 
     private companion object {
-        const val SHA256_DIGEST_BYTES: Int = 32
-        const val CONSTANT_DIGEST_BYTE: Byte = 0x5a
-
         fun privateKeyToken(locator: String, resourceClass: ResourceClass): String =
             "private-key:$locator:${resourceClass.name}"
     }

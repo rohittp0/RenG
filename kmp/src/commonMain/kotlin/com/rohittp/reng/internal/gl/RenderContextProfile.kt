@@ -20,6 +20,8 @@ internal val MINIMUM_GLES_VERSION: GlVersion = GlVersion(3, 0)
 internal val MINIMUM_DESKTOP_VERSION: GlVersion = GlVersion(3, 3)
 internal const val ES3_COMPATIBILITY_EXTENSION: String = "GL_ARB_ES3_compatibility"
 internal const val SRGB_WRITE_CONTROL_EXTENSION: String = "GL_EXT_sRGB_write_control"
+internal const val HALF_FLOAT_COLOUR_BUFFER_EXTENSION: String = "GL_EXT_color_buffer_half_float"
+internal const val FLOAT_COLOUR_BUFFER_EXTENSION: String = "GL_EXT_color_buffer_float"
 
 /**
  * The shading dialect is a runtime property of the adopted context, never a property of the
@@ -89,7 +91,15 @@ internal data class RenderContextProfile(
     val maxTextureSize: Int,
     val maxColorAttachments: Int,
     val maxCombinedTextureImageUnits: Int,
-)
+    val supportsHalfFloatColourBuffer: Boolean = false,
+) {
+    /**
+     * Whether this context samples ETC2 and EAC textures itself (ADR 0084): every ES 3.0 context must,
+     * and a desktop one does when it advertises [ES3_COMPATIBILITY_EXTENSION]. Apple's GL 4.1 does not,
+     * so on macOS a compressed sticker is decoded on the CPU instead.
+     */
+    val supportsEtc2: Boolean get() = dialect == ShaderDialect.GLES || supportsEs3Compatibility
+}
 
 internal sealed interface RenderContextAdoption {
     data class Adopted(val profile: RenderContextProfile) : RenderContextAdoption
@@ -162,6 +172,12 @@ internal fun adoptRenderContext(binding: GlBinding): RenderContextAdoption {
             maxTextureSize = maxTextureSize,
             maxColorAttachments = maxColorAttachments,
             maxCombinedTextureImageUnits = maxCombinedTextureImageUnits,
+            supportsHalfFloatColourBuffer = when (dialect) {
+                ShaderDialect.DESKTOP -> true
+                ShaderDialect.GLES ->
+                    HALF_FLOAT_COLOUR_BUFFER_EXTENSION in extensions ||
+                        FLOAT_COLOUR_BUFFER_EXTENSION in extensions
+            },
         ),
     )
 }

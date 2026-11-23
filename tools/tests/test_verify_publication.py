@@ -73,8 +73,8 @@ class VerifyPublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "missing.*kmp-linuxarm64"):
             discover_local_manifest(self.repository, VERSION)
         self.write_publication("kmp-linuxarm64")
-        self.write_publication("kmp-jvm")
-        with self.assertRaisesRegex(VerificationError, "unexpected.*kmp-jvm"):
+        self.write_publication("kmp-wasmjs")
+        with self.assertRaisesRegex(VerificationError, "unexpected.*kmp-wasmjs"):
             discover_local_manifest(self.repository, VERSION)
 
     def test_poms_require_canonical_url_license_and_scm(self) -> None:

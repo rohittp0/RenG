@@ -48,7 +48,21 @@ class FramePlanSerializationTest {
                 drawBasemap = false,
                 drawLabels = false,
                 stickers = listOf(
-                    Sticker(placement = mapPlacement, image = ResourceLocator("sticker://one.png")),
+                    Sticker(
+                        placement = mapPlacement,
+                        image = ResourceLocator("sticker://one.png"),
+                        opacity = 0.75f,
+                        blend = BlendMode.SCREEN,
+                        shader = StickerShader(
+                            fragmentSource = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n",
+                            uniforms = mapOf("uPopLine" to ShaderValue.Vec4(0.1f, 0.2f, 0.3f, 0.4f)),
+                            textures = mapOf("uDistance" to ResourceLocator("texture://distance.png")),
+                            ground = GroundRectangle(Vector3(48.5, -38.0, 12.0), Vector3(44.5, -36.5, -4.0)),
+                        ),
+                        transient = true,
+                        layer = 7,
+                        external = ExternalFrame(sourceId = "video-one", frame = 41L),
+                    ),
                 ),
                 models = listOf(
                     Model(
@@ -59,6 +73,8 @@ class FramePlanSerializationTest {
                             AnimationTrack(AnimationSelector.Name("walk"), 1.5),
                             AnimationTrack(AnimationSelector.Index(7L), 2.25),
                         ),
+                        opacity = 0.5f,
+                        layer = 8,
                     ),
                 ),
                 geometries = listOf(
@@ -78,8 +94,33 @@ class FramePlanSerializationTest {
                         ),
                         textures = mapOf("uTexture" to ResourceLocator("geometry://one.png")),
                         altitudeMode = AltitudeMode.GROUND_RELATIVE,
+                        emissive = true,
+                        blend = BlendMode.MULTIPLY,
+                        bloomReach = 0.5f,
+                        layer = 9,
                     ),
                 ),
+                bloom = Bloom(
+                    intensity = 1.5f,
+                    levelWeights = listOf(0.25f, 0.75f),
+                    insideSuppression = 0.5f,
+                    whiteness = 0.25f,
+                    highPrecisionEmission = true,
+                    reachLevel = 1,
+                    reachGain = 2f,
+                ),
+                basemap = BasemapSelection(
+                    style = 1,
+                    blend = BasemapBlend(
+                        toStyle = 2,
+                        mask = BlendMask.Linear(
+                            angleRadians = 1.25f,
+                            position = 0.75f,
+                            feather = 0.125f,
+                        ),
+                    ),
+                ),
+                extendGroundPastPoles = false,
             )
         }
 
@@ -93,6 +134,20 @@ class FramePlanSerializationTest {
     fun aMaximalPlanSurvivesEncodingAndDecodingUnchanged() {
         val original = maximalPlan
         assertEquals(original, json.decodeFromString(FramePlan.serializer(), json.encodeToString(FramePlan.serializer(), original)))
+    }
+
+    @Test
+    fun aDocumentWrittenBeforeLayerExistedDefaultsEveryLayerToZero() {
+        val olderDocument = json.encodeToString(FramePlan.serializer(), maximalPlan)
+            .replace(",\"layer\":7", "")
+            .replace(",\"layer\":8", "")
+            .replace(",\"layer\":9", "")
+        assertTrue("\"layer\"" !in olderDocument)
+
+        val decoded = json.decodeFromString(FramePlan.serializer(), olderDocument)
+        assertEquals(0, decoded.stickers.single().layer)
+        assertEquals(0, decoded.models.single().layer)
+        assertEquals(0, decoded.geometries.single().layer)
     }
 
     /**
@@ -110,7 +165,7 @@ class FramePlanSerializationTest {
         val expectedKeys = listOf(
             // FramePlan
             "frameIndex", "camera", "projectionMode", "drawBasemap", "drawLabels",
-            "stickers", "models", "geometries",
+            "stickers", "models", "geometries", "bloom", "basemap", "extendGroundPastPoles",
             // Camera
             "latitude", "unwrappedLongitude", "zoom", "bearing", "pitch",
             // Placement
@@ -119,13 +174,23 @@ class FramePlanSerializationTest {
             // Vector3
             "x", "y", "z",
             // Sticker
-            "placement", "image",
+            "placement", "image", "opacity", "blend", "shader", "transient", "layer", "external",
+            // ExternalFrame
+            "sourceId", "frame",
+            // StickerShader + GroundRectangle (its corners share Geometry's key names)
+            "ground",
             // Model
-            "glb", "texture", "animationTracks",
+            "glb", "texture", "animationTracks", "opacity",
             // AnimationTrack + AnimationSelector
             "animation", "timeSeconds", "value",
             // Geometry
-            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures",
+            "topLeft", "bottomRight", "shaderPair", "uniforms", "textures", "emissive", "blend",
+            "bloomReach",
+            // Bloom
+            "intensity", "levelWeights", "insideSuppression", "whiteness",
+            "highPrecisionEmission", "reachLevel", "reachGain",
+            // BasemapSelection + BasemapBlend + BlendMask.Linear
+            "style", "toStyle", "mask", "angleRadians", "position", "feather",
             // ShaderPair
             "vertexSource", "fragmentSource",
             // ShaderValue
@@ -172,5 +237,203 @@ class FramePlanSerializationTest {
         assertEquals(minimal, json.decodeFromString(FramePlan.serializer(), document))
         val keys = (json.parseToJsonElement(document) as JsonObject).keys
         assertEquals(setOf("frameIndex", "camera"), keys, "a minimal plan wrote more than it had to")
+    }
+
+    @Test
+    fun theFramesPoleChoiceRoundTripsAndADocumentWithoutItMeansNull() {
+        val camera = Camera(latitude = 0.0, unwrappedLongitude = 0.0, zoom = 0.0, bearing = 0.0, pitch = 0.0)
+        for (value in listOf(true, false, null)) {
+            val plan = FramePlan(frameIndex = 0L, camera = camera, extendGroundPastPoles = value)
+            val document = json.encodeToString(FramePlan.serializer(), plan)
+            assertEquals(plan, json.decodeFromString(FramePlan.serializer(), document))
+            assertEquals(value != null, "\"extendGroundPastPoles\"" in document)
+        }
+        val older = """{"frameIndex":0,"camera":{"latitude":0.0,"unwrappedLongitude":0.0,"zoom":0.0,"bearing":0.0,"pitch":0.0}}"""
+        assertEquals(null, json.decodeFromString(FramePlan.serializer(), older).extendGroundPastPoles)
+    }
+
+    @Test
+    fun everyBasemapMaskRoundTripsAndNullIsOmitted() {
+        val masks = listOf<BlendMask>(
+            BlendMask.Uniform(amount = 0.25f),
+            BlendMask.Radial(centreX = -1f, centreY = 2f, radius = 0.5f, feather = 0.1f),
+            BlendMask.Linear(angleRadians = 3f, position = 0.5f, feather = 0.2f),
+        )
+        masks.forEachIndexed { index, mask ->
+            val plan = FramePlan(
+                frameIndex = index.toLong(),
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+                basemap = BasemapSelection(
+                    style = 0,
+                    blend = BasemapBlend(toStyle = 1, mask = mask),
+                ),
+            )
+            assertEquals(
+                plan,
+                json.decodeFromString(FramePlan.serializer(), json.encodeToString(FramePlan.serializer(), plan)),
+            )
+        }
+        val without = json.encodeToString(
+            FramePlan.serializer(),
+            FramePlan(
+                frameIndex = 0,
+                camera = Camera(
+                    latitude = 0.0,
+                    unwrappedLongitude = 0.0,
+                    zoom = 0.0,
+                    bearing = 0.0,
+                    pitch = 0.0,
+                ),
+            ),
+        )
+        assertTrue("\"basemap\"" !in without)
+    }
+}
+
+/** ADR 0071: both backdrop cases over the wire, and what an older document still means. */
+class BackdropSerializationTest {
+    private val json = Json
+
+    @Test
+    fun bothCasesRoundTrip() {
+        val pattern: Backdrop = Backdrop.Pattern(ResourceLocator("patterns/grid.png"), 128.0)
+        val shader: Backdrop = Backdrop.Shader(
+            shaderPair = ShaderPair(
+                vertexSource = "#version 300 es\nvoid main() {}\n",
+                fragmentSource = "#version 300 es\nvoid main() {}\n",
+            ),
+            uniforms = mapOf("uTint" to ShaderValue.Vec3(0.1f, 0.2f, 0.3f)),
+            textures = mapOf("uMask" to ResourceLocator("masks/a.png")),
+        )
+
+        assertEquals(pattern, json.decodeFromString<Backdrop>(json.encodeToString(pattern)))
+        assertEquals(shader, json.decodeFromString<Backdrop>(json.encodeToString(shader)))
+    }
+
+    /**
+     * A document written before `Backdrop.Shader` existed carries `image` and nothing else. It must
+     * still mean what it meant -- a pattern, at the default repeat -- rather than failing to parse
+     * or arriving with a shader half nobody wrote.
+     */
+    @Test
+    fun aDocumentWrittenBeforeTheShaderCaseStillReadsAsAPattern() {
+        val decoded = json.decodeFromString<Backdrop>("""{"image":"patterns/grid.png"}""")
+
+        assertEquals(Backdrop.Pattern(ResourceLocator("patterns/grid.png")), decoded)
+    }
+
+    /** Neither half, or both, is a document nobody could have written: rejected, not guessed at. */
+    @Test
+    fun aDocumentCarryingBothHalvesOrNeitherIsRejected() {
+        assertFailsWith<IllegalArgumentException> {
+            json.decodeFromString<Backdrop>("""{"tileSizeLogicalPixels":64.0}""")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            json.decodeFromString<Backdrop>(
+                """{"image":"p.png","shaderPair":{"vertexSource":"v","fragmentSource":"f"}}""",
+            )
+        }
+    }
+}
+
+/** ADR 0087: a sticker's program over the wire, and what an older sticker document still means. */
+class StickerShaderSerializationTest {
+    private val json = Json
+
+    @Test
+    fun aStickerWithAndWithoutAProgramRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("sticker.png"))
+        val bare = plain.copy(shader = StickerShader(SOURCE))
+        val full = plain.copy(
+            shader = StickerShader(
+                SOURCE,
+                uniforms = mapOf("uSide" to ShaderValue.Integer(1)),
+                textures = mapOf("uDistance" to ResourceLocator("distance.png")),
+                ground = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0)),
+            ),
+        )
+        for (sticker in listOf(plain, bare, full)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"shader\"" !in json.encodeToString(plain), "an absent program must not be written")
+        assertTrue("\"ground\"" !in json.encodeToString(bare), "an absent rectangle must not be written")
+    }
+
+    /** A sticker document written before the field existed carries no `shader`, and means no program. */
+    @Test
+    fun aDocumentWrittenBeforeTheFieldExistedStillReadsAsAPlainSticker() {
+        val document = json.encodeToString(Sticker(PLACEMENT, ResourceLocator("sticker.png"), 0.5f))
+        val decoded = json.decodeFromString<Sticker>(document)
+
+        assertEquals(null, decoded.shader)
+        assertEquals(Sticker(PLACEMENT, ResourceLocator("sticker.png"), 0.5f), decoded)
+    }
+
+    /** Decoding runs the constructors, so a reserved name or an inverted rectangle is refused. */
+    @Test
+    fun aDocumentTheConstructorsWouldRefuseIsRefused() {
+        val valid = json.encodeToString(
+            Sticker(
+                PLACEMENT,
+                ResourceLocator("sticker.png"),
+                shader = StickerShader(
+                    SOURCE,
+                    uniforms = mapOf("uTint" to ShaderValue.Scalar(1f)),
+                    ground = GroundRectangle(Vector3(1.0, -1.0, 0.0), Vector3(-1.0, 1.0, 0.0)),
+                ),
+            ),
+        )
+        val refusals = listOf(
+            valid.replace("\"uTint\"", "\"rengStickerTint\""),
+            valid.replace("\"x\":1.0,\"y\":-1.0", "\"x\":-2.0,\"y\":-1.0"),
+        )
+        for (document in refusals) {
+            assertTrue(document != valid, "a refusal fixture did not change the document")
+            assertFailsWith<IllegalArgumentException> { json.decodeFromString<Sticker>(document) }
+        }
+    }
+
+    /** ADR 0093: `transient` round-trips, is omitted at its default, and an older document reads as false. */
+    @Test
+    fun aStickerWithAndWithoutTransientRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("frame.rrgb"))
+        val transient = plain.copy(transient = true)
+        for (sticker in listOf(plain, transient)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"transient\"" !in json.encodeToString(plain), "the default must not be written")
+        assertTrue("\"transient\":true" in json.encodeToString(transient))
+        assertEquals(false, json.decodeFromString<Sticker>(json.encodeToString(plain)).transient)
+    }
+
+    /** ADR 0095: `external` round-trips, is omitted at its default, and an older document reads as null. */
+    @Test
+    fun aStickerWithAndWithoutExternalRoundTrips() {
+        val plain = Sticker(PLACEMENT, ResourceLocator("poster.png"))
+        val external = plain.copy(external = ExternalFrame("video", 1_000_000_000_000L))
+        for (sticker in listOf(plain, external)) {
+            assertEquals(sticker, json.decodeFromString<Sticker>(json.encodeToString(sticker)))
+        }
+        assertTrue("\"external\"" !in json.encodeToString(plain), "the default must not be written")
+        assertTrue("\"sourceId\":\"video\"" in json.encodeToString(external))
+        assertEquals(null, json.decodeFromString<Sticker>(json.encodeToString(plain)).external)
+    }
+
+    private companion object {
+        const val SOURCE: String = "#version 300 es\nout vec4 c;\nvoid main() { c = rengStickerColour(); }\n"
+        val PLACEMENT: Placement = Placement(
+            positionMode = AnchoringMode.SCREEN,
+            position = Vector3(1.0, 2.0, 0.0),
+            rotationMode = AnchoringMode.SCREEN,
+            rotation = Vector3(0.0, 0.0, 0.0),
+            scaleMode = AnchoringMode.SCREEN,
+            scale = 1.0,
+        )
     }
 }

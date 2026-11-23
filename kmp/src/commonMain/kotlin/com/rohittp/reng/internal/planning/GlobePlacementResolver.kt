@@ -170,12 +170,10 @@ internal fun resolveGlobePlacement(
     val directionTransform = when (placement.rotationMode) {
         AnchoringMode.SCREEN -> localRotation
         AnchoringMode.MAP -> {
-            val viewBasis = DoubleMatrix3.fromRows(
-                listOf(
-                    listOf(camera.right.x, camera.right.y, camera.right.z),
-                    listOf(camera.cameraUp.x, camera.cameraUp.y, camera.cameraUp.z),
-                    listOf(camera.cameraBack.x, camera.cameraBack.y, camera.cameraBack.z),
-                ),
+            val viewBasis = DoubleMatrix3.rowMajor(
+                camera.right.x, camera.right.y, camera.right.z,
+                camera.cameraUp.x, camera.cameraUp.y, camera.cameraUp.z,
+                camera.cameraBack.x, camera.cameraBack.y, camera.cameraBack.z,
             )
             val cameraBasis = DoubleMatrix3.fromColumns(
                 camera.anchorEast,

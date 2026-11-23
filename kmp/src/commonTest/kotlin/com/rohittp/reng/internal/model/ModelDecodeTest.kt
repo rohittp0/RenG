@@ -6,6 +6,7 @@ import com.rohittp.reng.internal.gl.GL_REPEAT
 import com.rohittp.reng.internal.gl.GL_UNSIGNED_SHORT
 import com.rohittp.reng.internal.gl.TextureSamplerState
 import com.rohittp.reng.internal.gl.gltfSamplerState
+import com.rohittp.reng.internal.image.TWO_PIXEL_JPEG
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -106,6 +107,66 @@ class ModelDecodeTest {
     }
 
     @Test
+    fun aJpegBaseColourTextureDecodesToTheSameCanonicalOpaqueRgba() {
+        // ADR 0089: core glTF 2.0's second image type. The fixture is `JpegDecoderTest`'s 2x1 file,
+        // which libjpeg decodes exactly, so the bytes are the picture rather than a tolerance.
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/jpeg")
+        val projectedGroups = mutableListOf<Long>()
+        val model = assertIs<ModelDecodeResult.Success>(decodeModel(bytes, ResourceLimits(), projectedGroups::add)).model
+
+        assertEquals(0, model.primitives[0].material.baseColourImageIndex)
+        assertContentEquals(
+            byteArrayOf(0x10, 0x20, 0x30, -1, -64, -128, 0x40, -1),
+            model.images[0].rgbaSnapshot(),
+        )
+        // Admitted and reserved before allocation exactly as a PNG is.
+        assertEquals(36L + 6L + 8L, model.decodedCpuBytes)
+        assertEquals(model.decodedCpuBytes, projectedGroups.sum())
+    }
+
+    @Test
+    fun anImageWhoseBytesAreNotItsDeclaredFormatIsMalformed() {
+        val texture = """{"source": 0, "sampler": 0}"""
+        assertIs<ModelDecodeResult.Malformed>(
+            decodeModel(texturedGlb(texture, image = PNG_2X1, mimeType = "image/jpeg"), ResourceLimits()),
+        )
+        assertIs<ModelDecodeResult.Malformed>(
+            decodeModel(texturedGlb(texture, image = TWO_PIXEL_JPEG, mimeType = "image/png"), ResourceLimits()),
+        )
+    }
+
+    @Test
+    fun anImageMediaTypeOutsideCoreGltfIsStillUnsupported() {
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/webp")
+        assertIs<ModelDecodeResult.Unsupported>(decodeModel(bytes, ResourceLimits()))
+    }
+
+    @Test
+    fun aJpegWithoutAProjectedRasterIsRefusedWithoutDecoding() {
+        // Nothing may be decoded unreserved: a JPEG whose header does not project a raster is
+        // refused, as Unsupported when its frame is a valid process RenG lacks, Malformed otherwise.
+        val texture = """{"source": 0, "sampler": 0}"""
+        val garbage = TWO_PIXEL_JPEG.copyOfRange(0, 2) + byteArrayOf(0) + TWO_PIXEL_JPEG.copyOfRange(2, TWO_PIXEL_JPEG.size)
+        val frame = (0 until TWO_PIXEL_JPEG.size - 1).first {
+            TWO_PIXEL_JPEG[it] == 0xFF.toByte() && TWO_PIXEL_JPEG[it + 1] == 0xC0.toByte()
+        }
+        val lossless = TWO_PIXEL_JPEG.copyOf().also { it[frame + 1] = 0xC3.toByte() }
+        for ((bytes, expected) in listOf(garbage to ModelDecodeResult.Malformed, lossless to ModelDecodeResult.Unsupported)) {
+            val reserved = mutableListOf<Long>()
+            val glb = texturedGlb(texture, image = bytes, mimeType = "image/jpeg")
+            assertEquals(expected, decodeModel(glb, ResourceLimits(), reserved::add))
+            assertEquals(listOf(36L + 6L), reserved, "only the geometry may have been reserved")
+        }
+    }
+
+    @Test
+    fun aJpegRasterOverTheDecodedImageBudgetIsTooLarge() {
+        val bytes = texturedGlb(texture = """{"source": 0, "sampler": 0}""", image = TWO_PIXEL_JPEG, mimeType = "image/jpeg")
+        assertIs<ModelDecodeResult.TooLarge>(decodeModel(bytes, ResourceLimits(maximumDecodedImageBytes = 49L)))
+        assertIs<ModelDecodeResult.Success>(decodeModel(bytes, ResourceLimits(maximumDecodedImageBytes = 50L)))
+    }
+
+    @Test
     fun aTextureWithNoSamplerTakesTheSpecificationDefaults() {
         val model = decoded(texturedGlb(texture = """{"source": 0}""", samplers = ""))
         val sampler = model.primitives[0].material.baseColourSampler
@@ -160,6 +221,22 @@ class ModelDecodeTest {
 
         // 36 position bytes, 6 index bytes, and one 2x1 RGBA raster of 8 bytes.
         assertEquals(36L + 6L + 8L, model.decodedCpuBytes)
+    }
+
+    @Test
+    fun decodedPayloadIsProjectedForAdmissionBeforeEachAllocationGroup() {
+        listOf(
+            texturedGlb(texture = """{"source": 0, "sampler": 0}"""),
+            skinnedGlb(),
+        ).forEach { bytes ->
+            val projectedGroups = mutableListOf<Long>()
+            val result = assertIs<ModelDecodeResult.Success>(
+                decodeModel(bytes, ResourceLimits(), projectedGroups::add),
+            )
+
+            assertTrue(projectedGroups.isNotEmpty())
+            assertEquals(result.model.decodedCpuBytes, projectedGroups.sum())
+        }
     }
 
     @Test
@@ -312,18 +389,20 @@ private val PNG_2X1: ByteArray = byteArrayOf(
 private fun texturedGlb(
     texture: String,
     samplers: String = """"samplers": [{"magFilter": 9728, "minFilter": 9987, "wrapS": 33071, "wrapT": 33648}],""",
+    image: ByteArray = PNG_2X1,
+    mimeType: String = "image/png",
 ): ByteArray = glb(
     """
     {$ASSET,
-     "buffers": [{"byteLength": 116}],
+     "buffers": [{"byteLength": ${42 + image.size}}],
      "bufferViews": [
        {"buffer": 0, "byteOffset": 0, "byteLength": 36},
        {"buffer": 0, "byteOffset": 36, "byteLength": 6},
-       {"buffer": 0, "byteOffset": 42, "byteLength": 74}],
+       {"buffer": 0, "byteOffset": 42, "byteLength": ${image.size}}],
      "accessors": [
        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
        {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}],
-     "images": [{"bufferView": 2, "mimeType": "image/png"}],
+     "images": [{"bufferView": 2, "mimeType": "$mimeType"}],
      $samplers
      "textures": [$texture],
      "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
@@ -334,7 +413,7 @@ private fun texturedGlb(
     bin {
         f32(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f)
         u16(0, 2, 1)
-        raw(PNG_2X1)
+        raw(image)
     },
 )
 

@@ -2,6 +2,7 @@ package com.rohittp.reng.internal.preparation
 
 import com.rohittp.reng.ResourceAccessMode
 import com.rohittp.reng.ResourceClass
+import com.rohittp.reng.ResourceKey
 import com.rohittp.reng.internal.planning.StaticResourceReference
 import com.rohittp.reng.internal.resource.CanonicalIdentityRecord
 import com.rohittp.reng.internal.resource.ResourceCommitBinding
@@ -13,11 +14,7 @@ import com.rohittp.reng.internal.resource.ResourceRouteKey
 import com.rohittp.reng.internal.resource.ResourceRouteRegistration
 import com.rohittp.reng.internal.resource.StyleGroupId
 
-/**
- * The one group every basemap style in one preparation invocation commits under. A style is a
- * per-renderer configuration value, not per-item content, so every preparation item that draws a
- * basemap references the same style through the same group.
- */
+/** The stable commit group for the configured style at index zero. */
 internal val BASEMAP_STYLE_GROUP: StyleGroupId = StyleGroupId(1L)
 
 /**
@@ -50,10 +47,14 @@ internal fun buildResourceOperationDefinition(
     traversalsByItem: List<List<StaticResourceReference>>,
     accessMode: ResourceAccessMode,
     maximumConcurrentRoutes: Int,
+    primaryBasemapStyleResourceKey: ResourceKey? = null,
 ): ResourceOperationDefinition {
     val occurrences = mutableListOf<ResourceOccurrence>()
     val identities = mutableListOf<CanonicalIdentityRecord>()
+    var inferredPrimaryStyleResourceKey: ResourceKey? = null
+    var additionalStyleGroupByRoute: MutableMap<ResourceRouteKey, StyleGroupId>? = null
     var nextOccurrenceId = 1L
+    var nextStyleGroupId = 2L
     traversalsByItem.forEachIndexed { index, traversal ->
         val ownerId = ResourceOwnerId(index + 1L)
         traversal.forEach { reference ->
@@ -65,16 +66,17 @@ internal fun buildResourceOperationDefinition(
                 return@forEach
             }
             val style = reference.resourceClass == ResourceClass.BASEMAP_STYLE
+            val route = ResourceRouteKey(
+                accessMode = accessMode,
+                locator = reference.locator,
+                resourceClass = reference.resourceClass,
+                maximumResponseBytes = reference.maximumResponseBytes,
+            )
             occurrences += ResourceOccurrence(
                 id = ResourceOccurrenceId(nextOccurrenceId++),
                 ownerId = ownerId,
                 registration = ResourceRouteRegistration(
-                    route = ResourceRouteKey(
-                        accessMode = accessMode,
-                        locator = reference.locator,
-                        resourceClass = reference.resourceClass,
-                        maximumResponseBytes = reference.maximumResponseBytes,
-                    ),
+                    route = route,
                     resourceKey = reference.resourceKey,
                     rawKey = reference.rawKey,
                     privateRentileKey = reference.privateRentileKey,
@@ -82,7 +84,18 @@ internal fun buildResourceOperationDefinition(
                 ),
                 discoveryRequired = style,
                 commitBinding = if (style) {
-                    ResourceCommitBinding.BasemapStyle(BASEMAP_STYLE_GROUP)
+                    if (primaryBasemapStyleResourceKey == null && inferredPrimaryStyleResourceKey == null) {
+                        inferredPrimaryStyleResourceKey = reference.resourceKey
+                    }
+                    val primaryStyleKey = primaryBasemapStyleResourceKey ?: inferredPrimaryStyleResourceKey
+                    val groupId = if (reference.resourceKey == primaryStyleKey) {
+                        BASEMAP_STYLE_GROUP
+                    } else {
+                        val groups = additionalStyleGroupByRoute ?: mutableMapOf<ResourceRouteKey, StyleGroupId>()
+                            .also { additionalStyleGroupByRoute = it }
+                        groups.getOrPut(route) { StyleGroupId(value = nextStyleGroupId++) }
+                    }
+                    ResourceCommitBinding.BasemapStyle(groupId = groupId)
                 } else {
                     ResourceCommitBinding.Single
                 },

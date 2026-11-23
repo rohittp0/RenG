@@ -15,6 +15,18 @@ import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.LAYER_ORDER_READBACK_PIXELS
+import com.rohittp.reng.runLayerOrderReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
+import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
+import com.rohittp.reng.runStickerOpacityReadbackSuite
+import com.rohittp.reng.STICKER_SHADER_READBACK_PIXELS
+import com.rohittp.reng.runStickerShaderReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.TERRAIN_FRAME_READBACK_PIXELS
@@ -25,6 +37,7 @@ import com.rohittp.reng.runVertexTextureFetchProbeSuite
 import com.rohittp.reng.runModelReadbackSuite
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -81,7 +94,7 @@ class AndroidGlConformanceTest {
      * as a silent wrong answer somewhere later.
      */
     @Test fun everyRosterEntryPointResolvesOnThisDriver() {
-        assertEquals(91, GlEntryPoint.entries.size)
+        assertEquals(93, GlEntryPoint.entries.size)
         withCurrentContext { binding ->
             val adoption = adoptRenderContext(binding)
             val adopted = adoption as? RenderContextAdoption.Adopted
@@ -97,6 +110,32 @@ class AndroidGlConformanceTest {
         }
     }
 
+    /** ADR 0095's device-only compile gate for `samplerExternalOES`. */
+    @Test fun theExternalOesStickerProgramCompilesWhenTheDriverAdvertisesIt() {
+        withCurrentContext { binding ->
+            if (EXTERNAL_OES_EXTENSION_NAME !in readExtensionNames(binding)) {
+                println(
+                    "RenG external-OES compile: skipped because the driver does not advertise " +
+                        EXTERNAL_OES_EXTENSION_NAME,
+                )
+                return@withCurrentContext
+            }
+            val cache = GlProgramCache()
+            val pipeline = when (val result = createStickerPipeline(binding, ShaderDialect.GLES, cache)) {
+                is StickerPipelineResult.Created -> result.pipeline
+                is StickerPipelineResult.Failed -> throw AssertionError("plain sticker pipeline failed: $result")
+            }
+            try {
+                assertNotNull(
+                    ensureExternalOesStickerProgram(binding, ShaderDialect.GLES, cache, pipeline),
+                    "an advertised $EXTERNAL_OES_EXTENSION_NAME must compile the built-in OES variant",
+                )
+            } finally {
+                deleteStickerPipeline(binding, cache, pipeline)
+            }
+        }
+    }
+
     @Test fun theSuitePassesOnARealEsContext() {
         val fixture = PbufferEglContext.create()
         try {
@@ -109,7 +148,7 @@ class AndroidGlConformanceTest {
                     "sl=${report.shadingLanguageVersionText} checks=${report.checks}",
             )
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
         } finally {
             fixture.destroy()
@@ -227,6 +266,80 @@ class AndroidGlConformanceTest {
         }
     }
 
+    @Test fun theGeometryBlendReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theLayerOrderReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+            binding.scissor(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+            runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theStickerOpacityReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /** ADR 0087: a sticker drawn with a consumer fragment program, against the frames it must equal. */
+    @Test fun theStickerShaderReadbackSuitePassesOnARealEsContext() {
+        val fixture = PbufferEglContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
     /**
      * Cycle G task 7's gate on Android's driver: the globe ground's own geometry, its seams and the
      * granularity the camera implies. Manual, like everything in this source set (ADR 0033).
@@ -241,6 +354,7 @@ class AndroidGlConformanceTest {
         } finally {
             fixture.destroy()
         }
+    }
 
     /**
      * Cycle G task 12's gate on Android's driver: a `ProjectionMode.GLOBE` frame through the
@@ -264,7 +378,6 @@ class AndroidGlConformanceTest {
         } finally {
             fixture.destroy()
         }
-    }
     }
 
     /**

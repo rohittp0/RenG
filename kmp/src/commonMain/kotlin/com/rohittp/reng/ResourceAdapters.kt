@@ -161,33 +161,77 @@ public class StoredRawResourceMetadata(
             "storedAtEpochMillisPresent=true)"
 }
 
-public class StoredRawResource(
+public class StoredRawResource private constructor(
     bytes: ByteArray,
     public val contentDigest: String,
     public val metadata: StoredRawResourceMetadata,
+    shareSnapshot: Boolean,
 ) {
-    private val storedBytes: ByteArray = bytes.freshCopy()
+    /**
+     * The only way a caller -- a consumer or RenG itself -- constructs a resource from a `ByteArray`. It
+     * copies [bytes], so the caller may mutate its own array afterwards without reaching this resource.
+     */
+    public constructor(
+        bytes: ByteArray,
+        contentDigest: String,
+        metadata: StoredRawResourceMetadata,
+    ) : this(bytes, contentDigest, metadata, shareSnapshot = false)
+
+    // `shareSnapshot` is true only from [withSharedBytes], which passes another StoredRawResource's own
+    // `storedBytes`. So every array held here was copied by the public constructor above, from whatever
+    // array its caller supplied, and is referenced by StoredRawResource instances alone.
+    private val storedBytes: ByteArray = if (shareSnapshot) bytes else bytes.freshCopy()
 
     /**
      * The construction snapshot, read without a further copy by RenG-internal code only. This array is
-     * never handed to a caller, never mutated, and never retained past the reading call; [bytes] remains
-     * the only externally visible read and still returns a fresh copy on every access.
+     * never handed to a caller, never mutated, and never retained past the reading call except by
+     * another [StoredRawResource] through [withSharedBytes]; [bytes] remains the only externally visible
+     * read and still returns a fresh copy on every access.
      */
     internal val byteSnapshot: ByteArray
         get() = storedBytes
+
+    /**
+     * An equal-bytes resource carrying [metadata], which shares this one's snapshot instead of copying
+     * it (ADR 0062 erratum).
+     *
+     * **Why.** Re-wrapping a resource RenG already holds -- on every resident hit in every preparation,
+     * every validated store read, and every write handed to the consumer's `Store` -- would otherwise
+     * run the public constructor's full array copy on the largest arrays RenG holds (tiles, terrain
+     * DEMs, styles) once a frame each (ADR 0062 erratum).
+     *
+     * **Why it is safe.** The copy defended nothing. The array is private, never mutated, and reachable
+     * from outside only through [bytes], which copies; so two resources sharing it are as independent
+     * as two that do not. The boundary copy a consumer's array needs is taken by the public
+     * constructor, and this function cannot be handed a borrowed array at all -- it has no `ByteArray`
+     * parameter. Equality, hashing, the digest and every byte read are unchanged.
+     */
+    internal fun withSharedBytes(metadata: StoredRawResourceMetadata): StoredRawResource =
+        StoredRawResource(storedBytes, contentDigest, metadata, shareSnapshot = true)
 
     public val bytes: ByteArray
         get() = storedBytes.freshCopy()
 
     override fun equals(other: Any?): Boolean =
         other is StoredRawResource &&
-            storedBytes.contentEquals(other.storedBytes) &&
+            // Digest, then metadata, then bytes -- the same comparison, in the order that usually
+            // avoids reaching the last one (ADR 0061). Two resources whose bytes differ at all differ
+            // in their digest, so every unequal comparison now returns without walking megabytes.
+            //
+            // The byte walk is KEPT rather than replaced: this is a public type a consumer
+            // constructs, and its digest is whatever they passed. Trusting it alone would make
+            // equality exactly as sound as its least careful supplier.
             contentDigest == other.contentDigest &&
-            metadata == other.metadata
+            metadata == other.metadata &&
+            storedBytes.contentEquals(other.storedBytes)
 
     override fun hashCode(): Int {
-        var result = storedBytes.contentHashCode()
-        result = 31 * result + contentDigest.hashCode()
+        // Hashed from the digest rather than the bytes it summarises (ADR 0061), and that is not the
+        // trust `equals` refuses above. Equal resources still hash equally, because `equals` requires
+        // their digests to match; a lying digest can only make two UNEQUAL resources collide, which
+        // costs a bucket comparison that then calls `equals` and gets the right answer. A collision
+        // is a performance event, never a correctness one.
+        var result = contentDigest.hashCode()
         result = 31 * result + metadata.hashCode()
         return result
     }

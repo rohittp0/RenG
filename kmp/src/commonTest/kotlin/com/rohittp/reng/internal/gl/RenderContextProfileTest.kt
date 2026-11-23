@@ -46,6 +46,7 @@ class RenderContextProfileTest {
         assertEquals(GlVersion(3, 2), adoption.profile.version)
         assertEquals("llvmpipe (LLVM 20.1.2, 256 bits)", adoption.profile.rendererName)
         assertTrue(adoption.profile.supportsSrgbWriteControl)
+        assertTrue(!adoption.profile.supportsHalfFloatColourBuffer)
         assertTrue(!adoption.profile.supportsEs3Compatibility)
         assertEquals(16384, adoption.profile.maxTextureSize)
     }
@@ -57,6 +58,17 @@ class RenderContextProfileTest {
         assertEquals(GlVersion(4, 5), adoption.profile.version)
         assertTrue(adoption.profile.supportsEs3Compatibility)
         assertTrue(adoption.profile.supportsSrgbWriteControl)
+        assertTrue(adoption.profile.supportsHalfFloatColourBuffer)
+    }
+
+    @Test fun eitherEsColourBufferExtensionEnablesHalfFloatBloomTargets() {
+        listOf(HALF_FLOAT_COLOUR_BUFFER_EXTENSION, FLOAT_COLOUR_BUFFER_EXTENSION).forEach { extension ->
+            val binding = esContextBinding()
+            binding.indexedStrings += extension
+            binding.integers[GL_NUM_EXTENSIONS] = intArrayOf(binding.indexedStrings.size)
+            val adoption = adoptRenderContext(binding) as RenderContextAdoption.Adopted
+            assertTrue(adoption.profile.supportsHalfFloatColourBuffer, extension)
+        }
     }
 
     @Test fun aContextBelowTheRequirementIsRejectedWithoutModifyingState() {

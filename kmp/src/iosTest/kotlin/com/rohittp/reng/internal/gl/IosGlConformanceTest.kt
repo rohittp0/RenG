@@ -5,7 +5,9 @@ import com.rohittp.reng.GROUND_CULL_READBACK_PIXELS
 import com.rohittp.reng.GLOBE_GROUND_READBACK_PIXELS
 import com.rohittp.reng.LATITUDE_PROBE_PIXELS
 import com.rohittp.reng.MODEL_READBACK_PIXELS
+import com.rohittp.reng.EXTERNAL_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runBasemapReadbackSuite
+import com.rohittp.reng.runExternalFrameReadbackSuite
 import com.rohittp.reng.DEPTH_READBACK_PIXELS
 import com.rohittp.reng.DISPLACEMENT_READBACK_PIXELS
 import com.rohittp.reng.SHADING_READBACK_PIXELS
@@ -16,6 +18,18 @@ import com.rohittp.reng.runGroundDisplacementReadback
 import com.rohittp.reng.runGroundShadingReadback
 import com.rohittp.reng.GEOMETRY_SUBDIVISION_READBACK_PIXELS
 import com.rohittp.reng.runGeometrySubdivisionReadbackSuite
+import com.rohittp.reng.GEOMETRY_BLEND_READBACK_PIXELS
+import com.rohittp.reng.runGeometryBlendReadbackSuite
+import com.rohittp.reng.LAYER_ORDER_READBACK_PIXELS
+import com.rohittp.reng.runLayerOrderReadbackSuite
+import com.rohittp.reng.BLOOM_READBACK_PIXELS
+import com.rohittp.reng.runBloomReadbackSuite
+import com.rohittp.reng.runBloomPerElementReadbackSuite
+import com.rohittp.reng.BLOOM_PER_ELEMENT_PIXELS
+import com.rohittp.reng.STICKER_OPACITY_READBACK_PIXELS
+import com.rohittp.reng.runStickerOpacityReadbackSuite
+import com.rohittp.reng.STICKER_SHADER_READBACK_PIXELS
+import com.rohittp.reng.runStickerShaderReadbackSuite
 import com.rohittp.reng.GLOBE_FRAME_READBACK_PIXELS
 import com.rohittp.reng.runGlobeFrameReadbackSuite
 import com.rohittp.reng.GROUND_ANCHOR_READBACK_PIXELS
@@ -88,7 +102,7 @@ class IosGlConformanceTest {
         val fixture = EaglOffscreenContext.create()
         try {
             val binding = bindOrFail()
-            assertEquals(91, GlEntryPoint.entries.size)
+            assertEquals(93, GlEntryPoint.entries.size)
 
             val profile = when (val adoption = adoptRenderContext(binding)) {
                 is RenderContextAdoption.Adopted -> adoption.profile
@@ -152,7 +166,7 @@ class IosGlConformanceTest {
             val report = runGlConformanceSuite(binding, fixture.probe, ShaderDialect.GLES)
             println("RenG iOS conformance renderer: ${report.rendererName} / ${report.versionText}")
             assertEquals(ShaderDialect.GLES, report.dialect)
-            assertEquals(8, report.checks.size)
+            assertEquals(9, report.checks.size)
             assertTrue(report.shadingLanguageVersionText.startsWith("OpenGL ES GLSL ES"))
             assertTrue(report.versionText.startsWith("OpenGL ES 3"))
         } finally {
@@ -280,6 +294,93 @@ class IosGlConformanceTest {
             binding.viewport(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
             binding.scissor(0, 0, GEOMETRY_SUBDIVISION_READBACK_PIXELS, GEOMETRY_SUBDIVISION_READBACK_PIXELS)
             runGeometrySubdivisionReadbackSuite(binding, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theGeometryBlendReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            binding.scissor(0, 0, GEOMETRY_BLEND_READBACK_PIXELS, GEOMETRY_BLEND_READBACK_PIXELS)
+            runGeometryBlendReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theLayerOrderReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+            binding.scissor(0, 0, LAYER_ORDER_READBACK_PIXELS, LAYER_ORDER_READBACK_PIXELS)
+            runLayerOrderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theBloomReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            binding.scissor(0, 0, BLOOM_READBACK_PIXELS, BLOOM_READBACK_PIXELS)
+            runBloomReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+
+    @Test fun thePerElementBloomReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            binding.scissor(0, 0, BLOOM_PER_ELEMENT_PIXELS, BLOOM_PER_ELEMENT_PIXELS)
+            runBloomPerElementReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    @Test fun theStickerOpacityReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_OPACITY_READBACK_PIXELS, STICKER_OPACITY_READBACK_PIXELS)
+            runStickerOpacityReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /** ADR 0095: a source-owned 2D texture (iOS has no external OES), its v transform, and both fallbacks. */
+    @Test fun theExternalFrameReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+            binding.scissor(0, 0, EXTERNAL_FRAME_READBACK_PIXELS, EXTERNAL_FRAME_READBACK_PIXELS)
+            runExternalFrameReadbackSuite(binding, fixture.probe)
+        } finally {
+            fixture.destroy()
+        }
+    }
+
+    /** ADR 0087: a sticker drawn with a consumer fragment program, against the frames it must equal. */
+    @Test fun theStickerShaderReadbackSuitePassesOnARealEaglContext() {
+        val fixture = EaglOffscreenContext.create()
+        try {
+            val binding = bindOrFail()
+            binding.viewport(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            binding.scissor(0, 0, STICKER_SHADER_READBACK_PIXELS, STICKER_SHADER_READBACK_PIXELS)
+            runStickerShaderReadbackSuite(binding, fixture.probe, ShaderDialect.GLES)
         } finally {
             fixture.destroy()
         }

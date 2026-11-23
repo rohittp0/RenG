@@ -32,7 +32,7 @@ dependencyResolutionManagement {
         maven("https://maven.rohittp.com")
         mavenCentral()
         google()
-        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev") {
+        maven("https://redirector.kotlinlang.org/maven/compose-dev") {
             content { includeGroup("org.jetbrains.skiko") }
         }
     }

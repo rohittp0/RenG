@@ -368,6 +368,36 @@ class ModelPipelineTest {
         assertFalse(binding.log.any { it.startsWith("blendFuncSeparate(0x302,") })
     }
 
+    @Test fun opacityUploadsPerPrimitiveAndRoutesOpaqueMaterialsThroughTheBlendedPass() {
+        val binding = newBinding()
+        val pipelines = pipelines(binding)
+        binding.log.clear()
+        drawModels(
+            binding,
+            pipelines,
+            listOf(
+                ResolvedModel(
+                    listOf(
+                        resolved(indexCount = 11, opacity = 0.5f, cameraDistance = 9f),
+                        resolved(indexCount = 22, opacity = 1f, cameraDistance = 1f),
+                    ),
+                ),
+            ),
+            LIGHT,
+        )
+
+        assertEquals(listOf(22, 11), drawnIndexCounts(binding))
+        assertEquals(
+            listOf("uniform1f($OPACITY_LOCATION,1.0)", "uniform1f($OPACITY_LOCATION,0.5)"),
+            binding.log.filter { it.startsWith("uniform1f($OPACITY_LOCATION,") },
+        )
+        val writesOff = binding.log.indexOfFirst { it == "depthMask(false)" }
+        val translucentDraw = binding.log.indexOfFirst {
+            it.startsWith("drawElements(${hex(GL_TRIANGLES)},11")
+        }
+        assertTrue(writesOff in 0 until translucentDraw)
+    }
+
     @Test fun theOpaquePassDisablesBlendingRatherThanInheritingIt() {
         val binding = newBinding()
         val pipelines = pipelines(binding)
@@ -769,6 +799,7 @@ class ModelPipelineTest {
             ModelVertexAttribute.POSITION,
             ModelVertexAttribute.NORMAL,
         ),
+        opacity: Float = 1f,
     ): ResolvedModelPrimitive = ResolvedModelPrimitive(
         uploaded = UploadedPrimitive(
             vertexArray = 1,
@@ -784,6 +815,7 @@ class ModelPipelineTest {
         baseColourTexture = baseColourTexture,
         jointMatrices = jointMatrices,
         reverseWinding = reverseWinding,
+        opacity = opacity,
     )
 
     private fun decodedPrimitive(
@@ -826,6 +858,7 @@ class ModelPipelineTest {
             MODEL_AMBIENT_UNIFORM_NAME to AMBIENT_LOCATION,
             MODEL_FORCE_OPAQUE_UNIFORM_NAME to FORCE_OPAQUE_LOCATION,
             MODEL_VERTEX_COLOUR_PRESENT_UNIFORM_NAME to VERTEX_COLOUR_LOCATION,
+            MODEL_OPACITY_UNIFORM_NAME to OPACITY_LOCATION,
             MODEL_JOINT_BLOCK_NAME to JOINT_BLOCK_INDEX,
         )
         .also { it.integers[GL_MAX_UNIFORM_BLOCK_SIZE] = intArrayOf(16384) }
@@ -843,6 +876,7 @@ class ModelPipelineTest {
         const val FORCE_OPAQUE_LOCATION: Int = 17
         const val VERTEX_COLOUR_LOCATION: Int = 18
         const val JOINT_BLOCK_INDEX: Int = 19
+        const val OPACITY_LOCATION: Int = 20
         val LIGHT: FloatArray = floatArrayOf(-0.25f, 0.5f, 0.75f)
     }
 }

@@ -15,6 +15,7 @@ import com.rohittp.reng.internal.gl.RenderContextIdentity
 import com.rohittp.reng.internal.gl.RenderContextProbe
 import com.rohittp.reng.internal.gl.adoptRenderContext
 import com.rohittp.reng.internal.gl.openPlatformGlBinding
+import com.rohittp.reng.internal.metrics.EngineMetricRecorder
 import com.rohittp.reng.internal.lifecycle.GpuLedger
 import com.rohittp.reng.internal.lifecycle.RendererLifecycleSnapshot
 import com.rohittp.reng.internal.lifecycle.RendererOwnerState
@@ -79,16 +80,25 @@ internal fun createRenderer(
         is InternalGlStateResult.Failed -> throw result.failure.toException()
     }
 
-    val residentCache = ResidentCache()
+    val residentCache = ResidentCache(
+        residentByteBudget = configuration.resourceLimits.maximumResidentCpuResourceBytes,
+    )
 
     // The renderer's one long-lived Rentile engine (ADR 0016). Constructed here rather than lazily
     // because setup is where every renderer-lifetime resource is fixed (ADR 0012) and because building it
     // performs no I/O and no suspension at all; it is closed by RenGRenderer.close() below, alongside the
     // resident cache, and its close() is not GL-scoped so it is untouched by ADR 0015's exact-context rule.
+    // One recorder for the renderer's lifetime, shared by the host that feeds it and the renderer
+    // that reports it -- the counters are cumulative since this renderer was created (ADR 0049), so
+    // a second instance anywhere would split the totals in half without saying so.
+    val metricRecorder = EngineMetricRecorder()
+
     val basemapEngineHost = BasemapEngineHost(
         transport = configuration.transport,
         store = configuration.store,
         cache = residentCache,
+        metricRecorder = metricRecorder,
+        maximumConcurrentTileRasterisations = configuration.maximumConcurrentTileRasterisations,
     )
     val preparationDriver = PreparationDriver(
         transport = configuration.transport,
@@ -112,7 +122,11 @@ internal fun createRenderer(
     // documented public knob with no effect at all -- every renderer used the default 128 MB
     // whatever the consumer configured -- which is precisely the shape of bug the basemap ground's
     // one-megabyte-per-tile residency turns from theoretical into expensive.
-    val objectRegistry = GlObjectRegistry(configuration.resourceLimits.maximumResidentGpuTextureBytes)
+    val objectRegistry = GlObjectRegistry(
+        residentTextureByteBudget = configuration.resourceLimits.maximumResidentGpuTextureBytes,
+        residentBufferByteBudget = configuration.resourceLimits.maximumResidentGpuBufferBytes,
+        residentContentTextureByteBudget = configuration.resourceLimits.maximumResidentGpuContentTextureBytes,
+    )
 
     val driver = GlLifecycleDriver(
         binding = binding,
@@ -138,6 +152,7 @@ internal fun createRenderer(
         basemapEngineHost = basemapEngineHost,
         programs = programs,
         glObjectRegistry = objectRegistry,
+        metricRecorder = metricRecorder,
         initialGlState = glState,
     )
 }

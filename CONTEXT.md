@@ -13,7 +13,8 @@ A complete, self-contained definition of one frame's content, drawn by whichever
 Its required non-negative `frameIndex` orders strict, history-aware preparation within that renderer;
 `drawBasemap`, defaulting to true, may suppress ground for that frame, and `drawLabels`, also defaulting to
 true, may suppress **Map Label**s. The two are fully orthogonal: all four pairings are legal, including a
-frame that draws labels over no ground at all. Plan list inputs are snapshotted, and
+frame that draws labels over no ground at all. An optional **Bloom** controls the screen-space light added
+by **Emissive** Geometry. Plan list inputs are snapshotted, and
 every public list read returns a defensive copy whose platform mutation cannot change the plan, its equality,
 or its canonical identity.
 It is also a **document**: it and every type it reaches carry a serializer (ADR 0042), so a plan can be
@@ -35,8 +36,7 @@ at longitude 400 sees exactly what one at 40 sees. The turns survive anyway, bec
 consumer's own interpolation continuous — a camera animated from 170 to 190 pans smoothly east in either
 projection precisely because the number keeps counting, where a normalised field would ask the consumer to
 handle the wrap that Mercator handles for them. A consequence worth knowing rather than rediscovering: two
-globe frames differing only in winding render identically and still carry different frame identities, since
-a **Frame Plan**'s identity is a digest of the plan and never of the picture.
+globe frames differing only in winding render identically although their **Frame Plan**s are not equal.
 
 Zoom is a finite fractional
 value in `[0, 22]`; Mercator has `512` logical pixels at zoom zero and scales by `2^zoom`, independently of tile
@@ -72,16 +72,18 @@ different mode.
 _Avoid_: Anchoring mode, coordinate space, projection fallback
 
 **Frame History**:
-The renderer's clearable record of its last successfully prepared frame index, **Frame Plan**, selected
-basemap tile LOD, and label fade. Only one prepare invocation runs at a time. A batch's indices must be
-strictly increasing and above history; every item completes pure validation, projection, tile-budget, diff,
-and resource-reference planning in index order before any resource work begins. Independent resource work
+The renderer's clearable record of its last successfully prepared frame index, selected basemap tile LOD,
+and label fade. It holds no copy, encoding or digest of the last **Frame Plan** (ADR 0090). Only one prepare invocation runs at a time. A batch's indices must be
+strictly increasing and above history; every item completes pure validation, projection, tile-budget and
+resource-reference planning in index order before any resource work begins. Independent resource work
 then runs in parallel.
-History commits only when the whole batch succeeds, and returned prepared frames preserve input order.
-Structural diffing uses the last successfully prepared plan as the first baseline and each immediately preceding
-input plan as the next baseline within a batch; missing history is an empty baseline.
-A diff may reuse content-keyed work, but every **Prepared Frame** leases the complete resource set derived
-from its own plan. Failure or cancellation exposes no partial history, though valid acquired content may
+The preparation session remains active across planning, the shared resource operation, acquisition, frame
+construction, and commit or rollback. History commits only when the whole batch succeeds, and returned prepared
+frames preserve input order. A failed or cancelled batch atomically closes every provisional frame, releases its
+leases and raw-tile reservation, and leaves both history and the prepared style at their prior committed values.
+Each item's LOD and label-fade baseline is the committed history for the first item and the immediately
+preceding input's for each later one; missing history is an empty baseline. Content-keyed work may be
+reused across frames, but every **Prepared Frame** leases the complete resource set derived from its own plan. Failure or cancellation exposes no partial history, though valid acquired content may
 remain cached. With prior selected integer LOD `L`, selection repeatedly increments while
 `zoom >= L + 0.75` and repeatedly decrements while `zoom < L - 0.75`, bounded to `[0, 22]`; this defines
 multi-level jumps as the same one-level hysteresis applied until stable. Without history, the nearest integer
@@ -91,7 +93,7 @@ never by a draw; which labels are placed is recomputed from scratch every frame 
 0035), so a fade's duration in seconds is a function of the consumer's frame rate. An entry is retained only
 while its label is placed or still mid-fade. Every successfully prepared Mercator plan advances provisional
 LOD history even when no Basemap Style is configured or `drawBasemap` is false; those frames select and acquire
-no tiles. The context-free `clearFrameHistory()` clears the structural-diff, LOD and label-fade baseline,
+no tiles. The context-free `clearFrameHistory()` clears the ordering, LOD and label-fade baseline,
 permits a new sequence, and neither frees resources nor invalidates prepared frames. Drawing never changes
 history.
 _Avoid_: Cache, draw order, partial batch commit, previous-frame mutation
@@ -102,6 +104,32 @@ LOD. It defaults to `512`, is configurable from `1` through `4096`, and fails pr
 before acquisition when exceeded; RenG never drops required tiles.
 _Avoid_: Cache size, tile limit fallback, resource retry budget
 
+**Read-Ahead**:
+A consumer's hint, `Renderer.readAhead(plans)`, naming Frame Plans it expects to prepare soon. RenG selects the
+basemap tiles those plans need with the planning code `prepare` uses, drops tiles already resident on the GPU,
+and fetches the rest into the consumer's Store while earlier frames are still being prepared, in windows of at
+most 64 tiles. Each window is its own operation and is discarded when it ends (ADR 0075). It is a hint: it
+returns at once, does nothing before the first successful `prepare` or in `CACHE_ONLY`, never changes what a
+later `prepare` returns, and does not spare a frame from failing on a tile that cannot be fetched. When the
+**Rendered-Tile Cache** is enabled the same worker also draws the window's tiles ahead of the frames (ADR 0077).
+_Avoid_: Prefetch, preload, background download, tile cache, warm-up step
+
+**Tile Rasterisation Workers**:
+The number of a batch's output tiles the basemap engine may draw at once, `RendererConfiguration.maximumConcurrentTileRasterisations`,
+from `1` through `16` and `1` by default. Each busy worker holds a Skia surface and a bitmap and blocks one
+`Dispatchers.Default` thread for the length of a tile's draw, so a consumer chooses a count that leaves cores free.
+The pixels and their order do not depend on it (ADR 0076).
+_Avoid_: Thread count, render threads, parallelism, concurrency limit
+
+**Rendered-Tile Cache**:
+The bounded, least-recently-used queue of raw tile pixels the read-ahead worker has drawn for frames not yet prepared,
+sized by `RendererConfiguration.maximumReadAheadRasterisedTileBytes` (`0`, the default, means none). It holds only
+read-ahead output, keyed by the tile's rendered-tile key and charged by byte size; a `prepare` takes a tile out of it
+as the tile enters the frame, under the same raw-tile reservation as a tile it drew itself. A style change,
+`freeResources`, a `RELOAD` preparation and `close()` empty it, and it holds no GL object. While it exists `prepare`
+renders its own tiles `URGENT` and the worker draws at `NORMAL` (ADR 0077).
+_Avoid_: Tile memo, render cache, pixel cache, prefetch cache
+
 **Output Pixel Size**:
 The renderer-lifetime positive integer width and height of every frame and target in physical output pixels.
 It determines camera aspect ratio, screen anchoring, and basemap coverage and is not read from a framebuffer.
@@ -111,8 +139,9 @@ _Avoid_: Viewport, logical size, density-independent size, Render Target dimensi
 The renderer-lifetime values fixed at setup: required **Output Pixel Size**, **Transport**, and **Store**;
 optional **Basemap Style**, defaulting to none; **Resource Limits**, defaulting to their documented ceilings;
 maximum basemap tile instances, defaulting to `512`; maximum preparation batch size, defaulting to `256`;
-maximum concurrent resource operations, defaulting to `8`; and a non-throwing **Diagnostic** sink, defaulting
-to none. The already-current **Render Context** is
+maximum concurrent resource operations, defaulting to `8`; maximum unleased consumer-authored pipelines retained
+between draws, defaulting to `64`; maximum distinct consumer-authored pipelines in one frame, defaulting to `256`;
+and a non-throwing **Diagnostic** sink, defaulting to none. The already-current **Render Context** is
 passed separately to renderer creation and setup does not suspend; style acquisition occurs during frame
 preparation.
 _Avoid_: Frame Plan, render options, mutable settings
@@ -124,16 +153,26 @@ resource operations, default `8` and configurable from `1` through `64`.
 _Avoid_: Coroutine dispatcher, unbounded async, transport retry count
 
 **Resource Limits**:
-The immutable configurable byte ceilings supplied at setup. Every value is bytes in
-`[1, 2147483647]`. Encoded-response defaults are: basemap style `8 MiB`; basemap metadata (TileJSON and
+The immutable configurable ceilings supplied at setup. Byte ceilings are in `[1, 2147483647]`, except that
+in-flight raw basemap pixels and unleased resident CPU resources admit zero. Encoded-response defaults are:
+basemap style `8 MiB`; basemap metadata (TileJSON and
 sprite JSON) `4 MiB`; basemap vector/raster/DEM tile `32 MiB`; basemap sprite image `32 MiB`; basemap GeoJSON
 `64 MiB`; sticker image `32 MiB`; model GLB `256 MiB`; and model texture `32 MiB`. A request carries its
 selected ceiling and oversize resident, stored, or transported content fails before decode or use. Two
 further ceilings bound work an encoded ceiling cannot: a decoded-image ceiling, decided from the declared
-image dimensions before any pixel buffer is allocated rather than after decompression; and a model JSON-chunk
-ceiling bounding a GLB's JSON chunk independently of the whole-GLB ceiling, because a parsed value tree costs
-far more than its text. Structural depth bounds — JSON nesting and node-hierarchy depth — are fixed and not
-configurable.
+image dimensions before any pixel buffer is allocated rather than after decompression -- for an **ETC2
+Container**, from every level's RGBA8 size, which bounds the CPU decode a context without ETC2 needs; an image-decode
+working-set ceiling, projected before allocation from the final RGBA image, two streaming scanlines, and the
+bounded premultiplication upload chunk; and a model JSON-chunk ceiling bounding a GLB's JSON chunk independently
+of the whole-GLB ceiling, because a parsed value tree costs far more than its text. Structural depth bounds —
+JSON nesting and node-hierarchy depth — are fixed and not configurable.
+Aggregate ceilings independently bound unleased resident CPU resource bytes, resident GPU texture bytes, resident
+GPU model-buffer bytes, raw basemap pixels retained across open Prepared Frames, and all CPU payload retained by
+open Prepared Frames. A CPU or GPU lease may temporarily keep unleased residency above its LRU ceiling; its last
+release enforces that ceiling immediately. Raw pixels require an atomic reservation before rendering and fall back
+to encoded tiles rather than exceeding their ceiling. Prepared-frame admission is hard: leased resource generations
+are counted once across sharing frames, while each frame's own basemap, terrain, pose and label payload is counted
+once per frame; closing or rolling back the frame releases that reservation exactly once.
 _Avoid_: Transport timeout, cache size, decoded-memory estimate, retry budget
 
 **Basemap Style**:
@@ -146,9 +185,9 @@ _Avoid_: Map style, theme, basemap, style profile
 **Prepared Frame**:
 A network-free, GL-free rendering input holding every resource one **Frame Plan** needs, produced
 before any drawing occurs and owned by the renderer that prepared it. It may be drawn repeatedly until
-its idempotent, context-free `close()` releases its resource leases; closing it performs no immediate GL
-deletion. Renderer close invalidates it for drawing but does not change the harmless idempotence of its own
-later `close()`.
+its idempotent, context-free `close()` atomically claims and releases its resource leases and raw-tile reservation
+exactly once, even when close calls race; closing it performs no immediate GL deletion. Renderer close invalidates
+it for drawing but does not change the harmless idempotence of its own later `close()`.
 _Avoid_: Frame buffer, render pass, draw queue, prepared batch
 
 **Render Target**:
@@ -171,7 +210,8 @@ _Avoid_: Surface, device, GL session, EGL context
 **Restore Set**:
 The closed, documented set of GL state RenG reads before it draws and restores before it returns: the draw
 and read framebuffer, renderbuffer, program, vertex array, array buffer, pixel unpack buffer and uniform
-buffer bindings; the active texture unit and the texture and sampler binding on every unit RenG uses; blend
+buffer bindings; the active texture unit and the 2D texture, external-OES texture when used, and sampler bindings
+on every unit RenG uses; blend
 enable, separate factors, separate equations and colour; depth test enable, function, write mask and range;
 cull enable, mode and winding; viewport; scissor enable and box; the colour write mask; the colour and depth
 clear values; the unpack alignment, row length, skip rows and skip pixels and the pack alignment; and, on a
@@ -192,7 +232,8 @@ _Avoid_: Boolean closed flag, implicit context switch, recoverable close
 
 **GPU Object Loss**:
 The consumer's declaration that the renderer's GL objects no longer exist. `notifyGpuObjectsGone()` is
-context-free, forgets handles without deleting them, retains CPU state, and invalidates prior render
+context-free, serializes with any in-flight renderer GL operation, and atomically forgets handles, compiled
+programs, and consumer-pipeline state without deleting them. It retains CPU state and invalidates prior render
 targets. Further GL work requires explicit adoption of an already-current replacement **Render Context**.
 _Avoid_: Free, close, context switch, automatic recovery
 
@@ -208,9 +249,10 @@ Render Target minting, and drawing fail `RENDERER_CLOSED`.
 _Avoid_: Free resources, GPU object loss, frame close, reset
 
 **Preparation Cancellation**:
-The idempotent suspending snapshot barrier requested by `cancelPreparations()`. It cancels only the prepare
-invocation active when called and returns after that invocation terminates; no active invocation is a no-op.
-Cancellation remains an unwrapped `CancellationException` and commits no **Frame History**. Kotlin stack
+The idempotent suspending snapshot barrier requested by `cancelPreparations()`. It cancels the outer worker of
+only the prepare invocation active when called and returns after its planning, acquisition, construction, and
+rollback have terminated; no active invocation is a no-op. Cancellation remains an unwrapped
+`CancellationException` and commits no **Frame History**. Kotlin stack
 recovery may provide a copy whose immediate cause is the original exception, so referential identity is not
 part of the contract. Cancellation is not a persistent mode.
 _Avoid_: Renderer close, cancel latch, frame close, partial batch commit
@@ -249,8 +291,8 @@ _Avoid_: Quaternion, orientation matrix, intrinsic XYZ, moving-axis rotation
 
 **Scale**:
 A finite non-negative scalar converting asset-local units. Map-anchored scale is metres per local unit;
-screen-anchored scale is output pixels per local unit. Sticker local dimensions are encoded-image pixels,
-and Model local dimensions are GLB coordinates. Zero scale is valid. Planning requires the final converted
+screen-anchored scale is output pixels per local unit. Sticker local dimensions are encoded-image pixels --
+an **ETC2 Container**'s declared level-zero width and height, never its block-padded size -- and Model local dimensions are GLB coordinates. Zero scale is valid. Planning requires the final converted
 scale to remain finite as a GPU-bound Float and reports `fieldName=placement.scale` otherwise.
 _Avoid_: Size, zoom, density-independent scale
 
@@ -273,13 +315,12 @@ accepts any finite value, but planning rejects values that cannot remain finite 
 and GPU-bound Float conversion. Those failures report `mapPosition.altitude` or `geometry.altitude`; latitude
 and world-copy failures retain their corresponding latitude or unwrapped-longitude field. Map-anchored
 drawing is depth-tested throughout, in **three depth phases** and one draw order (ADRs 0025, 0027 and 0030).
-Flat map-plane content — the **Basemap Tile** ground first, then **Geometry**s in list order — tests depth
-and writes none, so it is occluded by anything that did write nearer depth and occludes nothing itself.
-**Model**s in list order then test **and write**, because a mesh that writes no depth cannot occlude itself:
-its own back faces show through its front ones. Map-anchored **Sticker**s in list order then test and write
-none again, drawing after the models because a map-anchored sticker is a marker and a marker paints over
-the scene it marks. The map regime's draw order is therefore ground, **Geometry**s, **Model**s,
-map-anchored **Sticker**s, with later entries on top of anything that wrote no nearer depth. Depth
+The **Basemap Tile** ground draws first. Caller-authored map content then draws by ascending **Layer**;
+within one layer the tie-break is **Geometry**, **Model**, **Sticker**, each in its own list order.
+Flat map-plane content — Geometry and map-anchored Sticker — tests depth and writes none, so it is
+occluded by anything that did write nearer depth and occludes nothing itself. Model tests **and writes**,
+because a mesh that writes no depth cannot occlude itself: its own back faces show through its front ones.
+Later entries paint on top of anything that wrote no nearer depth. Depth
 comparison is greater-or-equal, so a drawn thing at exactly the depth already drawn there is visible rather
 than discarded; altitude-0 content over the ground is the ordinary case of that, and needs no tie-break of
 its own now that nothing on the map plane writes depth to tie with. A **Model** is a real occluder, so a
@@ -294,10 +335,74 @@ _Avoid_: Layer, pass, stage
 
 ### Drawn things
 
+**Layer**:
+An integer ordering map-anchored **Sticker**, **Geometry** and **Model** entries across types. Lower layers
+draw first. Equal layers keep the compatibility order Geometry, Model, Sticker, each in source-list order.
+A screen-anchored Sticker ignores Layer and uses `position.z`; a Model remains a depth-writing occluder, so
+a later layer does not paint over a nearer Model (ADR 0096).
+_Avoid_: z-index, phase
+
 **Sticker**:
-A **Placement** paired with one PNG image identified by a **Resource Locator**, drawn as a centred local XY
-quad whose width and height are the image's pixel dimensions, with +x right, +y up, and +z normal.
+A **Placement** paired with one image identified by a **Resource Locator** -- a PNG, an **ETC2 Container** or a
+**Raw RGBA Container**, told apart by magic bytes -- drawn as a centred local XY quad whose width and height are the
+image's level-zero pixel dimensions, with +x right, +y up, and +z normal. A **Transient Sticker** is one whose
+image is dropped as soon as no open **Prepared Frame** leases it (ADR 0093). A Sticker may name an **External
+Frame** to replace that image at draw time; the image remains its required fallback and still determines the quad.
 _Avoid_: Marker, pin, decal, sprite
+
+**External Frame**:
+A consumer-selected sample from a live source, identified by a source id and a frame number and optionally drawn
+by a **Sticker** in place of its prepared fallback image. It names the sample to present, not transported image
+bytes or a resource to cache.
+_Avoid_: Video bytes, decoded image, animation frame, transport response
+
+**External Frame Source**:
+A consumer-owned producer that makes an **External Frame** available to the current **Render Context** when RenG
+draws it. Its lifetime follows registration and the Render Context that samples it; it is not a **Transport** or a
+stored resource.
+_Avoid_: Image provider, resource route, frame cache, transport adapter
+
+**Raw RGBA Container**:
+Uncompressed RGBA8 for a **Sticker** image (ADR 0092): the little-endian header `RRGB`, version 1, a flags byte
+whose bit 0 says the texels are already premultiplied, two zero bytes and a `u32` width and height, then exactly
+`width * height * 4` sRGB-encoded bytes, top row first. Admitted as a view of the stored bytes, never decoded or
+attached; straight texels are premultiplied at upload exactly as a PNG's are. One level, no mip chain.
+_Avoid_: Bitmap, raw frame, uncompressed PNG
+
+**Transient Sticker**:
+A **Sticker** with `transient = true` (ADR 0093): when the last lease on its image's resident generation goes,
+the generation is dropped at once rather than left to the LRU, and its texture is deleted at the next draw.
+A generation any open frame also uses non-transiently keeps the normal LRU behaviour. Meant for an image used
+once, such as a decoded video frame.
+_Avoid_: Ephemeral sticker, one-shot image, uncached sticker
+
+**ETC2 Container**:
+The one compressed form a **Sticker** image may take (ADR 0084): the little-endian header `RET2`, version 1,
+a format (ETC2 RGB8, RGB8 punch-through alpha, or RGBA8 EAC), a level count, a zero byte and a `u32` width
+and height, then exactly that mip chain's blocks. Its texels are sRGB-encoded and already premultiplied, so
+nothing premultiplies them again. A context that samples ETC2 receives the blocks and the chain as they
+are; one that cannot -- Apple's desktop GL -- receives RGBA8 decoded per level by RenG, which is a
+capability of the context, chosen before the upload, and never a recovery from one that failed.
+No mip level is ever generated for it. Backdrop and model-texture images stay PNG-only.
+_Avoid_: KTX, texture file, GIF frame, compressed PNG
+
+**Sticker Shader**:
+A consumer fragment program a **Sticker** may be drawn with instead of RenG's own (ADR 0087): a complete
+**Shader Profile** fragment shader writing premultiplied colour, with uniforms and data textures (at most
+fourteen, units one onwards) and an optional **Ground Rectangle**. RenG inserts a preamble after its
+directive -- the one injected include RenG makes -- giving `rengStickerColour()` (the plain sticker's colour),
+`rengStickerUv` (image orientation, top-left origin), `rengStickerGroundUv()` (the Ground Rectangle's
+Mercator-linear coordinate under the fragment's window pixel, on the flat plane at its declared
+altitudes, `vec2(-1.0)` above its horizon) and `rengStickerHasGround()` (per frame: false without a
+rectangle, under a globe, and when a Mercator camera cannot carry it -- which degrades the sticker
+rather than failing the frame). Placement, blend and depth are the plain sticker's. Names under
+`rengSticker` are reserved and `#extension` is refused.
+_Avoid_: Sticker material, mask, effect, region mask
+
+**Ground Rectangle**:
+A geographic rectangle on the ground, by a **Geometry**'s corner convention and validation, that a
+**Sticker Shader** reads ground coordinates against. It draws nothing itself.
+_Avoid_: Bounds, extent, region
 
 **Model**:
 A **Placement** paired with one GLB mesh locator, an optional base-colour texture override, and its
@@ -326,12 +431,50 @@ A shader-painted geographic rectangle defined by opposite `topLeft` and `bottomR
 Top-left latitude is strictly north of bottom-right latitude; its unwrapped longitude is strictly west,
 with a span no greater than `360` degrees. The northern edge uses `topLeft.z` altitude, the southern edge
 uses `bottomRight.z`, and altitude interpolates north-to-south. A **Geometry** carries no **Placement**,
-so it carries an **Altitude Mode** of its own.
+so it carries an **Altitude Mode** of its own. Its **Shader Pair** writes colour in premultiplied form.
+It may also be **Emissive**, which matters only when the **Frame Plan** carries a **Bloom**.
 _Avoid_: Layer, overlay, custom layer, primitive
+
+**Emissive**:
+A property of a **Geometry** whose ordinary colour should also seed the frame's **Bloom**. Emissive
+Geometry remains ordinary scene content and keeps the scene's depth occlusion; it is not a separate
+drawn-thing type and has no effect in a Frame Plan without Bloom.
+_Avoid_: Glow, halo, light source, post-effect, bloom flag
+
+**Bloom Reach**:
+A property of an **Emissive** **Geometry**, between zero and one, adding a wide-only far band to its
+**Bloom**: the emitter is drawn again, scaled by its reach and depth-tested like its emission redraw,
+into a full-resolution reach image whose downsample is added into the Bloom's chain at the Bloom's reach
+level, scaled by its reach gain. Only the levels at and below the reach level carry it, so it widens one
+emitter's halo without brightening the others'. Zero, the default, draws nothing extra.
+_Avoid_: Glow radius, spread, blur radius
+
+**Bloom**:
+The optional frame-wide screen-space spread and soft-shouldered composite of colour emitted by **Emissive**
+Geometry. Where the light is strong its halo takes the light's own hue on any ground, at the lightness
+the shoulder gives; its faint outer tail is plain added light. It controls intensity, the contribution of each resolution level, suppression inside opaque
+emission and whitening, the downsample level and gain that **Bloom Reach** is added at, and whether the
+emission chain is half-float, so emitted light can exceed one (where the context cannot render half-float
+colour the frame uses the eight-bit chain and reports `BLOOM_EMISSION_PRECISION_REDUCED`). It is composited immediately after the last Emissive Geometry in the Frame
+Plan's Geometry order: later Geometry, Models, Map Stickers, Map Labels and screen-anchored content
+cover it, while content already drawn receives it. A non-emissive Geometry between two emitters is
+therefore below the final emitter's Bloom boundary and receives the composite. The emission redraw
+happens before Models write depth: an emitter behind a Model still contributes to the halo beyond the
+Model's silhouette and to inside suppression, although the Model's own opaque pixels cover the
+composite when it draws. For the same ordering reason, an emitter-last frame is byte-identical to the
+older post-map placement only when no Models or Map Stickers follow it.
+_Avoid_: Glow, halo, post-effect, blur, emission
 
 **Shader Pair**:
 The `vertexSource` and `fragmentSource` shader sources a **Geometry** is painted with.
 _Avoid_: Program, material, effect
+
+**Consumer Pipeline Residency**:
+The renderer-local, count-bounded LRU shared by compiled Geometry, consumer Backdrop and **Sticker Shader** pipelines. Every
+pipeline used by a draw is leased until that complete draw returns, including failure cleanup; releasing the last
+lease immediately deletes least-recently-used unleased entries above the configured retained limit. Frame planning
+rejects more than the configured number of distinct consumer pipeline keys before acquisition or GL work.
+_Avoid_: Shader source cache, internal fixed pipeline, GPU byte budget
 
 **Shader Profile**:
 The single accepted shader source dialect — a GLSL ES 3.00 body whose first directive physical line, after
@@ -348,13 +491,16 @@ The fixed attribute and uniform names RenG binds by name in a compiled **Shader 
 **Shader Profile**'s substitution rule — ADR 0008 binds a documented name only when the compiled program
 declares it, and never fails a shader for omitting one. Attributes: `aPosition` (`vec3`), `aTexCoord`
 (`vec2`). Uniforms: `uModelViewProjection` (`mat4`); `uResolution` (`vec2`); `uGeometryBounds` (`vec4`,
-west/south/east/north degrees); `uFrameIndex` (`uint`). `uGeometryBounds` is explicitly informational and
+west/south/east/north degrees); `uFrameIndex` (`uint`); `rengGeometryEmissionPass` (`int`, zero for
+the ordinary draw and one for an Emissive redraw).
+`uGeometryBounds` is explicitly informational and
 unsuitable for placement arithmetic — placement stays camera-relative and exact through `aPosition` and
 `uModelViewProjection`, because Cycle B measured camera-relative Float error below 0.001 px and absolute
 degrees packed into a 32-bit float would discard that precision. `uFrameIndex` is narrowed from **Frame
 Plan**'s `frameIndex` (`Long`) because GLSL ES 3.00 has no 64-bit integer type, wrapping at roughly 2.3
 years of continuous 60fps; `frameIndex` is an ordering key rather than a clock, so that wrap is not a
-correctness hazard. See ADR 0024 for the hazard of renaming one of these names later.
+correctness hazard. A Geometry fragment shader writes premultiplied colour: each RGB channel already
+includes the output alpha. See ADR 0024 for the hazard of renaming one of these names later.
 _Avoid_: uniform preamble, injected include, varying, built-in attribute
 
 **Terrain**:
@@ -470,14 +616,15 @@ _Avoid_: Label animation, transition, hysteresis, label memory
 ### Resources
 
 **Frame Identity**:
-An internal versioned canonical binary encoding of one **Frame Plan**, identified as
-`reng-frame-v1:<lowercase SHA-256>`. The encoded root begins `RNGC`, schema byte `1`, and frame-kind byte `1`;
-strict tagged fields preserve every exact scalar, ordered list, duplicate, and canonicalized numeric bit under
-ADR 0018. Frame and animation indices use unsigned 64-bit big-endian payloads, enum and shader-profile values
-use unsigned 16-bit big-endian payloads, and canonically encoded strings reject isolated UTF-16 surrogates
-before exact UTF-8 encoding. RenG retains and compares canonical bytes before sharing and fails
-`IDENTITY_COLLISION` if one digest names different bytes. The key is not public API.
-_Avoid_: Public frame id, cache key, caller id
+Retired (ADR 0090). RenG used to encode every **Frame Plan** into an internal canonical root and hash it as
+`reng-frame-v1:<lowercase SHA-256>`, diff it against the previous frame's and register the digest, and no
+rendering, caching, resource, diagnostic or public path ever read any of it. A frame now has no identity.
+The canonical root-kind byte `1` stays reserved for frames, so no resource root's kind byte moves. One
+refusal the encoding made incidentally is kept explicitly: a uniform or texture name on a **Geometry**, a
+sticker program or a shader backdrop that contains an isolated UTF-16 surrogate fails planning, after spatial
+planning and before resource traversal. Resource identities (ADR 0018) and `IDENTITY_COLLISION` are
+unaffected.
+_Avoid_: Frame id, plan digest, cache key
 
 **Resource Locator**:
 A non-blank, opaque caller-supplied string identifying encoded resource bytes. RenG preserves its exact
@@ -520,11 +667,14 @@ _Avoid_: Cache predicate, mutable filter, locator query
 
 **Resource Generation**:
 One concrete loaded instance of a **Resource Key**'s content, holding its exact raw bytes and record
-metadata, its decoded or parsed product, and later its GPU allocations. Exactly one generation of a key is
+metadata and its decoded or parsed product. Its renderer-local monotonic generation identity also namespaces
+every reusable consumer texture, model image, and model primitive derived from it, including the subresource and
+upload variant. Exactly one generation of a key is
 current, and only the current generation satisfies a new **Resource Operation**. A generation superseded by
 different content stays usable while leased and disappears when its last lease closes. Freeing retires every
 generation of the matched keys: those with no lease go immediately, and the rest wait for their last lease.
-A retired generation is never resurrected, even when identical bytes return, so a free result stays a
+A GPU allocation derived later by an old Prepared Frame is born retired and is deleted when that draw's lease
+ends. A retired generation is never resurrected, even when identical bytes return, so a free result stays a
 truthful account of what happened at that instant.
 _Avoid_: Cache entry, version, revision, snapshot
 
@@ -601,7 +751,9 @@ and for the ones it proxies to Rentile. Requests carry the exact **Resource Loca
 selected **Resource Limits** byte ceiling, and only optional `ifNoneMatch`, `ifModifiedSince`, and `accept`
 metadata; their textual representation redacts the locator and all metadata values. A conditional `NORMAL`
 request sends exactly one validator, preferring a nonblank ETag over a nonblank last-modified value. Accept is
-fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract. Responses
+fixed by class: JSON, Mapbox vector tile, PNG, or GLB as specified by the Cycle B public contract, except that a
+sticker image accepts `image/x-reng-etc2, image/x-reng-rgba, image/png` (ADRs 0084, 0092). The response's content type never decides an
+image's form; its magic bytes do. Responses
 carry status, defensively copied bytes, and optional `contentType`, `etag`, `lastModified`, and
 `freshUntilEpochMillis`. Consumer response constructors snapshot and redact but deliberately admit malformed
 values; operation validation, not adapter-side construction, reports invalid status, bytes, metadata, or epochs
@@ -701,6 +853,8 @@ _Avoid_: Log message, arbitrary metadata, exception cause
 - A consumer may clear **Frame History** without freeing resources or invalidating prepared frames
 - One **Prepared Frame** draws into any number of **Render Target**s, and drawing does not consume it
 - One **Frame Plan** holds ordered lists of **Sticker**s, **Model**s, and **Geometry**s
+- One **Frame Plan** carries at most one **Bloom**, and each **Geometry** independently may be **Emissive**
+- Each **Emissive** **Geometry** carries its own **Bloom Reach**
 - List order is frame content, and each repeated equal value is a distinct drawn thing
 - Each **Sticker** and **Model** carries exactly one **Placement**
 - A **Geometry** carries no **Placement**; its geographic bounds establish its map-space footprint
@@ -716,8 +870,14 @@ _Avoid_: Log message, arbitrary metadata, exception cause
 - A violated uniqueness rule is an error; RenG never silently removes or repairs duplicates
 - Numeric construction canonicalizes only negative zero; non-finite, out-of-range, and malformed values
   are errors and are never clamped, wrapped, or repaired
-- Renderer-held resources remain resident without automatic LRU eviction until explicit free or
-  **Renderer Close**
+- Unleased CPU generations are evicted least-recently-used to the resident CPU byte ceiling after install,
+  decoded-image/model attachment, and the last lease release; eviction forgets a key and never marks it freed
+- A generation only **Transient Sticker**s used is dropped on its last lease release, counted apart from
+  eviction, never marked freed; its GPU texture is deleted at the next draw
+- Unleased measured GPU textures and model buffers are independently evicted least-recently-used to their byte
+  ceilings as soon as their last draw lease releases. Generation identity prevents reuse across reload or free
+- Consumer-authored Geometry and Backdrop pipelines share a count-bounded LRU; one frame also has a distinct-key
+  planning ceiling, and draw-scoped leases keep every pipeline in use alive until cleanup
 - Free retires leased generations without invalidating live **Prepared Frame**s; new preparation reloads a
   fresh generation and emits one warning
 - A free result is a linearized point-in-time account. If free wins a race with the last lease release, it

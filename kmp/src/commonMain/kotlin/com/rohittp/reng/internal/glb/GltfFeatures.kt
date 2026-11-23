@@ -31,7 +31,10 @@ private val SUPPORTED_WRAP_MODES = setOf(33071, 33648, 10497)
 private const val SUPPORTED_PRIMITIVE_MODE = 4
 
 /** The only embedded image media type RenG decodes. */
-private const val SUPPORTED_IMAGE_MEDIA_TYPE = "image/png"
+/** The two image media types core glTF 2.0 defines, and the only two RenG decodes. */
+internal const val GLTF_PNG_MEDIA_TYPE = "image/png"
+internal const val GLTF_JPEG_MEDIA_TYPE = "image/jpeg"
+private val SUPPORTED_IMAGE_MEDIA_TYPES = setOf(GLTF_PNG_MEDIA_TYPE, GLTF_JPEG_MEDIA_TYPE)
 
 /** The most joints one skin may declare. GLES 3.0 and GL 3.3 both guarantee a
  * `GL_MAX_UNIFORM_BLOCK_SIZE` of at least 16384 bytes, which is exactly 256 `mat4`, so a rig at
@@ -162,13 +165,12 @@ internal sealed interface GltfFeatureResult {
  *   `translation`, `rotation`, `scale` -- in practice, `weights`.
  * - [INTERPOLATION] covers any animation sampler whose `interpolation` is not `LINEAR` or `STEP`
  *   -- in practice, `CUBICSPLINE`.
- * - [IMAGE_MEDIA_TYPE] covers any image whose `mimeType` is not `image/png`, including an image
- *   with no declared `mimeType` at all. Checked only after [EXTERNAL_URI] on the same image, since
- *   a `uri`-sourced image legitimately omits `mimeType`. Re-decided rather than inherited when
- *   models were implemented: exactly one of the consumer's 41 models carries a JPEG texture, and a
- *   decoder RenG does not have is not worth building for a single asset. That model stays refused
- *   by a named code rather than silently, and the cheaper fix is upstream -- re-export it as PNG.
- *   It is the whole of why this cycle reaches 40 of 41 models rather than 41.
+ * - [IMAGE_MEDIA_TYPE] covers any image whose `mimeType` is neither `image/png` nor `image/jpeg`
+ *   -- the two core glTF 2.0 defines -- including an image with no declared `mimeType` at all, and
+ *   `image/webp` or `image/ktx2` without the extension that would make them legal. Checked only
+ *   after [EXTERNAL_URI] on the same image, since a `uri`-sourced image legitimately omits
+ *   `mimeType`. JPEG was refused here until ADR 0089: the consumer's catalogue grew JPEG-textured
+ *   models that could not be re-exported upstream, and a refused model fails every frame it is in.
  * - [EXTERNAL_URI] covers any buffer or image carrying a `uri`, `data:` URIs included: a resource
  *   named inside a GLB has no Resource Locator, no Resource Class, and no place in the operation's
  *   route set, so RenG has no correct way to resolve it (ADR 0021).
@@ -351,7 +353,7 @@ private class GltfFeatureValidator(private val document: GltfDocument) {
     private fun validateImages() {
         for (image in document.images) {
             if (image.uri != null) reject(GltfUnsupported.EXTERNAL_URI)
-            if (image.mimeType != SUPPORTED_IMAGE_MEDIA_TYPE) reject(GltfUnsupported.IMAGE_MEDIA_TYPE)
+            if (image.mimeType !in SUPPORTED_IMAGE_MEDIA_TYPES) reject(GltfUnsupported.IMAGE_MEDIA_TYPE)
         }
     }
 

@@ -46,7 +46,9 @@ matches the latched response and the stricter RenG record rules. A valid `304` i
 stale baseline and presented to Rentile as a bounded full response; every other redirect or disallowed status
 fails.
 
-Tile substitution remains disabled, and RenG never invokes Rentile's exact-tile retry helper. Internal
+Tile substitution remains disabled, and RenG never invokes Rentile's exact-tile retry helper. (A frame
+that opts into ADR 0057's `presentFailedTilesProvisionally` may draw a failed colour tile from an ancestor
+*already resident on RenG's GPU*; that is not engine substitution, and the engine call is unchanged.) Internal
 Rentile adapter counts are not public retries: only consumer Transport and Store calls define RenG's
 observable boundary. Adapter text, locators, validators, and causes never cross that boundary; cancellation
 remains an unwrapped coroutine cancellation rather than a RenG failure.
@@ -173,3 +175,17 @@ class takes the generic branch, and a DEM is now the same shape as the rest.
 `validatesDemTerrainEncoding` and its helper were deleted rather than left in place, since nothing called
 them. The decision this ADR makes — that Rentile is contained behind an operation-scoped firewall, and that
 every fetch and store crossing it is RenG's to mediate — is unchanged.
+
+---
+
+## Erratum, 2026-09-30 — a read-ahead window is a second, short-lived operation
+
+This ADR says an invocation's registry "is neither a renderer-lifetime response cache nor permission to
+share work across access modes", and describes the engine as reachable through one operation at a time.
+**Both rules stand. The second is widened in one place.** ADR 0075 adds `Renderer.readAhead`, which warms
+the basemap tiles of upcoming frames beside a running `prepare`. Each warm window gets a fresh registry of
+its own, in `NORMAL` mode, discarded when the window's `warmRawResources` call returns, and installed as a
+read-ahead operation next to the foreground one. The engine's callbacks route to the foreground operation
+first, then to the read-ahead one, and a Store write follows the latched transport digest, so a resource
+both operations know about is still exchanged once and no write is judged by a registry that never latched
+its bytes. No registry outlives the work it was opened for, which is the property the rule above protects.

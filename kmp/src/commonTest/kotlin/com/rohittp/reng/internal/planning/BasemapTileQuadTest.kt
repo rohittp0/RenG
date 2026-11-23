@@ -99,11 +99,49 @@ class BasemapTileQuadTest {
         assertEquals(coarse.centreYLogicalPixels + 128.0, fine.centreYLogicalPixels)
     }
 
+    @Test
+    fun poleCapRectanglesMeetTheirEdgeRowsOnExactlyTheSameLogicalPixel() {
+        val camera = nullIslandCamera()
+        val northTile = resolveBasemapTileQuad(instance(tileY = 0, unwrappedX = 8L), camera)
+        val northCap = resolveBasemapTileQuad(
+            instance(
+                tileY = 0,
+                unwrappedX = 8L,
+                cap = GroundCap.NORTH,
+                capSpanTiles = 3.0,
+            ),
+            camera,
+        )
+        assertEquals(
+            northTile.centreYLogicalPixels + northTile.heightLogicalPixels / 2.0,
+            northCap.centreYLogicalPixels - northCap.heightLogicalPixels / 2.0,
+        )
+
+        val southTile = resolveBasemapTileQuad(instance(tileY = 15, unwrappedX = 8L), camera)
+        val southCap = resolveBasemapTileQuad(
+            instance(
+                tileY = 15,
+                unwrappedX = 8L,
+                cap = GroundCap.SOUTH,
+                capSpanTiles = 2.0,
+            ),
+            camera,
+        )
+        assertEquals(
+            southTile.centreYLogicalPixels - southTile.heightLogicalPixels / 2.0,
+            southCap.centreYLogicalPixels + southCap.heightLogicalPixels / 2.0,
+        )
+        assertEquals(3.0 * northTile.sideLogicalPixels, northCap.heightLogicalPixels)
+        assertEquals(2.0 * southTile.sideLogicalPixels, southCap.heightLogicalPixels)
+    }
+
     private fun instance(
         lod: Int = 4,
         tileY: Int,
         unwrappedX: Long,
         instanceCopy: Int = 0,
+        cap: GroundCap? = null,
+        capSpanTiles: Double = 1.0,
     ): BasemapTileInstance {
         val tileCount = 1L shl lod
         val copy = if (unwrappedX >= 0) unwrappedX / tileCount else (unwrappedX - tileCount + 1) / tileCount
@@ -113,6 +151,8 @@ class BasemapTileQuadTest {
             unwrappedX = unwrappedX,
             instanceCopy = if (instanceCopy != 0) instanceCopy else copy.toInt(),
             canonicalX = (unwrappedX - copy * tileCount).toInt(),
+            cap = cap,
+            capSpanTiles = capSpanTiles,
         )
     }
 

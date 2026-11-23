@@ -61,6 +61,20 @@ public enum class ResourceClass {
      * silently renumber.
      */
     BASEMAP_GLYPH_RANGE,
+
+    /**
+     * One repeating image a frame paints behind everything it draws (ADR 0068). Appended after
+     * [BASEMAP_GLYPH_RANGE] for the reason that constant's own note gives -- no existing ordinal,
+     * wire value or report-order entry moves, and both of the latter are explicit tables a
+     * reordering would silently renumber.
+     *
+     * It carries a sticker image's byte ceiling, because it is the same kind of bytes, but only the PNG
+     * half of a sticker image's form: the `DECODE_PNG` gate and a PNG accept value, never the ETC2
+     * container (ADR 0084). Nor does it share `STICKER_IMAGE`'s *list*: `RenGRenderer` pairs that
+     * class's references with `FramePlan.stickers` by index, and a
+     * backdrop among them is an off-by-one in every sticker's texture.
+     */
+    BACKDROP_IMAGE,
 }
 
 public enum class ResourceKind {
@@ -93,16 +107,14 @@ public data class ResourceLimits(
      * as `pixelCount > maximumDecodedImageBytes / 4`, so this value divided by four is a pixel count.
      *
      * **Raised from 64 MiB to 256 MiB by Cycle E-labels, because the engine packs glyph atlases this
-     * decoder would otherwise refuse.** Rentile's own recorded worst case is 159 glyph ranges in one
-     * plan at 8192x4357 -- 35,684,864 pixels, needing about 136 MiB. Against the old 64 MiB the
-     * ceiling was 16,777,216 pixels, roughly 73 full ranges, and a denser multilingual viewport did
-     * not degrade: `decodePng` answered `TooLarge` and the whole frame failed
-     * `RESOURCE_DECODE_FAILED`. 256 MiB clears the engine's worst case by 1.88x.
+     * decoder would otherwise refuse.** Rentile's worst recorded case is 159 glyph ranges in one plan
+     * at 8192x4357 -- 35,684,864 pixels, about 136 MiB -- where the old ceiling admitted roughly 73
+     * ranges and a denser multilingual viewport failed the whole frame `RESOURCE_DECODE_FAILED`
+     * rather than degrading. 256 MiB clears that worst case by 1.88x.
      *
-     * This limit is still **shared** with every raster RenG decodes -- sticker images, model textures,
-     * basemap tiles -- which is Cycle F-2's recorded debt rather than a decision taken here. Raising it
-     * raises their ceiling too; giving the atlas its own public field was the alternative and was not
-     * taken, so a consumer tightening this for rasters can still starve the atlas.
+     * Still **shared** with every raster RenG decodes -- sticker images, model textures, basemap
+     * tiles -- which is recorded debt rather than a decision taken here: a consumer
+     * tightening this for rasters can still starve the atlas.
      */
     public val maximumDecodedImageBytes: Long = 256L * 1024L * 1024L,
     public val maximumModelJsonChunkBytes: Long = 16L * 1024L * 1024L,
@@ -110,20 +122,128 @@ public data class ResourceLimits(
      * The byte budget for resident GPU texture memory: everything an unleased upload -- for
      * example a basemap tile with no live [com.rohittp.reng.internal.gl.GlObjectRegistry] lease
      * left on it -- may keep occupying on the GPU before least-recently-used eviction reclaims it.
-     * A texture still leased by a live Prepared Frame is never evicted, even past this budget:
-     * this field bounds what MAY stay resident, never what MUST. Deliberately independent of the
-     * Tile Budget (`maximumBasemapTileInstances`) -- a tile count means a different number of
-     * bytes at every tile size and on every device, so deriving one from the other would hide the
-     * real cost from whoever configures it.
+     * A texture still leased by a live Prepared Frame is never evicted, even past this budget: this
+     * bounds what MAY stay resident, never what MUST. Deliberately independent of the Tile Budget
+     * (`maximumBasemapTileInstances`) -- a tile count means a different number of bytes at every tile
+     * size and on every device, so deriving one from the other would hide the real cost.
      *
-     * The two *defaults* are nonetheless sized to agree, which is a different claim: 512 canonical
-     * 512x512 RGBA8 tiles are exactly 512 MiB, so a frame at the default tile ceiling cannot thrash
-     * against the default budget. The two sat 4x apart until a level 3840x2160 camera was measured
-     * reaching 167 tiles. This is an eviction threshold rather than a reservation, so the larger
-     * default costs nothing until a frame genuinely needs it. A consumer who changes either number
-     * is back to reasoning in bytes themselves, which is what the independence above is for.
+     * The two *defaults* are nonetheless sized to agree: 512 canonical 512x512 RGBA8 tiles are
+     * exactly 512 MiB, so a frame at the default tile ceiling cannot thrash against the default
+     * budget. This is an eviction threshold rather than a reservation, so the larger default costs nothing until a
+     * frame needs it.
      */
     public val maximumResidentGpuTextureBytes: Long = 512L * 1024L * 1024L,
+    /**
+     * How many bytes of **raw, not-yet-uploaded** basemap tile pixels every open Prepared Frame may
+     * hold between them before a preparation stops asking Rentile for pixels and asks for PNGs
+     * instead (ADR 0044).
+     *
+     * A prepared frame retains its tile bytes until it is drawn, because `prepare()` cannot upload:
+     * it may resume off the thread holding the render context. Raw is roughly ten times encoded -- a
+     * 512x512 tile is 1 MiB of RGBA8 against about 100 KB as a PNG -- so skipping the encode trades
+     * CPU for a residency the *caller* sizes, by choosing how many frames it prepares before drawing.
+     *
+     * Above this the ground path takes the encode and the decode, which is what every release before
+     * ADR 0044 did: the fallback is the old behaviour reached deliberately, not a degraded mode.
+     *
+     * The default is 64 tiles at the default 512 px output -- more than any single frame's ground
+     * plane, far less than a batch's worth.
+     *
+     * **Declared last, and that is an ABI decision.** Every field before it is positional in shipped
+     * consumer code; appending one with a default leaves all of it compiling, where inserting one
+     * would silently re-bind every positional construction.
+     */
+    public val maximumInFlightRawBasemapTileBytes: Long = 64L * 1024L * 1024L,
+    /**
+     * How many bytes of **encoded, unleased** consumer resources may stay resident on the CPU before
+     * least-recently-used eviction reclaims them (ADR 0047).
+     *
+     * Bounds what `acquireFrameResources` installs: the compiled style document, every sticker and
+     * geometry-consumer image, every model GLB. **Not** rendered basemap tiles, which are never
+     * installed in that cache -- those are bounded by [maximumResidentGpuTextureBytes] and, in
+     * flight, by [maximumInFlightRawBasemapTileBytes].
+     *
+     * A resource still leased by a live Prepared Frame is never evicted, even past this budget: this
+     * bounds what **may** stay resident, never what **must**.
+     *
+     * The default sits below [maximumDecodedImageBytes], a per-image ceiling rather than a total,
+     * and below the GPU budget: these are encoded bytes, and a consumer holding more than this in
+     * resources nothing is drawing is holding something it is not using.
+     *
+     * Declared last, for the ABI reason [maximumInFlightRawBasemapTileBytes] already gives.
+     */
+    public val maximumResidentCpuResourceBytes: Long = 128L * 1024L * 1024L,
+    /**
+     * How many basemap tiles one `prepare()` may rasterise before it starts drawing the rest from
+     * resident ancestors instead (ADR 0057).
+     *
+     * **Defaults to no limit, and with no limit nothing changes**: every frame rasterises every tile
+     * it selected, as every release before this one did. The trade it offers -- a frame sooner, at a
+     * lower resolution, for a few frames -- is a decision about an application's feel, and RenG is
+     * not in a position to make it for anyone.
+     *
+     * A tile with no resident ancestor is rasterised whatever this says: the budget bounds the work a
+     * frame **adds** and can never make it draw nothing.
+     *
+     * Refinement needs no background work: a tile this frame skipped is still not resident, so the
+     * next `prepare()` selects and rasterises it under that frame's own budget. An animation loop
+     * gets coarse ground immediately and sharper over the next few frames; a consumer preparing one
+     * still should leave this unset.
+     *
+     * `Int.MAX_VALUE` means unlimited and is the default. Zero is admissible and means "rasterise
+     * nothing that has an ancestor", which is the most aggressive form of the same trade.
+     *
+     * Declared last, for the ABI reason [maximumInFlightRawBasemapTileBytes] already gives.
+     */
+    public val maximumTilesRasterisedPerFrame: Int = Int.MAX_VALUE,
+    /**
+     * Peak CPU bytes one PNG decode may require, projected from IHDR before allocating its output.
+     * The streaming decoder retains one final RGBA image and two source-width rows rather than
+     * several full rasters. A separate ceiling keeps hostile, extremely wide images from turning
+     * those otherwise-small row workspaces into another process-sized allocation.
+     *
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
+     */
+    public val maximumImageDecodeWorkingBytes: Long = 512L * 1024L * 1024L,
+    /**
+     * Byte budget for unleased model vertex and index buffers retained on the GPU. Kept separate
+     * from [maximumResidentGpuTextureBytes] so image-heavy and geometry-heavy applications can tune
+     * the two independent driver allocations without one silently consuming the other's allowance.
+     *
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
+     */
+    public val maximumResidentGpuBufferBytes: Long = 512L * 1024L * 1024L,
+    /**
+     * Hard aggregate CPU-payload ceiling for every open Prepared Frame. Each leased resource
+     * generation's encoded and decoded bytes are charged once no matter how many open frames share
+     * it; frame-owned basemap, terrain, pose and label payloads are charged once per frame.
+     *
+     * This closes the deliberate hole in [maximumResidentCpuResourceBytes]: that value is an LRU
+     * threshold for unleased resources, while an open Prepared Frame's lease must win over eviction.
+     * Without a separate admission ceiling, a consumer can keep opening frames over unique resources
+     * until process memory is exhausted even though the resident cache is nominally over budget.
+     *
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
+     */
+    public val maximumInFlightPreparedFrameCpuBytes: Long = 1024L * 1024L * 1024L,
+    /**
+     * A GPU texture budget of their own for **content** textures -- sticker images, model and
+     * geometry-consumer textures, label text textures -- or `null` (the default) for one pool shared
+     * with basemap tiles under [maximumResidentGpuTextureBytes], exactly as before this field existed.
+     *
+     * When set, [maximumResidentGpuTextureBytes] bounds the key-registered textures alone -- basemap
+     * tiles, DEMs, and the basemap's glyph and sprite atlases -- and each pool evicts only for its own
+     * pressure. Why: content is drawn every frame, so under one shared LRU it is always the most
+     * recent and tiles take every eviction; enough content shrinks what is left below the tiles'
+     * working set and every frame re-rasterises tiles (ADR 0047).
+     *
+     * Declared last so positional construction still compiles. Source-compatible but binary-breaking:
+     * the constructor's and `copy`'s signatures change, so a consumer recompiles against this release.
+     */
+    public val maximumResidentGpuContentTextureBytes: Long? = null,
 ) {
     init {
         val minimum = 1L
@@ -160,6 +280,35 @@ public data class ResourceLimits(
         }
         require(maximumResidentGpuTextureBytes in minimum..maximum) {
             "maximumResidentGpuTextureBytes must be within the supported range"
+        }
+        // Zero is admissible here and nowhere else on this type: it is how a consumer says "never
+        // hold raw pixels", which is a coherent choice (every preparation takes the PNG path) and
+        // not the degenerate "no budget at all" that a zero means for every other field above.
+        require(maximumInFlightRawBasemapTileBytes in 0L..maximum) {
+            "maximumInFlightRawBasemapTileBytes must be within the supported range"
+        }
+        // Zero is admissible for the same reason it is above: it says "keep nothing unleased", which
+        // is coherent -- every resource is evicted the moment its last frame closes.
+        require(maximumResidentCpuResourceBytes in 0L..maximum) {
+            "maximumResidentCpuResourceBytes must be within the supported range"
+        }
+        // Zero is admissible for the same reason the two byte budgets above admit it: it is a
+        // coherent choice ("rasterise nothing that has an ancestor"), not the degenerate absence of
+        // a budget.
+        require(maximumTilesRasterisedPerFrame >= 0) {
+            "maximumTilesRasterisedPerFrame must not be negative"
+        }
+        require(maximumImageDecodeWorkingBytes in minimum..maximum) {
+            "maximumImageDecodeWorkingBytes must be within the supported range"
+        }
+        require(maximumResidentGpuBufferBytes in minimum..maximum) {
+            "maximumResidentGpuBufferBytes must be within the supported range"
+        }
+        require(maximumInFlightPreparedFrameCpuBytes in minimum..maximum) {
+            "maximumInFlightPreparedFrameCpuBytes must be within the supported range"
+        }
+        require(maximumResidentGpuContentTextureBytes == null || maximumResidentGpuContentTextureBytes in minimum..maximum) {
+            "maximumResidentGpuContentTextureBytes must be within the supported range"
         }
     }
 }

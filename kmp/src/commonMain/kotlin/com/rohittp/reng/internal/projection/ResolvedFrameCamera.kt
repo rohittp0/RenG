@@ -42,4 +42,13 @@ internal sealed interface ResolvedFrameCamera {
     val cameraBack: DoubleVector3
     val viewMatrix: DoubleMatrix4
     val projectionMatrix: DoubleMatrix4
+
+    /**
+     * `projectionMatrix * viewMatrix`, computed once when the camera is resolved rather than again for
+     * every projected point, ground tile, geometry and sticker that needs it. It is the same product of
+     * the same two matrices in the same order, so every caller's result is bit-identical to multiplying
+     * them itself -- and matrix products group left to right, so `projection * view * model` always was
+     * `(projection * view) * model`.
+     */
+    val viewProjection: DoubleMatrix4
 }

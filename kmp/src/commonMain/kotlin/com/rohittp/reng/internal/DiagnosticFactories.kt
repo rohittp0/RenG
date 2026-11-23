@@ -30,10 +30,16 @@ internal enum class DiagnosticField(internal val wireName: String) {
     BASEMAP_TILE_INSTANCES("basemapTileInstances"),
     RESPONSE_BODY_BYTES("responseBodyBytes"),
     RESOURCE("resource"),
-    FRAME_IDENTITY("frameIdentity"),
     ANIMATION_SELECTOR("animationSelector"),
     SHADER_PAIR("shaderPair"),
     RENDER_TARGET("renderTarget"),
+    PREPARED_FRAME_CPU_BYTES("preparedFrameCpuBytes"),
+
+    /** ADR 0087: a sticker program's source, refused at planning. Appended, so nothing moves. */
+    STICKER_SHADER_FRAGMENT_SOURCE("sticker.shader.fragmentSource"),
+
+    /** ADR 0087: a sticker program's ground rectangle, which a draw could not carry. */
+    STICKER_SHADER_GROUND("sticker.shader.ground"),
 }
 
 internal fun failureContextDiagnostic(
@@ -77,6 +83,53 @@ internal fun basemapNotConfiguredDiagnostic(): Diagnostic =
         code = DiagnosticCode.BASEMAP_NOT_CONFIGURED,
         severity = DiagnosticSeverity.WARNING,
         stage = PipelineStage.BASEMAP_RENDER,
+    )
+
+/**
+ * One per drawn frame that presented any provisional ground at all (ADR 0057) — never one per tile,
+ * for the reason [terrainCoverageIncompleteDiagnostic] gives for counting rather than listing.
+ */
+internal fun groundPresentedProvisionallyDiagnostic(tileCount: Int): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.GROUND_PRESENTED_PROVISIONALLY,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+        limit = 0L,
+        actual = tileCount.toLong(),
+    )
+
+/**
+ * [count] of this frame's sticker programs declared a ground rectangle the frame's Mercator camera
+ * cannot carry -- beyond its latitude limit or world-copy bounds -- and drew without one (ADR 0087):
+ * `rengStickerHasGround()` false and `rengStickerGroundUv()` off-rectangle everywhere.
+ */
+internal fun stickerGroundUnavailableDiagnostic(count: Int): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.STICKER_GROUND_UNAVAILABLE,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+        fieldName = DiagnosticField.STICKER_SHADER_GROUND.wireName,
+        limit = 0L,
+        actual = count.toLong(),
+    )
+
+internal fun bloomUnavailableDiagnostic(): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.BLOOM_UNAVAILABLE,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
+    )
+
+/**
+ * A frame asked for [com.rohittp.reng.Bloom.highPrecisionEmission] and drew its bloom with the
+ * RGBA8 emission chain instead, because the context cannot render to half-float colour or refused a
+ * half-float target (ADR 0085). Light an emitter wrote above one was clipped to one.
+ */
+internal fun bloomEmissionPrecisionReducedDiagnostic(): Diagnostic =
+    Diagnostic(
+        code = DiagnosticCode.BLOOM_EMISSION_PRECISION_REDUCED,
+        severity = DiagnosticSeverity.WARNING,
+        stage = PipelineStage.DRAW,
     )
 
 /**
@@ -230,8 +283,8 @@ internal fun requireAllowedFailureContext(
 
         is FailureRule.Context -> {
             requireNotNull(diagnostic) { "this failure requires a diagnostic" }
-            require(diagnostic.code == DiagnosticCode.FAILURE_CONTEXT) {
-                "failure diagnostics must be failure context"
+            require(diagnostic.code in rule.diagnosticCodes) {
+                "failure diagnostic code is not allowlisted"
             }
             require(diagnostic.severity == DiagnosticSeverity.ERROR) {
                 "failure diagnostics must be errors"
@@ -264,9 +317,10 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
         DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
         DiagnosticField.GEOMETRY_ALTITUDE,
         DiagnosticField.BASEMAP_TILE_INSTANCES,
-        DiagnosticField.FRAME_IDENTITY,
         DiagnosticField.SHADER_PAIR,
+        DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
     ),
+    PipelineStage.FRAME_PREPARATION to setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
     PipelineStage.RESOURCE_LOOKUP to setOf(DiagnosticField.RESOURCE),
     PipelineStage.STORE_VALIDATION to setOf(DiagnosticField.RESOURCE),
     PipelineStage.TRANSPORT_VALIDATION to setOf(DiagnosticField.RESPONSE_BODY_BYTES),
@@ -282,7 +336,7 @@ private val diagnosticFieldsByStage: Map<PipelineStage, Set<DiagnosticField>> = 
     // resident -- see `RenGRenderer.performDraw`. Naming the tile is the whole value of the
     // failure; without this entry the only reportable shape would be a bare GPU_OPERATION_FAILED,
     // which sends a consumer to inspect GL state for a fault that is in their resource limits.
-    PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE),
+    PipelineStage.DRAW to setOf(DiagnosticField.RESOURCE, DiagnosticField.STICKER_SHADER_GROUND),
     // The label stage carries the same bare `resource` field the route failures do, and for the same
     // reason: the only failure allowlisted here is one about a source RenG could not route, and it
     // has no identity to name. Nothing about a label -- its text, its layer, its script -- is a
@@ -295,12 +349,15 @@ private sealed interface FailureRule {
 
     data class Context(
         val fields: Set<DiagnosticField?>,
+        val diagnosticCodes: Set<DiagnosticCode> = setOf(DiagnosticCode.FAILURE_CONTEXT),
+        val fieldsByDiagnosticCode: Map<DiagnosticCode, Set<DiagnosticField?>> = emptyMap(),
         val identity: IdentityRequirement = IdentityRequirement.FORBIDDEN,
         val status: PresenceRequirement = PresenceRequirement.FORBIDDEN,
         val numericLimit: PresenceRequirement = PresenceRequirement.FORBIDDEN,
     ) : FailureRule {
         fun matches(diagnostic: Diagnostic): Boolean =
-            fields.any { it?.wireName == diagnostic.fieldName } &&
+            fieldsByDiagnosticCode.getOrElse(diagnostic.code) { fields }
+                .any { it?.wireName == diagnostic.fieldName } &&
                 identity.matches(diagnostic.resourceKey) &&
                 status.matches(diagnostic.statusCode != null) &&
                 numericLimit.matches(diagnostic.limit != null) &&
@@ -326,6 +383,18 @@ private enum class IdentityRequirement {
     REQUIRED_GEOMETRY_PROGRAM {
         override fun matches(key: ResourceKey?): Boolean =
             key?.kind == ResourceKind.GEOMETRY_PROGRAM && key.resourceClass == null
+    },
+
+    /**
+     * A program compiled from source a consumer wrote: a geometry's, or -- since ADR 0071 -- a
+     * backdrop's, which is keyed as an internal pipeline because its role is RenG's even though its
+     * text is not. Both carry no resource class.
+     */
+    REQUIRED_CONSUMER_PROGRAM {
+        override fun matches(key: ResourceKey?): Boolean =
+            key != null &&
+                key.resourceClass == null &&
+                (key.kind == ResourceKind.GEOMETRY_PROGRAM || key.kind == ResourceKind.INTERNAL_PIPELINE)
     },
     OPTIONAL_ANY {
         override fun matches(key: ResourceKey?): Boolean = true
@@ -364,6 +433,14 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
                     DiagnosticField.GEOMETRY_UNWRAPPED_LONGITUDE,
                     DiagnosticField.GEOMETRY_ALTITUDE,
                     DiagnosticField.SHADER_PAIR,
+                    DiagnosticField.STICKER_SHADER_FRAGMENT_SOURCE,
+                ),
+                diagnosticCodes = setOf(
+                    DiagnosticCode.FAILURE_CONTEXT,
+                    DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE,
+                ),
+                fieldsByDiagnosticCode = mapOf(
+                    DiagnosticCode.BASEMAP_STYLE_INDEX_OUT_OF_RANGE to setOf(DiagnosticField.FRAME_INDEX),
                 ),
             )
 
@@ -384,7 +461,17 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
 
         RenGErrorCode.RESOURCE_LIMIT_EXCEEDED -> when (stage) {
             PipelineStage.FRAME_PLANNING -> FailureRule.Context(
-                fields = setOf(DiagnosticField.PLANS, DiagnosticField.BASEMAP_TILE_INSTANCES),
+                fields = setOf(
+                    DiagnosticField.PLANS,
+                    DiagnosticField.BASEMAP_TILE_INSTANCES,
+                    // maximumConsumerPipelinesPerFrame: the distinct consumer programs one plan names.
+                    DiagnosticField.SHADER_PAIR,
+                ),
+                numericLimit = PresenceRequirement.REQUIRED,
+            )
+
+            PipelineStage.FRAME_PREPARATION -> FailureRule.Context(
+                fields = setOf(DiagnosticField.PREPARED_FRAME_CPU_BYTES),
                 numericLimit = PresenceRequirement.REQUIRED,
             )
 
@@ -463,6 +550,18 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             PipelineStage.RENDERER_CLOSE,
         )
 
+        // The same four stages as DIFFERENT_CURRENT_RENDER_CONTEXT above, and for the same reason:
+        // both say "the context you promised is not the one here", one by identity and one by the
+        // thread that identity was fixed on (ADR 0056). CONTEXT_ADOPTION is absent because adoption
+        // is where the thread is set, never where it is refused.
+        RenGErrorCode.RENDER_CONTEXT_THREAD_CHANGED -> noDiagnosticAt(
+            stage,
+            PipelineStage.RENDER_TARGET,
+            PipelineStage.DRAW,
+            PipelineStage.RESOURCE_FREE,
+            PipelineStage.RENDERER_CLOSE,
+        )
+
         RenGErrorCode.UNSUPPORTED_RENDER_CONTEXT -> noDiagnosticAt(
             stage,
             PipelineStage.CONTEXT_ADOPTION,
@@ -489,11 +588,18 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             FailureRule.Context(setOf(DiagnosticField.RESOURCE)),
         )
 
-        RenGErrorCode.RESOURCE_UNAVAILABLE -> ruleAt(
-            stage,
-            PipelineStage.RESOURCE_LOOKUP,
-            externalResourceRule,
-        )
+        RenGErrorCode.RESOURCE_UNAVAILABLE -> when (stage) {
+            PipelineStage.RESOURCE_LOOKUP -> externalResourceRule
+
+            // A rendered basemap tile whose texture was evicted between the frame's preparation and
+            // its draw (`RenGRenderer.resolveGroundTiles`, ADR 0046), named by its BASEMAP_TILE key --
+            // RESOURCE_DECODE_FAILED's DRAW pair below, for the same reason. Without this pair the
+            // typed eviction failure would surface as an IllegalArgumentException ("error code is not
+            // valid at this pipeline stage") that no consumer could answer by preparing again.
+            PipelineStage.DRAW -> establishedResourceRule
+
+            else -> null
+        }
 
         RenGErrorCode.TRANSPORT_EXECUTION_FAILED -> ruleAt(
             stage,
@@ -566,7 +672,9 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             PipelineStage.SHADER_COMPILATION,
             FailureRule.Context(
                 fields = setOf(DiagnosticField.SHADER_PAIR),
-                identity = IdentityRequirement.REQUIRED_GEOMETRY_PROGRAM,
+                // Widened from REQUIRED_GEOMETRY_PROGRAM by ADR 0071: a consumer's backdrop shader
+                // fails with these codes too, under an internal-pipeline key.
+                identity = IdentityRequirement.REQUIRED_CONSUMER_PROGRAM,
             ),
         )
 
@@ -587,8 +695,8 @@ private fun failureRule(code: RenGErrorCode, stage: PipelineStage): FailureRule?
             null
         }
 
+        // Resources only: a frame's identity never collides since ADR 0081 keeps frames by digest.
         RenGErrorCode.IDENTITY_COLLISION -> when (stage) {
-            PipelineStage.FRAME_PLANNING -> FailureRule.Context(setOf(DiagnosticField.FRAME_IDENTITY))
             PipelineStage.RESOURCE_LOOKUP -> establishedResourceRule
             else -> null
         }

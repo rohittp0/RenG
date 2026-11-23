@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 
 class FramePlanTest {
     @Test
@@ -29,6 +30,8 @@ class FramePlanTest {
         assertEquals(emptyList(), plan.stickers)
         assertEquals(emptyList(), plan.models)
         assertEquals(emptyList(), plan.geometries)
+        assertEquals(null, plan.bloom)
+        assertEquals(null, plan.basemap)
     }
 
     /**
@@ -66,6 +69,79 @@ class FramePlanTest {
     @Test
     fun framePlanRequiresANonNegativeIndex() {
         assertFailsWith<IllegalArgumentException> { FramePlan(-1, camera()) }
+    }
+
+    @Test
+    fun bloomParticipatesInEqualityAndHashing() {
+        val absent = FramePlan(0, camera())
+        val first = FramePlan(0, camera(), bloom = Bloom(intensity = 2f))
+        val equal = FramePlan(0, camera(), bloom = Bloom(intensity = 2f))
+        val different = FramePlan(0, camera(), bloom = Bloom(intensity = 3f))
+
+        assertNotEquals(absent, first)
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertNotEquals(first, different)
+        assertNotEquals(first.hashCode(), different.hashCode())
+        assertEquals(first.bloom, first.bloomForCore())
+    }
+
+    @Test
+    fun basemapParticipatesInEqualityHashingAndCoreAccess() {
+        val selection = BasemapSelection(
+            style = 1,
+            blend = BasemapBlend(toStyle = 2, mask = BlendMask.Uniform(amount = 0.5f)),
+        )
+        val absent = FramePlan(frameIndex = 0, camera = camera())
+        val first = FramePlan(frameIndex = 0, camera = camera(), basemap = selection)
+        val equal = FramePlan(frameIndex = 0, camera = camera(), basemap = selection)
+        val different = FramePlan(
+            frameIndex = 0,
+            camera = camera(),
+            basemap = BasemapSelection(style = 2),
+        )
+
+        assertNotEquals(absent, first)
+        assertEquals(first, equal)
+        assertEquals(first.hashCode(), equal.hashCode())
+        assertNotEquals(first, different)
+        assertNotEquals(first.hashCode(), different.hashCode())
+        assertEquals(selection, first.basemapForCore())
+    }
+
+    @Test
+    fun basemapValuesValidateEveryFiniteRangeAndDistinctTarget() {
+        assertFailsWith<IllegalArgumentException> {
+            BasemapSelection(
+                style = 1,
+                blend = BasemapBlend(toStyle = 1, mask = BlendMask.Uniform(amount = 0.5f)),
+            )
+        }
+        listOf(Float.NaN, Float.POSITIVE_INFINITY, -0.01f, 1.01f).forEach { amount ->
+            assertFailsWith<IllegalArgumentException> { BlendMask.Uniform(amount = amount) }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = Float.NaN, centreY = 0f, radius = 0f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = Float.NEGATIVE_INFINITY, radius = 0f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = 0f, radius = -0.01f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Radial(centreX = 0f, centreY = 0f, radius = 0f, feather = -0.01f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = Float.NaN, position = 0.5f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = 0f, position = 1.01f, feather = 0f)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BlendMask.Linear(angleRadians = 0f, position = 0.5f, feather = -0.01f)
+        }
+        assertEquals(0f, BlendMask.Uniform(amount = -0.0f).amount)
     }
 
     @Test
@@ -117,12 +193,39 @@ class FramePlanTest {
         assertGetterIsIndependent(listOf(model), singleton.models) { singleton.models }
         assertGetterIsIndependent(emptyList<Geometry>(), empty.geometries) { empty.geometries }
         assertGetterIsIndependent(listOf(geometry), singleton.geometries) { singleton.geometries }
-        assertGetterIsIndependent(emptyList<Sticker>(), empty.stickersForCore()) { empty.stickersForCore() }
-        assertGetterIsIndependent(listOf(sticker), singleton.stickersForCore()) { singleton.stickersForCore() }
-        assertGetterIsIndependent(emptyList<Model>(), empty.modelsForCore()) { empty.modelsForCore() }
-        assertGetterIsIndependent(listOf(model), singleton.modelsForCore()) { singleton.modelsForCore() }
-        assertGetterIsIndependent(emptyList<Geometry>(), empty.geometriesForCore()) { empty.geometriesForCore() }
-        assertGetterIsIndependent(listOf(geometry), singleton.geometriesForCore()) { singleton.geometriesForCore() }
+    }
+
+    /**
+     * The core accessors are RenG's own reads and hand out the snapshot itself, uncopied: the same
+     * instance on every call, equal to what the public getter copies, which stays a fresh list each time.
+     */
+    @Test
+    fun theCoreAccessorsReturnTheSnapshotWhileThePublicGettersStillCopy() {
+        val sticker = Sticker(screenPlacement(), ResourceLocator("sticker"))
+        val model = Model(screenPlacement(), ResourceLocator("model"))
+        val geometry = Geometry(
+            Vector3(1.0, 2.0, 3.0),
+            Vector3(0.0, 3.0, 4.0),
+            ShaderPair("vertex", "fragment"),
+        )
+        val plan = FramePlan(
+            frameIndex = 1,
+            camera = camera(),
+            stickers = listOf(sticker),
+            models = listOf(model),
+            geometries = listOf(geometry),
+        )
+
+        assertSame(plan.stickersForCore(), plan.stickersForCore())
+        assertSame(plan.modelsForCore(), plan.modelsForCore())
+        assertSame(plan.geometriesForCore(), plan.geometriesForCore())
+        assertEquals(plan.stickers, plan.stickersForCore())
+        assertEquals(plan.models, plan.modelsForCore())
+        assertEquals(plan.geometries, plan.geometriesForCore())
+        assertNotSame(plan.stickers, plan.stickersForCore())
+        assertNotSame(plan.stickers, plan.stickers)
+        assertNotSame(plan.models, plan.models)
+        assertNotSame(plan.geometries, plan.geometries)
     }
 
     @Test

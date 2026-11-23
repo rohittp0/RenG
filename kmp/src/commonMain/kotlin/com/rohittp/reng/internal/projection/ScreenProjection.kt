@@ -208,7 +208,7 @@ internal fun projectCameraRelativeLogicalPosition(
     camera: ResolvedMercatorCamera,
     logicalPosition: DoubleVector3,
 ): ScreenProjection = projectCameraRelativeLogicalPosition(
-    viewProjection = camera.projectionMatrix * camera.viewMatrix,
+    viewProjection = camera.viewProjection,
     outputPixelSize = camera.outputPixelSize,
     logicalPosition = logicalPosition,
 )
@@ -235,7 +235,7 @@ internal fun projectCameraRelativeLogicalPosition(
     camera: ResolvedGlobeCamera,
     logicalPosition: DoubleVector3,
 ): ScreenProjection = projectCameraRelativeLogicalPosition(
-    viewProjection = camera.projectionMatrix * camera.viewMatrix,
+    viewProjection = camera.viewProjection,
     outputPixelSize = camera.outputPixelSize,
     logicalPosition = logicalPosition,
 )
@@ -256,9 +256,5 @@ internal fun projectCameraRelativeLogicalPosition(
 
     return ScreenProjection.Projected(pixelX = pixelX, pixelY = pixelY, w = w)
 }
-
-/** One row of `matrix * (point, 1)`, without materialising a four-component vector type. */
-private fun DoubleMatrix4.homogeneousRow(row: Int, point: DoubleVector3): Double =
-    this[row, 0] * point.x + this[row, 1] * point.y + this[row, 2] * point.z + this[row, 3]
 
 private const val HOMOGENEOUS_W_ROW: Int = 3

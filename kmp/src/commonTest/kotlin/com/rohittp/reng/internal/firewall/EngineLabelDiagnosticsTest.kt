@@ -183,6 +183,7 @@ class EngineLabelDiagnosticsTest {
             EngineDiagnosticCode.ROOT_BEHAVIOR_EXCLUDED to false,
             EngineDiagnosticCode.UNSUPPORTED_RETAINED_CONSTRUCT to false,
             EngineDiagnosticCode.ICON_LAYER_SKIPPED_SOURCE_UNAVAILABLE to false,
+            EngineDiagnosticCode.SYMBOL_LAYER_HOST_OWNED to false,
         )
 
         assertEquals(

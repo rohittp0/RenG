@@ -4,6 +4,10 @@ import com.rohittp.reng.internal.canonicalDouble
 import com.rohittp.reng.internal.requireUnicodeScalars
 
 internal enum class CanonicalRootKind(internal val wireByte: Int) {
+    /**
+     * Reserved and never written: a frame is no longer encoded into an identity (ADR 0090). Kept so
+     * wire byte 1 is never given to another kind and no resource kind's number moves.
+     */
     FRAME(1),
     EXTERNAL_RESOURCE(2),
     GEOMETRY_PROGRAM(3),
@@ -77,7 +81,7 @@ internal class CanonicalFieldWriter internal constructor() {
             field.payload.copyInto(output, offset + FIELD_HEADER_BYTES)
             offset += FIELD_HEADER_BYTES + field.payload.size
         }
-        return CanonicalBytes(output)
+        return CanonicalBytes.adopting(output)
     }
 
     private data class CanonicalField(
@@ -109,12 +113,12 @@ internal object CanonicalBinary {
 
     internal fun u16(value: Int): CanonicalBytes {
         require(value in 0..MAX_U16) { "Value must fit an unsigned 16-bit integer" }
-        return CanonicalBytes(ByteArray(U16_BYTES).also { writeU16(value, it, 0) })
+        return CanonicalBytes.adopting(ByteArray(U16_BYTES).also { writeU16(value, it, 0) })
     }
 
     internal fun u64(value: Long): CanonicalBytes {
         require(value >= 0L) { "Value must be a non-negative unsigned 64-bit integer" }
-        return CanonicalBytes(encodeLongBits(value))
+        return CanonicalBytes.adopting(encodeLongBits(value))
     }
 
     /**
@@ -128,10 +132,10 @@ internal object CanonicalBinary {
      * an identity derivation that can fail a frame over a number nobody promised. This encoding is
      * total over every `Long`, so the caller needs no guard and no fallback.
      */
-    internal fun i64(value: Long): CanonicalBytes = CanonicalBytes(encodeLongBits(value))
+    internal fun i64(value: Long): CanonicalBytes = CanonicalBytes.adopting(encodeLongBits(value))
 
     internal fun boolean(value: Boolean): CanonicalBytes =
-        CanonicalBytes(byteArrayOf(if (value) 1 else 0))
+        CanonicalBytes.adopting(byteArrayOf(if (value) 1 else 0))
 
     /**
      * Bytes RenG did not author and does not interpret, carried into an identity verbatim.
@@ -149,7 +153,7 @@ internal object CanonicalBinary {
 
     internal fun binary64(value: Double): CanonicalBytes {
         val canonical = canonicalDouble(value, "canonical binary64 value")
-        return CanonicalBytes(encodeLongBits(canonical.toBits()))
+        return CanonicalBytes.adopting(encodeLongBits(canonical.toBits()))
     }
 
     internal fun exactUtf8(value: String): CanonicalBytes {
@@ -207,18 +211,18 @@ internal object CanonicalBinary {
             }
             index += 1
         }
-        return CanonicalBytes(output)
+        return CanonicalBytes.adopting(output)
     }
 
     internal fun optional(value: CanonicalBytes?): CanonicalBytes {
         if (value == null) {
-            return CanonicalBytes(byteArrayOf(OPTIONAL_ABSENT))
+            return CanonicalBytes.adopting(byteArrayOf(OPTIONAL_ABSENT))
         }
 
         val output = ByteArray(requireCanonicalSize(1L + value.size.toLong()))
         output[0] = OPTIONAL_PRESENT
         value.copyInto(output, 1)
-        return CanonicalBytes(output)
+        return CanonicalBytes.adopting(output)
     }
 
     internal fun list(elements: List<CanonicalBytes>): CanonicalBytes {
@@ -237,7 +241,7 @@ internal object CanonicalBinary {
             element.copyInto(output, offset + U32_BYTES)
             offset += U32_BYTES + element.size
         }
-        return CanonicalBytes(output)
+        return CanonicalBytes.adopting(output)
     }
 
     private fun encodeLongBits(value: Long): ByteArray = ByteArray(U64_BYTES) { index ->

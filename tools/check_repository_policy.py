@@ -227,7 +227,7 @@ _EXPECTED_REPOSITORY_BLOCK_SOURCES = {
                     google()
                     mavenCentral()
                     maven {
-                        url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+                        url = uri("https://redirector.kotlinlang.org/maven/compose-dev")
                         content {
                             includeGroup("org.jetbrains.skiko")
                         }
@@ -322,7 +322,9 @@ _EXPECTED_PRODUCTION_BUILD_FINGERPRINTS = {
         "166fecfee5dec0aa54707d27f12154db3cf7ecc40f637d35672dc06a1b829dbc",
     }),
     "settings.gradle.kts": frozenset({
-        "875c43c41cd359df0236f99f7cee86b020d168cc6c73f1a424db53a093eeaa31",
+        # Skiko comes from JetBrains' live address for the Compose dev repository; the old
+        # maven.pkg.jetbrains.space host, which the previous fingerprint pinned, no longer resolves.
+        "e066f79cb05590eb994f94e817cef55b2e43b003d4d39b55fd05a986c55284fa",
     }),
 }
 _FORBIDDEN_BUILD_PAYLOAD_SUFFIXES = frozenset({

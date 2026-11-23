@@ -78,7 +78,7 @@ DEPENDENCY_RESOLUTION_BLOCK = """dependencyResolutionManagement {
         google()
         mavenCentral()
         maven {
-            url = uri("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+            url = uri("https://redirector.kotlinlang.org/maven/compose-dev")
             content {
                 includeGroup("org.jetbrains.skiko")
             }

@@ -147,8 +147,11 @@ class ResourceOperationScaleTest {
      */
     @Test
     fun aSessionDrivesManyDistinctRoutesUnderOneOwnerInNearLinearTime() {
+        driver.driveDistinctRoutesThroughSession(routeCount = 512) // warm-up, so the smallest count is not timing a cold JIT
         val routeCounts = listOf(1024, 2048, 4096)
-        val elapsed = routeCounts.associateWith { driver.driveDistinctRoutesThroughSession(it) }
+        val elapsed = routeCounts.associateWith { routeCount ->
+            fastestOf(SESSION_TIMING_REPEATS) { driver.driveDistinctRoutesThroughSession(routeCount) }
+        }
         println("session routes -> elapsedMillis: $elapsed")
         val ratios = routeCounts.zipWithNext { smaller, larger ->
             val smallerElapsed = elapsed.getValue(smaller).coerceAtLeast(1L)
@@ -188,7 +191,9 @@ class ResourceOperationScaleTest {
     fun aSessionWithAStyleDrivesManyRoutesUnderSharedOwnersInNearLinearTime() {
         driver.driveStyledRoutesThroughSession(routeCount = 512) // warm-up, so the smallest count is not timing a cold JIT
         val routeCounts = listOf(1024, 2048, 4096)
-        val elapsed = routeCounts.associateWith { driver.driveStyledRoutesThroughSession(it) }
+        val elapsed = routeCounts.associateWith { routeCount ->
+            fastestOf(SESSION_TIMING_REPEATS) { driver.driveStyledRoutesThroughSession(routeCount) }
+        }
         println("styled session routes -> elapsedMillis: $elapsed")
         val ratios = routeCounts.zipWithNext { smaller, larger ->
             val smallerElapsed = elapsed.getValue(smaller).coerceAtLeast(1L)
@@ -206,6 +211,20 @@ class ResourceOperationScaleTest {
     @Test
     fun aStyledSessionsIndexesAgreeWithTheScansTheyReplace() {
         driver.driveStyledRoutesThroughSession(routeCount = 300, crossCheckIndexes = true)
+    }
+
+    /**
+     * The fastest of [repeats] timings of one operation. The two session guards time operations of tens of
+     * milliseconds on the JVM (13/24/76 ms on a 3-core hosted runner, 2026-11-23), where one garbage
+     * collection or JIT compilation landing in a single sample added ~50 ms and pushed a linear ~2x doubling
+     * past the 3.0x ceiling. Noise only ever adds time, so the minimum is the measurement closest to the
+     * work itself; a real quadratic regression slows every repeat and still fails.
+     */
+    private fun fastestOf(repeats: Int, measure: () -> Long): Long = (1..repeats).minOf { measure() }
+
+    private companion object {
+        /** Five: the session operations cost well under a second each even on Kotlin/Native. */
+        const val SESSION_TIMING_REPEATS: Int = 5
     }
 }
 
